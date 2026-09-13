@@ -1,6 +1,14 @@
 # Vendored at utilityai/llama-cpp-rs main @ 09fc815d (2026-08-18), which pins
 # llama.cpp at e79e4bf6 (b10405) — replacing the 2026-07-31 vendoring at
-# 8625c7c4 (see H3-P/H3-R/H3-Y in docs/backlog-fix-e-hardening.md). Upstream
+# 8625c7c4 (see H3-P/H3-R/H3-Y in docs/backlog-fix-e-hardening.md).
+#
+# The llama.cpp SUBMODULE HAS MOVED SINCE and this crate has not: it is at
+# 4d917609 (b10818, 2026-09-05), bumped on its own without re-vendoring
+# llama-cpp-rs. So the b10405 above dates the Rust crate, not the C++ tree —
+# read the pin from `git ls-tree HEAD
+# engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`, never from here.
+#
+# Upstream
 # has since caught up past and superseded the three local API patches that
 # base needed (load_mode, mtmd_input_text.text_len,
 # mtmd_helper_bitmap_wrapper); none remain.
