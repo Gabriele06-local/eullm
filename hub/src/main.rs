@@ -358,13 +358,17 @@ async fn download_model(
         }
     };
 
+    // Named from `gguf_path`, not from the resolved path: the client should
+    // get the name the operator published under `storage_root`, so a
+    // legitimate in-storage symlink keeps serving under the name it was given
+    // rather than leaking its target's.
     let raw_name = gguf_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("{short_name}.gguf"));
     let file_name = sanitize_download_filename(&raw_name, short_name);
 
-    let file = tokio::fs::File::open(&gguf_path).await.map_err(|e| {
+    let file = tokio::fs::File::open(&canonical_path).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Failed to read model file: {e}") })),
