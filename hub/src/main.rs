@@ -538,10 +538,53 @@ mod tests {
             sanitize_download_filename("model.gguf", "model"),
             "model.gguf"
         );
+        // Every character here is ASCII; the non-ASCII cases are below.
         assert_eq!(
             sanitize_download_filename("Modello 2026.gguf", "model"),
             "Modello 2026.gguf"
         );
+        // Accents, CJK and an emoji: all multi-byte, none of them a control
+        // character, so all must survive untouched.
+        assert_eq!(
+            sanitize_download_filename("modèllo-perità.gguf", "model"),
+            "modèllo-perità.gguf"
+        );
+        assert_eq!(
+            sanitize_download_filename("日本語モデル.gguf", "model"),
+            "日本語モデル.gguf"
+        );
+        assert_eq!(
+            sanitize_download_filename("modello-🇪🇺.gguf", "model"),
+            "modello-🇪🇺.gguf"
+        );
+    }
+
+    /// The property the sanitizer actually owes the caller: whatever comes out
+    /// of it can be interpolated into `Content-Disposition` and still build a
+    /// `HeaderValue`. Without this the function is only tested against the
+    /// characters someone thought to list.
+    #[test]
+    fn sanitized_names_always_build_a_header_value() {
+        for raw in [
+            "model.gguf",
+            "modèllo-perità.gguf",
+            "日本語モデル.gguf",
+            "evil\".gguf",
+            "a\\b.gguf",
+            "a\r\nX-Evil: 1.gguf",
+            "\u{7f}del.gguf",
+            "",
+        ] {
+            let clean = sanitize_download_filename(raw, "model");
+            // `TryFrom<String>` is the conversion axum itself performs on the
+            // `[(HeaderName, String); N]` this handler returns, so testing any
+            // other one would be testing the wrong thing.
+            let header = format!("attachment; filename=\"{clean}\"");
+            assert!(
+                axum::http::HeaderValue::try_from(header).is_ok(),
+                "sanitized name did not produce a valid header value: {raw:?} -> {clean:?}"
+            );
+        }
     }
 
     #[test]
