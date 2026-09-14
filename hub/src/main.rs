@@ -336,12 +336,39 @@ async fn download_model(
         )
     })?;
 
-    let file_name = gguf_path
+    // The directory check above does not cover the file itself:
+    // `find_gguf_in_dir` matches on the entry name's extension, so a symlink
+    // like `model/x.gguf -> /etc/passwd` passes the directory check and would
+    // be served. Resolve the file and re-verify containment before opening.
+    // Same 404 as above, so missing and rejected are indistinguishable.
+    //
+    // Keep the resolved path and open *that*. Checking one path and then
+    // opening another leaves a window in which the link can be repointed
+    // between the two syscalls, which is the hole this check exists to close.
+    let canonical_path = match gguf_path.canonicalize() {
+        Ok(canonical_file) if canonical_file.starts_with(&canonical_root) => canonical_file,
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Model '{name}' not available for download on this Hub instance"),
+                    "hint": "Upload the GGUF file to the Hub storage directory, or use HuggingFace directly"
+                })),
+            ));
+        }
+    };
+
+    // Named from `gguf_path`, not from the resolved path: the client should
+    // get the name the operator published under `storage_root`, so a
+    // legitimate in-storage symlink keeps serving under the name it was given
+    // rather than leaking its target's.
+    let raw_name = gguf_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("{short_name}.gguf"));
+    let file_name = sanitize_download_filename(&raw_name, short_name);
 
-    let file = tokio::fs::File::open(&gguf_path).await.map_err(|e| {
+    let file = tokio::fs::File::open(&canonical_path).await.map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Failed to read model file: {e}") })),
@@ -391,6 +418,40 @@ fn is_valid_model_slug(slug: &str) -> bool {
     is_lower_alnum(first)
         && chars.all(|c| is_lower_alnum(c) || matches!(c, '.' | '_' | '-'))
         && !slug.contains("..")
+}
+
+/// Makes a filename from storage safe to interpolate into a quoted
+/// `Content-Disposition` header value.
+///
+/// The name comes from the filesystem, where `"`, `\` and CR/LF are all legal
+/// and all survive `to_string_lossy`. The two cases differ:
+///
+/// - `"` and `\` are valid header-value bytes, so they reach the client and
+///   break out of the quoted string in `Content-Disposition`. This is the
+///   injection the function exists to stop.
+/// - CR/LF and the other ASCII controls cannot split the response: axum builds
+///   the header through `TryInto<HeaderValue>`, which rejects bytes below
+///   `0x20`, and the conversion error is returned as a 500. Mapping them to
+///   `_` turns a download that fails into one that works.
+///
+/// Quotes, backslashes and ASCII controls become `_`; everything else,
+/// including non-ASCII names, passes through unchanged.
+fn sanitize_download_filename(raw: &str, short_name: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        format!("{short_name}.gguf")
+    } else {
+        clean
+    }
 }
 
 /// Find the first .gguf file in a directory.
@@ -469,6 +530,79 @@ mod tests {
         assert!(!is_valid_model_slug("-leading-dash"));
         assert!(!is_valid_model_slug("UPPER-case"));
         assert!(!is_valid_model_slug("has space"));
+    }
+
+    #[test]
+    fn plain_and_unicode_filenames_pass_through() {
+        assert_eq!(
+            sanitize_download_filename("model.gguf", "model"),
+            "model.gguf"
+        );
+        // Every character here is ASCII; the non-ASCII cases are below.
+        assert_eq!(
+            sanitize_download_filename("Modello 2026.gguf", "model"),
+            "Modello 2026.gguf"
+        );
+        // Accents, CJK and an emoji: all multi-byte, none of them a control
+        // character, so all must survive untouched.
+        assert_eq!(
+            sanitize_download_filename("modèllo-perità.gguf", "model"),
+            "modèllo-perità.gguf"
+        );
+        assert_eq!(
+            sanitize_download_filename("日本語モデル.gguf", "model"),
+            "日本語モデル.gguf"
+        );
+        assert_eq!(
+            sanitize_download_filename("modello-🇪🇺.gguf", "model"),
+            "modello-🇪🇺.gguf"
+        );
+    }
+
+    /// The property the sanitizer actually owes the caller: whatever comes out
+    /// of it can be interpolated into `Content-Disposition` and still build a
+    /// `HeaderValue`. Without this the function is only tested against the
+    /// characters someone thought to list.
+    #[test]
+    fn sanitized_names_always_build_a_header_value() {
+        for raw in [
+            "model.gguf",
+            "modèllo-perità.gguf",
+            "日本語モデル.gguf",
+            "evil\".gguf",
+            "a\\b.gguf",
+            "a\r\nX-Evil: 1.gguf",
+            "\u{7f}del.gguf",
+            "",
+        ] {
+            let clean = sanitize_download_filename(raw, "model");
+            // `TryFrom<String>` is the conversion axum itself performs on the
+            // `[(HeaderName, String); N]` this handler returns, so testing any
+            // other one would be testing the wrong thing.
+            let header = format!("attachment; filename=\"{clean}\"");
+            assert!(
+                axum::http::HeaderValue::try_from(header).is_ok(),
+                "sanitized name did not produce a valid header value: {raw:?} -> {clean:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quotes_backslashes_and_crlf_become_underscores() {
+        assert_eq!(
+            sanitize_download_filename("evil\".gguf", "model"),
+            "evil_.gguf"
+        );
+        assert_eq!(sanitize_download_filename("a\\b.gguf", "model"), "a_b.gguf");
+        assert_eq!(
+            sanitize_download_filename("a\r\nX-Evil-1.gguf", "model"),
+            "a__X-Evil-1.gguf"
+        );
+    }
+
+    #[test]
+    fn empty_sanitized_name_falls_back_to_slug() {
+        assert_eq!(sanitize_download_filename("", "model"), "model.gguf");
     }
 }
 
