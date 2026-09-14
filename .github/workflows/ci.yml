@@ -1,11 +1,31 @@
 name: CI
 
+# Pull requests as well as pushes. This workflow was written for both — the
+# `changes` job asks for `pull-requests: read`, `dorny/paths-filter` needs a
+# base to diff against, and every component job carries
+# `|| github.event_name == 'push'` to bypass that filter — but the trigger was
+# push-only, so none of it ever fired before a merge. CI was a post-merge
+# report, not a gate: a pull request could be merged untested and the first
+# run happened on `main`, with the breakage already in. Two external
+# contributions (#443, #444) arrived with no checks at all, one of them
+# explicitly relying on "CI's Linux check/clippy/test run" as its gate.
+#
+# `pull_request`, not `pull_request_target`: this workflow builds and runs code
+# from the pull request's head, and `pull_request_target` would hand that code
+# a writable token and the repository's secrets. It uses neither — there is no
+# `secrets.` reference below — so the read-only, secret-less fork context is
+# exactly right. Do not "fix" a fork's cold cache by switching the trigger.
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
+# One run per pull request rather than per commit, so pushing a fixup cancels
+# the build of the commit it replaces. On a push event there is no PR number
+# and this falls back to the previous per-SHA behaviour.
 concurrency:
-  group: ci-${{ github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
@@ -30,6 +50,15 @@ jobs:
   # Only inspects commits new to this push, so the existing history does not
   # fail every run forever. `github.event.before` is all zeros on the first
   # push of a branch; in that case fall back to the single head commit.
+  #
+  # A pull request needs its own range, and taking the push branch would be
+  # worse than useless. On a `pull_request` event `github.event.before` does
+  # not exist, so the fallback would scan `-1 $github.sha` — and on that event
+  # `github.sha` is the throwaway merge commit GitHub builds for the checkout,
+  # authored by "GitHub <noreply@github.com>". The job would pass every time
+  # while never once looking at the commits under review. Use the base and head
+  # the event carries instead; `fetch-depth: 0` on the merge ref puts both
+  # inside the clone.
   commit_hygiene:
     name: No AI attribution in commit messages
     runs-on: ubuntu-22.04
@@ -41,9 +70,13 @@ jobs:
         env:
           BEFORE: ${{ github.event.before }}
           HEAD_SHA: ${{ github.sha }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+          if [ -n "${PR_HEAD:-}" ]; then
+            range="$PR_BASE..$PR_HEAD"
+          elif [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
             range="-1 $HEAD_SHA"
           else
             range="$BEFORE..$HEAD_SHA"
@@ -93,6 +126,13 @@ jobs:
     name: Detect changes
     runs-on: ubuntu-22.04
     permissions:
+      # Declaring any `permissions:` block zeroes every scope not listed, so
+      # `contents: read` has to be spelled out for `actions/checkout` even
+      # though it used to be implicit. It survived on push only because the
+      # repository is public; a fork's pull request runs with an already
+      # read-only token and no reason to be narrower still.
+      contents: read
+      # paths-filter asks the API which files the pull request touches.
       pull-requests: read
     outputs:
       engine: ${{ steps.filter.outputs.engine }}
@@ -103,18 +143,36 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          # The root manifest and lockfile belong to both Rust components:
+          # `engine` and `hub` are members of one workspace with a single
+          # `Cargo.lock`, so a dependency bump made at the root changes what
+          # they compile against while touching neither directory. Without
+          # these entries such a pull request skips both build jobs and is
+          # merged untested — this very workflow's first run did exactly that
+          # while bumping rustls out of RUSTSEC-2026-0285.
+          #
+          # The workflow file itself is in every filter for the same reason:
+          # a change to how a job builds is only tested by running that job.
           filters: |
             engine:
               - 'engine/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             hub:
               - 'hub/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             forge:
               - 'forge/**'
+              - '.github/workflows/ci.yml'
 
   # ── Dependency, licence and advisory policy ──────────────────────────
-  # Runs on every push, not behind the `changes` filter: a dependency can
-  # become vulnerable without anyone touching this repository, so this job has
-  # to run when nothing changed as much as when something did.
+  # Runs on every push and every pull request, not behind the `changes`
+  # filter: a dependency can become vulnerable without anyone touching this
+  # repository, so this job has to run when nothing changed as much as when
+  # something did.
   #
   # `CLAUDE.md` forbids copyleft *dependencies* and requires them to stay
   # permissive; our own crates are the deliberate exception (AGPL-3.0-or-later
