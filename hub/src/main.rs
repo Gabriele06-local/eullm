@@ -336,10 +336,29 @@ async fn download_model(
         )
     })?;
 
-    let file_name = gguf_path
+    // The directory check above does not cover the file itself:
+    // `find_gguf_in_dir` matches on the entry name's extension, so a symlink
+    // like `model/x.gguf -> /etc/passwd` passes the directory check and would
+    // be served. Resolve the file and re-verify containment before opening.
+    // Same 404 as above, so missing and rejected are indistinguishable.
+    match gguf_path.canonicalize() {
+        Ok(canonical_file) if canonical_file.starts_with(&canonical_root) => {}
+        _ => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "error": format!("Model '{name}' not available for download on this Hub instance"),
+                    "hint": "Upload the GGUF file to the Hub storage directory, or use HuggingFace directly"
+                })),
+            ));
+        }
+    }
+
+    let raw_name = gguf_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| format!("{short_name}.gguf"));
+    let file_name = sanitize_download_filename(&raw_name, short_name);
 
     let file = tokio::fs::File::open(&gguf_path).await.map_err(|e| {
         (
@@ -391,6 +410,32 @@ fn is_valid_model_slug(slug: &str) -> bool {
     is_lower_alnum(first)
         && chars.all(|c| is_lower_alnum(c) || matches!(c, '.' | '_' | '-'))
         && !slug.contains("..")
+}
+
+/// Makes a filename from storage safe to interpolate into a quoted
+/// `Content-Disposition` header value.
+///
+/// The name comes from the filesystem, where `"` and `\` are legal and CR/LF
+/// survives `to_string_lossy` — so a hostile or accidental name would break
+/// out of the quoted string or split the response. Quotes, backslashes and
+/// ASCII controls become `_`; everything else, including non-ASCII names,
+/// passes through unchanged.
+fn sanitize_download_filename(raw: &str, short_name: &str) -> String {
+    let clean: String = raw
+        .chars()
+        .map(|c| {
+            if c == '"' || c == '\\' || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    if clean.is_empty() {
+        format!("{short_name}.gguf")
+    } else {
+        clean
+    }
 }
 
 /// Find the first .gguf file in a directory.
@@ -469,6 +514,36 @@ mod tests {
         assert!(!is_valid_model_slug("-leading-dash"));
         assert!(!is_valid_model_slug("UPPER-case"));
         assert!(!is_valid_model_slug("has space"));
+    }
+
+    #[test]
+    fn plain_and_unicode_filenames_pass_through() {
+        assert_eq!(
+            sanitize_download_filename("model.gguf", "model"),
+            "model.gguf"
+        );
+        assert_eq!(
+            sanitize_download_filename("Modello 2026.gguf", "model"),
+            "Modello 2026.gguf"
+        );
+    }
+
+    #[test]
+    fn quotes_backslashes_and_crlf_become_underscores() {
+        assert_eq!(
+            sanitize_download_filename("evil\".gguf", "model"),
+            "evil_.gguf"
+        );
+        assert_eq!(sanitize_download_filename("a\\b.gguf", "model"), "a_b.gguf");
+        assert_eq!(
+            sanitize_download_filename("a\r\nX-Evil-1.gguf", "model"),
+            "a__X-Evil-1.gguf"
+        );
+    }
+
+    #[test]
+    fn empty_sanitized_name_falls_back_to_slug() {
+        assert_eq!(sanitize_download_filename("", "model"), "model.gguf");
     }
 }
 
