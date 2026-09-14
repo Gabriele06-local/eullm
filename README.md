@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/license-AGPL%203.0-blue" alt="License" />
+  <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License" />
   <img src="https://img.shields.io/badge/EU%20AI%20Act-Designed%20for%20compliance-gold" alt="EU AI Act" />
   <img src="https://img.shields.io/badge/Engine-v0.6.29-2ea44f" alt="Engine status" />
   <img src="https://img.shields.io/badge/Forge%20%2B%20Hub-Early%20development-orange" alt="Forge/Hub status" />
@@ -28,6 +28,10 @@
 
 <p align="center">
   🔒 Local-first and sovereign by design &nbsp;·&nbsp; 🇮🇹 Developed in Italy
+</p>
+
+<p align="center">
+  <sub><strong>AGPL-3.0-or-later.</strong> Copyright held by <strong>I3K Technologies Srl</strong>, which also offers EuLLM under a separate <a href="#license">commercial licence</a>. Contributions require the <a href="CLA.md">CLA</a>.</sub>
 </p>
 
 ---
@@ -1339,7 +1343,7 @@ If you use EuLLM in academic research, EU grant proposals, or technical publicat
   version      = {v0.5.1},
   doi          = {10.5281/zenodo.20412980},
   url          = {https://doi.org/10.5281/zenodo.20412980},
-  license      = {Apache-2.0},
+  license      = {AGPL-3.0-or-later},
   note         = {Inference engine, verticalization pipeline, and EU-hosted model registry for sovereign EU LLM deployment}
 }
 ```
@@ -1358,7 +1362,15 @@ and let others use it over a network (including as a hosted service), you
 must offer them the Corresponding Source of your modified version. Versions
 published before the 2026-08 relicense remain available to everyone under
 their original Apache 2.0 terms; this only governs new work going forward.
-Contributions require signing the project's CLA before merge.
+
+**I3K Technologies Srl holds the copyright** and also offers this software
+under a separate commercial licence, for organisations that cannot accept the
+AGPL's terms. Enquiries: **info@i3k.eu**
+
+Because the project is licensed both ways, contributions need a Contributor
+Licence Agreement — a one-line statement in your pull request. You keep the
+copyright in your own work; [CLA.md](CLA.md) explains exactly what it grants
+and why it is necessary.
 
 The models we build on (Qwen 3, Mistral, Falcon 3, etc.) keep their own,
 separate licenses — see the [model catalog](#planned-verticalized-models-q4-2026-roadmap)

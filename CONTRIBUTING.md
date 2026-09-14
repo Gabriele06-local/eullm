@@ -104,10 +104,23 @@ See [docs/architecture.md](docs/architecture.md) for detailed diagrams.
 
 ## License
 
-EULLM is licensed under [AGPL-3.0-or-later](LICENSE). By contributing, you
-agree that your contributions will be licensed under the same terms, and you
-must sign the project's CLA before a pull request can be merged (ask in the
-PR if this hasn't happened yet).
+EULLM is licensed under [AGPL-3.0-or-later](LICENSE). I3K Technologies Srl
+holds the copyright and also offers the software under a separate commercial
+licence, so before a pull request can be merged you must agree to the
+[Contributor Licence Agreement](CLA.md) by adding one line to your pull
+request description:
+
+```
+I have read and agree to the Contributor Licence Agreement in CLA.md.
+```
+
+Agreeing only that your contribution is "licensed under AGPL-3.0-or-later" is
+**not** the same thing and is not sufficient: it is the licence the project
+already carries, and it leaves us without the right to include your work in a
+commercially licensed build. [CLA.md](CLA.md) sets out what you grant, what
+you keep (your own copyright — it is a licence, not an assignment), and why a
+`Signed-off-by` line does not cover it. One agreement covers all your future
+contributions.
 
 **Important:** Do not introduce *dependencies* with GPL, AGPL, or other
 copyleft licenses — our own crates being AGPL-3.0-or-later doesn't change
