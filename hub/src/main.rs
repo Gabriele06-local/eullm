@@ -341,8 +341,12 @@ async fn download_model(
     // like `model/x.gguf -> /etc/passwd` passes the directory check and would
     // be served. Resolve the file and re-verify containment before opening.
     // Same 404 as above, so missing and rejected are indistinguishable.
-    match gguf_path.canonicalize() {
-        Ok(canonical_file) if canonical_file.starts_with(&canonical_root) => {}
+    //
+    // Keep the resolved path and open *that*. Checking one path and then
+    // opening another leaves a window in which the link can be repointed
+    // between the two syscalls, which is the hole this check exists to close.
+    let canonical_path = match gguf_path.canonicalize() {
+        Ok(canonical_file) if canonical_file.starts_with(&canonical_root) => canonical_file,
         _ => {
             return Err((
                 StatusCode::NOT_FOUND,
@@ -352,7 +356,7 @@ async fn download_model(
                 })),
             ));
         }
-    }
+    };
 
     let raw_name = gguf_path
         .file_name()
