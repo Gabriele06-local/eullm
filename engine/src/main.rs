@@ -3727,9 +3727,32 @@ fn daemonize(pidfile: &str, log_path: &std::path::Path) {
                 }
             }
 
-            // Write PID file.
-            if let Ok(mut f) = std::fs::File::create(pidfile) {
-                let _ = write!(f, "{pid}");
+            // Write PID file. A missing or half-written pidfile is worse than
+            // none — a stop script trusts it — so fail instead of claiming
+            // success, mirroring the log-file handling above.
+            //
+            // Failing here cannot just exit, the way it can above. This is
+            // spawn(), not fork(): the child is a separate process that has
+            // already survived DAEMON_STARTUP_GRACE and is serving on the
+            // port. Exiting alone would leave it running with nothing on disk
+            // pointing at it, and the PID is only printed below — so the
+            // operator would be told neither that it is up nor what to kill.
+            // Stop it instead, which is the same rule the early-exit path
+            // above follows: never leave a state a stop script would misread.
+            let pidfile_err = match std::fs::File::create(pidfile) {
+                Ok(mut f) => write!(f, "{pid}").err().map(|e| e.to_string()),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(e) = pidfile_err {
+                eprintln!("Error: cannot write pidfile {pidfile}: {e}");
+                eprintln!("  Stopping the daemon (PID {pid}): it would hold the port untracked.");
+                let _ = child.kill();
+                // Reap it before returning the shell, so a retry does not race
+                // a dying process for the port.
+                let _ = child.wait();
+                // File::create may have succeeded and left an empty file.
+                let _ = std::fs::remove_file(pidfile);
+                std::process::exit(1);
             }
             println!("eullm daemon started (PID {pid}).");
             println!("  PID file: {pidfile}");
