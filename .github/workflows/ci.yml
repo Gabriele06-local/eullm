@@ -143,13 +143,30 @@ jobs:
       - uses: dorny/paths-filter@v4
         id: filter
         with:
+          # The root manifest and lockfile belong to both Rust components:
+          # `engine` and `hub` are members of one workspace with a single
+          # `Cargo.lock`, so a dependency bump made at the root changes what
+          # they compile against while touching neither directory. Without
+          # these entries such a pull request skips both build jobs and is
+          # merged untested — this very workflow's first run did exactly that
+          # while bumping rustls out of RUSTSEC-2026-0285.
+          #
+          # The workflow file itself is in every filter for the same reason:
+          # a change to how a job builds is only tested by running that job.
           filters: |
             engine:
               - 'engine/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             hub:
               - 'hub/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/ci.yml'
             forge:
               - 'forge/**'
+              - '.github/workflows/ci.yml'
 
   # ── Dependency, licence and advisory policy ──────────────────────────
   # Runs on every push and every pull request, not behind the `changes`
