@@ -423,11 +423,19 @@ fn is_valid_model_slug(slug: &str) -> bool {
 /// Makes a filename from storage safe to interpolate into a quoted
 /// `Content-Disposition` header value.
 ///
-/// The name comes from the filesystem, where `"` and `\` are legal and CR/LF
-/// survives `to_string_lossy` — so a hostile or accidental name would break
-/// out of the quoted string or split the response. Quotes, backslashes and
-/// ASCII controls become `_`; everything else, including non-ASCII names,
-/// passes through unchanged.
+/// The name comes from the filesystem, where `"`, `\` and CR/LF are all legal
+/// and all survive `to_string_lossy`. The two cases differ:
+///
+/// - `"` and `\` are valid header-value bytes, so they reach the client and
+///   break out of the quoted string in `Content-Disposition`. This is the
+///   injection the function exists to stop.
+/// - CR/LF and the other ASCII controls cannot split the response: axum builds
+///   the header through `TryInto<HeaderValue>`, which rejects bytes below
+///   `0x20`, and the conversion error is returned as a 500. Mapping them to
+///   `_` turns a download that fails into one that works.
+///
+/// Quotes, backslashes and ASCII controls become `_`; everything else,
+/// including non-ASCII names, passes through unchanged.
 fn sanitize_download_filename(raw: &str, short_name: &str) -> String {
     let clean: String = raw
         .chars()
