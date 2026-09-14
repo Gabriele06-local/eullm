@@ -57,3 +57,26 @@ def test_teacher_max_memory_rejects_single_gpu():
 def test_teacher_max_memory_rejects_bad_student_index():
     with pytest.raises(ValueError):
         build_teacher_max_memory(4, student_gpu_index=4)
+
+
+def test_unknown_dataset_raises_instead_of_silent_fallback(monkeypatch):
+    """An explicitly requested dataset that fails to load must fail loudly.
+
+    Falling back to wikitext here would train the student for days on the
+    wrong corpus while looking healthy, so the loader refuses instead.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    from eullm_forge import distill as distill_module
+
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("Dataset 'no-such-dataset' doesn't exist")
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = _raise
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    with pytest.raises(RuntimeError, match="no-such-dataset"):
+        distill_module._load_distillation_dataset("no-such-dataset", tokenizer=MagicMock())

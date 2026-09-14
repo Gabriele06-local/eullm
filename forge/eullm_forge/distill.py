@@ -136,9 +136,13 @@ def _load_distillation_dataset(
     else:
         try:
             ds = load_dataset(dataset_name, split="train")
-        except Exception:
-            logger.warning("Could not load '%s', using wikitext", dataset_name)
-            ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Could not load distillation dataset '{dataset_name}': {exc}. "
+                "Check the name/path, `huggingface-cli login`, and that compute "
+                "nodes can reach the network (Leonardo compute nodes cannot). "
+                "Refusing to train on a fallback dataset silently."
+            ) from exc
 
     if max_samples:
         ds = ds.select(range(min(max_samples, len(ds))))
