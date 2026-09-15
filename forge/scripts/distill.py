@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from dataclasses import dataclass
@@ -138,7 +139,14 @@ class DistillConfig:
     max_steps: int = -1                    # -1 = unlimited (use epochs)
     warmup_steps: int = 1000
     save_steps: int = 1000
+    # Checkpoints kept on disk, newest first; <= 0 keeps every one. Needed
+    # because `save_steps` is the knob that decides how much work a walltime
+    # kill throws away, and lowering it without bounding the directory turns
+    # a 24 h chain into tens of gigabytes of optimizer state on $WORK.
+    save_total_limit: int = 3
     eval_steps: int = 1000
+    # Validation batches scored per eval. Capped on purpose: see `evaluate`.
+    eval_max_batches: int = 200
     logging_steps: int = 20
 
     # Distillation
@@ -365,6 +373,58 @@ def distill_loss(
     return total, {"loss": total.item(), "kl": kl.item(), "ce": ce.item()}
 
 
+@torch.no_grad()
+def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
+             max_batches: int) -> dict:
+    """Distillation loss on held-out data, over a fixed prefix of the val set.
+
+    `eval_steps` was a declared config field that nothing read: the v1.1
+    Phase 2 run produced 18,000 steps with no validation number at all, so
+    when its training loss flattened there was nothing to say whether the
+    student had stopped learning or the batches had simply got harder.
+
+    Capped at `max_batches`, and that is the whole design. The validation
+    split is 11,387 chunks and one teacher+student forward pair costs about
+    0.7 s on a Booster node, so scoring all of it takes over two hours —
+    against an `eval_steps` interval that is three hours of training at the
+    measured rate, that is a 40 % tax on the allocation to sharpen a number
+    a few hundred batches already pin down. `build_dataloaders` builds the
+    validation loader with `shuffle=False`, so the prefix is the same prefix
+    every time and successive evals compare like with like.
+
+    Returns the mean of the same three components the training log prints,
+    or an empty dict if the loader yielded nothing.
+    """
+    was_training = student.training
+    student.eval()
+    acc = {"loss": 0.0, "kl": 0.0, "ce": 0.0}
+    seen = 0
+    try:
+        for batch in val_loader:
+            if seen >= max_batches:
+                break
+            batch = {k: v.to(device, non_blocking=True)
+                     for k, v in batch.items()}
+            t_logits = teacher(**batch).logits.detach().to(device)
+            s_logits = student(**batch).logits
+            _, parts = distill_loss(
+                s_logits, t_logits, batch["labels"],
+                kl_alpha=cfg.kl_alpha, kl_temperature=cfg.kl_temperature,
+            )
+            for key in acc:
+                acc[key] += parts[key]
+            seen += 1
+    finally:
+        # Restored in `finally`: leaving the student in eval mode after an
+        # interrupted eval would silently disable dropout for the rest of
+        # the run, and nothing downstream would report it.
+        if was_training:
+            student.train()
+    if seen == 0:
+        return {}
+    return {key: value / seen for key, value in acc.items()}
+
+
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
@@ -413,15 +473,44 @@ def build_dataloaders(cfg: DistillConfig, tokenizer):
 # ---------------------------------------------------------------------------
 
 
+def _checkpoint_step(path: Path) -> int:
+    """Step number encoded in a `checkpoint-N` directory name, -1 if absent.
+
+    Sorting these by name is wrong and quietly so: `checkpoint-9000` sorts
+    after `checkpoint-18000` lexicographically, so a resume would reload a
+    checkpoint half the run old and redo nine thousand steps.
+    """
+    tail = path.name.split("-")[-1]
+    return int(tail) if tail.isdigit() else -1
+
+
 def latest_checkpoint(output_dir: Path) -> Optional[Path]:
     if not output_dir.is_dir():
         return None
-    candidates = sorted(
-        output_dir.glob("checkpoint-*"),
-        key=lambda p: int(p.name.split("-")[-1])
-        if p.name.split("-")[-1].isdigit() else -1,
-    )
+    candidates = sorted(output_dir.glob("checkpoint-*"), key=_checkpoint_step)
     return candidates[-1] if candidates else None
+
+
+def prune_checkpoints(output_dir: Path, keep: int) -> list:
+    """Delete all but the newest `keep` checkpoints. Returns what it removed.
+
+    A checkpoint here is the LoRA adapter plus AdamW's two moments over the
+    trainable parameters — hundreds of megabytes each. Saving often enough
+    that a walltime kill costs under an hour means saving several times as
+    often, and without this that multiplies straight into $WORK.
+
+    Keeps more than one deliberately: the newest checkpoint is the one a
+    kill can catch mid-write, and the run's only way back is the one before
+    it. Directories whose name carries no step number are never touched.
+    """
+    if keep <= 0:
+        return []
+    numbered = [p for p in output_dir.glob("checkpoint-*")
+                if p.is_dir() and _checkpoint_step(p) >= 0]
+    doomed = sorted(numbered, key=_checkpoint_step)[:-keep]
+    for path in doomed:
+        shutil.rmtree(path, ignore_errors=True)
+    return doomed
 
 
 def save_checkpoint(
@@ -552,6 +641,15 @@ def train(cfg: DistillConfig) -> None:
     micro = 0
     optim_step = start_step
     t0 = time.time()
+    # Throughput was reported as `micro / (now - t0)` — an average over the
+    # whole job, never reset. Thirteen hours in it printed the same 1.48 on
+    # every line, which reads as reassuring stability and is really just a
+    # large denominator: had the node halved in speed, the figure would have
+    # taken hours to show it. The window pair below is the number that can
+    # actually move; the cumulative one is kept beside it because it is the
+    # one that predicts when the run ends.
+    t_window = t0
+    micro_window = 0
     log_loss_acc = 0.0
     log_kl_acc = 0.0
     log_ce_acc = 0.0
@@ -576,6 +674,7 @@ def train(cfg: DistillConfig) -> None:
             log_ce_acc += parts["ce"]
             log_n += 1
             micro += 1
+            micro_window += 1
             if micro % cfg.gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(
                     student.parameters(), cfg.max_grad_norm,
@@ -586,7 +685,9 @@ def train(cfg: DistillConfig) -> None:
                 optim_step += 1
 
                 if optim_step % cfg.logging_steps == 0:
-                    dt = time.time() - t0
+                    now = time.time()
+                    rate_now = micro_window / max(now - t_window, 1e-9)
+                    rate_avg = micro / max(now - t0, 1e-9)
                     avg_loss = log_loss_acc / log_n
                     avg_kl = log_kl_acc / log_n
                     avg_ce = log_ce_acc / log_n
@@ -594,15 +695,35 @@ def train(cfg: DistillConfig) -> None:
                     print(
                         f"[step {optim_step:>6} / {total_optim_steps}] "
                         f"loss={avg_loss:.4f}  kl={avg_kl:.4f}  ce={avg_ce:.4f}  "
-                        f"lr={lr:.2e}  micro/s={micro/dt:.2f}",
+                        f"lr={lr:.2e}  "
+                        f"micro/s={rate_now:.2f} (avg {rate_avg:.2f})",
                         file=sys.stderr,
                     )
                     log_loss_acc = log_kl_acc = log_ce_acc = 0.0
                     log_n = 0
+                    micro_window = 0
+                    t_window = now
+
+                if cfg.eval_steps > 0 and optim_step % cfg.eval_steps == 0:
+                    val = evaluate(student, teacher, val_loader, cfg, device,
+                                   cfg.eval_max_batches)
+                    if val:
+                        print(
+                            f"[eval {optim_step:>6} / {total_optim_steps}] "
+                            f"loss={val['loss']:.4f}  kl={val['kl']:.4f}  "
+                            f"ce={val['ce']:.4f}",
+                            file=sys.stderr,
+                        )
+                    # The eval's forward passes are not training: charging
+                    # them to the window would make throughput look worse
+                    # every time we measured it.
+                    t_window = time.time()
+                    micro_window = 0
 
                 if optim_step % cfg.save_steps == 0:
                     save_checkpoint(student, optimizer, scheduler, scaler,
                                     optim_step, output_dir, cfg)
+                    prune_checkpoints(output_dir, cfg.save_total_limit)
 
                 if cfg.max_steps > 0 and optim_step >= cfg.max_steps:
                     break
