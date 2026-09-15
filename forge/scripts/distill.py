@@ -76,7 +76,10 @@ from transformers import (
 # The script runs from a repo checkout, not necessarily with eullm_forge
 # pip-installed — make the package importable from its source tree.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from eullm_forge.distill import build_teacher_max_memory  # noqa: E402
+from eullm_forge.distill import (  # noqa: E402
+    build_teacher_max_memory,
+    build_teacher_split_memory,
+)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -99,6 +102,9 @@ class DistillConfig:
     #              student's GPU free. Required on nodes where no single
     #              GPU fits the BF16 teacher (Leonardo: 4x A100 64 GB).
     teacher_device_map: str = "single"
+    # design B only: the GPUs the teacher owns outright. The student takes
+    # whatever is left, and `student_device` must not be one of these.
+    teacher_gpus: tuple = (0, 1)
     teacher_gib_per_gpu: int = 58          # teacher budget on non-student GPUs
     teacher_gib_on_student_gpu: int = 8    # teacher budget on the student GPU
     student_device: str = "cuda:0"
@@ -234,7 +240,43 @@ def load_teacher(cfg: DistillConfig, dtype: torch.dtype, device: str):
                                  cfg.teacher_load_in_4bit)
     device_map = {"": device} if quant is None else "auto"
     max_memory = None
-    if cfg.teacher_device_map == "auto":
+    if cfg.teacher_device_map == "split":
+        # ADR-001 design B. The teacher owns `teacher_gpus` outright and the
+        # student owns the rest; they never share a card, which is the whole
+        # reason this mode exists.
+        n_gpus = torch.cuda.device_count()
+        student_idx = torch.device(cfg.student_device).index or 0
+        # YAML gives a list, the generated CLI flag gives a string like
+        # "0,1". Normalise before anything compares against it, or
+        # `student_idx in "0,1"` raises a TypeError after the teacher has
+        # already been named in the log and the operator thinks it loaded.
+        teacher_gpus = cfg.teacher_gpus
+        if isinstance(teacher_gpus, str):
+            teacher_gpus = [int(x) for x in teacher_gpus.replace(",", " ").split()]
+        teacher_gpus = [int(x) for x in teacher_gpus]
+        if student_idx in teacher_gpus:
+            # Caught here rather than by an OOM ten minutes into the first
+            # forward: a split that puts the student on a teacher card is not
+            # a split, and it would fail the way v1.0 failed.
+            raise ValueError(
+                f"student_device {cfg.student_device} is inside teacher_gpus "
+                f"{teacher_gpus} — that is co-hosting, not a split"
+            )
+        device_map = "auto"
+        max_memory = build_teacher_split_memory(
+            n_gpus,
+            teacher_gpus=teacher_gpus,
+            teacher_gib_per_gpu=cfg.teacher_gib_per_gpu,
+        )
+        print(f"[teacher] split node: teacher on GPUs "
+              f"{teacher_gpus}, student on {cfg.student_device}, "
+              f"max_memory={max_memory}", file=sys.stderr)
+        if quant is not None:
+            print("[teacher] WARNING: quantization is on in split mode — the "
+                  "point of the split is to afford BF16. Set "
+                  "teacher_load_in_8bit: false unless measuring the "
+                  "difference on purpose.", file=sys.stderr)
+    elif cfg.teacher_device_map == "auto":
         n_gpus = torch.cuda.device_count()
         if n_gpus > 1:
             student_idx = torch.device(cfg.student_device).index or 0
@@ -252,7 +294,7 @@ def load_teacher(cfg: DistillConfig, dtype: torch.dtype, device: str):
                   "— falling back to single-device placement", file=sys.stderr)
     elif cfg.teacher_device_map != "single":
         raise ValueError(
-            f"teacher_device_map must be 'single' or 'auto', "
+            f"teacher_device_map must be 'single', 'auto' or 'split', "
             f"got {cfg.teacher_device_map!r}"
         )
     model = AutoModelForCausalLM.from_pretrained(

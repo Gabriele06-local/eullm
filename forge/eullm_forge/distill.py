@@ -423,3 +423,58 @@ def build_teacher_max_memory(
         )
         for i in range(num_gpus)
     }
+
+
+def build_teacher_split_memory(
+    num_gpus: int,
+    teacher_gpus,
+    teacher_gib_per_gpu: int = 58,
+) -> dict[int, str]:
+    """Build the ``max_memory`` map for a split node — ADR-001 design B.
+
+    Where :func:`build_teacher_max_memory` lets the teacher spill a shard onto
+    the student's GPU, this one draws a hard line: the teacher gets whole GPUs
+    and the rest of the node is untouched by it. That is the point of design
+    B. Co-hosting is what forced the teacher to 8-bit in v1.0 — a shard and a
+    student and its optimizer state and its activations all had to fit in one
+    64 GB card — and giving the teacher two cards to itself is what buys BF16
+    back without ZeRO-3 and without a cache.
+
+    A GPU the teacher may not touch is given ``"0GiB"`` rather than being left
+    out of the map: accelerate treats an absent device as unconstrained, so an
+    omission would silently hand the teacher the whole node and reproduce the
+    problem this exists to remove.
+
+    Args:
+        num_gpus: Number of visible CUDA devices.
+        teacher_gpus: Indices the teacher may occupy, e.g. ``[0, 1]``.
+        teacher_gib_per_gpu: Budget (GiB) on each of those.
+
+    Returns:
+        ``{gpu_index: "NGiB"}`` for ``from_pretrained(..., max_memory=...)``.
+
+    Raises:
+        ValueError: if the split leaves the student no GPU, names a device
+            that does not exist, or repeats one.
+    """
+    if num_gpus < 2:
+        raise ValueError(f"a split node needs >= 2 GPUs, got {num_gpus}")
+    wanted = list(teacher_gpus)
+    if not wanted:
+        raise ValueError("teacher_gpus is empty — the teacher needs a GPU")
+    if len(set(wanted)) != len(wanted):
+        raise ValueError(f"teacher_gpus repeats a device: {wanted}")
+    for i in wanted:
+        if not 0 <= i < num_gpus:
+            raise ValueError(
+                f"teacher_gpus {i} out of range for {num_gpus} GPUs"
+            )
+    if len(wanted) >= num_gpus:
+        raise ValueError(
+            f"teacher_gpus {wanted} takes every GPU of {num_gpus} — "
+            "design B needs at least one left for the student"
+        )
+    return {
+        i: (f"{teacher_gib_per_gpu}GiB" if i in wanted else "0GiB")
+        for i in range(num_gpus)
+    }
