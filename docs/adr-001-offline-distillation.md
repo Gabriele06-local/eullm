@@ -127,6 +127,36 @@ TeacherLogitProvider          # returns RAW LOGITS, not log-probabilities
 
 Raw logits, not log-probabilities, or the temperature story in Part 4 breaks.
 
+> **Corrected 2026-09-15, after P1 measured it.** The sentence above is wrong
+> and nearly cost the project its teacher backend. vLLM returns
+> log-probabilities — `decoded_token`, `logprob`, `rank` — and that was read
+> as "vLLM cannot serve this pipeline". It can. A log-probability is
+> `zᵢ − logZ`, the logit minus a constant *per position*, and that constant
+> cancels in the softmax at **every** temperature:
+>
+> ```
+> softmax_T(zᵢ − C) = exp((zᵢ−C)/T) / Σⱼ exp((zⱼ−C)/T)
+>                   = exp(zᵢ/T)·exp(−C/T) / [exp(−C/T)·Σⱼ exp(zⱼ/T)]
+>                   = softmax_T(zᵢ)
+> ```
+>
+> Distillation optimises against the distribution, never against the absolute
+> scale of the logits, so nothing downstream can tell the difference. What
+> "raw logits, not log-probabilities" was really guarding against is storing
+> probabilities **renormalised over the top-K after truncation**, which
+> destroys the residual mass and cannot be undone. Top-K log-probabilities of
+> the full-vocabulary distribution do not have that problem — they make the
+> residual mass directly recoverable as `1 − Σ pᵢ`.
+>
+> The real limit of vLLM is unrelated to the format: it returns only the
+> top-K, so `logZ_T` over the full vocabulary cannot be computed from its
+> output at an arbitrary temperature. That is a property of **truncation**,
+> not of log-probabilities, and it would apply identically to raw logits from
+> the same backend. Transformers hands back the whole logits tensor, so it
+> can compute `logZ_T` exactly — which is the argument for it as the first
+> provider, and it is an argument about the normaliser, not about vLLM being
+> unusable.
+
 > **Verify this before building around it.** Teacher-forcing needs vLLM's
 > `prompt_logprobs`, which returns values for every *prompt* position — not
 > the `logprobs` of generation. It exists, but at large K over long sequences

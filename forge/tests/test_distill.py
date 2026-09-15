@@ -2,7 +2,11 @@
 
 import pytest
 
-from eullm_forge.distill import build_teacher_max_memory, estimate_distillation_cost
+from eullm_forge.distill import (
+    build_teacher_max_memory,
+    build_teacher_split_memory,
+    estimate_distillation_cost,
+)
 
 
 def test_estimate_14b_to_7b():
@@ -80,3 +84,58 @@ def test_unknown_dataset_raises_instead_of_silent_fallback(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no-such-dataset"):
         distill_module._load_distillation_dataset("no-such-dataset", tokenizer=MagicMock())
+
+
+# ── design B: the teacher gets whole GPUs, never the student's ───────────
+# Co-hosting is what forced the teacher to 8-bit in v1.0. These guard the
+# map that stops it happening again, and every failure mode here is one that
+# would otherwise surface as an OOM minutes into a multi-day job.
+
+def test_split_gives_the_teacher_its_gpus_and_zero_elsewhere():
+    got = build_teacher_split_memory(4, [0, 1], teacher_gib_per_gpu=58)
+    assert got == {0: "58GiB", 1: "58GiB", 2: "0GiB", 3: "0GiB"}
+
+
+def test_split_names_every_device_including_the_forbidden_ones():
+    """accelerate treats an absent device as unconstrained.
+
+    Omitting GPUs 2-3 instead of pinning them to 0GiB would hand the teacher
+    the whole node — exactly the co-hosting the split exists to remove, and
+    silently, because the run would still start.
+    """
+    got = build_teacher_split_memory(4, [0])
+    assert sorted(got) == [0, 1, 2, 3]
+    assert [got[i] for i in (1, 2, 3)] == ["0GiB", "0GiB", "0GiB"]
+
+
+def test_split_refuses_to_take_the_whole_node():
+    with pytest.raises(ValueError, match="at least one left"):
+        build_teacher_split_memory(4, [0, 1, 2, 3])
+
+
+def test_split_rejects_a_device_that_does_not_exist():
+    with pytest.raises(ValueError, match="out of range"):
+        build_teacher_split_memory(4, [0, 4])
+
+
+def test_split_rejects_a_repeated_device():
+    with pytest.raises(ValueError, match="repeats"):
+        build_teacher_split_memory(4, [0, 0])
+
+
+def test_split_rejects_an_empty_teacher():
+    with pytest.raises(ValueError, match="needs a GPU"):
+        build_teacher_split_memory(4, [])
+
+
+def test_split_needs_more_than_one_gpu():
+    with pytest.raises(ValueError, match=">= 2 GPUs"):
+        build_teacher_split_memory(1, [0])
+
+
+def test_split_and_shared_maps_differ_exactly_where_it_matters():
+    """The shared map lets the teacher onto the student's card; split does not."""
+    shared = build_teacher_max_memory(4, student_gpu_index=2)
+    split = build_teacher_split_memory(4, [0, 1])
+    assert shared[2] != "0GiB"     # v1.0: a teacher shard sits with the student
+    assert split[2] == "0GiB"      # design B: it cannot
