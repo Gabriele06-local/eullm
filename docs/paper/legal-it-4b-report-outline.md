@@ -98,13 +98,54 @@ Fill these in as they occur. An empty cell after the run is a number lost.
 
 ### Phase 2 — distillation
 
+*In progress. Figures below are at step 18,360 of 70,457 (26.1 %), after
+three 24 h links — jobs 57353618-20, 2026-09-13 to 2026-09-15.*
+
 | Quantity | Value |
 |---|---|
-| KL term at start / after 1k / final | |
-| Effective alpha schedule realised | |
-| Seconds per step | |
-| Peak VRAM (teacher + student) | |
-| Node-hours | |
+| Total optimizer steps for one epoch | 70,457 (1,127,316 chunks ÷ effective batch 16) |
+| KL term at step 20 / 820 / 1,620 / 18,260 | 2.6989 / 1.0209 / 0.7881 / 0.5105 |
+| Effective alpha schedule realised | none — constant 0.700, recovered from the logged components and matching `kl_alpha: 0.7` |
+| Seconds per step | 10.8 s per optimizer step (1.48 micro-batches/s at accumulation 16) |
+| Peak VRAM (teacher + student) | 36,452 MiB on cuda:0 (student + teacher shard), 24,512 / 16,274 / 16,274 MiB on the rest |
+| Node-hours | 61 for 26.1 % of one epoch; ~240 projected for the full epoch |
+
+The throughput figure has two independent sources that agree: the in-run
+counter (1.48 micro-batches/s → 333 optimizer steps/hour) and the checkpoint
+directory timestamps (1,000 steps every 2 h 59 m, four consecutive intervals
+within three minutes of each other).
+
+**The training loss flattened at around step 14,000 and has not moved since.**
+
+| step | loss | KL | CE | lr |
+|---:|---:|---:|---:|---:|
+| 20 | 2.4462 | 2.6989 | 1.8562 | 1.00e-06 |
+| 1,620 | 0.9549 | 0.7881 | 1.3439 | 5.00e-05 |
+| 10,360 | 0.7321 | 0.5467 | 1.1643 | 4.78e-05 |
+| 14,260 | 0.7008 | 0.5170 | 1.1297 | 4.56e-05 |
+| 18,260 | **0.7028** | 0.5105 | 1.1515 | 4.28e-05 |
+
+Steps 2,420 → 10,360 bought 0.166 of loss; the next 8,000 bought 0.029; the
+last 4,000 — twelve hours of a Booster node — bought nothing, oscillating
+between 0.696 and 0.708 with no trend, and CE rose slightly. This is worth
+more than the usual plateau observation because `num_train_epochs: 1` with no
+repetition means **every batch is unseen data**: the training loss here is a
+running measurement on held-out text, not on memorised text.
+
+It is not, however, evidence that the run is finished, and the distinction
+matters for anyone sizing a chain from this report. The schedule is
+`get_cosine_schedule_with_warmup` over all 70,457 steps, and at 4.28e-05
+against a 5.00e-05 peak the learning rate is still at 86 % — the anneal has
+barely started, and plateaus that break during the anneal are the normal case.
+
+What follows from that is a scheduling result rather than a training one:
+**the worst place to stop a cosine run is partway down it.** The seven links
+booked for this phase reach roughly step 47,700, which is 68 % of the
+schedule and a learning rate still a quarter of peak. That buys a model that
+was never consolidated, for the same node-hours. Either the chain runs to the
+end of the schedule or the schedule is recomputed for the chain; stopping
+where the booking happens to end is the one option that wastes the compute it
+spends.
 
 ### Phase 3 — quantization and export
 
@@ -295,6 +336,9 @@ worth more than a tidy methods description.
 | 2026-09-08 | Pre-flight verified the smoke model's tokenizer, not the job's | false green | `--tokenizer-model` |
 | 2026-09-08 | ZeRO-3 dense-tuned limits OOM'd at first forward on the MoE teacher | 0.67 node-hours | `ds_zero3_moe.json` |
 | 2026-09-08 | 20+ minutes of silent job, diagnosed by hand from `/proc` | ~30 min of operator time | job heartbeat |
+| 2026-09-15 | `eval_steps: 1000` was config nothing read — no validation loop existed, so 18,000 steps of Phase 2 produced no held-out number and a flat training curve could not be interpreted | the whole v1.1 Phase 2 has no validation curve; unrecoverable after the fact | `evaluate()`, capped at `eval_max_batches` |
+| 2026-09-15 | `save_steps: 1000` against a 24 h walltime: job 57353619 reached ~step 14,890 and its successor resumed from checkpoint-14000 | 890 steps, 2 h 40 m, per link boundary | `save_steps: 300` with `save_total_limit` bounding the directory |
+| 2026-09-15 | Throughput reported as a cumulative mean since job start, never reset — printed an identical 1.48 for thirteen hours and could not have shown a slowdown | none yet; a latent blind spot on the metric used to size the chain | per-window rate, cumulative kept beside it |
 
 ## Administrative
 

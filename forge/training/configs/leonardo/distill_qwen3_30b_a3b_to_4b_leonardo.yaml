@@ -14,9 +14,25 @@
 # WALL TIME: the teacher is a 128-expert MoE with 8 experts active, so a
 # forward costs ~3B active parameters, not 30B. This config's ancestor
 # estimated 5-7 days from a DENSE 32B teacher that turned out not to
-# exist; that figure does not carry over and should be re-measured from
-# the first job's throughput before sizing the chain. Start with
-# submit_chain.sh count=3 and extend rather than booking 7 up front.
+# exist; that figure does not carry over.
+#
+# MEASURED, 2026-09-15, on the v1.1 run (jobs 57353618-20, three links):
+# 1.48 micro-batches/s, i.e. 333 optimizer steps/hour, confirmed
+# independently by the checkpoint timestamps (1,000 steps every 2h59m).
+# One epoch over the 1,127,316-chunk corpus is 70,457 steps, so a full
+# epoch is ~212 hours of stepping and ~240 node-hours with per-link
+# loading — nine to ten 24 h links, not the seven booked. Size the chain
+# from that number, and note that the cosine schedule is computed over
+# `num_train_epochs`: stopping the chain early leaves the learning rate
+# mid-anneal, which is the worst place to stop.
+#
+# The node is not saturated at this setting. `teacher_device_map: auto`
+# is pipeline parallelism — the heartbeat shows one GPU busy at a time
+# (`gpu util 53,10,1,26`) — and at batch size 1 the teacher forward is
+# latency-bound. Trading per_device_train_batch_size 1/accum 16 for 4/4
+# keeps the effective batch at 16, so the optimization is unchanged, and
+# should raise throughput. Untested: measure micro/s before and after
+# rather than assuming it.
 #
 # The student is Qwen3-4B-Base: vocab 151936, identical to the teacher's,
 # which logit distillation requires. Pairing across Qwen generations does
@@ -86,8 +102,20 @@ max_grad_norm: 1.0
 num_train_epochs: 1
 max_steps: -1
 warmup_steps: 1000
-save_steps: 1000
+# 300, not 1000. A link ends when SLURM kills it at 24 h, and everything
+# since the last checkpoint is redone by the next link: measured on job
+# 57353619, which reached ~step 14,890 and whose successor resumed from
+# checkpoint-14000 — 890 steps, 2h40m, thrown away. At 333 steps/hour 300
+# steps is a 54-minute interval, so the expected loss at a kill drops from
+# ~1h30m to ~27m, for about eighteen extra saves per link.
+save_steps: 300
+# Which is only affordable with a bound on the directory: each checkpoint
+# is the LoRA adapter plus AdamW's two moments.
+save_total_limit: 3
 eval_steps: 1000
+# ~200 batches is 2-3 minutes against a 3-hour eval interval. Scoring the
+# whole 11,387-chunk validation split would take over two hours.
+eval_max_batches: 200
 logging_steps: 20
 
 ### distillation
