@@ -58,14 +58,35 @@ echo "[p3] commit $(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null || e
 # and doing it on the int8 copy would confound truncation with quantization.
 # P6 measured the quantization separately, which is what allows this to be
 # read on its own.
+# The Phase-1 adapter, when it is there. The first P3 run measured the BASE
+# model because Phase 1 had not finished, and its numbers are a LOWER BOUND:
+# continued pre-training on Italian case law should make the teacher more
+# peaked on that text, so the retained mass can only go up. Re-running
+# without the adapter reproduces a result we already have and buys nothing,
+# which is what this block exists to prevent — the flag was easy to forget
+# because the script's default is simply "no adapter".
+ADAPTER="${EULLM_P3_ADAPTER:-./checkpoints/qwen3_30b_a3b_legal_it_continued_pt}"
+if [ -f "$ADAPTER/adapter_config.json" ]; then
+    echo "[p3] teacher adapter: $ADAPTER"
+    ADAPTER_ARG=(--adapter "$ADAPTER")
+    SUFFIX="_adapted"
+else
+    echo "[p3] WARNING: no adapter at $ADAPTER — measuring the BASE model." >&2
+    echo "[p3] That is the run we already have; its numbers are a lower" >&2
+    echo "[p3] bound. Link the Phase-1 adapter into \$EULLM_RUN_DIR first." >&2
+    ADAPTER_ARG=()
+    SUFFIX="_base"
+fi
+
 python "$EULLM_REPO/forge/scripts/pilot/measure_topk_truncation.py" \
     --model Qwen/Qwen3-30B-A3B-Base \
+    ${ADAPTER_ARG[@]+"${ADAPTER_ARG[@]}"} \
     --data "$EULLM_DATA_DIR/val.jsonl" \
     --samples 64 \
     --seq-len 512 \
     --k 16 32 64 128 \
     --temperatures 1 2 4 \
-    --report "$EULLM_RUN_DIR/p3_topk_truncation.json"
+    --report "$EULLM_RUN_DIR/p3_topk_truncation${SUFFIX}.json"
 STATUS=$?
 
 python3 "$EULLM_REPO/forge/scripts/leonardo/queue_stats.py" 2026-09-02 \
