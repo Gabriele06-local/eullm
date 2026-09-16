@@ -88,9 +88,13 @@ def _load_calibration_data(
             ds = load_dataset(loader, data_files=dataset_name, split="train")
         else:
             ds = load_dataset(dataset_name, split="train")
-    except Exception:
-        logger.warning("Could not load dataset '%s', falling back to wikitext", dataset_name)
-        ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not load calibration dataset '{dataset_name}': {exc}. "
+            "Check the name/path, `huggingface-cli login`, and that compute "
+            "nodes can reach the network (Leonardo compute nodes cannot). "
+            "Refusing to calibrate on a fallback dataset silently."
+        ) from exc
 
     # Filter empty texts and take samples
     texts = [row["text"] for row in ds if row.get("text", "").strip()][:num_samples]
