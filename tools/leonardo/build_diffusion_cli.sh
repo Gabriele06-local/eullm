@@ -73,7 +73,10 @@ log() { printf '\033[34m[..]\033[0m  %s\n' "$*"; }
 
 # ── Preflight ─────────────────────────────────────────────────────────────
 
-command -v nvcc >/dev/null || err "nvcc not found — 'module load cuda/12.2' (12.2, 12.3 or 12.6; there is no CUDA 13 here)"
+command -v nvcc >/dev/null || err "nvcc not found. Load both modules, not just CUDA:
+    module load gcc/12.2.0
+    module load cuda/12.2        # 12.2, 12.3 or 12.6 — there is no CUDA 13 here
+    export CC=gcc CXX=g++"
 NVCC_VER=$(nvcc --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')
 case "$NVCC_VER" in
     13.*) err "CUDA $NVCC_VER needs driver r580, which Leonardo does not have — load 12.2/12.3/12.6 instead" ;;
@@ -82,7 +85,24 @@ log "nvcc: $NVCC_VER"
 
 command -v cmake >/dev/null || err "cmake not found — 'module load cmake' or equivalent"
 log "cmake: $(cmake --version | head -1 | awk '{print $3}')"
-log "host compiler: $(${CXX:-g++} --version | head -1)  (gcc/12.2.0 is the module that works here)"
+# The host compiler is checked, not just reported. RHEL 8's own gcc 8.5.0 is
+# pre-GCC-9, where std::filesystem lives in a separate libstdc++fs; combined
+# with RHEL's patching it produces ABI mismatches on internal classes rather
+# than a clean missing-symbol error, halfway through a long build. That is
+# blocker #7 in docs/cineca/leonardo.md and it cost an afternoon once already.
+HOST_CXX="${CXX:-g++}"
+command -v "$HOST_CXX" >/dev/null || err "no C++ compiler ($HOST_CXX) — module load gcc/12.2.0 && export CC=gcc CXX=g++"
+HOST_CXX_VER=$("$HOST_CXX" -dumpfullversion -dumpversion 2>/dev/null | head -1)
+case "${HOST_CXX_VER%%.*}" in
+    ''|*[!0-9]*) log "host compiler: $HOST_CXX $HOST_CXX_VER (version not parsed — continuing)" ;;
+    *) if [ "${HOST_CXX_VER%%.*}" -lt 9 ]; then
+           err "host compiler is $HOST_CXX $HOST_CXX_VER — pre-GCC-9 puts std::filesystem in a
+    separate libstdc++fs and links with ABI mismatches rather than a clean error:
+        module load gcc/12.2.0
+        export CC=gcc CXX=g++"
+       fi
+       log "host compiler: $HOST_CXX $HOST_CXX_VER" ;;
+esac
 
 if [ ! -f "$LCPP/CMakeLists.txt" ]; then
     MSG="no llama.cpp sources at $LCPP"
