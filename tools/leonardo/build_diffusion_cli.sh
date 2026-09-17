@@ -131,6 +131,31 @@ grep -q "LLM_ARCH_DREAM" "$LCPP/src/llama-arch.h" \
 [ -f "$LCPP/examples/diffusion/diffusion-cli.cpp" ] \
     || err "no examples/diffusion in this llama.cpp — wrong submodule commit?"
 
+# libcuda.so.1 is the DRIVER library, not the toolkit's. It lives on compute
+# nodes and not on login05, so linking anything against ggml-cuda here fails on
+# CUDA Driver API symbols — cuMemCreate, cuDeviceGet and friends — with ld
+# itself suggesting -rpath or -rpath-link. The toolkit ships a stub for exactly
+# this case; the Rust engine build already does the same through RUSTFLAGS.
+# See docs/cineca/leonardo.md.
+#
+# -rpath-link, never -rpath: the first is consulted only while linking, the
+# second is recorded in the binary and would make it load the STUB at runtime,
+# on a compute node, with a real GPU sitting there. Every CUDA call would fail
+# against a library whose entire purpose is to define nothing.
+CUDA_STUBS="${CUDA_STUBS:-${CUDA_HOME:-}/targets/x86_64-linux/lib/stubs}"
+if [ -f "$CUDA_STUBS/libcuda.so" ]; then
+    log "CUDA driver stub: $CUDA_STUBS"
+    STUB_LDFLAGS="-L$CUDA_STUBS -Wl,-rpath-link,$CUDA_STUBS"
+elif ldconfig -p 2>/dev/null | grep -q "libcuda\.so\.1"; then
+    log "libcuda.so.1 present on this node — no stub needed"
+    STUB_LDFLAGS=""
+else
+    err "no libcuda.so.1 on this node and no stub at $CUDA_STUBS
+    Linking ggml-cuda needs one or the other. Point CUDA_STUBS at the toolkit's
+    stubs directory, or set CUDA_HOME so it can be derived:
+        find \${CUDA_HOME:-/usr/local/cuda} -name 'libcuda.so' -path '*stubs*'"
+fi
+
 # ── Configure ─────────────────────────────────────────────────────────────
 
 log "configuring for sm_$CUDA_ARCH into $BUILD_DIR"
@@ -142,6 +167,8 @@ cmake -S "$LCPP" -B "$BUILD_DIR" \
     -DLLAMA_BUILD_TOOLS=ON \
     -DLLAMA_BUILD_TESTS=OFF \
     -DLLAMA_BUILD_SERVER=OFF \
+    -DCMAKE_EXE_LINKER_FLAGS="$STUB_LDFLAGS" \
+    -DCMAKE_SHARED_LINKER_FLAGS="$STUB_LDFLAGS" \
     >/dev/null || err "cmake configure failed — rerun without >/dev/null to see why"
 
 log "building (the long part; run under tmux — a dropped SSH kills it otherwise)"
@@ -175,6 +202,21 @@ $(ls -1 "$BIN" "$BUILD_DIR"/bin/libggml*.so "$BUILD_DIR"/lib/libggml*.so 2>/dev/
     ok "sm_$CUDA_ARCH device code in $(basename "$DEVICE_CODE_IN")"
 else
     log "cuobjdump not on PATH — skipping the device-code check (the job script still greps for the runtime fallback)"
+fi
+
+# The failure this must not be allowed to ship: a binary that links here and
+# then, on a compute node, resolves libcuda.so.1 to the stub instead of the
+# driver. It would start, claim CUDA, and fail every call.
+if [ -n "${STUB_LDFLAGS:-}" ] && command -v readelf >/dev/null; then
+    for obj in "$BIN" "$BUILD_DIR"/bin/libggml*.so; do
+        [ -f "$obj" ] || continue
+        if readelf -d "$obj" 2>/dev/null | grep -E "RUNPATH|RPATH" | grep -q "stubs"; then
+            err "$(basename "$obj") records the stub directory in RUNPATH — at runtime it would
+    load the stub rather than the driver. Reconfigure in a clean build
+    directory with -rpath-link (link-time only), not -rpath."
+        fi
+    done
+    ok "no stub directory baked into RUNPATH"
 fi
 
 ok "llama-diffusion-cli: $BIN"
