@@ -1032,6 +1032,11 @@ pub fn parse_keep_alive_flag(s: &str) -> Result<std::time::Duration, String> {
 /// `s`/`m`/`h`.
 fn parse_duration_string(s: &str) -> Option<f64> {
     let s = s.trim();
+    if s.is_empty() {
+        // An empty (or whitespace-only) string has no number to split off:
+        // without this, `split_at(s.len() - 1)` underflows below.
+        return None;
+    }
     if let Ok(n) = s.parse::<f64>() {
         return Some(n);
     }
@@ -1141,6 +1146,18 @@ mod keep_alive_tests {
         assert_eq!(parse_keep_alive(Some(&v("\"banana\""))), KeepAlive::Default);
         assert_eq!(parse_keep_alive(Some(&v("null"))), KeepAlive::Default);
         assert_eq!(parse_keep_alive(Some(&v("true"))), KeepAlive::Default);
+    }
+
+    /// An empty (or whitespace-only) string is malformed like any other
+    /// garbage — the documented fallback above — except it used to never get
+    /// there: `split_at(s.len() - 1)` underflows on a zero-length string and
+    /// panics the request task instead.
+    #[test]
+    fn an_empty_string_falls_back_to_default_rather_than_panicking() {
+        assert_eq!(parse_keep_alive(Some(&v("\"\""))), KeepAlive::Default);
+        assert_eq!(parse_keep_alive(Some(&v("\"   \""))), KeepAlive::Default);
+        assert!(parse_keep_alive_flag("").is_err());
+        assert!(parse_keep_alive_flag("   ").is_err());
     }
 
     #[test]
