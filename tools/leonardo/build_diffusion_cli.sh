@@ -42,8 +42,16 @@ set -euo pipefail
 
 CUDA_ARCH="${CUDA_ARCH:-80}"
 EULLM_REPO="${EULLM_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-LCPP="$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp"
+# LCPP_DIR lets this run without the EULLM repository at all: fetch llama.cpp
+# alone at the pinned commit and point here. Building needs the C++ sources —
+# unlike the smoke test, which needs only a published binary — but it does not
+# need our repository or four months of llama.cpp history.
+LCPP="${LCPP_DIR:-$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp}"
 BUILD_DIR="${BUILD_DIR:-$LCPP/build-cuda}"
+
+# The commit EULLM ships. Kept here so the standalone route above can name it
+# without a clone; when the submodule bumps, this bumps with it.
+PINNED_COMMIT="${PINNED_COMMIT:-4d9176092d00586775af140581bb0b558ddc4389}"
 
 err() { printf '\033[31m[err]\033[0m %s\n' "$*" >&2; exit 1; }
 ok()  { printf '\033[32m[ok]\033[0m  %s\n' "$*"; }
@@ -62,9 +70,15 @@ command -v cmake >/dev/null || err "cmake not found — 'module load cmake' or e
 log "cmake: $(cmake --version | head -1 | awk '{print $3}')"
 log "host compiler: $(${CXX:-g++} --version | head -1)  (gcc/12.2.0 is the module that works here)"
 
-[ -f "$LCPP/CMakeLists.txt" ] || err "llama.cpp submodule is not checked out at $LCPP
+[ -f "$LCPP/CMakeLists.txt" ] || err "no llama.cpp sources at $LCPP
+  From a clone of this repository:
     git -C $EULLM_REPO submodule update --init --depth 1 \\
-        engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp"
+        engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
+  Or standalone, without the repository (one commit, no history):
+    git init llama.cpp && git -C llama.cpp fetch --depth 1 \\
+        https://github.com/eullm/llama.cpp $PINNED_COMMIT
+    git -C llama.cpp checkout FETCH_HEAD
+    export LCPP_DIR=\$PWD/llama.cpp"
 log "llama.cpp: $(git -C "$LCPP" rev-parse --short HEAD 2>/dev/null || echo '?') (the commit EULLM ships)"
 
 grep -q "LLM_ARCH_DREAM" "$LCPP/src/llama-arch.h" \
