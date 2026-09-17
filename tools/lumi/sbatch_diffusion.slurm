@@ -44,6 +44,28 @@
 # same shape sbatch_bench.slurm and sbatch_replicas.slurm emit, so one grep
 # collects every arrangement we have measured.
 
+#
+# IF `sbatch` REFUSES THE JOB, read which limit it names — the two look alike
+# and have nothing in common:
+#
+#   AssocMaxSubmitJobLimit         no account resolved, so the job went to the
+#                                  default association, whose MaxSubmit is 0.
+#                                  `squeue -u $USER` is EMPTY in this case,
+#                                  which is what makes the message misleading:
+#                                  nothing is queued, the limit is simply zero.
+#                                  `sbatch` reads SBATCH_ACCOUNT at submission
+#                                  and a fresh shell does not have it — pass
+#                                  --account=project_465003366 explicitly instead of
+#                                  trusting the environment. Same root cause as
+#                                  the three-variable note in sbatch_smoke.slurm,
+#                                  different symptom.
+#
+#   QOSMaxWallDurationPerJobLimit  --time exceeds what this QoS grants. Lower
+#                                  the time, or leave the debug QoS and queue
+#                                  behind the long jobs.
+#
+# Neither costs allocation: both are refused before the job queues.
+
 #SBATCH --job-name=eullm-diffusion
 #SBATCH --partition=small-g
 #SBATCH --nodes=1
