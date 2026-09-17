@@ -134,9 +134,23 @@ BIN="$BUILD_DIR/bin/llama-diffusion-cli"
 LDD_OUT=$(ldd "$BIN" 2>&1 || true)
 grep -q "amdhip64" <<<"$LDD_OUT" || err "$BIN is not linked against HIP — the ROCm backend did not build in"
 
-STRINGS_OUT=$(strings -a "$BIN" 2>/dev/null || true)
-grep -q "amdhsa--$EULLM_AMDGPU_TARGETS" <<<"$STRINGS_OUT" \
-    || err "no $EULLM_AMDGPU_TARGETS device code in $BIN — it would fall back to the CPU"
+# Look for device code wherever ggml-hip actually ended up. llama.cpp builds
+# shared libraries by default, and then the executable carries none of it —
+# the kernels live in libggml-hip.so. Checking only the executable reports a
+# perfectly good build as broken, which is what this check did on its first
+# real run.
+DEVICE_CODE_IN=""
+for obj in "$BIN" "$BUILD_DIR"/bin/libggml*.so "$BUILD_DIR"/lib/libggml*.so; do
+    [ -f "$obj" ] || continue
+    if strings -a "$obj" 2>/dev/null | grep -q "amdhsa--$EULLM_AMDGPU_TARGETS"; then
+        DEVICE_CODE_IN="$obj"
+        break
+    fi
+done
+[ -n "$DEVICE_CODE_IN" ] || err "no $EULLM_AMDGPU_TARGETS device code in $BIN or any libggml*.so
+    beside it — the build would fall back to the CPU. Objects searched:
+$(ls -1 "$BIN" "$BUILD_DIR"/bin/libggml*.so "$BUILD_DIR"/lib/libggml*.so 2>/dev/null | sed 's/^/      /')"
+ok "$EULLM_AMDGPU_TARGETS device code in $(basename "$DEVICE_CODE_IN")"
 
 ok "llama-diffusion-cli: $BIN"
 ok "llama-tokenize:      $BUILD_DIR/bin/llama-tokenize"

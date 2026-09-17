@@ -158,10 +158,21 @@ grep -qE "libcudart|libcuda" <<<"$LDD_OUT" || err "$BIN is not linked against CU
 # cuobjdump is the honest check: the banner names the backend compiled in, not
 # the device found, so a binary with no sm_80 code still says "GPU backend: CUDA".
 if command -v cuobjdump >/dev/null; then
-    ARCH_OUT=$(cuobjdump -lelf "$BIN" 2>/dev/null || true)
-    grep -q "sm_$CUDA_ARCH" <<<"$ARCH_OUT" \
-        || err "no sm_$CUDA_ARCH device code in $BIN — it would fall back to the CPU on an A100"
-    ok "sm_$CUDA_ARCH device code present"
+    # Same trap as the HIP twin: with shared libraries the kernels are in
+    # libggml-cuda.so and the executable carries none, so searching only the
+    # executable calls a good build broken.
+    DEVICE_CODE_IN=""
+    for obj in "$BIN" "$BUILD_DIR"/bin/libggml*.so "$BUILD_DIR"/lib/libggml*.so; do
+        [ -f "$obj" ] || continue
+        if cuobjdump -lelf "$obj" 2>/dev/null | grep -q "sm_$CUDA_ARCH"; then
+            DEVICE_CODE_IN="$obj"
+            break
+        fi
+    done
+    [ -n "$DEVICE_CODE_IN" ] || err "no sm_$CUDA_ARCH device code in $BIN or any libggml*.so
+    beside it — it would fall back to the CPU on an A100. Objects searched:
+$(ls -1 "$BIN" "$BUILD_DIR"/bin/libggml*.so "$BUILD_DIR"/lib/libggml*.so 2>/dev/null | sed 's/^/      /')"
+    ok "sm_$CUDA_ARCH device code in $(basename "$DEVICE_CODE_IN")"
 else
     log "cuobjdump not on PATH — skipping the device-code check (the job script still greps for the runtime fallback)"
 fi
