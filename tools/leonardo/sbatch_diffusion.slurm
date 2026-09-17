@@ -104,8 +104,21 @@ EOP
 }
 
 SWEEP="$(build_sweep)"
-[ -n "$SWEEP" ] && [ -x "$DIFFUSION_BIN" ] || {
-    echo "ERROR: set LLADA_GGUF and/or DREAM_GGUF, and a runnable DIFFUSION_BIN"; exit 1; }
+# Say which one is missing, and what it was actually set to. An unset variable
+# and one set to an empty string look identical from here, and a shell that ate
+# a placeholder — `<...>` is a redirection, not a placeholder — leaves exactly
+# the second case.
+if [ -z "$SWEEP" ] || [ ! -x "$DIFFUSION_BIN" ]; then
+    echo "ERROR: cannot build a sweep. What this job can see:"
+    printf '  %-14s %s\n' \
+        DIFFUSION_BIN "${DIFFUSION_BIN:-<unset>}$([ -n "${DIFFUSION_BIN:-}" ] && { [ -x "$DIFFUSION_BIN" ] && echo '  (ok)' || echo '  (NOT EXECUTABLE)'; })" \
+        LLADA_GGUF    "${LLADA_GGUF:-<unset or empty>}" \
+        DREAM_GGUF    "${DREAM_GGUF:-<unset or empty>}"
+    echo "  At least one of LLADA_GGUF / DREAM_GGUF must name a readable .gguf."
+    echo "  Derive them from what actually landed rather than typing them:"
+    echo "    export LLADA_GGUF=\$(ls \$MODELS/*LLaDA*Q4_K_M*.gguf | head -1)"
+    exit 1
+fi
 
 echo "=== node and device ==="
 hostname
