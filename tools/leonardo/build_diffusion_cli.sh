@@ -42,11 +42,25 @@ set -euo pipefail
 
 CUDA_ARCH="${CUDA_ARCH:-80}"
 EULLM_REPO="${EULLM_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
-# LCPP_DIR lets this run without the EULLM repository at all: fetch llama.cpp
-# alone at the pinned commit and point here. Building needs the C++ sources —
-# unlike the smoke test, which needs only a published binary — but it does not
-# need our repository or four months of llama.cpp history.
-LCPP="${LCPP_DIR:-$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp}"
+# Where llama.cpp's sources are, in order of decreasing certainty. Building
+# needs them — unlike the smoke test, which needs only a published binary,
+# because the diffusion loop lives in examples/ and is never compiled into the
+# library we link. What it does not need is our repository, or four months of
+# llama.cpp history.
+#
+# The middle case is why this is not a one-liner. Run standalone from a
+# directory that is not a clone, EULLM_REPO resolves to whatever sits two
+# levels up — `/users`, on a LUMI login node — and the script then reports a
+# missing submodule in a repository that was never there. So look beside the
+# script first: that is where the standalone recipe puts llama.cpp.
+if [ -n "${LCPP_DIR:-}" ]; then
+    LCPP="$LCPP_DIR"
+elif [ -f "$PWD/llama.cpp/CMakeLists.txt" ]; then
+    LCPP="$PWD/llama.cpp"
+    log_lcpp_found_beside=1
+else
+    LCPP="$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp"
+fi
 BUILD_DIR="${BUILD_DIR:-$LCPP/build-cuda}"
 
 # The commit EULLM ships. Kept here so the standalone route above can name it
@@ -70,15 +84,26 @@ command -v cmake >/dev/null || err "cmake not found — 'module load cmake' or e
 log "cmake: $(cmake --version | head -1 | awk '{print $3}')"
 log "host compiler: $(${CXX:-g++} --version | head -1)  (gcc/12.2.0 is the module that works here)"
 
-[ -f "$LCPP/CMakeLists.txt" ] || err "no llama.cpp sources at $LCPP
-  From a clone of this repository:
+if [ ! -f "$LCPP/CMakeLists.txt" ]; then
+    MSG="no llama.cpp sources at $LCPP"
+    # Only offer the submodule route when there is actually a repository to run
+    # it in. Suggesting `git -C /users submodule update` helps nobody.
+    if [ -f "$EULLM_REPO/engine/Cargo.toml" ]; then
+        MSG="$MSG
+  From this clone:
     git -C $EULLM_REPO submodule update --init --depth 1 \\
-        engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
-  Or standalone, without the repository (one commit, no history):
+        engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp"
+    fi
+    err "$MSG
+  Standalone, without the repository (one commit, no history):
     git init llama.cpp && git -C llama.cpp fetch --depth 1 \\
         https://github.com/eullm/llama.cpp $PINNED_COMMIT
     git -C llama.cpp checkout FETCH_HEAD
-    export LCPP_DIR=\$PWD/llama.cpp"
+    bash $(basename "${BASH_SOURCE[0]}")        # found automatically from here
+  Or point at a checkout elsewhere:
+    export LCPP_DIR=/path/to/llama.cpp"
+fi
+[ -n "${log_lcpp_found_beside:-}" ] && log "llama.cpp found beside this script: $LCPP"
 log "llama.cpp: $(git -C "$LCPP" rev-parse --short HEAD 2>/dev/null || echo '?') (the commit EULLM ships)"
 
 grep -q "LLM_ARCH_DREAM" "$LCPP/src/llama-arch.h" \
