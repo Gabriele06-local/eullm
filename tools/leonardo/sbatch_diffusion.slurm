@@ -167,9 +167,20 @@ if [ -n "$TOKENIZE_BIN" ] && [ -x "$TOKENIZE_BIN" ]; then
     # `--show-count` prints one line, "Total number of tokens: N". Parsing that
     # beats counting the `--ids` array: no bracket/comma handling, and a change
     # in how ids are formatted cannot silently return a wrong count.
-    N_INPUT=$("$TOKENIZE_BIN" -m "$FIRST_GGUF" -p "$PROMPT" --show-count 2>/dev/null \
+    TOK_OUT=$("$TOKENIZE_BIN" -m "$FIRST_GGUF" -p "$PROMPT" --show-count 2>&1)
+    TOK_RC=$?
+    N_INPUT=$(printf '%s\n' "$TOK_OUT" \
         | sed -n 's/^Total number of tokens: *\([0-9]\{1,\}\).*/\1/p' | tail -1)
     [ "${N_INPUT:-0}" -gt 0 ] 2>/dev/null || N_INPUT=""
+    # Keep the reason. Throwing stderr away here once cost a run whose tok/s
+    # could only be reported as an upper bound, with nothing on record saying
+    # why — and the candidates are not alike: a missing --show-count in this
+    # build, a binary that cannot start because libcuda.so.1 is absent, or a
+    # model this tokenizer refuses. Each has a different fix.
+    if [ -z "$N_INPUT" ]; then
+        echo "  prompt count failed (exit $TOK_RC) — tok/s will be an upper bound. First lines:"
+        printf '%s\n' "$TOK_OUT" | head -3 | sed 's/^/      /'
+    fi
 fi
 if [ -n "$N_INPUT" ]; then
     echo "  prompt: $N_INPUT tokens"
