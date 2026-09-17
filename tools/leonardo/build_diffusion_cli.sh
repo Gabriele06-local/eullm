@@ -142,10 +142,20 @@ grep -q "LLM_ARCH_DREAM" "$LCPP/src/llama-arch.h" \
 # second is recorded in the binary and would make it load the STUB at runtime,
 # on a compute node, with a real GPU sitting there. Every CUDA call would fail
 # against a library whose entire purpose is to define nothing.
+# One more turn of the screw: ld resolves a dependency by FILE NAME, and the
+# name recorded in libggml-cuda.so is libcuda.so.1 — while the toolkit's stubs
+# directory contains only libcuda.so. Pointing -rpath-link at the stubs is
+# therefore necessary and not sufficient: ld looks in the right place and finds
+# nothing called what it is looking for, then reports every driver symbol as
+# undefined. So build a small directory carrying the versioned name.
 CUDA_STUBS="${CUDA_STUBS:-${CUDA_HOME:-}/targets/x86_64-linux/lib/stubs}"
 if [ -f "$CUDA_STUBS/libcuda.so" ]; then
-    log "CUDA driver stub: $CUDA_STUBS"
-    STUB_LDFLAGS="-L$CUDA_STUBS -Wl,-rpath-link,$CUDA_STUBS"
+    STUB_LINK_DIR="$BUILD_DIR/.cuda-stub"
+    mkdir -p "$STUB_LINK_DIR"
+    ln -sf "$CUDA_STUBS/libcuda.so" "$STUB_LINK_DIR/libcuda.so"
+    ln -sf "$CUDA_STUBS/libcuda.so" "$STUB_LINK_DIR/libcuda.so.1"
+    log "CUDA driver stub: $CUDA_STUBS (linked as libcuda.so.1 in $STUB_LINK_DIR)"
+    STUB_LDFLAGS="-L$STUB_LINK_DIR -Wl,-rpath-link,$STUB_LINK_DIR"
 elif ldconfig -p 2>/dev/null | grep -q "libcuda\.so\.1"; then
     log "libcuda.so.1 present on this node — no stub needed"
     STUB_LDFLAGS=""
@@ -210,10 +220,11 @@ fi
 if [ -n "${STUB_LDFLAGS:-}" ] && command -v readelf >/dev/null; then
     for obj in "$BIN" "$BUILD_DIR"/bin/libggml*.so; do
         [ -f "$obj" ] || continue
-        if readelf -d "$obj" 2>/dev/null | grep -E "RUNPATH|RPATH" | grep -q "stubs"; then
+        if readelf -d "$obj" 2>/dev/null | grep -E "RUNPATH|RPATH" | grep -qE "stubs|\.cuda-stub"; then
             err "$(basename "$obj") records the stub directory in RUNPATH — at runtime it would
-    load the stub rather than the driver. Reconfigure in a clean build
-    directory with -rpath-link (link-time only), not -rpath."
+    load the stub rather than the driver, on a node where the real one is
+    present. Reconfigure in a clean build directory with -rpath-link
+    (link-time only), not -rpath."
         fi
     done
     ok "no stub directory baked into RUNPATH"
