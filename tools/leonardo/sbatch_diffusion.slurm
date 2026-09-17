@@ -67,12 +67,21 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=01:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=eullm-diffusion-%j.out
 
 # boost_qos_dbg on purpose: legal-it distillation is the critical path on this
 # machine and owns the long queue. SLURM bills elapsed time, not the --time
 # ceiling, so an early exit stops the meter.
+#
+# The 30 minutes are the QoS's, not a guess. A debug QoS caps wall duration,
+# and asking for an hour is refused at submission with
+# `QOSMaxWallDurationPerJobLimit` — before anything queues, so it costs only
+# the confusion. The sweep needs a fraction of it: six points of roughly a
+# minute each, plus loads that take seconds from the fast scratch tier. Raising
+# this means leaving boost_qos_dbg, which means queueing behind the training
+# jobs. Check the real ceiling with:
+#     sacctmgr show qos boost_qos_dbg format=Name,MaxWall,MaxSubmit,MaxTRESPU
 
 set -uo pipefail
 
