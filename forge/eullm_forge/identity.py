@@ -235,6 +235,12 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     Returns:
         Path to the fine-tuned model adapter.
     """
+    # Fail fast on a misspelled dataset path before paying for imports, GPU
+    # memory, and hours of training: a non-empty dataset_path that points
+    # nowhere must be an error, not a silent switch to synthetic examples.
+    if config.dataset_path and not Path(config.dataset_path).exists():
+        raise FileNotFoundError(f"identity dataset not found: {config.dataset_path}")
+
     import torch
     from peft import LoraConfig, TaskType, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
