@@ -86,6 +86,13 @@ def _load_calibration_data(
             ext = Path(dataset_name).suffix.lower()
             loader = "json" if ext in (".jsonl", ".json") else "text"
             ds = load_dataset(loader, data_files=dataset_name, split="train")
+        elif dataset_name == "wikitext":
+            # The default in PruningConfig, and it cannot load from the bare
+            # name: wikitext declares four configs and marks none of them
+            # default, so load_dataset("wikitext") raises asking which one.
+            # The fallback removed below is the only reason this ever worked —
+            # it caught that error and reloaded with the config name.
+            ds = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
         else:
             ds = load_dataset(dataset_name, split="train")
     except Exception as exc:
