@@ -17,6 +17,11 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# The dataset `run_distillation` falls back to when none is requested, and the
+# config it needs. Kept together because the name alone does not load.
+WIKITEXT_DEFAULT = "wikitext"
+WIKITEXT_DEFAULT_CONFIG = "wikitext-2-raw-v1"
+
 
 @dataclass
 class DistillConfig:
@@ -133,6 +138,18 @@ def _load_distillation_dataset(
         ext = Path(dataset_name).suffix.lower()
         loader = "json" if ext in (".jsonl", ".json") else "text"
         ds = load_dataset(loader, data_files=dataset_name, split="train")
+    elif dataset_name == WIKITEXT_DEFAULT:
+        # The project default, and it cannot load from the bare name: wikitext
+        # declares four configs (wikitext-2/103, raw and not) and marks none of
+        # them default, so load_dataset("wikitext") raises asking which one.
+        #
+        # It used to work only by accident. The fallback removed alongside this
+        # branch caught that error and reloaded with the config name, so the
+        # default path never went through the line above — it went through the
+        # rescue. Removing the rescue without naming the config here left
+        # `run_distillation` unable to start without an explicit --dataset,
+        # since it passes `config.dataset or "wikitext"`.
+        ds = load_dataset(WIKITEXT_DEFAULT, WIKITEXT_DEFAULT_CONFIG, split="train")
     else:
         try:
             ds = load_dataset(dataset_name, split="train")
@@ -332,9 +349,9 @@ def distill(config: DistillConfig) -> str:
     )
 
     # Load dataset
-    logger.info("Loading distillation dataset: %s", config.dataset or "wikitext")
+    logger.info("Loading distillation dataset: %s", config.dataset or WIKITEXT_DEFAULT)
     dataset = _load_distillation_dataset(
-        config.dataset or "wikitext",
+        config.dataset or WIKITEXT_DEFAULT,
         tokenizer,
     )
     dataloader = DataLoader(dataset, batch_size=config.batch_size, shuffle=True)

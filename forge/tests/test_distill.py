@@ -139,3 +139,58 @@ def test_split_and_shared_maps_differ_exactly_where_it_matters():
     split = build_teacher_split_memory(4, [0, 1])
     assert shared[2] != "0GiB"     # v1.0: a teacher shard sits with the student
     assert split[2] == "0GiB"      # design B: it cannot
+
+
+def test_default_wikitext_is_requested_with_its_config(monkeypatch):
+    """The default dataset must be asked for by name AND config.
+
+    `wikitext` declares four configs and marks none of them default, so
+    `load_dataset("wikitext")` raises rather than picking one. Before the
+    fallback was removed that error was caught and the reload supplied the
+    config, which is the only reason the default ever worked; afterwards
+    `run_distillation` could not start without an explicit --dataset. This
+    pins the call, so removing the branch fails here instead of in a job.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    from eullm_forge import distill as distill_module
+
+    seen: list[tuple] = []
+
+    class _FakeDS:
+        column_names = ["text"]
+
+        def __len__(self):
+            return 1
+
+        def select(self, _):
+            return self
+
+        def filter(self, _):
+            return self
+
+        def map(self, *a, **k):
+            return self
+
+        def set_format(self, _):
+            pass
+
+    def _record(*args, **kwargs):
+        seen.append(args)
+        return _FakeDS()
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = _record
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    distill_module._load_distillation_dataset(
+        distill_module.WIKITEXT_DEFAULT, tokenizer=MagicMock()
+    )
+
+    assert seen, "load_dataset was never called"
+    assert seen[0][:2] == (
+        distill_module.WIKITEXT_DEFAULT,
+        distill_module.WIKITEXT_DEFAULT_CONFIG,
+    ), f"the default must carry its config, got {seen[0]!r}"
