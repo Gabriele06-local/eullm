@@ -25,3 +25,35 @@ def test_unknown_calibration_dataset_raises_instead_of_silent_fallback(monkeypat
 
     with pytest.raises(RuntimeError, match="no-such-calib"):
         pruning_module._load_calibration_data("no-such-calib", tokenizer=MagicMock(), num_samples=8)
+
+
+def test_default_wikitext_is_requested_with_its_config(monkeypatch):
+    """The default calibration dataset must be asked for by name AND config.
+
+    `wikitext` declares four configs and marks none of them default, so
+    `load_dataset("wikitext")` raises rather than picking one. The fallback
+    this PR removes was the only reason PruningConfig's default ever worked.
+    Pins the call, so dropping the branch fails here rather than in a job.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    from eullm_forge import pruning as pruning_module
+
+    seen: list[tuple] = []
+
+    def _record(*args, **kwargs):
+        seen.append(args)
+        return [{"text": "hello"}]
+
+    fake_datasets = types.ModuleType("datasets")
+    fake_datasets.load_dataset = _record
+    monkeypatch.setitem(sys.modules, "datasets", fake_datasets)
+
+    pruning_module._load_calibration_data("wikitext", tokenizer=MagicMock(), num_samples=1)
+
+    assert seen, "load_dataset was never called"
+    assert seen[0][:2] == ("wikitext", "wikitext-2-raw-v1"), (
+        f"the default must carry its config, got {seen[0]!r}"
+    )
