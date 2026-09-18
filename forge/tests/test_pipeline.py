@@ -186,3 +186,52 @@ def test_identity_stage_runs_before_quantization_and_is_merged():
     # the pre-identity checkpoint.
     assert exported["model_path"] == "/tmp/eullm-test/identity-merged", calls
     assert exported["model_path"] != config.base_model
+
+
+def test_slugify_model_name_preserves_legitimate_names():
+    """Slugifying must not rename what is already a safe name."""
+    from eullm_forge.pipeline import _slugify_model_name
+
+    assert _slugify_model_name("EULLM Legal IT") == "eullm-legal-it"
+    assert _slugify_model_name("model") == "model"
+    assert _slugify_model_name("../../tmp/evil") == "tmp-evil"
+    assert _slugify_model_name("...") == "model"
+
+
+def test_malicious_identity_name_cannot_escape_output_dir(tmp_path):
+    """A hostile identity name must not escape output_dir via the GGUF filename.
+
+    The identity comes raw from the CLI; without slugifying, "../pwned"
+    writes outside output_dir (or fails late on platform-illegal characters
+    after hours of GPU time). Runs `run_pipeline` with the export stage
+    stubbed and asserts on the path it is handed.
+    """
+    from pathlib import Path
+
+    import eullm_forge.pipeline as pipeline_mod
+
+    exported: dict[str, str] = {}
+
+    def fake_export(cfg):
+        exported["output_path"] = cfg.output_path
+        return cfg.output_path
+
+    config = load_profile("legal-it")
+    config.output_dir = str(tmp_path)
+    config.skip_pruning = True
+    config.skip_distillation = True
+    config.skip_identity = True
+    config.skip_quantization = True
+    config.base_model = str(tmp_path / "base")
+    config.identity.identity_name = "../pwned"
+
+    original_export = pipeline_mod.export_gguf
+    pipeline_mod.export_gguf = fake_export
+    try:
+        run_pipeline(config)
+    finally:
+        pipeline_mod.export_gguf = original_export
+
+    out = Path(exported["output_path"])
+    assert out.parent == tmp_path
+    assert out.name == "eullm-pwned.gguf"

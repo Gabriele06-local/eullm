@@ -11,6 +11,7 @@ the HuggingFace-level quantization stage is a no-op — llama-quantize inside
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -115,6 +116,18 @@ def estimate_target_params(source_params_b: float, target_vram_gb: int) -> float
     return min(target_params, source_params_b)
 
 
+def _slugify_model_name(name: str) -> str:
+    """Make free-form identity text safe for the GGUF filename.
+
+    The identity comes raw from the CLI, so without this `..` or `/` in it
+    escapes `output_dir` (or fails late on platform-illegal characters after
+    hours of GPU time). Keeps lowercase alphanumerics, "-", and "_";
+    everything else becomes "-".
+    """
+    slug = re.sub(r"[^a-z0-9-_]+", "-", name.lower()).strip("-")
+    return slug or "model"
+
+
 def run_pipeline(config: PipelineConfig) -> Path:
     """Run the full verticalizzazione pipeline.
 
@@ -195,8 +208,7 @@ def run_pipeline(config: PipelineConfig) -> Path:
 
     # Stage 5: GGUF export
     logger.info("[5/5] GGUF export...")
-    final_name = f"eullm-{config.identity.identity_name or 'model'}"
-    final_name = final_name.lower().replace(" ", "-")
+    final_name = f"eullm-{_slugify_model_name(config.identity.identity_name or 'model')}"
     config.export.model_path = current_model_path
     config.export.output_path = str(output_dir / f"{final_name}.gguf")
     gguf_path = export_gguf(config.export)
