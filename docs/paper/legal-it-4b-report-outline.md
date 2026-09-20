@@ -25,7 +25,17 @@ actually about, is the part usually left out:
 3. **GDPR-aware corpus construction from a public case-law archive**, stated
    honestly as pseudonymisation rather than anonymisation, including a
    redaction bug that reported success while leaking (§3).
-4. **The failures, with numbers.** Model ids that did not exist, a launcher
+4. **The deliverable is not gated on the run finishing.** A distillation
+   run writes a shippable model every `save_steps`, not one at the end: each
+   checkpoint is a complete adapter that merges, converts and quantizes like
+   the final output, and is only less trained. Treating the model as the
+   *terminus* of a four-week chain rather than as its *continuous output* is
+   what makes a fixed-term allocation frightening — and it is a habit, not a
+   constraint. Packaging on a cadence moves end-to-end validation from week
+   four to day three, lets quality be measured while there is still budget to
+   act on the answer, and means an expired allocation leaves a model behind
+   rather than a directory of optimizer state.
+5. **The failures, with numbers.** Model ids that did not exist, a launcher
    pointing at a stale checkpoint path, a pre-flight that verified the wrong
    tokenizer, an OOM at the first forward. Each cost measurable time, and
    each is the kind of thing the next team hits.

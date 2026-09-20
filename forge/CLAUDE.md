@@ -21,6 +21,38 @@ Base model (14B–72B)
 Output: 7B Q4 model (~4.5GB) that runs on any laptop with 8GB RAM
 ```
 
+### A distillation run does not produce a model at the end. It produces one continuously.
+
+Stage 2 writes a `checkpoint-N` every `save_steps`, and **each one is already
+a shippable model**. It is a complete LoRA adapter over the student base:
+merge it, convert it, quantize it, and you have a GGUF that loads and
+generates exactly like the run's final output. Less trained. Nothing else
+about it is different.
+
+This is easy to miss because `distill.py` merges the adapter only when the
+whole run finishes, which makes the deliverable *look* gated on an epoch that
+takes weeks of chained 24 h jobs on a busy cluster. It never was, and treating
+it as though it were costs three things that matter:
+
+* **Evidence.** The pipeline can be proven end to end on day three instead of
+  week four — and a pipeline nobody has run to the end is a pipeline with
+  unknown bugs in its last stage, which is where they are most expensive.
+* **Feedback.** Quality can be measured against a real baseline while there is
+  still budget left to act on what it says. A loss curve is not a model; only
+  a model tells you whether the thing is any good.
+* **Risk.** If an allocation expires, a node dies, or a chain breaks mid-run,
+  what survives is a *model* rather than a directory of optimizer state.
+
+`forge/scripts/export_checkpoint.py` packages any checkpoint;
+`forge/scripts/leonardo/sbatch_export_gguf.slurm` does it on a cadence without
+being asked, on the **serial partition** — merging is elementwise arithmetic
+and GGUF conversion is CPU-only, so neither belongs inside a GPU job, where it
+would spend A100 time on addition and stall the training loop while it ran.
+
+Corollary worth stating because it inverts the usual instinct: **`save_steps`
+is not only a crash-recovery knob.** It is also the sampling rate of the
+deliverable, and the interval at which a run can be evaluated at all.
+
 **Two ordering rules, both found as real bugs in July 2026 and both easy to
 reintroduce:**
 
