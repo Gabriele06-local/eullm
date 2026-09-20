@@ -34,8 +34,13 @@
 #SBATCH --partition=lrd_all_serial
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+# Matched to sbatch_quantize.slurm, which does the same GGUF conversion on
+# this partition and is known to pass. An earlier 8 cores / 64 G was rejected
+# outright with QOSMaxMemoryPerUser: lrd_all_serial caps per-user memory well
+# below a compute node's, and the merge only needs room for a 4 B model in
+# bf16 (~8 GB of weights) plus the copy save_pretrained writes.
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=30G
 #SBATCH --time=04:00:00
 #SBATCH --output=logs/%x-%j.out
 
