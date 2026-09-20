@@ -25,7 +25,7 @@
 #       ~/checkpoints/qwen3_7b_legal_it_distilled \
 #       ~/gguf/legal-it-7b
 #
-# After this completes, the file at <output-dir>/legal-it-7b-q4_k_m.gguf
+# After this completes, the file at <output-dir>/${GGUF_NAME}-${QUANT_TYPE}.gguf
 # can be loaded by the EULLM Engine, Ollama, or any llama.cpp-compatible
 # runtime.
 
@@ -114,8 +114,13 @@ fi
 # 2. Build (CPU only is enough for conversion + quantization + smoke)
 # ---------------------------------------------------------------------------
 
+# llama-perplexity is in the list because comparing perplexity against the
+# untouched base model is the only quantitative read on whether distillation
+# moved anything. Eyeballing a completion is not a measurement, and a build
+# that omits the tool makes the measurement something nobody does.
 if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
-   [ ! -f "$LCPP_DIR/build/bin/llama-cli" ]; then
+   [ ! -f "$LCPP_DIR/build/bin/llama-cli" ] || \
+   [ ! -f "$LCPP_DIR/build/bin/llama-perplexity" ]; then
     # CMake caches the compiler it configured with, so a build directory left
     # behind by a failed attempt keeps using that compiler no matter what is
     # loaded now. `module load gcc/12` then re-running would have rebuilt with
@@ -138,7 +143,8 @@ if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
         -DLLAMA_CURL=OFF \
         >/dev/null
     cmake --build "$LCPP_DIR/build" --config Release \
-        --target llama-quantize llama-cli -j "${LCPP_BUILD_JOBS:-8}" \
+        --target llama-quantize llama-cli llama-perplexity \
+        -j "${LCPP_BUILD_JOBS:-8}" \
         >/dev/null
     ok "llama.cpp built"
 fi
@@ -198,7 +204,7 @@ cat <<EOF
    ${QUANT_TYPE} GGUF:  $QUANT_FILE
 
  Next: load into the EULLM Engine, or push to HuggingFace Hub:
-   huggingface-cli upload eullm/legal-it-7b "$QUANT_FILE" \\
+   huggingface-cli upload eullm/${GGUF_NAME} "$QUANT_FILE" \\
        legal-it-7b-${QUANT_TYPE}.gguf
 ================================================================================
 EOF
