@@ -20,6 +20,25 @@
 #   bash forge/scripts/quantize_to_gguf.sh \
 #       <hf-model-dir> [output-dir]
 #
+# On a cluster, run it through the batch system rather than on a login node.
+# "CPU only" means no GPU; it does not mean small. Converting a 4 B model
+# holds gigabytes of tensors in memory and writes an 8 GB file, and a login
+# node's per-user memory is whatever is left after everyone else — the
+# conversion was OOM-killed there at 91%, and the merge before it at the same
+# place. A serial allocation is a request, not a share of the leftovers:
+#
+#   srun --account=<acct> --partition=lrd_all_serial \
+#        --cpus-per-task=4 --mem=30G --time=02:00:00 \
+#        bash forge/scripts/quantize_to_gguf.sh <hf-model-dir> [output-dir]
+#
+# 30G and 4 cores are not arbitrary and should not be raised casually:
+# lrd_all_serial enforces QOSMaxMemoryPerUser, and --mem=64G was rejected
+# outright. These are the values sbatch_quantize.slurm already uses because
+# they are known to be accepted.
+#
+# forge/scripts/leonardo/sbatch_export_gguf.slurm does this unattended on a
+# cadence and is the better answer for anything recurring.
+#
 # Example:
 #   bash forge/scripts/quantize_to_gguf.sh \
 #       ~/checkpoints/qwen3_7b_legal_it_distilled \
@@ -180,13 +199,26 @@ if [ -f "$F16_FILE" ]; then
     fi
 fi
 
+# Both heavy steps write to a .partial and rename only on success, because
+# "the file exists" is the only thing the skip logic above can see and a file
+# can exist while being wrong.
+#
+# Measured: the F16 conversion was OOM-killed on a login node at 91%, leaving
+# 7.3 GB of an 8.05 GB file behind. Nothing reported an error afterwards — the
+# next run would have said "F16 GGUF already at …, skipping conversion" and
+# quantized a truncated model. A rename is atomic on the same filesystem, so
+# what the skip logic sees is either a complete file or no file.
 if [ -f "$F16_FILE" ]; then
     log "F16 GGUF already at $F16_FILE — skipping conversion"
 else
+    rm -f "$F16_FILE.partial"
     log "converting HF → GGUF F16 ($F16_FILE)"
+    log "8 GB of tensors through a CPU: this wants the serial partition, not a"
+    log "login node. See the header of this script if it gets killed."
     python3 "$LCPP_DIR/convert_hf_to_gguf.py" "$HF_DIR" \
-        --outfile "$F16_FILE" \
+        --outfile "$F16_FILE.partial" \
         --outtype f16
+    mv -f "$F16_FILE.partial" "$F16_FILE"
     ok "F16 GGUF written ($(du -h "$F16_FILE" | cut -f1))"
 fi
 
@@ -197,9 +229,11 @@ fi
 if [ -f "$QUANT_FILE" ]; then
     log "$QUANT_TYPE GGUF already at $QUANT_FILE — skipping quantization"
 else
+    rm -f "$QUANT_FILE.partial"
     log "quantizing F16 → ${QUANT_TYPE} ($QUANT_FILE)"
     "$LCPP_DIR/build/bin/llama-quantize" \
-        "$F16_FILE" "$QUANT_FILE" "${QUANT_TYPE}"
+        "$F16_FILE" "$QUANT_FILE.partial" "${QUANT_TYPE}"
+    mv -f "$QUANT_FILE.partial" "$QUANT_FILE"
     ok "${QUANT_TYPE} GGUF written ($(du -h "$QUANT_FILE" | cut -f1))"
 fi
 
