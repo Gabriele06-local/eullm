@@ -387,7 +387,13 @@ pub struct HfRef {
 /// the existing direct-download path untouched.
 pub fn parse_hf_ref(s: &str) -> Option<HfRef> {
     let trimmed = s.trim();
-    let lower = trimmed.to_lowercase();
+    // ASCII-only on purpose: every prefix matched below is ASCII, and the
+    // slicing that follows subtracts a length measured on THIS string from a
+    // length measured on `trimmed`. A full `to_lowercase()` can change byte
+    // length (U+0130 lowercases to two code points), which makes that
+    // subtraction land on the wrong byte — or underflow it. Same defect the
+    // web HTML stripper carried in `tools::remove_block_tag`.
+    let lower = trimmed.to_ascii_lowercase();
 
     // Strip the recognised prefix, keeping the remainder in its original case
     // (owner/repo paths and quant tokens are case-sensitive on the Hub).
@@ -844,6 +850,34 @@ mod tests {
         assert!(parse_hf_ref("hf.co/owner").is_none());
         // Extra path segments (e.g. a resolve URL) are not a repo ref.
         assert!(parse_hf_ref("hf.co/owner/repo/resolve/main/x.gguf").is_none());
+    }
+
+    /// The prefix is stripped by subtracting a length measured on the lowered
+    /// copy from a length measured on the original. `to_lowercase()` can grow
+    /// a string — U+0130 becomes two code points — so that subtraction used to
+    /// drift one byte per such character: two of them silently turned a valid
+    /// ref into `None`, seven underflowed the subtraction and panicked. ASCII
+    /// folding keeps both lengths equal. Pins it, so a revert fails here.
+    #[test]
+    fn parses_refs_whose_path_grows_under_full_lowercasing() {
+        let owner = "\u{130}\u{130}owner";
+        assert_eq!(
+            parse_hf_ref(&format!("hf.co/{owner}/repo")).unwrap().repo,
+            format!("{owner}/repo")
+        );
+
+        let owner = "\u{130}".repeat(7) + "owner";
+        assert_eq!(
+            parse_hf_ref(&format!("hf.co/{owner}/repo")).unwrap().repo,
+            format!("{owner}/repo")
+        );
+
+        // The prefixes themselves are ASCII, so matching them stays case-insensitive.
+        assert_eq!(parse_hf_ref("HF.CO/Owner/Repo").unwrap().repo, "Owner/Repo");
+        assert_eq!(
+            parse_hf_ref("HuggingFace.co/Owner/Repo").unwrap().repo,
+            "Owner/Repo"
+        );
     }
 
     #[test]
