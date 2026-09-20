@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -154,6 +155,22 @@ def main(argv=None) -> int:
 
     base_model = resolve_base_model(args.base_model, checkpoint)
     step = checkpoint_step(checkpoint)
+
+    # Everything is written beside the target and moved into place at the end.
+    #
+    # The failure this prevents has already happened: merging a 4 B model in
+    # BF16 on a Leonardo login node was OOM-killed ("Ucciso") midway. That time
+    # it died before any write, so the previous export survived intact — but a
+    # kill a few seconds later would have left a directory holding a fresh
+    # config.json, a partial shard and the old weight files, which
+    # `from_pretrained` loads without a word of complaint. A model that is
+    # quietly half of two exports is worse than no model.
+    #
+    # If this keeps being killed, the merge does not belong on a login node:
+    # `forge/scripts/leonardo/sbatch_export_gguf.slurm` runs it on
+    # lrd_all_serial with 30 GB, which is a request rather than a share of
+    # whatever the login node has left.
+    staging = output.parent / f"{output.name}.partial"
     print(f"[export] checkpoint {checkpoint}", file=sys.stderr)
     print(f"[export] step       {step if step is not None else 'unnumbered'}",
           file=sys.stderr)
@@ -188,8 +205,10 @@ def main(argv=None) -> int:
             str(checkpoint), torch_dtype=dtype, device_map={"": "cpu"},
         )
 
-    output.mkdir(parents=True, exist_ok=True)
-    model.save_pretrained(output, safe_serialization=True)
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    model.save_pretrained(staging, safe_serialization=True)
 
     # The tokenizer travels with the weights. convert_hf_to_gguf.py needs it,
     # and a merged directory without one fails at the export step rather than
@@ -224,16 +243,22 @@ def main(argv=None) -> int:
               file=sys.stderr)
         tokenizer.chat_template = None
 
-    tokenizer.save_pretrained(output)
+    tokenizer.save_pretrained(staging)
     # save_pretrained can still write the file from the source directory's
     # copy, so remove it explicitly rather than trusting the attribute.
     if not args.keep_chat_template:
-        (output / "chat_template.jinja").unlink(missing_ok=True)
+        (staging / "chat_template.jinja").unlink(missing_ok=True)
 
-    (output / "eullm_export.json").write_text(
+    (staging / "eullm_export.json").write_text(
         json.dumps(describe(checkpoint, base_model, output), indent=2) + "\n",
         encoding="utf-8",
     )
+
+    # Into place, now that there is a complete model to put there. The old
+    # directory goes only once the new one is whole.
+    if output.exists():
+        shutil.rmtree(output)
+    staging.rename(output)
 
     print(f"[export] done → {output}", file=sys.stderr)
     print("[export] next: forge/scripts/quantize_to_gguf.sh "
