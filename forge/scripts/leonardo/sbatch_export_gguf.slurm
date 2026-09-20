@@ -107,6 +107,30 @@ echo "[export] run dir $EULLM_RUN_DIR"
 echo "[export] repo   $EULLM_REPO"
 echo "[export] commit $(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
 
+# One chain, however many times it is submitted.
+#
+# This job re-arms itself, so a second submission does not produce one extra
+# round — it produces a SECOND self-perpetuating chain, forever, and the two
+# race on the same output paths. `export_checkpoint.py` is called with
+# --force, so two rounds packaging the same step would write the same merged
+# directory at the same time and leave something that loads and is wrong.
+#
+# The lock holds the job id, so a stale one left by a walltime kill names its
+# owner and can be checked rather than guessed at.
+LOCK="$EULLM_RUN_DIR/.export_gguf.lock"
+if [ -f "$LOCK" ]; then
+    owner="$(cat "$LOCK" 2>/dev/null)"
+    if [ -n "$owner" ] && [ "$owner" != "${SLURM_JOB_ID:-}" ] &&
+       squeue -j "$owner" -h >/dev/null 2>&1; then
+        echo "[export] job $owner already holds $LOCK and is still queued." >&2
+        echo "[export] Exiting rather than starting a second export chain." >&2
+        echo "[export] If that job is wrong, scancel it and remove the lock." >&2
+        exit 0
+    fi
+    echo "[export] stale lock from job ${owner:-unknown} — taking it over"
+fi
+echo "${SLURM_JOB_ID:-manual}" > "$LOCK"
+
 EVERY="${EULLM_EXPORT_EVERY:-4000}"
 KEEP_F16="${EULLM_EXPORT_KEEP_F16:-0}"
 MAX_GGUF="${EULLM_EXPORT_MAX_GGUF:-0}"
