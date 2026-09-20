@@ -160,6 +160,26 @@ python3 -m pip install --quiet --upgrade \
 # ---------------------------------------------------------------------------
 
 F16_FILE="$OUT_DIR/${GGUF_NAME}-f16.gguf"
+QUANT_FILE="$OUT_DIR/${GGUF_NAME}-${QUANT_TYPE}.gguf"
+
+# "Already there, skipping" is the right default and also the way a fix
+# silently fails to apply. Re-exporting the HF directory and re-running this
+# script reused the F16 built from the *previous* export, so the corrected
+# model was never converted and the smoke test reproduced the old output
+# exactly — which reads as "the fix did nothing" rather than "nothing ran".
+# Compare mtimes: if anything in the HF directory is newer than the GGUF, the
+# GGUF describes a model that no longer exists.
+newest_in() { find "$1" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1; }
+if [ -f "$F16_FILE" ]; then
+    src_t="$(newest_in "$HF_DIR")"
+    gguf_t="$(stat -c %Y "$F16_FILE" 2>/dev/null || echo 0)"
+    if [ -n "$src_t" ] && awk "BEGIN{exit !($src_t > $gguf_t)}"; then
+        log "$HF_DIR is newer than $F16_FILE — the existing GGUFs were built"
+        log "from an older export; reconverting rather than reusing them"
+        rm -f "$F16_FILE" "$QUANT_FILE"
+    fi
+fi
+
 if [ -f "$F16_FILE" ]; then
     log "F16 GGUF already at $F16_FILE — skipping conversion"
 else
@@ -174,7 +194,6 @@ fi
 # 4. Quantize F16 → Q4_K_M
 # ---------------------------------------------------------------------------
 
-QUANT_FILE="$OUT_DIR/${GGUF_NAME}-${QUANT_TYPE}.gguf"
 if [ -f "$QUANT_FILE" ]; then
     log "$QUANT_TYPE GGUF already at $QUANT_FILE — skipping quantization"
 else
@@ -189,8 +208,29 @@ fi
 # ---------------------------------------------------------------------------
 
 log "smoke prompt to verify the GGUF loads correctly"
+
+# The prompt has to reach the model verbatim, and by default it does not.
+#
+# Recent llama.cpp switches llama-cli into conversation mode on its own as
+# soon as the model carries a chat template, and then wraps whatever you
+# passed to -p in <|im_start|>user … <|im_end|><|im_start|>assistant. A
+# completion model distilled from Qwen3-4B-*Base* has never seen that format,
+# so it answers with loops, echoes and stray subword tokens — and the smoke
+# test reports a broken model when the model is fine.
+#
+# That is exactly what happened on the step-8400 export: through the template
+# the output was "…: ictures" followed by timestamps; fed the same prompt
+# verbatim, the same file continued into correct Italian legal prose. So the
+# smoke test overrides the template with a passthrough one rather than
+# trusting the default. (-no-cnv and --in-prefix are not accepted by every
+# build; --chat-template-file is.)
+SMOKE_TMPL="$(mktemp "${TMPDIR:-/tmp}/eullm-passthrough-XXXXXX.jinja")"
+trap 'rm -f "$SMOKE_TMPL"' EXIT
+printf '%s' '{% for m in messages %}{{ m.content }}{% endfor %}' > "$SMOKE_TMPL"
+
 "$LCPP_DIR/build/bin/llama-cli" \
     -m "$QUANT_FILE" \
+    --chat-template-file "$SMOKE_TMPL" \
     -p "Articolo 2086 del codice civile italiano: " \
     -n 128 -t 4 --temp 0.7 --top-p 0.95 --no-display-prompt \
     2>/dev/null | head -20 \
@@ -203,8 +243,14 @@ cat <<EOF
    F16 GGUF:    $F16_FILE
    ${QUANT_TYPE} GGUF:  $QUANT_FILE
 
+ Measure it before believing it. Perplexity alone is not a result — the same
+ number on the untouched base model, same corpus, same --chunks, is what says
+ whether distillation moved anything:
+   $LCPP_DIR/build/bin/llama-perplexity -m "$QUANT_FILE" \\
+       -f <corpus.txt> --chunks 40 -t 4
+
  Next: load into the EULLM Engine, or push to HuggingFace Hub:
    huggingface-cli upload eullm/${GGUF_NAME} "$QUANT_FILE" \\
-       legal-it-7b-${QUANT_TYPE}.gguf
+       ${GGUF_NAME}-${QUANT_TYPE}.gguf
 ================================================================================
 EOF
