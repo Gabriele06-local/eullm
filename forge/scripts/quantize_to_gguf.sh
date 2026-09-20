@@ -35,7 +35,10 @@ HF_DIR="${1:?Usage: $0 <hf-model-dir> [output-dir]}"
 OUT_DIR="${2:-$HF_DIR/gguf}"
 LCPP_DIR="${LCPP_DIR:-$HOME/llama.cpp}"
 LCPP_REPO="${LCPP_REPO:-https://github.com/ggerganov/llama.cpp.git}"
-GGUF_NAME="${GGUF_NAME:-legal-it-7b}"
+# Named after the directory being converted unless told otherwise. The old
+# default was the literal string "legal-it-7b", which outlived the 7 B target
+# and would have stamped the same wrong name on every model in a series.
+GGUF_NAME="${GGUF_NAME:-$(basename "$HF_DIR")}"
 QUANT_TYPE="${QUANT_TYPE:-q4_k_m}"
 
 err() { printf '\033[31m[err]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -79,7 +82,7 @@ if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
         -DLLAMA_CURL=OFF \
         >/dev/null
     cmake --build "$LCPP_DIR/build" --config Release \
-        --target llama-quantize llama-cli -j \
+        --target llama-quantize llama-cli -j "${LCPP_BUILD_JOBS:-8}" \
         >/dev/null
     ok "llama.cpp built"
 fi

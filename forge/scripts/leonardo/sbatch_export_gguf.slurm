@@ -250,7 +250,13 @@ else
     # LCPP_SKIP_UPDATE: the llama.cpp checkout is shared and pinned; a git pull
     # here would change the quantizer under a series of exports that are
     # supposed to be comparable with each other.
-    elif ! LCPP_SKIP_UPDATE=1 bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
+    # GGUF_NAME, or every export writes a file called "legal-it-7b-q4_k_m.gguf":
+    # the script's default is stale (the model is 4 B, not 7 B) and identical
+    # for every step. The directories differ, so nothing collides on the
+    # cluster — but download two of them and they are indistinguishable, which
+    # defeats the point of packaging a series.
+    elif ! GGUF_NAME="$name" LCPP_SKIP_UPDATE=1 \
+            bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
             "$merged" "$gguf"; then
         echo "[export] GGUF conversion FAILED for step $step" >&2
     else
