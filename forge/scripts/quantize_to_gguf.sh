@@ -33,7 +33,15 @@ set -euo pipefail
 
 HF_DIR="${1:?Usage: $0 <hf-model-dir> [output-dir]}"
 OUT_DIR="${2:-$HF_DIR/gguf}"
-LCPP_DIR="${LCPP_DIR:-$HOME/llama.cpp}"
+# $WORK when it exists, because $HOME on Leonardo is 50 GB and a llama.cpp
+# checkout plus its build objects is several of them. Running this without
+# sourcing env.sh first put the clone in $HOME, which is a quota away from
+# failing halfway through a link step.
+if [ -n "${WORK:-}" ] && [ -d "${WORK:-}" ]; then
+    LCPP_DIR="${LCPP_DIR:-$WORK/llama.cpp}"
+else
+    LCPP_DIR="${LCPP_DIR:-$HOME/llama.cpp}"
+fi
 LCPP_REPO="${LCPP_REPO:-https://github.com/ggerganov/llama.cpp.git}"
 # Named after the directory being converted unless told otherwise. The old
 # default was the literal string "legal-it-7b", which outlived the 7 B target
@@ -42,8 +50,40 @@ GGUF_NAME="${GGUF_NAME:-$(basename "$HF_DIR")}"
 QUANT_TYPE="${QUANT_TYPE:-q4_k_m}"
 
 err() { printf '\033[31m[err]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# std::filesystem moved into libstdc++ proper in GCC 9. Before that it lives in
+# a separate -lstdc++fs that llama.cpp does not link, and the build gets all
+# the way to the final link before dying in a wall of "undefined reference to
+# std::filesystem::__cxx11::path::parent_path()". That is five minutes of
+# compiling to learn something `g++ -dumpversion` answers instantly, and the
+# error names templates and symbols rather than the actual problem.
+check_compiler() {
+    command -v g++ >/dev/null 2>&1 || err "g++ not found — try 'module load gcc'"
+    local v
+    v="$(g++ -dumpversion 2>/dev/null | cut -d. -f1)"
+    case "$v" in
+        ''|*[!0-9]*) return 0;;   # unreadable: let the build speak for itself
+    esac
+    if [ "$v" -lt 9 ]; then
+        err "g++ $v is too old: std::filesystem is not in libstdc++ before GCC 9,
+      and the build fails at the final link with hundreds of undefined
+      references to std::filesystem. Load a newer compiler first:
+          module avail gcc
+          module load gcc/<11 or newer>
+      then run this again."
+    fi
+}
 ok()  { printf '\033[32m[ok]\033[0m  %s\n' "$*"; }
 log() { printf '\033[34m[..]\033[0m  %s\n' "$*"; }
+
+# Before the clone, not after it: a 36 MB checkout and five minutes of
+# compiling are a poor way to discover something `g++ -dumpversion` answers
+# instantly, and the link error that follows names templates rather than the
+# problem. Skipped when the binaries already exist — a rebuilt toolchain is
+# not needed to reuse one.
+if [ ! -x "$LCPP_DIR/build/bin/llama-quantize" ]; then
+    check_compiler
+fi
 
 [ -d "$HF_DIR" ]                || err "HF model dir not found: $HF_DIR"
 [ -f "$HF_DIR/config.json" ]    || err "missing $HF_DIR/config.json"
@@ -76,6 +116,22 @@ fi
 
 if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
    [ ! -f "$LCPP_DIR/build/bin/llama-cli" ]; then
+    # CMake caches the compiler it configured with, so a build directory left
+    # behind by a failed attempt keeps using that compiler no matter what is
+    # loaded now. `module load gcc/12` then re-running would have rebuilt with
+    # the GCC 8 recorded in CMakeCache.txt and failed identically — the second
+    # time looking like the fix did not work, rather than like a stale cache.
+    cache="$LCPP_DIR/build/CMakeCache.txt"
+    if [ -f "$cache" ]; then
+        cached_cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$cache" | head -1)"
+        current_cxx="$(command -v g++ 2>/dev/null)"
+        if [ -n "$cached_cxx" ] && [ -n "$current_cxx" ] &&
+           [ "$cached_cxx" != "$current_cxx" ]; then
+            log "compiler changed ($cached_cxx -> $current_cxx) — clearing the"
+            log "stale CMake cache so the new one is actually used"
+            rm -rf "$LCPP_DIR/build"
+        fi
+    fi
     log "building llama.cpp (this takes 2-5 min on first run)"
     cmake -S "$LCPP_DIR" -B "$LCPP_DIR/build" \
         -DCMAKE_BUILD_TYPE=Release \
