@@ -146,6 +146,27 @@ OUT_DIR="${EULLM_EXPORT_DIR:-$EULLM_RUN_DIR/exports}"
 KEEP="${EULLM_EXPORT_KEEP:-2}"
 mkdir -p "$OUT_DIR"
 
+# Pre-flight the quantizer BEFORE the merge, not after.
+#
+# `quantize_to_gguf.sh` clones and builds llama.cpp on first use, and cloning
+# needs network — which a compute or serial node does not have. The first real
+# round found that out the expensive way: it spent ten minutes merging 8 GB of
+# weights, then died at the conversion and left an empty gguf directory. The
+# merge was fine; nothing downstream said so.
+#
+# Checked here so a missing toolchain costs seconds and names its own remedy.
+if [ ! -x "${LCPP_DIR:-$WORK/llama.cpp}/build/bin/llama-quantize" ]; then
+    echo "[export] llama.cpp is not built at ${LCPP_DIR:-$WORK/llama.cpp}" >&2
+    echo "[export] Building it needs network, which this node does not have." >&2
+    echo "[export] Build it once from a LOGIN node:" >&2
+    echo "[export]   bash \$EULLM_REPO/forge/scripts/quantize_to_gguf.sh \\" >&2
+    echo "[export]        <any merged model dir> <output dir>" >&2
+    echo "[export] Re-arming anyway: once the binaries exist this picks up." >&2
+    NO_QUANTIZER=1
+else
+    NO_QUANTIZER=0
+fi
+
 echo "[export] watching $CKPT_DIR every $EVERY steps → $OUT_DIR"
 keep_gguf_label="$MAX_GGUF"
 [ "$MAX_GGUF" -eq 0 ] && keep_gguf_label="all"
@@ -207,7 +228,9 @@ for done_gguf in "$OUT_DIR"/gguf/legal-it-4b-step*; do
 done
 
 exported_any=0
-if [ "$SKIP_ROUND" = "1" ]; then
+if [ "$NO_QUANTIZER" = "1" ]; then
+    echo "[export] round skipped: no quantizer (see above)"
+elif [ "$SKIP_ROUND" = "1" ]; then
     echo "[export] round skipped on free space"
 elif [ "$newest_step" -lt 0 ]; then
     echo "[export] no checkpoints yet"
