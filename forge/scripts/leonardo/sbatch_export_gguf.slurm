@@ -20,15 +20,41 @@
 # Self-resubmitting, like the queue-stats job: it re-arms itself so the
 # exports keep appearing for as long as the run does.
 #
-#   EULLM_EXPORT_EVERY     minimum steps between exports (default 2000). A
-#                          floor on the gap, not a set of step numbers: the
-#                          newest surviving checkpoint is what gets packaged.
+# EVERYTHING IS SETTABLE AT SUBMISSION. Export each of these before `sbatch`
+# and it is inherited by every re-arm, so the cadence and the disk policy are
+# decided once rather than edited into the file:
+#
+#   EULLM_EXPORT_EVERY     minimum TRAINING STEPS between exports (default
+#                          4000). A floor on the gap, not a set of step
+#                          numbers: the newest surviving checkpoint is what
+#                          gets packaged.
+#   EULLM_EXPORT_KEEP_F16  keep the intermediate F16 GGUF (default 0, delete)
+#   EULLM_EXPORT_KEEP      merged HF dirs to keep (default 2)
+#   EULLM_EXPORT_MAX_GGUF  Q4 models to keep, oldest deleted first; 0 = all
+#   EULLM_EXPORT_MIN_FREE_GB  skip a round below this much free space (default 50)
+#   EULLM_EXPORT_HOURS     hours between rounds (default 4)
 #   EULLM_EXPORT_CKPT_DIR  where to look (default: the split arm's output_dir)
 #   EULLM_EXPORT_DIR       where merged models and GGUFs go
-#   EULLM_EXPORT_KEEP      merged HF dirs to keep; GGUFs are never deleted
+#
+# WHY STEPS AND NOT HOURS, since a time-based cadence is the obvious instinct:
+# what makes two exports worth having is training progress between them, not
+# wall-clock. Links queue for hours on a busy partition, so two exports a day
+# apart during a drought can be the same model — paid for twice in disk. Set
+# EULLM_EXPORT_EVERY to the progress you want to see; at the duty cycle
+# measured so far (~20 %) 4000 steps is about two exports a week.
+#
+# DISK, because the numbers are not small. Each export writes a ~8 GB
+# intermediate F16 GGUF and a ~2.5 GB Q4_K_M for a 4 B model. Keeping both for
+# the ~15 exports left in an epoch is ~160 GB of a 1 TB $WORK shared with a
+# 61 GB teacher cache and two runs' checkpoints. The F16 is a build artefact
+# that regenerates from the merged directory in minutes, so it goes by
+# default and the Q4 — the thing anyone actually wants — stays.
 #
 # Start it once:
 #   sbatch "$EULLM_REPO/forge/scripts/leonardo/sbatch_export_gguf.slurm"
+#
+#   EULLM_EXPORT_EVERY=10000 \
+#       sbatch "$EULLM_REPO/forge/scripts/leonardo/sbatch_export_gguf.slurm"
 #
 #SBATCH --job-name=eullm-export-gguf
 #SBATCH --partition=lrd_all_serial
@@ -62,13 +88,35 @@ cd "$EULLM_RUN_DIR"
 echo "[export] repo   $EULLM_REPO"
 echo "[export] commit $(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
 
-EVERY="${EULLM_EXPORT_EVERY:-2000}"
+EVERY="${EULLM_EXPORT_EVERY:-4000}"
+KEEP_F16="${EULLM_EXPORT_KEEP_F16:-0}"
+MAX_GGUF="${EULLM_EXPORT_MAX_GGUF:-0}"
+MIN_FREE_GB="${EULLM_EXPORT_MIN_FREE_GB:-50}"
+HOURS="${EULLM_EXPORT_HOURS:-4}"
+# Re-armed rounds inherit these, so a cadence chosen once at submission holds
+# for the life of the chain instead of reverting to the defaults tomorrow.
+export EULLM_EXPORT_EVERY="$EVERY" EULLM_EXPORT_KEEP_F16="$KEEP_F16"
+export EULLM_EXPORT_MAX_GGUF="$MAX_GGUF" EULLM_EXPORT_MIN_FREE_GB="$MIN_FREE_GB"
+export EULLM_EXPORT_HOURS="$HOURS"
 CKPT_DIR="${EULLM_EXPORT_CKPT_DIR:-$EULLM_RUN_DIR/checkpoints/qwen3_4b_legal_it_distilled_split}"
 OUT_DIR="${EULLM_EXPORT_DIR:-$EULLM_RUN_DIR/exports}"
 KEEP="${EULLM_EXPORT_KEEP:-2}"
 mkdir -p "$OUT_DIR"
 
 echo "[export] watching $CKPT_DIR every $EVERY steps → $OUT_DIR"
+echo "[export] keep F16=$KEEP_F16  merged=$KEEP  gguf=${MAX_GGUF:-all}  every ${HOURS}h"
+
+# Refuse rather than half-write. A conversion that runs out of disk leaves a
+# truncated .gguf that llama.cpp loads far enough to look plausible.
+free_gb=$(df -BG --output=avail "$OUT_DIR" 2>/dev/null | tail -1 | tr -dc '0-9')
+if [ -n "$free_gb" ] && [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+    echo "[export] only ${free_gb}G free under $OUT_DIR, need ${MIN_FREE_GB}G —" \
+         "skipping this round" >&2
+    SKIP_ROUND=1
+else
+    SKIP_ROUND=0
+    [ -n "$free_gb" ] && echo "[export] ${free_gb}G free"
+fi
 
 if [ ! -d "$CKPT_DIR" ]; then
     echo "[export] no checkpoint directory yet — nothing to do this round"
@@ -108,7 +156,9 @@ for done_gguf in "$OUT_DIR"/gguf/legal-it-4b-step*; do
 done
 
 exported_any=0
-if [ "$newest_step" -lt 0 ]; then
+if [ "$SKIP_ROUND" = "1" ]; then
+    echo "[export] round skipped on free space"
+elif [ "$newest_step" -lt 0 ]; then
     echo "[export] no checkpoints yet"
 elif [ "$last_exported" -ge 0 ] && [ $((newest_step - last_exported)) -lt "$EVERY" ]; then
     echo "[export] newest is step $newest_step, last exported $last_exported —" \
@@ -132,6 +182,11 @@ else
     else
         exported_any=1
         echo "[export] packaged $gguf"
+        if [ "$KEEP_F16" != "1" ]; then
+            # A build intermediate, ~8 GB and four times the Q4 it produced.
+            # Regenerates from the merged directory in minutes.
+            rm -f "$gguf"/*-f16.gguf && echo "[export] dropped the F16 intermediate"
+        fi
     fi
 
     # The merged HF directory is ~8 GB and exists only to be converted; the
@@ -144,6 +199,16 @@ else
                 rm -rf "$old"
             done
     fi
+
+    # Q4 models, oldest first. Off by default: at ~2.5 GB each they are the
+    # cheap half, and a series of them across training is the point.
+    if [ "$MAX_GGUF" -gt 0 ]; then
+        ls -dt "$OUT_DIR/gguf"/*/ 2>/dev/null | tail -n +$((MAX_GGUF + 1)) |
+            while read -r old; do
+                echo "[export] pruning old GGUF $old (EULLM_EXPORT_MAX_GGUF=$MAX_GGUF)"
+                rm -rf "$old"
+            done
+    fi
 fi
 
 [ "$exported_any" -eq 1 ] || echo "[export] nothing new to package this round"
@@ -151,13 +216,14 @@ fi
 echo "[export] available models:"
 ls -1 "$OUT_DIR/gguf" 2>/dev/null || echo "  (none yet)"
 
-# Re-arm. Four hours is well under the cadence at which new checkpoints
-# appear, so a missed round costs nothing and a crashed round self-heals.
+# Re-arm. The wake interval is deliberately well under the export cadence:
+# waking often and deciding to do nothing is free, while waking rarely risks
+# trailing the run. A missed round costs nothing and a crashed round self-heals.
 if [ "${EULLM_EXPORT_ONCE:-0}" = "1" ]; then
     echo "[export] EULLM_EXPORT_ONCE=1 — not re-arming"
 elif [ -n "$SELF" ] && [ -f "$SELF" ]; then
-    if sbatch --begin=now+4hours "$SELF"; then
-        echo "[export] re-armed for four hours from now"
+    if sbatch --begin=now+"${HOURS}"hours "$SELF"; then
+        echo "[export] re-armed for ${HOURS}h from now"
     else
         echo "[export] FATAL: re-submission failed — the export chain stops here." >&2
         exit 1
