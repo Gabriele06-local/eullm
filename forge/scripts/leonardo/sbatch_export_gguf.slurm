@@ -20,7 +20,9 @@
 # Self-resubmitting, like the queue-stats job: it re-arms itself so the
 # exports keep appearing for as long as the run does.
 #
-#   EULLM_EXPORT_EVERY     export checkpoints at multiples of this (default 2000)
+#   EULLM_EXPORT_EVERY     minimum steps between exports (default 2000). A
+#                          floor on the gap, not a set of step numbers: the
+#                          newest surviving checkpoint is what gets packaged.
 #   EULLM_EXPORT_CKPT_DIR  where to look (default: the split arm's output_dir)
 #   EULLM_EXPORT_DIR       where merged models and GGUFs go
 #   EULLM_EXPORT_KEEP      merged HF dirs to keep; GGUFs are never deleted
@@ -67,39 +69,65 @@ if [ ! -d "$CKPT_DIR" ]; then
     echo "[export] no checkpoint directory yet — nothing to do this round"
 fi
 
-exported_any=0
-for ckpt in $(ls -d "$CKPT_DIR"/checkpoint-* 2>/dev/null | sort -t- -k2 -n); do
+# Pick the NEWEST checkpoint and export it if enough steps have passed since
+# the last export — rather than looking for exact multiples of EVERY.
+#
+# The exact-multiple version could not work, and would have failed silently.
+# `save_total_limit` keeps only the newest few checkpoints, so at save_steps
+# 300 and ~360 steps/hour a checkpoint-8000 exists for about 2.7 hours while
+# this job wakes every 4. It would have found nothing on almost every round
+# and reported "nothing new to package" while doing nothing, indefinitely.
+#
+# Newest-since-last is immune to that: whatever survives pruning is what gets
+# packaged, and the cadence is a floor on the gap between exports rather than
+# a set of step numbers that have to be caught in flight.
+newest=""
+newest_step=-1
+for ckpt in "$CKPT_DIR"/checkpoint-*; do
+    [ -d "$ckpt" ] || continue
     step="${ckpt##*-}"
     case "$step" in ''|*[!0-9]*) continue;; esac
-    # Only the cadence, and only once. `save_steps` is far finer than anything
-    # worth packaging — exporting all of them would fill $WORK with models
-    # nobody asked for.
-    [ $((step % EVERY)) -eq 0 ] || continue
+    if [ "$step" -gt "$newest_step" ]; then
+        newest_step="$step"
+        newest="$ckpt"
+    fi
+done
 
+last_exported=-1
+for done_gguf in "$OUT_DIR"/gguf/legal-it-4b-step*; do
+    [ -d "$done_gguf" ] || continue
+    compgen -G "$done_gguf/*.gguf" >/dev/null || continue   # half-finished round
+    step="${done_gguf##*step}"
+    case "$step" in ''|*[!0-9]*) continue;; esac
+    [ "$step" -gt "$last_exported" ] && last_exported="$step"
+done
+
+exported_any=0
+if [ "$newest_step" -lt 0 ]; then
+    echo "[export] no checkpoints yet"
+elif [ "$last_exported" -ge 0 ] && [ $((newest_step - last_exported)) -lt "$EVERY" ]; then
+    echo "[export] newest is step $newest_step, last exported $last_exported —" \
+         "less than $EVERY apart, waiting"
+else
+    step="$newest_step"
     name="legal-it-4b-step${step}"
     gguf="$OUT_DIR/gguf/$name"
-    if [ -d "$gguf" ] && compgen -G "$gguf/*.gguf" >/dev/null; then
-        continue                       # already packaged on an earlier round
-    fi
-
-    echo "[export] === step $step ==="
     merged="$OUT_DIR/merged/$name"
-    if ! python "$EULLM_REPO/forge/scripts/export_checkpoint.py" \
-            --checkpoint "$ckpt" --output "$merged" --force; then
-        echo "[export] merge FAILED for $ckpt — leaving it for the next round" >&2
-        continue
-    fi
+    echo "[export] === step $step (last exported: $last_exported) ==="
 
-    # LCPP_SKIP_UPDATE: the llama.cpp checkout is shared and pinned; a git
-    # pull here would change the quantizer under a series of exports that are
+    if ! python "$EULLM_REPO/forge/scripts/export_checkpoint.py" \
+            --checkpoint "$newest" --output "$merged" --force; then
+        echo "[export] merge FAILED for $newest — leaving it for the next round" >&2
+    # LCPP_SKIP_UPDATE: the llama.cpp checkout is shared and pinned; a git pull
+    # here would change the quantizer under a series of exports that are
     # supposed to be comparable with each other.
-    if ! LCPP_SKIP_UPDATE=1 bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
+    elif ! LCPP_SKIP_UPDATE=1 bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
             "$merged" "$gguf"; then
         echo "[export] GGUF conversion FAILED for step $step" >&2
-        continue
+    else
+        exported_any=1
+        echo "[export] packaged $gguf"
     fi
-    exported_any=1
-    echo "[export] packaged $gguf"
 
     # The merged HF directory is ~8 GB and exists only to be converted; the
     # GGUF is ~2.5 GB and is the artefact anyone actually wants. Keep a couple
@@ -111,7 +139,7 @@ for ckpt in $(ls -d "$CKPT_DIR"/checkpoint-* 2>/dev/null | sort -t- -k2 -n); do
                 rm -rf "$old"
             done
     fi
-done
+fi
 
 [ "$exported_any" -eq 1 ] || echo "[export] nothing new to package this round"
 
