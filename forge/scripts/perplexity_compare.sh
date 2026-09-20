@@ -47,6 +47,9 @@ CHUNKS="${EULLM_PPL_CHUNKS:-40}"
 THREADS="${EULLM_PPL_THREADS:-${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || echo 4)}}"
 CTX="${EULLM_PPL_CTX:-512}"
 LCPP_DIR="${LCPP_DIR:-${WORK:-$HOME}/llama.cpp}"
+BASE_CACHE=""
+CSV=""
+LABEL=""
 
 err() { printf '\033[31m[err]\033[0m %s\n' "$*" >&2; exit 1; }
 log() { printf '\033[34m[..]\033[0m  %s\n' "$*" >&2; }
@@ -59,6 +62,9 @@ while [ $# -gt 0 ]; do
         --chunks)  CHUNKS="$2";  shift 2;;
         --threads) THREADS="$2"; shift 2;;
         --ctx)     CTX="$2";     shift 2;;
+        --base-ppl-cache) BASE_CACHE="$2"; shift 2;;
+        --csv)     CSV="$2";     shift 2;;
+        --label)   LABEL="$2";   shift 2;;
         -h|--help) sed -n '2,30p' "$0"; exit 0;;
         *) err "unknown argument: $1";;
     esac
@@ -113,7 +119,46 @@ measure() {
     sed -n 's/.*Final estimate: PPL = \([0-9.]*\).*/\1/p' "$raw" | tail -1
 }
 
-ppl_base="$(measure base "$BASE")"
+# The base's perplexity is a constant, so measure it once and remember it.
+#
+# For a fixed (base model, corpus, chunks, ctx) the number never changes, and
+# it costs as much as the student's — twenty minutes. Re-measuring it on every
+# round of an automated eval doubles the bill to reproduce a value already
+# known. Cached, an unattended round costs one measurement instead of two.
+#
+# The cache stores its own key and is ignored when the key differs, because a
+# stale base perplexity does not look wrong: it produces a plausible delta
+# against a corpus it was never measured on, and nothing downstream can tell.
+# The corpus is keyed by size as well as name, so regenerating it with a
+# different seed invalidates the entry rather than silently reusing it.
+cache_key() {
+    printf '%s|%s|%s|%s|%s' \
+        "$(basename "$BASE")" "$(basename "$CORPUS")" \
+        "$(wc -c < "$CORPUS" | tr -d ' ')" "$CHUNKS" "$CTX"
+}
+
+ppl_base=""
+if [ -n "$BASE_CACHE" ] && [ -f "$BASE_CACHE" ]; then
+    cached_key="$(head -1 "$BASE_CACHE" 2>/dev/null || true)"
+    cached_val="$(sed -n 2p "$BASE_CACHE" 2>/dev/null || true)"
+    if [ "$cached_key" = "$(cache_key)" ] && [ -n "$cached_val" ]; then
+        ppl_base="$cached_val"
+        log "base: PPL $ppl_base from cache ($BASE_CACHE) — not re-measuring"
+    else
+        log "base cache at $BASE_CACHE does not match this corpus/settings —" \
+            "re-measuring"
+    fi
+fi
+
+if [ -z "$ppl_base" ]; then
+    ppl_base="$(measure base "$BASE")"
+    if [ -n "$BASE_CACHE" ] && [ -n "$ppl_base" ]; then
+        mkdir -p "$(dirname "$BASE_CACHE")"
+        printf '%s\n%s\n' "$(cache_key)" "$ppl_base" > "$BASE_CACHE"
+        log "base: PPL cached in $BASE_CACHE"
+    fi
+fi
+
 ppl_student="$(measure student "$STUDENT")"
 
 [ -n "$ppl_base" ]    || err "could not parse a final PPL for the base model"
@@ -145,3 +190,32 @@ cat <<'EOF'
  way — which is the question a checkpoint is exported to answer.
 ================================================================================
 EOF
+
+# One row per measurement, appended.
+#
+# Without this the result exists only in a terminal. Three measurements were
+# run by hand on 20 September, twenty minutes each, and the numbers survived
+# in a scrollback — which is not a record, and is not what a report can cite.
+# A row per checkpoint is what turns a series of exports into a quality curve
+# that writes itself while the run proceeds.
+#
+# The header is written once, so a file that already exists is appended to
+# rather than restarted — an unattended job that truncated its own history on
+# every round would leave exactly one row, forever.
+if [ -n "$CSV" ]; then
+    mkdir -p "$(dirname "$CSV")"
+    if [ ! -s "$CSV" ]; then
+        printf 'timestamp,label,corpus,corpus_bytes,chunks,ctx,base,base_ppl,student,student_ppl,delta_pct\n' > "$CSV"
+    fi
+    delta="$(awk -v b="$ppl_base" -v s="$ppl_student" \
+                 'BEGIN { printf "%.4f", (b - s) / b * 100 }')"
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "${LABEL:-}" \
+        "$(basename "$CORPUS")" "$(wc -c < "$CORPUS" | tr -d ' ')" \
+        "$CHUNKS" "$CTX" \
+        "$(basename "$BASE")" "$ppl_base" \
+        "$(basename "$STUDENT")" "$ppl_student" \
+        "$delta" >> "$CSV"
+    log "appended a row to $CSV"
+fi

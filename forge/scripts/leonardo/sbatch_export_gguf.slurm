@@ -35,6 +35,26 @@
 #   EULLM_EXPORT_HOURS     hours between rounds (default 4)
 #   EULLM_EXPORT_CKPT_DIR  where to look (default: the split arm's output_dir)
 #   EULLM_EXPORT_DIR       where merged models and GGUFs go
+#   EULLM_EVAL             1 to measure each new GGUF (default 1; 0 disables)
+#   EULLM_EVAL_BASE        base GGUF to compare against
+#   EULLM_EVAL_CORPUS      held-out text, from make_ppl_corpus.py
+#   EULLM_EVAL_CHUNKS      chunks per measurement (default 40)
+#   EULLM_EVAL_CSV         where the rows go (default $EULLM_EXPORT_DIR/perplexity.csv)
+#
+# AND IT MEASURES WHAT IT PACKAGES. Producing a GGUF nobody evaluates gets the
+# hard half of the loop and stops: on 20 September three perplexity runs were
+# done by hand, twenty minutes each, and the numbers survived in a terminal
+# scrollback. That is not a record and a report cannot cite it.
+#
+# So after each export this measures the new model against a fixed base on a
+# fixed held-out corpus and appends a row to a CSV. The quality curve then
+# builds itself alongside the run instead of being reconstructed afterwards
+# from whatever anyone remembers to do — and a run that turns out to be going
+# nowhere says so while there is still allocation left to change course.
+#
+# The base's perplexity is cached, since for a fixed corpus and settings it is
+# a constant: a round costs one measurement, not two. Evaluation failing never
+# fails the export — the GGUF is the deliverable, the number is a comment on it.
 #
 # WHY STEPS AND NOT HOURS, since a time-based cadence is the obvious instinct:
 # what makes two exports worth having is training progress between them, not
@@ -145,6 +165,39 @@ CKPT_DIR="${EULLM_EXPORT_CKPT_DIR:-$EULLM_RUN_DIR/checkpoints/qwen3_4b_legal_it_
 OUT_DIR="${EULLM_EXPORT_DIR:-$EULLM_RUN_DIR/exports}"
 KEEP="${EULLM_EXPORT_KEEP:-2}"
 mkdir -p "$OUT_DIR"
+
+DO_EVAL="${EULLM_EVAL:-1}"
+EVAL_BASE="${EULLM_EVAL_BASE:-$WORK/gguf/qwen3-4b-base/qwen3-4b-base-q4_k_m.gguf}"
+EVAL_CORPUS="${EULLM_EVAL_CORPUS:-$WORK/eval/legal-it-val-40chunks.txt}"
+EVAL_CHUNKS="${EULLM_EVAL_CHUNKS:-40}"
+EVAL_CSV="${EULLM_EVAL_CSV:-$OUT_DIR/perplexity.csv}"
+EVAL_CACHE="$OUT_DIR/.base_ppl.cache"
+export EULLM_EVAL="$DO_EVAL" EULLM_EVAL_BASE="$EVAL_BASE"
+export EULLM_EVAL_CORPUS="$EVAL_CORPUS" EULLM_EVAL_CHUNKS="$EVAL_CHUNKS"
+export EULLM_EVAL_CSV="$EVAL_CSV"
+
+# Say now what is missing, not in three hours when the export is done.
+#
+# The evaluation runs last, so anything wrong with its inputs surfaces after
+# the expensive part — the same mistake as the quantizer pre-flight above,
+# which cost a ten-minute merge before dying at conversion. Checked here, a
+# missing corpus costs a line of log and names its own remedy.
+if [ "$DO_EVAL" = "1" ]; then
+    if [ ! -f "$EVAL_BASE" ]; then
+        echo "[export] eval OFF: no base GGUF at $EVAL_BASE" >&2
+        echo "[export]   build it once: GGUF_NAME=qwen3-4b-base \\" >&2
+        echo "[export]     bash \$EULLM_REPO/forge/scripts/quantize_to_gguf.sh \\" >&2
+        echo "[export]     <Qwen3-4B-Base HF dir> \$WORK/gguf/qwen3-4b-base" >&2
+        DO_EVAL=0
+    elif [ ! -f "$EVAL_CORPUS" ]; then
+        echo "[export] eval OFF: no corpus at $EVAL_CORPUS" >&2
+        echo "[export]   build it once: python \$EULLM_REPO/forge/scripts/make_ppl_corpus.py \\" >&2
+        echo "[export]     --val \$EULLM_DATA_DIR/val.jsonl --out $EVAL_CORPUS --target-chunks $EVAL_CHUNKS" >&2
+        DO_EVAL=0
+    else
+        echo "[export] eval ON: $EVAL_CHUNKS chunks vs $(basename "$EVAL_BASE") → $EVAL_CSV"
+    fi
+fi
 
 # Pre-flight the quantizer BEFORE the merge, not after.
 #
@@ -262,6 +315,30 @@ else
     else
         exported_any=1
         echo "[export] packaged $gguf"
+
+        # Measure it before pruning anything, and never let this fail the
+        # round: the GGUF is the deliverable, the number is a comment on it.
+        # A lost measurement is one missing row in a curve; a failed export is
+        # a missing model.
+        if [ "$DO_EVAL" = "1" ]; then
+            q4="$(ls "$gguf"/*-q4_k_m.gguf 2>/dev/null | head -1)"
+            if [ -z "$q4" ]; then
+                echo "[export] eval skipped: no Q4 file under $gguf" >&2
+            else
+                echo "[export] --- evaluating step $step ---"
+                if bash "$EULLM_REPO/forge/scripts/perplexity_compare.sh" \
+                        --base "$EVAL_BASE" --student "$q4" \
+                        --corpus "$EVAL_CORPUS" --chunks "$EVAL_CHUNKS" \
+                        --base-ppl-cache "$EVAL_CACHE" \
+                        --csv "$EVAL_CSV" --label "step-$step"; then
+                    echo "[export] measured step $step → $EVAL_CSV"
+                else
+                    echo "[export] eval FAILED for step $step — the GGUF is" \
+                         "still good, only the measurement is missing" >&2
+                fi
+            fi
+        fi
+
         if [ "$KEEP_F16" != "1" ]; then
             # A build intermediate, ~8 GB and four times the Q4 it produced.
             # Regenerates from the merged directory in minutes.
@@ -295,6 +372,15 @@ fi
 
 echo "[export] available models:"
 ls -1 "$OUT_DIR/gguf" 2>/dev/null || echo "  (none yet)"
+
+# The quality curve so far, in the log, every round. Whoever reads a job log
+# to see whether the run is worth continuing should not have to go and find a
+# CSV to answer that.
+if [ -s "$EVAL_CSV" ]; then
+    echo "[export] perplexity so far ($EVAL_CSV):"
+    awk -F, 'NR>1 {printf "[export]   %-14s PPL %-9s  %+.2f%% vs base\n", $2, $10, $11}' \
+        "$EVAL_CSV" | tail -10
+fi
 
 # Re-arm. The wake interval is deliberately well under the export cadence:
 # waking often and deciding to do nothing is free, while waking rarely risks
