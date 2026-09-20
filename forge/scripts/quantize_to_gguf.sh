@@ -116,6 +116,22 @@ fi
 
 if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
    [ ! -f "$LCPP_DIR/build/bin/llama-cli" ]; then
+    # CMake caches the compiler it configured with, so a build directory left
+    # behind by a failed attempt keeps using that compiler no matter what is
+    # loaded now. `module load gcc/12` then re-running would have rebuilt with
+    # the GCC 8 recorded in CMakeCache.txt and failed identically — the second
+    # time looking like the fix did not work, rather than like a stale cache.
+    cache="$LCPP_DIR/build/CMakeCache.txt"
+    if [ -f "$cache" ]; then
+        cached_cxx="$(sed -n 's/^CMAKE_CXX_COMPILER:[^=]*=//p' "$cache" | head -1)"
+        current_cxx="$(command -v g++ 2>/dev/null)"
+        if [ -n "$cached_cxx" ] && [ -n "$current_cxx" ] &&
+           [ "$cached_cxx" != "$current_cxx" ]; then
+            log "compiler changed ($cached_cxx -> $current_cxx) — clearing the"
+            log "stale CMake cache so the new one is actually used"
+            rm -rf "$LCPP_DIR/build"
+        fi
+    fi
     log "building llama.cpp (this takes 2-5 min on first run)"
     cmake -S "$LCPP_DIR" -B "$LCPP_DIR/build" \
         -DCMAKE_BUILD_TYPE=Release \
