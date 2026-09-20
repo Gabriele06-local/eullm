@@ -233,8 +233,15 @@ printf '%s' '{% for m in messages %}{{ m.content }}{% endfor %}' > "$SMOKE_TMPL"
     --chat-template-file "$SMOKE_TMPL" \
     -p "Articolo 2086 del codice civile italiano: " \
     -n 128 -t 4 --temp 0.7 --top-p 0.95 --no-display-prompt \
-    2>/dev/null | head -20 \
+    < /dev/null 2>/dev/null | head -20 \
     || err "smoke prompt failed — the GGUF is malformed"
+# stdin from /dev/null, and that is load-bearing. The passthrough template
+# fixes what the model is *fed*, but llama-cli still enters conversation mode
+# and, after generating, sits at a "> " prompt waiting for a second turn —
+# which in a script means hanging forever, and in a batch job means burning
+# the walltime on an idle prompt. EOF on stdin ends the turn on every build,
+# where the flag that does it (-no-cnv, -st, --single-turn) has changed names
+# more than once and is not accepted by all of them.
 
 cat <<EOF
 
