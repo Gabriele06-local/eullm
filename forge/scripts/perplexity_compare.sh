@@ -63,6 +63,9 @@ done
 [ -f "$BASE" ]    || err "no such file: $BASE"
 [ -f "$CORPUS" ]  || err "no such file: $CORPUS"
 
+WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/eullm-ppl-XXXXXX")"
+trap 'rm -rf "$WORKDIR"' EXIT
+
 PPL_BIN="$LCPP_DIR/build/bin/llama-perplexity"
 [ -x "$PPL_BIN" ] || err "llama-perplexity not built at $PPL_BIN
       Run forge/scripts/quantize_to_gguf.sh once — it builds this target."
@@ -78,13 +81,28 @@ fi
 
 # llama-perplexity's last "Final estimate: PPL = X" line is the result; the
 # per-chunk running values printed before it are not.
+# Progress goes to the terminal while it runs, not into a variable.
+#
+# Capturing the output to parse the final PPL out of it also swallowed the
+# running per-chunk estimates and the ETA that llama-perplexity prints. Each
+# model takes ten to fifteen minutes, so that produced half an hour of total
+# silence — indistinguishable from a hung job, and it got asked as exactly
+# that. The output now goes through a file: progress is echoed to stderr as
+# it arrives, and the file is what gets parsed afterwards.
 measure() {
-    local label="$1" model="$2" out
+    local label="$1" model="$2" rc=0
+    local raw="$WORKDIR/$label.log"
     log "$label: $CHUNKS chunks, ctx $CTX — $(basename "$model")"
-    out="$("$PPL_BIN" -m "$model" -f "$CORPUS" \
-            --chunks "$CHUNKS" -c "$CTX" -t "$THREADS" 2>&1)" \
-        || { printf '%s\n' "$out" >&2; err "$label: llama-perplexity failed"; }
-    printf '%s\n' "$out" | sed -n 's/.*Final estimate: PPL = \([0-9.]*\).*/\1/p' | tail -1
+    "$PPL_BIN" -m "$model" -f "$CORPUS" \
+        --chunks "$CHUNKS" -c "$CTX" -t "$THREADS" \
+        > "$raw" 2>&1 &
+    local pid=$!
+    tail -f --pid="$pid" -n +1 "$raw" >&2 &
+    local tailpid=$!
+    wait "$pid" || rc=$?
+    wait "$tailpid" 2>/dev/null || true
+    [ "$rc" = 0 ] || err "$label: llama-perplexity failed (exit $rc) — see above"
+    sed -n 's/.*Final estimate: PPL = \([0-9.]*\).*/\1/p' "$raw" | tail -1
 }
 
 ppl_base="$(measure base "$BASE")"
@@ -107,8 +125,9 @@ awk -v b="$ppl_base" -v s="$ppl_student" '
 BEGIN {
     d = (b - s) / b * 100
     printf "   delta    %+.2f%% ", d
-    if (d > 0) print "(student is better on this corpus)"
-    else       print "(student is worse on this corpus)"
+    if      (d >  0.005) print "(student is better on this corpus)"
+    else if (d < -0.005) print "(student is worse on this corpus)"
+    else                 print "(no measurable difference)"
 }'
 
 cat <<'EOF'
