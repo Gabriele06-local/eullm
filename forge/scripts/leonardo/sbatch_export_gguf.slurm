@@ -81,9 +81,28 @@ elif [ -n "$SELF" ] && [ -f "$SELF" ]; then
 fi
 export EULLM_REPO
 
+# The run dir is the directory this was SUBMITTED from, not whatever the
+# submitting shell happened to export.
+#
+# This bit on the first real round. `env.sh` defaults EULLM_RUN_DIR to the
+# control arm's directory, so a submission from a shell that had not sourced
+# it sent the job looking for the split arm's checkpoints under the control
+# arm's run dir. It found none, printed "no checkpoint directory yet", and
+# re-armed — correct behaviour for a wrong directory, and indistinguishable
+# from "training has not written anything yet". Meanwhile the log landed in
+# the right place, because --output IS relative to the submit directory, so
+# the two halves of the job disagreed about where they were.
+#
+# Fourth time this family of bug has cost us something. Same fix as
+# sbatch_phase2.slurm: decide from where the job came, not from the
+# environment it inherited.
+if [ -z "${EULLM_RUN_DIR:-}" ] && [ -n "${SLURM_SUBMIT_DIR:-}" ]; then
+    export EULLM_RUN_DIR="$SLURM_SUBMIT_DIR"
+fi
 # shellcheck disable=SC1091
 source "$EULLM_REPO/forge/scripts/leonardo/env.sh"
 cd "$EULLM_RUN_DIR"
+echo "[export] run dir $EULLM_RUN_DIR"
 
 echo "[export] repo   $EULLM_REPO"
 echo "[export] commit $(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -104,7 +123,9 @@ KEEP="${EULLM_EXPORT_KEEP:-2}"
 mkdir -p "$OUT_DIR"
 
 echo "[export] watching $CKPT_DIR every $EVERY steps → $OUT_DIR"
-echo "[export] keep F16=$KEEP_F16  merged=$KEEP  gguf=${MAX_GGUF:-all}  every ${HOURS}h"
+keep_gguf_label="$MAX_GGUF"
+[ "$MAX_GGUF" -eq 0 ] && keep_gguf_label="all"
+echo "[export] keep F16=$KEEP_F16  merged=$KEEP  gguf=$keep_gguf_label  every ${HOURS}h"
 
 # Refuse rather than half-write. A conversion that runs out of disk leaves a
 # truncated .gguf that llama.cpp loads far enough to look plausible.
@@ -119,7 +140,13 @@ else
 fi
 
 if [ ! -d "$CKPT_DIR" ]; then
-    echo "[export] no checkpoint directory yet — nothing to do this round"
+    echo "[export] WARNING: no such directory: $CKPT_DIR" >&2
+    echo "[export] This is more often a wrong path than a run that has" >&2
+    echo "[export] written nothing. Check that the run dir above is the one" >&2
+    echo "[export] the training chain writes to, or set" >&2
+    echo "[export] EULLM_EXPORT_CKPT_DIR explicitly. Directories present:" >&2
+    ls -1d "$EULLM_RUN_DIR"/checkpoints/*/ 2>/dev/null | sed 's/^/[export]   /' >&2 ||
+        echo "[export]   (no checkpoints/ at all under the run dir)" >&2
 fi
 
 # Pick the NEWEST checkpoint and export it if enough steps have passed since
