@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -122,6 +123,24 @@ def check_output_dir(output: Path, force: bool) -> None:
         )
 
 
+def empty_output_dir(output: Path) -> None:
+    """Remove a previous export's files so --force replaces, not overlays.
+
+    `save_pretrained` writes the new files but never deletes stale ones, so
+    reusing the directory leaves old shards beside the new index. Emptying
+    before the save also fails safe: a mid-save crash leaves an empty
+    directory (obvious) rather than a mixed one (silent). Only ever called
+    on the --output directory itself, after it passed `check_output_dir`.
+    """
+    if not output.is_dir():
+        return
+    for child in output.iterdir():
+        if child.is_symlink() or child.is_file():
+            child.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(child, ignore_errors=True)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -186,6 +205,11 @@ def main(argv=None) -> int:
         )
 
     output.mkdir(parents=True, exist_ok=True)
+    if args.force:
+        # After every input check above has passed and the model is in
+        # memory: the only thing left is the save, so nothing validated can
+        # still fail and strand an emptied directory.
+        empty_output_dir(output)
     model.save_pretrained(output, safe_serialization=True)
 
     # The tokenizer travels with the weights. convert_hf_to_gguf.py needs it,

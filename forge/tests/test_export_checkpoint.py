@@ -148,6 +148,22 @@ def test_force_allows_replacing_a_populated_directory(tmp_path):
     export.check_output_dir(out, force=True)         # no exception
 
 
+def test_force_empties_the_directory_before_saving(tmp_path):
+    """--force promises replace: stale shards must not survive beside the new index."""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "model.safetensors").write_bytes(b"old")
+    (out / "stale-extra.safetensors").write_bytes(b"stale")
+    (out / "tokenizer").mkdir()
+    (out / "tokenizer" / "vocab.json").write_bytes(b"{}")
+    export.empty_output_dir(out)
+    assert list(out.iterdir()) == []
+
+
+def test_emptying_a_missing_directory_is_a_noop(tmp_path):
+    export.empty_output_dir(tmp_path / "not-yet")  # no exception
+
+
 def test_help_works_without_the_training_stack(capsys):
     """torch is imported inside main, so --help works on a login node."""
     with pytest.raises(SystemExit) as e:
