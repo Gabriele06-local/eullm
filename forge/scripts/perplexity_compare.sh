@@ -36,7 +36,15 @@ STUDENT=""
 BASE=""
 CORPUS=""
 CHUNKS="${EULLM_PPL_CHUNKS:-40}"
-THREADS="${EULLM_PPL_THREADS:-8}"
+# Follow the allocation, do not assume it.
+#
+# This defaulted to a flat 8, and under `srun --cpus-per-task=4` that ran
+# llama-perplexity with n_threads=8 on four cores for two twenty-minute
+# measurements. Oversubscribing a compute-bound matmul does not share nicely;
+# it just adds context switching to work that was already saturating the
+# cores. SLURM_CPUS_PER_TASK is what the job was actually given, so it wins,
+# and nproc is the fallback outside a job.
+THREADS="${EULLM_PPL_THREADS:-${SLURM_CPUS_PER_TASK:-$(nproc 2>/dev/null || echo 4)}}"
 CTX="${EULLM_PPL_CTX:-512}"
 LCPP_DIR="${LCPP_DIR:-${WORK:-$HOME}/llama.cpp}"
 
