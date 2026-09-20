@@ -98,7 +98,11 @@ fn remove_block_tag(html: &str, tag: &str) -> String {
     let close = format!("</{tag}>");
     let mut result = String::with_capacity(html.len());
     let mut pos = 0;
-    let lower = html.to_lowercase();
+    // ASCII-only on purpose: every tag searched here is ASCII, and a full
+    // `to_lowercase()` can change byte length (e.g. U+0130 lowercases to two
+    // code points), which would invalidate the indices below — they are
+    // computed on this string but used to slice `html`.
+    let lower = html.to_ascii_lowercase();
     loop {
         let start = match lower[pos..].find(&open) {
             Some(n) => pos + n,
@@ -296,4 +300,27 @@ pub async fn fetch_for_context(
     let budget_chars = available_tokens * CHARS_PER_TOKEN;
 
     Ok(select_relevant(&text, query, budget_chars))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `to_lowercase()` on the page would grow U+0130 into two code points,
+    /// shifting every index computed on the lowered copy — which is then used
+    /// to slice the original. That panicked the request task on pages an
+    /// attacker can serve; ASCII folding keeps length and char boundaries.
+    #[test]
+    fn remove_block_tag_survives_unicode_length_changes() {
+        assert_eq!(
+            remove_block_tag("\u{130}<script>s</script>\u{e9}", "script"),
+            "\u{130}\u{e9}"
+        );
+        // Case-insensitive matching still works: the tags are ASCII.
+        assert_eq!(remove_block_tag("<SCRIPT>x</SCRIPT>ok", "script"), "ok");
+        assert_eq!(
+            remove_block_tag("plain <b>text</b>", "script"),
+            "plain <b>text</b>"
+        );
+    }
 }
