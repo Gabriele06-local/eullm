@@ -159,12 +159,76 @@ spends.
 
 ### Phase 3 — quantization and export
 
+Measured 20 September on `legal-it-4b-step8400` and `legal-it-4b-step28000`.
+
 | Quantity | Value |
 |---|---|
-| BF16 student size | |
-| Q4_K_M GGUF size | |
-| Perplexity before / after quantization | |
-| Tokens/s on the target consumer GPU | |
+| F16 GGUF size | 7,672.62 MiB (16.00 BPW) |
+| Q4_K_M GGUF size | **2,375.91 MiB (4.95 BPW)**, 2.4 GB on disk |
+| Compression, F16 → Q4_K_M | 3.23× |
+| Quantization wall-clock | 154–168 s, 4 CPU cores, no GPU |
+| Generation, CPU only (4 cores, serial node) | 9.3–10.5 tok/s |
+| Prompt processing, same | 28–48 tok/s |
+| Perplexity before / after quantization | **not measured** — see below |
+| Tokens/s on the target consumer GPU | **not measured** — no such hardware in this allocation |
+
+Two gaps stated rather than left blank. The F16-vs-Q4 comparison needs a
+perplexity run on the 7.7 GB intermediate, which is cheap but was not done
+before the F16 files were deleted as build artefacts; it costs one re-export
+to recover. And nothing in this allocation is a consumer GPU, so the headline
+claim — *runs on a laptop* — is supported here only by the file size and by
+CPU-only throughput on a serial node. It needs one measurement on real target
+hardware before it appears in a report as a number.
+
+### The first quality result
+
+Perplexity of each model on **held-out** Italian legal text, same corpus, same
+chunk count, same context, same quantization on every side. `val.jsonl` is a
+1 % split at seed 42, disjoint from `train.jsonl` over a deduplicated corpus,
+and enters no gradient in either the teacher's continued pre-training or the
+student's distillation.
+
+Two independent samples of the split, ~73 kB each, because a single 28-document
+slice cannot tell a result from its sample:
+
+| | corpus A (file order) | corpus B (seed 7) |
+|---|---|---|
+| Qwen3-4B-Base, untouched | 6.6500 ± 0.157 | 6.9796 ± 0.174 |
+| legal-it-4b **step-8400** (split arm) | 3.2787 (**−50.7 %**) | 3.6434 (**−47.8 %**) |
+| legal-it-4b **step-28000** (control arm) | 3.0320 ± 0.066 (**−54.4 %**) | 3.3085 (**−52.6 %**) |
+
+Both orderings survive the change of sample: every distilled checkpoint
+roughly halves the base model's perplexity, and step-28000 beats step-8400 by
+7.5 % on A and 9.2 % on B. The defensible statement is **−48 to −54 % across
+two samples of the held-out split**, not a single figure that would imply more
+precision than two samples support.
+
+**Three things this does not say**, each of which a reader will ask:
+
+* **It is not legal knowledge.** Asked for the content of art. 2086 c.c., both
+  checkpoints answered fluently with the content of *other* articles — one
+  described the restitution of goods, the other the `procura al difensore` of
+  art. 83 c.p.c. They have learned the register, not the map from article
+  number to text. Measuring that needs a verifiable-answer benchmark, which
+  does not yet exist here.
+* **Part of the gain is surface form.** The student has also learned how these
+  documents are laid out, cited and punctuated. That is verticalization, but
+  it is not knowledge, and the two get conflated exactly when the number
+  flatters.
+* **In-domain, not general.** Same courts, overlapping years as the training
+  corpus. It answers "did this help on this domain", and nothing beyond.
+
+One qualitative observation, reported as an observation because n=1 at
+temperature 0.7: on the same prompt the untouched base **looped**, repeating
+its own sentence two and a half times and fragmenting a token (`2 086`), while
+both distilled checkpoints produced one complete period and stopped. Turning
+that into a result needs fixed seeds over a handful of prompts, counting how
+often each model enters repetition.
+
+**The comparison between the two checkpoints isolates nothing.** step-28000 is
+from the control arm (8-bit teacher, shared GPU) and step-8400 from the split
+arm (BF16 teacher, separate GPUs): steps, teacher precision and node layout all
+differ at once. The clean A/B exists only when the split arm reaches 28,000.
 
 ### Budget
 
@@ -351,6 +415,12 @@ worth more than a tidy methods description.
 | 2026-09-20 | A base-model student shipped with Qwen3's *Instruct* chat template, inherited from the base tokenizer. Recent llama.cpp auto-enables conversation mode when a template is present, so every prompt arrived wrapped in a format the model had never seen: it looped, echoed its input, emitted stray subword tokens, and read as broken | two wrong diagnoses (under-training, then a mis-mapped EOS) before the template was suspected | template dropped at export; the same file then continued a Cassation incipit into correct legal Italian citing art. 365 c.p.c. |
 | 2026-09-20 | `quantize_to_gguf.sh` built only `llama-quantize` and `llama-cli`, so the one quantitative check — perplexity against the untouched base — needed a binary that was never compiled | the measurement went untaken while generations were judged by eye | `llama-perplexity` added to the build targets |
 | 2026-09-20 | The same script defaulted `GGUF_NAME` to the literal `legal-it-7b` and `LCPP_DIR` to `$HOME` (50 GB on Leonardo) | every model in a series would have carried one stale, identical name | named after the source directory; `$WORK` preferred |
+| 2026-09-20 | Merging a 4 B student in BF16 was OOM-killed on a login node — twice. "CPU only" means no GPU, not small: the merge holds gigabytes of weights and the GGUF conversion writes 8 GB, against whatever per-user memory a shared login node has left | two dead runs, ~40 min | both steps moved to `lrd_all_serial` with 30 G; the scripts' headers now say so |
+| 2026-09-20 | The second of those kills landed at 91 % of writing the F16 GGUF, leaving a 7.3 GB truncated file. Nothing reported an error, and the next run's "F16 already present — skipping conversion" would have quantized the truncated model into one that loads and is silently wrong | caught before it propagated | conversion and quantization write a `.partial` and rename on success; the export writes a `.partial` directory and moves it into place only when complete |
+| 2026-09-20 | A re-run after fixing an export silently reused the GGUF built from the *previous* export, so the corrected model was never converted and the smoke output was byte-identical — reading as "the fix did nothing" rather than "nothing ran" | one wasted diagnosis cycle | the conversion compares mtimes and reconverts when the source directory is newer |
+| 2026-09-20 | `llama-cli` with stdin at `/dev/null` and no single-turn flag does not exit — it generates, returns to its `> ` prompt, reads EOF, reprints, and spins. Piped into `head`, the resulting SIGPIPE surfaced as exit 141, which the script reported as "the GGUF is malformed" about a model that had just written competent legal Italian | a false failure on a healthy model, on top of a hang | the single-turn flag is read from `--help` rather than guessed, output goes to a file instead of a pipe, and a timeout bounds the step |
+| 2026-09-20 | `perplexity_compare.sh` defaulted to 8 threads regardless of the allocation, so two twenty-minute measurements ran oversubscribed on 4 cores | ~2× on two measurements | threads default to `SLURM_CPUS_PER_TASK`; the next run went from ~20 min to 6.5 |
+| 2026-09-20 | The export job packaged GGUFs that nothing evaluated. The first three perplexity measurements were run by hand and existed only in a terminal scrollback | not a record, and not citable; a run that stopped improving would have said so only when somebody next remembered to look | the export job now measures each new GGUF against a fixed base on a fixed held-out corpus and appends a row to `exports/perplexity.csv` |
 | 2026-09-15 | Throughput reported as a cumulative mean since job start, never reset — printed an identical 1.48 for thirteen hours and could not have shown a slowdown | none yet; a latent blind spot on the metric used to size the chain | per-window rate, cumulative kept beside it |
 
 ## Administrative
