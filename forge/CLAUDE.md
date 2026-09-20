@@ -53,6 +53,41 @@ Corollary worth stating because it inverts the usual instinct: **`save_steps`
 is not only a crash-recovery knob.** It is also the sampling rate of the
 deliverable, and the interval at which a run can be evaluated at all.
 
+### Packaging without measuring is half a loop
+
+The export job also **evaluates** what it packages: after each GGUF it runs
+`perplexity_compare.sh` against a fixed base model on a fixed held-out corpus
+and appends a row to `exports/perplexity.csv`. The quality curve then builds
+itself alongside the run.
+
+This was added because the alternative had already happened. On 20 September
+three perplexity measurements were run by hand, twenty minutes each, and the
+results existed only in a terminal scrollback — not a record, and not
+something a report can cite. Worse, nothing was watching: a run that had
+stopped improving, or started getting worse, would have said so only whenever
+somebody next remembered to check, which on a four-week chain is a lot of
+allocation spent on a hypothesis nobody is testing.
+
+Three properties, each of which is the reason it is safe to leave running:
+
+* **The base is measured once.** For a fixed (base, corpus, chunks, ctx) its
+  perplexity is a constant, and it costs as much as the student's. It is
+  cached under a key that includes the corpus size, so regenerating the corpus
+  invalidates the entry instead of silently producing a plausible delta
+  against a corpus the base was never measured on.
+* **Evaluation never fails the export.** The GGUF is the deliverable; the
+  number is a comment on it. A lost measurement is a missing row, a failed
+  export is a missing model.
+* **The inputs are checked before the expensive part**, not after — same
+  lesson as the quantizer pre-flight, which was added after a ten-minute merge
+  died at conversion for want of a binary.
+
+Build the two inputs once per project: the base GGUF via `quantize_to_gguf.sh`
+on the untouched student base, and the corpus via `make_ppl_corpus.py` from
+`val.jsonl`. Interpreting what comes out is a separate discipline — a held-out
+in-domain corpus answers "did this help on this domain", not "is the model
+correct", and the two get conflated exactly when the number is flattering.
+
 **Two ordering rules, both found as real bugs in July 2026 and both easy to
 reintroduce:**
 
