@@ -137,6 +137,9 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "what the student trains in)")
     p.add_argument("--force", action="store_true",
                    help="overwrite a non-empty output directory")
+    p.add_argument("--keep-chat-template", action="store_true",
+                   help="ship the base tokenizer's chat template (default: "
+                        "drop it — see the note in main())")
     return p.parse_args(argv)
 
 
@@ -193,7 +196,39 @@ def main(argv=None) -> int:
     # here, after the slow part is already done.
     tokenizer_src = checkpoint if (checkpoint / "tokenizer.json").is_file() else base_model
     print(f"[export] tokenizer from {tokenizer_src}", file=sys.stderr)
-    AutoTokenizer.from_pretrained(str(tokenizer_src)).save_pretrained(output)
+    tokenizer = AutoTokenizer.from_pretrained(str(tokenizer_src))
+
+    # Drop the chat template, and this is not cosmetic.
+    #
+    # Qwen3-4B-*Base* ships the Qwen3 *Instruct* chat template in its tokenizer
+    # files, and a distilled student inherits it. Recent llama.cpp switches
+    # into conversation mode automatically whenever a model carries one, so it
+    # wraps every prompt in <|im_start|>user ... <|im_end|><|im_start|>assistant
+    # — a format this model has never seen a single token of.
+    #
+    # Measured on the step-8400 export: through the template the model looped,
+    # echoed its own input and emitted stray subword tokens, and read as
+    # broken. With the template replaced by plain passthrough, the same file
+    # continued "La Corte, letti gli atti, osserva che il ricorso è" into
+    # competent Italian legal prose with a correct citation of art. 365 c.p.c.
+    # Same weights, same quantization; only the template differed.
+    #
+    # Shipping it would hand every downloader that first experience and the
+    # conclusion that the model does not work. Stage 3 of the pipeline (the
+    # identity LoRA) is what earns a chat template; until then the student is
+    # a completion model and should present as one.
+    if not args.keep_chat_template and getattr(tokenizer, "chat_template", None):
+        print("[export] dropping the base tokenizer's chat template: this is a "
+              "completion model, and shipping an Instruct template makes "
+              "llama.cpp wrap prompts in a format it never saw",
+              file=sys.stderr)
+        tokenizer.chat_template = None
+
+    tokenizer.save_pretrained(output)
+    # save_pretrained can still write the file from the source directory's
+    # copy, so remove it explicitly rather than trusting the attribute.
+    if not args.keep_chat_template:
+        (output / "chat_template.jinja").unlink(missing_ok=True)
 
     (output / "eullm_export.json").write_text(
         json.dumps(describe(checkpoint, base_model, output), indent=2) + "\n",
