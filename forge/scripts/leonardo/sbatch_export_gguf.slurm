@@ -107,6 +107,30 @@ echo "[export] run dir $EULLM_RUN_DIR"
 echo "[export] repo   $EULLM_REPO"
 echo "[export] commit $(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
 
+# One chain, however many times it is submitted.
+#
+# This job re-arms itself, so a second submission does not produce one extra
+# round — it produces a SECOND self-perpetuating chain, forever, and the two
+# race on the same output paths. `export_checkpoint.py` is called with
+# --force, so two rounds packaging the same step would write the same merged
+# directory at the same time and leave something that loads and is wrong.
+#
+# The lock holds the job id, so a stale one left by a walltime kill names its
+# owner and can be checked rather than guessed at.
+LOCK="$EULLM_RUN_DIR/.export_gguf.lock"
+if [ -f "$LOCK" ]; then
+    owner="$(cat "$LOCK" 2>/dev/null)"
+    if [ -n "$owner" ] && [ "$owner" != "${SLURM_JOB_ID:-}" ] &&
+       squeue -j "$owner" -h >/dev/null 2>&1; then
+        echo "[export] job $owner already holds $LOCK and is still queued." >&2
+        echo "[export] Exiting rather than starting a second export chain." >&2
+        echo "[export] If that job is wrong, scancel it and remove the lock." >&2
+        exit 0
+    fi
+    echo "[export] stale lock from job ${owner:-unknown} — taking it over"
+fi
+echo "${SLURM_JOB_ID:-manual}" > "$LOCK"
+
 EVERY="${EULLM_EXPORT_EVERY:-4000}"
 KEEP_F16="${EULLM_EXPORT_KEEP_F16:-0}"
 MAX_GGUF="${EULLM_EXPORT_MAX_GGUF:-0}"
@@ -121,6 +145,27 @@ CKPT_DIR="${EULLM_EXPORT_CKPT_DIR:-$EULLM_RUN_DIR/checkpoints/qwen3_4b_legal_it_
 OUT_DIR="${EULLM_EXPORT_DIR:-$EULLM_RUN_DIR/exports}"
 KEEP="${EULLM_EXPORT_KEEP:-2}"
 mkdir -p "$OUT_DIR"
+
+# Pre-flight the quantizer BEFORE the merge, not after.
+#
+# `quantize_to_gguf.sh` clones and builds llama.cpp on first use, and cloning
+# needs network — which a compute or serial node does not have. The first real
+# round found that out the expensive way: it spent ten minutes merging 8 GB of
+# weights, then died at the conversion and left an empty gguf directory. The
+# merge was fine; nothing downstream said so.
+#
+# Checked here so a missing toolchain costs seconds and names its own remedy.
+if [ ! -x "${LCPP_DIR:-$WORK/llama.cpp}/build/bin/llama-quantize" ]; then
+    echo "[export] llama.cpp is not built at ${LCPP_DIR:-$WORK/llama.cpp}" >&2
+    echo "[export] Building it needs network, which this node does not have." >&2
+    echo "[export] Build it once from a LOGIN node:" >&2
+    echo "[export]   bash \$EULLM_REPO/forge/scripts/quantize_to_gguf.sh \\" >&2
+    echo "[export]        <any merged model dir> <output dir>" >&2
+    echo "[export] Re-arming anyway: once the binaries exist this picks up." >&2
+    NO_QUANTIZER=1
+else
+    NO_QUANTIZER=0
+fi
 
 echo "[export] watching $CKPT_DIR every $EVERY steps → $OUT_DIR"
 keep_gguf_label="$MAX_GGUF"
@@ -183,7 +228,9 @@ for done_gguf in "$OUT_DIR"/gguf/legal-it-4b-step*; do
 done
 
 exported_any=0
-if [ "$SKIP_ROUND" = "1" ]; then
+if [ "$NO_QUANTIZER" = "1" ]; then
+    echo "[export] round skipped: no quantizer (see above)"
+elif [ "$SKIP_ROUND" = "1" ]; then
     echo "[export] round skipped on free space"
 elif [ "$newest_step" -lt 0 ]; then
     echo "[export] no checkpoints yet"
@@ -203,7 +250,13 @@ else
     # LCPP_SKIP_UPDATE: the llama.cpp checkout is shared and pinned; a git pull
     # here would change the quantizer under a series of exports that are
     # supposed to be comparable with each other.
-    elif ! LCPP_SKIP_UPDATE=1 bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
+    # GGUF_NAME, or every export writes a file called "legal-it-7b-q4_k_m.gguf":
+    # the script's default is stale (the model is 4 B, not 7 B) and identical
+    # for every step. The directories differ, so nothing collides on the
+    # cluster — but download two of them and they are indistinguishable, which
+    # defeats the point of packaging a series.
+    elif ! GGUF_NAME="$name" LCPP_SKIP_UPDATE=1 \
+            bash "$EULLM_REPO/forge/scripts/quantize_to_gguf.sh" \
             "$merged" "$gguf"; then
         echo "[export] GGUF conversion FAILED for step $step" >&2
     else
