@@ -199,11 +199,20 @@ The **real** reasons S3/MinIO remains the right backend for sccache:
    oldest objects on every push — including base layers we'd just paid to
    compile. MinIO has no cap; the existing S3 bucket has held the same
    content-addressed objects across all v0.5.x releases without eviction.
-2. **Content-addressed sharing across all workflows in the repo.** Our CI
-   workflow (`ci.yml`, runs on every push/PR) and the release workflow share
-   the *same* sccache bucket. With S3 they hit each other's writes; with
-   GitHub cache, branch/PR runs are isolated from main+tag runs in
-   practice (their scopes don't overlap).
+2. **Content-addressed sharing across all workflows in the repo.** The CI
+   workflow's engine job and the release workflow share the *same* sccache
+   bucket, and hit each other's writes. With the GitHub cache, branch/PR runs
+   are isolated from main+tag runs in practice (their scopes don't overlap).
+
+   Read this claim precisely, because it was wrong in this file for months:
+   `ci.yml` had **no** sccache at all, so every CI run rebuilt llama.cpp's C++
+   from scratch — twice, since `cargo check --features multimodal` builds the
+   mtmd/clip sources too — while this paragraph said the cache was shared. It
+   is shared now, but only on **pushes to main**. Pull-request runs are
+   deliberately left out: `ci.yml` builds and runs code from the pull request's
+   head, and its whole security posture is that it stays secret-less while
+   doing so. Giving PR runs the cache needs a read-only bucket credential, not
+   a lifted guard.
 3. **Cross-repo reuse (future).** If we ever add a sibling repo (Forge or
    Hub C++ work), the same MinIO bucket continues to serve. GitHub cache
    is per-repo, hard boundary.
