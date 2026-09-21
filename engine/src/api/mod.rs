@@ -1003,13 +1003,13 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
         None => KeepAlive::Default,
         Some(s) if s < 0.0 => KeepAlive::Forever,
         Some(0.0) => KeepAlive::Immediate,
-        // from_secs_f64 panics on NaN, infinity, and magnitudes past what a
-        // Duration holds — all reachable from a request body — so only
-        // convert what provably fits and take the malformed-value fallback
-        // for the rest.
-        Some(s) => match checked_duration_from_secs(s) {
-            Some(d) => KeepAlive::For(d),
-            None => KeepAlive::Default,
+        // `from_secs_f64` panics on NaN, infinity, and magnitudes past what
+        // a Duration holds — all reachable from a request body so go
+        // through the standard library's checked constructor and take the
+        // malformed-value fallback for whatever it refuses.
+        Some(s) => match std::time::Duration::try_from_secs_f64(s) {
+            Ok(d) => KeepAlive::For(d),
+            Err(_) => KeepAlive::Default,
         },
     }
 }
