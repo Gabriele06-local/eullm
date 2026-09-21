@@ -1063,23 +1063,6 @@ fn parse_duration_string(s: &str) -> Option<f64> {
     }
 }
 
-/// Build a `Duration` from float seconds without panicking.
-///
-/// `Duration::from_secs_f64` panics on NaN, infinity, and magnitudes past
-/// what a `Duration` holds — all reachable from a request body — so only
-/// convert what provably fits: every finite f64 below 2^64 converts to u64
-/// exactly with `as` (which saturates only out of range), so this bound
-/// needs no per-version tuning against the standard library's panic
-/// threshold. The fraction is preserved.
-fn checked_duration_from_secs(s: f64) -> Option<std::time::Duration> {
-    if !s.is_finite() || s < 0.0 || s >= 2f64.powi(64) {
-        return None;
-    }
-    let whole = s.trunc();
-    let nanos = ((s - whole) * 1_000_000_000.0).min(999_999_999.0) as u32;
-    Some(std::time::Duration::new(whole as u64, nanos))
-}
-
 /// Shared implementation behind `touch_main_slot`/`touch_embedding_slot`:
 /// resolve `keep_alive` (falling back to `default` when it is `Default`)
 /// into a new deadline, or clear it for `Forever`/`Immediate` (the caller
