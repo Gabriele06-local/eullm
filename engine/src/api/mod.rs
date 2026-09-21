@@ -1023,9 +1023,9 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
 /// than silently accepted and misread as `Duration::ZERO`.
 pub fn parse_keep_alive_flag(s: &str) -> Result<std::time::Duration, String> {
     match parse_duration_string(s) {
-        Some(secs) if secs > 0.0 => match checked_duration_from_secs(secs) {
-            Some(d) => Ok(d),
-            None => Err(format!(
+        Some(secs) if secs > 0.0 => match std::time::Duration::try_from_secs_f64(secs) {
+            Ok(d) => Ok(d),
+            Err(_) => Err(format!(
                 "--keep-alive must be a positive duration, got '{s}' \
                  (the value is too large to represent as a duration)"
             )),
