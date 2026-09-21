@@ -13,6 +13,43 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## 0.7.6 — 2026-09-21
+
+### Fixed
+- **Every model pull on Windows crashed the moment the download finished.**
+  The progress bar reached 100%, the process aborted with `thread 'main' has
+  overflowed its stack`, and the model never became usable — what was left on
+  disk was a `.gguf.part` that retrying could only bring back to the same
+  point. It hit every model in the catalogue, because the integrity check that
+  runs at the end of a download needed more stack than Windows gives a
+  program's main thread. Linux and macOS have eight times as much and were
+  never affected, which is why this survived to a user report. Every Windows
+  build since 0.6.80 carried it. Pulling by `hf.co/owner/repo` was never
+  affected — that path records no digest, so it never reached the check — and
+  neither was anything done with a model already on disk. If an earlier
+  attempt left a `.gguf.part` behind, delete it and pull again.
+
+- **A fetched web page could kill the chat that fetched it.** With `--web`, a
+  page containing a character such as `İ` — an ordinary Turkish letter — took
+  down the request while the page was being reduced to text. Any page on the
+  open web can carry one. Reported and fixed by
+  [@Gabriele06-local](https://github.com/Gabriele06-local) (#463).
+
+- **`hf.co/…` references containing those same characters** were either
+  refused as though they were not HuggingFace references at all, or crashed
+  the command outright, depending on how many there were. They now resolve
+  like any other reference.
+
+- **An empty `keep_alive` crashed the request instead of being ignored.** The
+  documented behaviour is that a malformed value falls back to the server
+  default, and an empty string now does that too.
+
+- **`eullm daemon` reported success when it had not written its pidfile.** It
+  printed `eullm daemon started (PID N)` and exited cleanly with nothing on
+  disk, which leaves a stop script no way to find the process — worse than an
+  outright failure. It now names the path and the error, and stops the child
+  it had already started instead of leaving it holding the port.
+
 ## 0.7.5 — 2026-09-12
 
 ### Added
