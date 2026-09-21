@@ -154,3 +154,27 @@ def test_help_works_without_the_training_stack(capsys):
         export.parse_args(["--help"])
     assert e.value.code == 0
     assert "checkpoint" in capsys.readouterr().out
+
+
+def test_publish_replaces_without_leaving_previous_files(tmp_path):
+    """A --force publish must leave no file from the previous export behind.
+
+    Stale shards beside the new index load without complaint and are wrong
+    in ways nothing downstream reports, so the swap that replaces the old
+    directory is pinned here rather than trusted to stay correct.
+    """
+    out = tmp_path / "merged"
+    out.mkdir()
+    (out / "model.safetensors").write_bytes(b"old")
+    (out / "stale-extra.safetensors").write_bytes(b"stale")
+    staging = tmp_path / "merged.partial"
+    staging.mkdir()
+    (staging / "model.safetensors").write_bytes(b"new")
+    (staging / "eullm_export.json").write_bytes(b"{}")
+    export.publish_staging(staging, out)
+    assert sorted(p.name for p in out.iterdir()) == [
+        "eullm_export.json",
+        "model.safetensors",
+    ]
+    assert (out / "model.safetensors").read_bytes() == b"new"
+    assert not staging.exists()

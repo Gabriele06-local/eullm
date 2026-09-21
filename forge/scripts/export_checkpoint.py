@@ -123,6 +123,18 @@ def check_output_dir(output: Path, force: bool) -> None:
         )
 
 
+def publish_staging(staging: Path, output: Path) -> None:
+    """Move a complete staged export into place, replacing the previous one.
+
+    The old directory goes only once the new one is whole, so a mid-save
+    crash can never leave a mix of two exports: the previous export stays
+    until there is a whole new one to replace it.
+    """
+    if output.exists():
+        shutil.rmtree(output)
+    staging.rename(output)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -256,9 +268,7 @@ def main(argv=None) -> int:
 
     # Into place, now that there is a complete model to put there. The old
     # directory goes only once the new one is whole.
-    if output.exists():
-        shutil.rmtree(output)
-    staging.rename(output)
+    publish_staging(staging, output)
 
     print(f"[export] done → {output}", file=sys.stderr)
     print("[export] next: forge/scripts/quantize_to_gguf.sh "
