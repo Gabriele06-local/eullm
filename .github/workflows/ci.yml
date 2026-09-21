@@ -12,9 +12,14 @@ name: CI
 #
 # `pull_request`, not `pull_request_target`: this workflow builds and runs code
 # from the pull request's head, and `pull_request_target` would hand that code
-# a writable token and the repository's secrets. It uses neither — there is no
-# `secrets.` reference below — so the read-only, secret-less fork context is
-# exactly right. Do not "fix" a fork's cold cache by switching the trigger.
+# a writable token and the repository's secrets. It takes neither. The token is
+# read-only, and the only `secrets.` reference below — the sccache backend in
+# the engine job — sits in a step guarded by `github.event_name == 'push'`, so
+# a pull_request run, fork or not, is still secret-less while it builds code
+# from the pull request. Do not "fix" a fork's cold cache by switching the
+# trigger, and do not lift that guard, which is the same trade by another
+# route: a same-repo pull request does receive secrets, and `cargo test` runs
+# whatever that branch put in a test.
 on:
   push:
     branches: [main]
@@ -212,6 +217,78 @@ jobs:
           workspaces: "engine -> target"
       - name: Install dependencies
         run: sudo DEBIAN_FRONTEND=noninteractive apt-get update && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y cmake build-essential pkg-config libssl-dev
+
+      # sccache for the C++ half of this job, on pushes to main only.
+      #
+      # Why it is worth having: this job IS the length of a CI run. Measured on
+      # run #541 (a merge that touched only forge/): 11m57s of a 12m09s run,
+      # while every other job finished inside 2m40s. Inside it, `cargo build`
+      # took 4m03s and `cargo check --features multimodal` 3m19s, and both
+      # compile llama.cpp's C++ from scratch — the multimodal step is not a
+      # cheap check, turning the feature on makes llama-cpp-sys-2 build the
+      # mtmd/clip sources as well, so the C++ is built twice per run.
+      # Swatinem/rust-cache cannot help: it caches Rust artifacts, and the
+      # vendored llama-cpp crates are workspace members, which it drops before
+      # saving. sccache is content-addressed, so an unchanged submodule hits
+      # across runs no matter which branch wrote the objects.
+      #
+      # Why `push` only, and why this is not what the header forbids: the
+      # header's rule is that this workflow stays secret-less while it builds
+      # and runs pull-request code. A push to main is neither — that code is
+      # already merged and reviewed. Every `secrets.` reference lives inside
+      # this one guarded step, so a pull_request run, fork or not, still sees
+      # no secrets and behaves exactly as it does today. Do NOT lift the guard
+      # to speed pull requests up: that is precisely the trade the header
+      # refuses. If PR runs should read the cache, give them a read-only
+      # bucket credential — a different change, with its own reasoning.
+      #
+      # 0.8.0 on purpose, matching release-engine.yml. Both workflows share one
+      # content-addressed bucket and sccache changes its cache-key handling
+      # between versions, so a mismatch means neither ever hits the other's
+      # objects — the opposite of the point. Upgrade both together or neither.
+      - name: Install sccache
+        if: github.event_name == 'push'
+        env:
+          SCCACHE_BUCKET: ${{ secrets.SCCACHE_BUCKET }}
+          SCCACHE_ENDPOINT: ${{ secrets.SCCACHE_ENDPOINT }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        run: |
+          if [ -z "${SCCACHE_ENDPOINT}" ]; then
+            echo "::notice::No sccache backend configured for this run — building without it."
+            exit 0
+          fi
+          SCCACHE_VER=0.8.0
+          TMPSC=$(mktemp -d)
+          curl -sSfL "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VER}/sccache-v${SCCACHE_VER}-x86_64-unknown-linux-musl.tar.gz" \
+            -o "${TMPSC}/sccache.tar.gz"
+          tar -xzf "${TMPSC}/sccache.tar.gz" -C "${TMPSC}"
+          find "${TMPSC}" -maxdepth 2 -name sccache -type f -exec mv {} /usr/local/bin/ \;
+          chmod +x /usr/local/bin/sccache
+          rm -rf "${TMPSC}"
+          # A backend outage must degrade to a cache-less build, never fail one.
+          if curl -sSf -m 10 "${SCCACHE_ENDPOINT}/minio/health/live" >/dev/null 2>&1; then
+            {
+              echo "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
+              echo "SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT}"
+              echo "SCCACHE_REGION=us-east-1"
+              echo "SCCACHE_S3_USE_SSL=true"
+              echo "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
+              echo "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
+              # The default 600s idle shutdown can kill the daemon mid-build,
+              # after which a fresh one re-handshakes with S3 and a blip reads
+              # as "Timed out waiting for server startup".
+              echo "SCCACHE_IDLE_TIMEOUT=0"
+              echo "RUSTC_WRAPPER=sccache"
+              echo "CMAKE_C_COMPILER_LAUNCHER=sccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=sccache"
+            } >> "$GITHUB_ENV"
+            echo "sccache: S3 backend reachable — caching enabled."
+          else
+            echo "::warning::sccache S3 backend unreachable — building WITHOUT cache (slower, but the build will not fail)."
+          fi
+          sccache --version
+
       - name: Build
         working-directory: engine
         run: cargo build
@@ -251,6 +328,14 @@ jobs:
         # deliberately not checked here — it needs the CUDA toolkit, which is a
         # multi-minute install on every push, and it shares this same Rust code.
         run: cargo check --features multimodal
+
+      # Never claim sccache works without reading the stats. The line that
+      # matters is "Cache hits (C/C++)": if it is absent or zero while the job
+      # is still minutes long, the compiler launcher is not reaching nvcc/cc
+      # and the cache is doing nothing for the expensive half of the build.
+      - name: sccache stats
+        if: always() && github.event_name == 'push'
+        run: sccache --show-stats || true
 
   # ── Hub ──────────────────────────────────────────────────────────────
   hub:
