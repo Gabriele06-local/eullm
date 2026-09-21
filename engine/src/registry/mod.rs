@@ -95,7 +95,12 @@ pub async fn download_file(
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    let mut buf = [0u8; 1024 * 1024];
+    // On the heap, not the stack. A `[0u8; 1024 * 1024]` local is a 1 MiB
+    // stack frame, and Windows gives the main thread exactly 1 MiB (the PE
+    // default, which nothing here raises) — so this aborted the process with
+    // "thread 'main' has overflowed its stack" the instant a download
+    // finished and its digest was checked. Linux's 8 MiB main stack hid it.
+    let mut buf = vec![0u8; 1024 * 1024];
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
@@ -789,6 +794,30 @@ mod tests {
         assert!(verify_digest_if_present(&path, None).is_ok());
         assert!(verify_digest_if_present(&path, Some("")).is_ok());
         fs::remove_file(&path).ok();
+    }
+
+    /// Runs the hash on a stack smaller than its read buffer used to be.
+    ///
+    /// The buffer was a 1 MiB array — a 1 MiB stack frame — and Windows gives
+    /// the main thread exactly 1 MiB, so every completed download aborted the
+    /// process while verifying its digest. A regression here does not fail
+    /// this assertion: it overflows the stack and aborts the whole test
+    /// binary, printing "fatal runtime error: stack overflow". That is the
+    /// signal.
+    #[test]
+    fn sha256_file_runs_on_a_small_stack() {
+        let path = write_temp_file(&vec![b'x'; 3 * 1024 * 1024]);
+        let hashed = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn({
+                let path = path.clone();
+                move || sha256_file(&path)
+            })
+            .expect("spawn")
+            .join()
+            .expect("the hash must not need more stack than this");
+        fs::remove_file(&path).ok();
+        assert_eq!(hashed.unwrap().len(), 64);
     }
 
     #[test]
