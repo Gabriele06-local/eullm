@@ -110,6 +110,15 @@ def main(argv: list[str] | None = None) -> int:
         help="RNG seed for the train/val split (default: 42)",
     )
     parser.add_argument(
+        "--group-by",
+        default="sentence_id",
+        help="Record field identifying the document a chunk belongs to; "
+             "records sharing it are never split across train and val "
+             "(default: sentence_id). Pass 'none' for the old per-chunk "
+             "split, which overstates held-out performance and is kept only "
+             "to reproduce corpora built before 2026-09-21.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Compute stats without writing the train/val files",
@@ -176,15 +185,48 @@ def main(argv: list[str] | None = None) -> int:
         print("No records to write; nothing to do.", file=sys.stderr)
         return 1
 
-    train_idx, val_idx = split_indices(n, args.val_ratio, args.seed)
+    # Split by document, not by chunk.
+    #
+    # A record is a chunk of a ruling. Splitting over records put chunk 3 of a
+    # ruling in train and chunk 4 in val, so the held-out set shared parties,
+    # citations and formulas with text the model had trained on, and the first
+    # quality measurement taken against it was inflated by an unbounded
+    # amount. `sentence_id` is the document the chunk came from and survives
+    # into every record via DEFAULT_KEEP_FIELDS, so grouping on it costs
+    # nothing and is the difference between a validation set and a decorated
+    # training set.
+    groups = (
+        None if args.group_by == "none"
+        else [rec.get(args.group_by) for rec in all_records]
+    )
+    if groups is not None:
+        missing = sum(1 for g in groups if g is None or g == "")
+        if missing:
+            print(
+                f"[WARN] {missing:,} of {n:,} records have no '{args.group_by}'. "
+                f"Each is treated as its own document, which is safe but means "
+                f"they cannot be grouped with their siblings — check the "
+                f"upstream corpus if this count is large.",
+                file=sys.stderr,
+            )
+
+    train_idx, val_idx = split_indices(n, args.val_ratio, args.seed, groups)
     stats.written_train = len(train_idx)
     stats.written_val = len(val_idx)
 
+    n_groups = len({g for g in groups}) if groups is not None else n
     print(
         f"\nSplit: {len(train_idx):,} train + {len(val_idx):,} val "
-        f"(val ratio {len(val_idx) / n:.4%})",
+        f"(val ratio {len(val_idx) / n:.4%}, asked {args.val_ratio:.2%})",
         file=sys.stderr,
     )
+    if groups is not None:
+        print(
+            f"Grouped by '{args.group_by}': {n_groups:,} documents, held out "
+            f"whole. The realised ratio differs from the requested one because "
+            f"documents are indivisible.",
+            file=sys.stderr,
+        )
 
     if not args.dry_run:
         # Shuffle train order (val stays in source order — easier for

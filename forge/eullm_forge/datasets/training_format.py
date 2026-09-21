@@ -59,21 +59,73 @@ def split_indices(
     n: int,
     val_ratio: float,
     seed: int,
+    groups: Optional[list[Any]] = None,
 ) -> tuple[list[int], list[int]]:
     """Deterministic train/val index split with shuffling.
 
     Uses Python's stdlib ``random`` (Mersenne Twister) seeded with
     ``seed`` so the same corpus + same ratio + same seed always produce
     the same split — important for reproducibility of training runs.
+
+    ``groups`` holds one key per record; records sharing a key go to the
+    same side. **Pass it whenever records are fragments of a larger
+    document**, or the split measures the wrong thing.
+
+    Why this argument exists, from a result it spoiled. A record here is a
+    ~2,048-token chunk of a court ruling, not a ruling. Splitting over
+    records scattered the chunks of one ruling across both sides — chunk 3
+    trained on, chunk 4 held out — so a model was scored on passages whose
+    immediate neighbours it had read: same parties, same cited articles,
+    same recurring formulas. The base model it was compared against had
+    seen none of it, and the measured gap was inflated by an amount nothing
+    in the measurement could bound. A validation set has to be held out at
+    the unit a reader will assume, which for a corpus of documents is the
+    document.
+
+    Grouping makes the ratio approximate: whole groups are taken until the
+    target is reached, so the realised ratio depends on group sizes and the
+    caller should report what it got rather than what it asked for.
     """
     import random
     rng = random.Random(seed)
-    indices = list(range(n))
-    rng.shuffle(indices)
-    n_val = max(1, int(n * val_ratio))
-    val_idx = sorted(indices[:n_val])
-    train_idx = sorted(indices[n_val:])
-    return train_idx, val_idx
+
+    if groups is None:
+        indices = list(range(n))
+        rng.shuffle(indices)
+        n_val = max(1, int(n * val_ratio))
+        return sorted(indices[n_val:]), sorted(indices[:n_val])
+
+    if len(groups) != n:
+        raise ValueError(
+            f"groups has {len(groups)} keys for {n} records — one key per "
+            f"record is required, or the split silently misassigns them"
+        )
+
+    # A record whose key is missing is its own group rather than sharing a
+    # bucket with every other keyless record: lumping them together would
+    # put an arbitrary slice of the corpus on one side, which is a worse
+    # failure than the one this function is fixing.
+    by_group: dict[Any, list[int]] = {}
+    for i, key in enumerate(groups):
+        k = key if key is not None and key != "" else ("__ungrouped__", i)
+        by_group.setdefault(k, []).append(i)
+
+    keys = sorted(by_group, key=repr)
+    rng.shuffle(keys)
+
+    target = max(1, int(n * val_ratio))
+    val_idx: list[int] = []
+    taken = 0
+    for k in keys:
+        if taken >= target:
+            break
+        members = by_group[k]
+        val_idx.extend(members)
+        taken += len(members)
+
+    val_set = set(val_idx)
+    train_idx = [i for i in range(n) if i not in val_set]
+    return train_idx, sorted(val_idx)
 
 
 def iter_slimmed(
