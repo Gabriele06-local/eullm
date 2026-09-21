@@ -182,11 +182,23 @@ hardware before it appears in a report as a number.
 
 ### The first quality result
 
-Perplexity of each model on **held-out** Italian legal text, same corpus, same
-chunk count, same context, same quantization on every side. `val.jsonl` is a
-1 % split at seed 42, disjoint from `train.jsonl` over a deduplicated corpus,
-and enters no gradient in either the teacher's continued pre-training or the
-student's distillation.
+Perplexity of each model on Italian legal text from `val.jsonl`, same corpus,
+same chunk count, same context, same quantization on every side.
+
+**Read the numbers with the caveat below, which is not small.** `val.jsonl` is
+a 1 % split at seed 42 and no record in it enters a gradient — but
+`format_pretraining.py` shuffles and splits **chunks, not documents**. Each
+record is a ~2,048-token fragment of a ruling, so the chunks of one ruling are
+scattered across train and val: chunk 3 trained on, chunk 4 held out. The
+student was therefore scored on passages whose immediate neighbours it had
+read — same parties, same cited articles, same recurring formulas — while the
+base had seen none of it.
+
+That inflates the gap, by an amount this measurement cannot bound. What it
+does not plausibly do is reverse the ordering: the base is worse than both
+students on both samples, by a margin far outside the confidence intervals.
+Treat the direction as established and the **magnitude as an upper bound**
+until it is remeasured against text with no document-level overlap.
 
 Two independent samples of the split, ~73 kB each, because a single 28-document
 slice cannot tell a result from its sample:
@@ -200,10 +212,19 @@ slice cannot tell a result from its sample:
 Both orderings survive the change of sample: every distilled checkpoint
 roughly halves the base model's perplexity, and step-28000 beats step-8400 by
 7.5 % on A and 9.2 % on B. The defensible statement is **−48 to −54 % across
-two samples of the held-out split**, not a single figure that would imply more
-precision than two samples support.
+two chunk-level samples, as an upper bound** — not a single figure, and not a
+document-level held-out result.
 
-**Three things this does not say**, each of which a reader will ask:
+**Four things this does not say**, each of which a reader will ask:
+
+* **The split is chunk-level, not document-level.** Stated above and repeated
+  here because it is the one a reviewer finds by opening
+  `format_pretraining.py`. `split_indices` shuffles the record list and takes
+  1 %; the records are chunks. Grouping by `sentence_id` before splitting is a
+  four-line change and is the fix for `medical-de` and `finance-fr`; it cannot
+  retroactively clean this run's split, because with chunks assigned
+  independently the chance that any multi-chunk ruling landed wholly in val is
+  effectively nil. A clean number needs a corpus the training never touched.
 
 * **It is not legal knowledge.** Asked for the content of art. 2086 c.c., both
   checkpoints answered fluently with the content of *other* articles — one
@@ -420,6 +441,7 @@ worth more than a tidy methods description.
 | 2026-09-20 | A re-run after fixing an export silently reused the GGUF built from the *previous* export, so the corrected model was never converted and the smoke output was byte-identical — reading as "the fix did nothing" rather than "nothing ran" | one wasted diagnosis cycle | the conversion compares mtimes and reconverts when the source directory is newer |
 | 2026-09-20 | `llama-cli` with stdin at `/dev/null` and no single-turn flag does not exit — it generates, returns to its `> ` prompt, reads EOF, reprints, and spins. Piped into `head`, the resulting SIGPIPE surfaced as exit 141, which the script reported as "the GGUF is malformed" about a model that had just written competent legal Italian | a false failure on a healthy model, on top of a hang | the single-turn flag is read from `--help` rather than guessed, output goes to a file instead of a pipe, and a timeout bounds the step |
 | 2026-09-20 | `perplexity_compare.sh` defaulted to 8 threads regardless of the allocation, so two twenty-minute measurements ran oversubscribed on 4 cores | ~2× on two measurements | threads default to `SLURM_CPUS_PER_TASK`; the next run went from ~20 min to 6.5 |
+| 2026-09-21 | `format_pretraining.py` splits train/val over **chunks, not documents**, so fragments of the same ruling sit on both sides. The first quality result was therefore reported as held-out when it is held-out per chunk and overlapping per document — the student was scored on passages whose neighbours it had trained on | the −48 to −54 % figure demoted to an upper bound; direction unaffected | caveat written into the report the day it was found; group by `sentence_id` before splitting for the next corpus; a clean number needs text the training never touched |
 | 2026-09-20 | The export job packaged GGUFs that nothing evaluated. The first three perplexity measurements were run by hand and existed only in a terminal scrollback | not a record, and not citable; a run that stopped improving would have said so only when somebody next remembered to look | the export job now measures each new GGUF against a fixed base on a fixed held-out corpus and appends a row to `exports/perplexity.csv` |
 | 2026-09-15 | Throughput reported as a cumulative mean since job start, never reset — printed an identical 1.48 for thirteen hours and could not have shown a slowdown | none yet; a latent blind spot on the metric used to size the chain | per-window rate, cumulative kept beside it |
 
