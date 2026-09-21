@@ -1003,7 +1003,14 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
         None => KeepAlive::Default,
         Some(s) if s < 0.0 => KeepAlive::Forever,
         Some(0.0) => KeepAlive::Immediate,
-        Some(s) => KeepAlive::For(std::time::Duration::from_secs_f64(s)),
+        // from_secs_f64 panics on NaN, infinity, and magnitudes past what a
+        // Duration holds — all reachable from a request body — so only
+        // convert what provably fits and take the malformed-value fallback
+        // for the rest.
+        Some(s) => match checked_duration_from_secs(s) {
+            Some(d) => KeepAlive::For(d),
+            None => KeepAlive::Default,
+        },
     }
 }
 
@@ -1016,7 +1023,13 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
 /// than silently accepted and misread as `Duration::ZERO`.
 pub fn parse_keep_alive_flag(s: &str) -> Result<std::time::Duration, String> {
     match parse_duration_string(s) {
-        Some(secs) if secs > 0.0 => Ok(std::time::Duration::from_secs_f64(secs)),
+        Some(secs) if secs > 0.0 => match checked_duration_from_secs(secs) {
+            Some(d) => Ok(d),
+            None => Err(format!(
+                "--keep-alive must be a positive duration, got '{s}' \
+                 (the value is too large to represent as a duration)"
+            )),
+        },
         Some(_) => Err(format!(
             "--keep-alive must be a positive duration, got '{s}' \
              (0 or negative only make sense as a per-request keep_alive override)"
@@ -1048,6 +1061,23 @@ fn parse_duration_string(s: &str) -> Option<f64> {
         "h" => Some(n * 3600.0),
         _ => None,
     }
+}
+
+/// Build a `Duration` from float seconds without panicking.
+///
+/// `Duration::from_secs_f64` panics on NaN, infinity, and magnitudes past
+/// what a `Duration` holds — all reachable from a request body — so only
+/// convert what provably fits: every finite f64 below 2^64 converts to u64
+/// exactly with `as` (which saturates only out of range), so this bound
+/// needs no per-version tuning against the standard library's panic
+/// threshold. The fraction is preserved.
+fn checked_duration_from_secs(s: f64) -> Option<std::time::Duration> {
+    if !s.is_finite() || s < 0.0 || s >= 2f64.powi(64) {
+        return None;
+    }
+    let whole = s.trunc();
+    let nanos = ((s - whole) * 1_000_000_000.0).min(999_999_999.0) as u32;
+    Some(std::time::Duration::new(whole as u64, nanos))
 }
 
 /// Shared implementation behind `touch_main_slot`/`touch_embedding_slot`:
@@ -1158,6 +1188,28 @@ mod keep_alive_tests {
         assert_eq!(parse_keep_alive(Some(&v("\"   \""))), KeepAlive::Default);
         assert!(parse_keep_alive_flag("").is_err());
         assert!(parse_keep_alive_flag("   ").is_err());
+    }
+
+    /// Absurd magnitudes must behave like any other malformed value rather
+    /// than panicking inside `from_secs_f64`: NaN, infinity, and anything
+    /// past what a `Duration` holds are all reachable from a request body
+    /// (`"nan"`/`"inf"` parse as floats; JSON numbers have no range check).
+    #[test]
+    fn absurd_durations_fall_back_to_default_rather_than_panicking() {
+        for raw in ["1e20", "1e30", "\"1e30\"", "\"nan\"", "\"inf\""] {
+            assert_eq!(parse_keep_alive(Some(&v(raw))), KeepAlive::Default);
+        }
+        assert_eq!(
+            parse_keep_alive(Some(&v("300"))),
+            KeepAlive::For(Duration::from_secs(300))
+        );
+        for s in ["1e30", "inf", "nan"] {
+            assert!(parse_keep_alive_flag(s).is_err());
+        }
+        assert_eq!(
+            parse_keep_alive_flag("5m").unwrap(),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]
