@@ -1003,7 +1003,14 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
         None => KeepAlive::Default,
         Some(s) if s < 0.0 => KeepAlive::Forever,
         Some(0.0) => KeepAlive::Immediate,
-        Some(s) => KeepAlive::For(std::time::Duration::from_secs_f64(s)),
+        // `from_secs_f64` panics on NaN, infinity, and magnitudes past what
+        // a Duration holds — all reachable from a request body so go
+        // through the standard library's checked constructor and take the
+        // malformed-value fallback for whatever it refuses.
+        Some(s) => match std::time::Duration::try_from_secs_f64(s) {
+            Ok(d) => KeepAlive::For(d),
+            Err(_) => KeepAlive::Default,
+        },
     }
 }
 
@@ -1016,7 +1023,13 @@ pub fn parse_keep_alive(value: Option<&serde_json::Value>) -> KeepAlive {
 /// than silently accepted and misread as `Duration::ZERO`.
 pub fn parse_keep_alive_flag(s: &str) -> Result<std::time::Duration, String> {
     match parse_duration_string(s) {
-        Some(secs) if secs > 0.0 => Ok(std::time::Duration::from_secs_f64(secs)),
+        Some(secs) if secs > 0.0 => match std::time::Duration::try_from_secs_f64(secs) {
+            Ok(d) => Ok(d),
+            Err(_) => Err(format!(
+                "--keep-alive must be a positive duration, got '{s}' \
+                 (the value is too large to represent as a duration)"
+            )),
+        },
         Some(_) => Err(format!(
             "--keep-alive must be a positive duration, got '{s}' \
              (0 or negative only make sense as a per-request keep_alive override)"
@@ -1158,6 +1171,28 @@ mod keep_alive_tests {
         assert_eq!(parse_keep_alive(Some(&v("\"   \""))), KeepAlive::Default);
         assert!(parse_keep_alive_flag("").is_err());
         assert!(parse_keep_alive_flag("   ").is_err());
+    }
+
+    /// Absurd magnitudes must behave like any other malformed value rather
+    /// than panicking inside `from_secs_f64`: NaN, infinity, and anything
+    /// past what a `Duration` holds are all reachable from a request body
+    /// (`"nan"`/`"inf"` parse as floats; JSON numbers have no range check).
+    #[test]
+    fn absurd_durations_fall_back_to_default_rather_than_panicking() {
+        for raw in ["1e20", "1e30", "\"1e30\"", "\"nan\"", "\"inf\""] {
+            assert_eq!(parse_keep_alive(Some(&v(raw))), KeepAlive::Default);
+        }
+        assert_eq!(
+            parse_keep_alive(Some(&v("300"))),
+            KeepAlive::For(Duration::from_secs(300))
+        );
+        for s in ["1e30", "inf", "nan"] {
+            assert!(parse_keep_alive_flag(s).is_err());
+        }
+        assert_eq!(
+            parse_keep_alive_flag("5m").unwrap(),
+            Duration::from_secs(300)
+        );
     }
 
     #[test]
