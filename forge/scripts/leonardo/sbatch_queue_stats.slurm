@@ -109,9 +109,29 @@ done
 
 # `|| true` only covers a genuine runtime failure of a tool we have just
 # confirmed exists — never a missing file, which is what it used to hide.
+STAMP="$(date +%Y%m%d_%H%M)"
 if ! "$PY" "$TOOL" "$ALLOC_START" \
-        --json "$OUT/queue_stats_$(date +%Y%m%d_%H%M).json"; then
+        --json "$OUT/queue_stats_$STAMP.json"; then
     echo "[qstats] snapshot failed; re-arming anyway so one bad day is not fatal" >&2
+fi
+
+# The priority snapshot, taken here because it is the one that cannot be
+# taken later.
+#
+# `queue_stats` reads `sacct`, which keeps weeks of history: a missed day is
+# recoverable. `sprio`, `sshare` and `sinfo` keep nothing — they report the
+# current instant, so a day not captured is a day that never existed. Asking
+# a person to remember a daily command is how that gap gets made.
+#
+# Failure here never stops the chain: the calendar snapshot above has already
+# been written, and one absent file is better than a broken re-arm.
+PRIO="$REPO/forge/scripts/leonardo/priority_snapshot.py"
+if [ -f "$PRIO" ]; then
+    if ! "$PY" "$PRIO" --json "$OUT/priority_$STAMP.json"; then
+        echo "[qstats] priority snapshot failed — continuing" >&2
+    fi
+else
+    echo "[qstats] no priority_snapshot.py at $PRIO — skipping (update the checkout)" >&2
 fi
 
 # Re-arm, unless the allocation is over. Without this guard the chain would
