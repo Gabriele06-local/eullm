@@ -174,7 +174,9 @@ class CassazioneSource:
 #   - italgiure.giustizia.it/sncass/ (SentenzeWeb): full-text delle sentenze
 #     Cassazione civili+penali dal 2021 (~423K doc, ~2.8GB). Pre-2021 non
 #     disponibile su SentenzeWeb — solo massime (kind:sic, sintesi brevi).
-#     Vedi modulo datasets.italgiure (fetch massivo via Solr).
+#     Il fetch massivo via Solr vive in eullm-priv (repo separato):
+#     vedi fetchers/eullm_forge_datasets/italgiure.py e
+#     docs/corpus-acquisition.md per il perche'.
 #   - cortedicassazione.it  : sentenze selezionate + massimario (libero)
 #   - cortecostituzionale.it: TUTTE le sentenze CC, API pubblica ECLI (libero)
 CASSAZIONE_SOURCES: list[CassazioneSource] = [
@@ -1140,7 +1142,7 @@ def parse_eurlex_html(html: str, source_id: str) -> list[dict]:
 # Sorgenti libere con full-text:
 #   1. italgiure.giustizia.it/sncass/ (SentenzeWeb) — full-text Cassazione
 #      civili+penali dal 2021 (SentenzeWeb non copre anni precedenti).
-#      Vedi datasets.italgiure.fetch_italgiure().
+#      Vedi fetch_italgiure() in eullm-priv (repo separato).
 #   2. cortedicassazione.it — sentenze selezionate Cassazione (solo sintesi HTML)
 #   3. cortecostituzionale.it — TUTTE le sentenze CC (API pubblica ECLI)
 # ---------------------------------------------------------------------------
