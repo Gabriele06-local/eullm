@@ -16,6 +16,12 @@ something changed, less so for understanding what it means.
 ## Unreleased
 
 ### Added
+- **Spark-X2.5 is in the catalog, in both sizes.** `spark-x2.5-1.7b` and
+  `spark-x2.5-4b`, Apache-2.0, from the publisher's own GGUF repositories.
+  They use a hybrid attention layout — one full-attention layer for every
+  three sliding-window ones — which is what buys them a 1M-token context
+  without the memory a full-attention model of that length would need.
+
 - **Three more model architectures load**, as a consequence of moving the
   vendored llama.cpp from b10818 (5 September) to b11100: `spark2_5`,
   `hrm_text` and `maple`. The engine now knows 152 architectures. The C
