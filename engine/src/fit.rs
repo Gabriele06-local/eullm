@@ -330,8 +330,11 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         let advanced = match target {
             Some(slot) => match c.read_uint_as_u64(value_type) {
                 Some(v) => {
-                    // Clamp into u32; all of these counts are small.
-                    *slot = u32::try_from(v).ok().or(Some(u32::MAX));
+                    // No saturation: these counts come from the file, and a
+                    // value that does not fit u32 is corrupt — recording
+                    // u32::MAX for it would send the sizer into a
+                    // ~4-billion-iteration loop below.
+                    *slot = u32::try_from(v).ok();
                     true
                 }
                 // Unexpected type for a key we wanted; skip to stay aligned.
@@ -482,6 +485,12 @@ fn align_up(pos: u64, alignment: u64) -> Option<u64> {
 /// [`parse_gguf_header`] — the caller treats that as "not a MoE model" and
 /// falls back to the ordinary dense `--fit` path.
 pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Option<MoeLayout> {
+    if n_layers > MAX_LAYERS {
+        // Same corrupt-header class `compute_fit` refuses above: without
+        // this the scratch vector below prices ~8 bytes per layer off one
+        // untrusted integer.
+        return None;
+    }
     let mut c = Cursor::new(data);
 
     if c.u32()? != GGUF_MAGIC {
@@ -722,6 +731,12 @@ pub(crate) const EMBEDDING_COMPUTE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 /// dims are present.
 const FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER: f64 = 128.0;
 
+/// Sanity ceiling for a layer count read from a GGUF header. Real
+/// architectures ship well under 200 layers; anything past this is a corrupt
+/// file, and without a ceiling it prices loop iterations and scratch vectors
+/// off one untrusted integer (see `compute_fit` and `parse_gguf_moe_layout`).
+const MAX_LAYERS: u32 = 4096;
+
 /// Compute the fit decision from probed VRAM, the GGUF info, the on-disk file
 /// size (a proxy for total weight bytes), and the chosen KV cache element
 /// sizes.
@@ -752,7 +767,15 @@ pub fn compute_fit(
         }
     };
     let info = match info {
-        Some(i) if i.n_layers > 0 => i,
+        Some(i) if i.n_layers > 0 && i.n_layers <= MAX_LAYERS => i,
+        Some(i) if i.n_layers > MAX_LAYERS => {
+            return FitDecision::Unknown {
+                reason: format!(
+                    "absurd layer count {} in the GGUF header (past the {MAX_LAYERS} sanity ceiling)",
+                    i.n_layers
+                ),
+            };
+        }
         _ => {
             return FitDecision::Unknown {
                 reason: "could not parse layer count from the GGUF header".to_string(),
@@ -1228,6 +1251,15 @@ mod tests {
         assert_eq!(info.n_layers, 36);
     }
 
+    /// A block_count that does not fit u32 must not saturate to u32::MAX:
+    /// that value would send compute_fit into a ~4-billion-iteration loop
+    /// and size a ~32 GiB MoE scratch vector.
+    #[test]
+    fn overflowing_block_count_is_unknown_not_max() {
+        let data = make_gguf(u64::MAX, true);
+        assert!(parse_gguf_header(&data).is_none());
+    }
+
     #[test]
     fn rejects_bad_magic() {
         let mut data = make_gguf(28, false);
@@ -1265,6 +1297,23 @@ mod tests {
     fn fit_unknown_when_no_vram() {
         let info = info_layers(28);
         let d = compute_fit(None, Some(&info), 5_000_000_000, 4096, F16.0, F16.1);
+        assert!(matches!(d, FitDecision::Unknown { .. }));
+    }
+
+    /// An absurd layer count returns Unknown immediately (no million-iteration
+    /// loop): real architectures ship under 200 layers, so anything past the
+    /// sanity ceiling is a corrupt header, not a model to size.
+    #[test]
+    fn absurd_layer_count_is_unknown_not_a_hang() {
+        let info = info_layers(1_000_000);
+        let d = compute_fit(
+            Some((8 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024)),
+            Some(&info),
+            20_000_000_000,
+            4096,
+            F16.0,
+            F16.1,
+        );
         assert!(matches!(d, FitDecision::Unknown { .. }));
     }
 
@@ -1371,6 +1420,76 @@ mod tests {
         assert_eq!(info.n_head_kv, Some(8));
         // head_dim = 5120/40 = 128 → 8 × 128 = 1024 elems/token/layer, K and V alike.
         assert_eq!(info.kv_elems_per_token_per_layer(), Some((1024.0, 1024.0)));
+    }
+
+    // ── Properties ───────────────────────────────────────────────────────
+    //
+    // A GGUF is bytes we did not write. `eullm pull hf.co/...` records no
+    // digest, so a corrupt or hostile file reaches this parser intact, and
+    // #490 showed what one integer in it can buy: a four-billion-iteration
+    // loop and a 32 GiB allocation, both under the lock that serialises model
+    // swaps.
+    //
+    // Uniformly random bytes would fail the magic check and never get inside,
+    // so the strategy keeps a valid prelude and randomises what follows —
+    // header fields first, then the metadata block. That is where the numbers
+    // the sizer trusts actually live. (Reaching deeper than this is what a
+    // coverage-guided fuzzer is for; a property test cannot guess its way
+    // into a nested branch.)
+    use proptest::prelude::*;
+
+    /// A GGUF prelude that passes the magic check, followed by arbitrary bytes.
+    fn gguf_shaped() -> impl Strategy<Value = Vec<u8>> {
+        (
+            any::<u32>(),
+            any::<u64>(),
+            any::<u64>(),
+            proptest::collection::vec(any::<u8>(), 0..512),
+        )
+            .prop_map(|(version, tensor_count, kv_count, rest)| {
+                let mut b = Vec::new();
+                b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+                b.extend_from_slice(&version.to_le_bytes());
+                b.extend_from_slice(&tensor_count.to_le_bytes());
+                b.extend_from_slice(&kv_count.to_le_bytes());
+                b.extend_from_slice(&rest);
+                b
+            })
+    }
+
+    proptest! {
+        /// No sequence of bytes makes the header parser panic. It answers or
+        /// gives up; it never takes the process with it.
+        #[test]
+        fn parse_gguf_header_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = parse_gguf_header(&data);
+        }
+
+        /// Same, for bytes that get past the magic and into the parsing proper.
+        #[test]
+        fn parse_gguf_header_never_panics_on_well_formed_prelude(data in gguf_shaped()) {
+            let _ = parse_gguf_header(&data);
+        }
+
+        /// #490 as a rule rather than three examples. The parser deliberately
+        /// reports whatever the file claims; the ceiling lives in the
+        /// consumers, and there are two of them, which is the whole reason to
+        /// state this over every absurd count instead of trusting one call
+        /// site to remember. A regression does not fail this assertion — it
+        /// hangs the test in a four-billion-iteration loop, which is the
+        /// loudest signal this class allows.
+        #[test]
+        fn no_absurd_layer_count_ever_reaches_the_sizing_loop(n in (MAX_LAYERS + 1)..=u32::MAX) {
+            let d = compute_fit(
+                Some((8 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024)),
+                Some(&info_layers(n)),
+                20_000_000_000,
+                4096,
+                F16.0,
+                F16.1,
+            );
+            prop_assert!(matches!(d, FitDecision::Unknown { .. }), "{n} layers gave {d:?}");
+        }
     }
 }
 
@@ -1817,6 +1936,16 @@ mod moe_layout_tests {
         assert!(parse_gguf_moe_layout(truncated, file_size, 2).is_none());
     }
 
+    /// An absurd layer count returns None before sizing any scratch vector:
+    /// with valid tensor data the old code allocated ~8 bytes per layer off
+    /// one untrusted integer.
+    #[test]
+    fn absurd_layer_count_returns_none_without_allocating() {
+        let (data, file_size) =
+            make_gguf_with_tensors(None, &[("blk.0.ffn_gate_exps.weight", 500)]);
+        assert!(parse_gguf_moe_layout(&data, file_size, 1_000_000).is_none());
+    }
+
     #[test]
     fn layer_index_and_expert_marker_parsing() {
         assert_eq!(tensor_layer_index("blk.0.attn_q.weight"), Some(0));
@@ -1829,6 +1958,41 @@ mod moe_layout_tests {
         assert!(is_expert_tensor_name("blk.0.ffn_gate_up_exps.weight"));
         assert!(!is_expert_tensor_name("blk.0.ffn_gate.weight"));
         assert!(!is_expert_tensor_name("blk.0.attn_q.weight"));
+    }
+
+    // ── Properties ───────────────────────────────────────────────────────
+    //
+    // The other half of #490. This entry point is reached from `run_moe_fit`
+    // without passing through `compute_fit`, so the ceiling checked there
+    // covers nothing here — which is exactly the kind of gap a rule closes
+    // and an example does not.
+    use proptest::prelude::*;
+
+    proptest! {
+        /// No layer count past the ceiling ever gets as far as sizing the
+        /// per-layer vector. The data is valid on purpose: with a real tensor
+        /// block the parser would otherwise reach the allocation, and at
+        /// `u32::MAX` that is 32 GiB. A regression here does not fail the
+        /// assertion, it takes the runner's memory with it.
+        #[test]
+        fn no_absurd_layer_count_ever_sizes_the_per_layer_vector(
+            n in (MAX_LAYERS + 1)..=u32::MAX,
+        ) {
+            let (data, file_size) =
+                make_gguf_with_tensors(None, &[("blk.0.ffn_gate_exps.weight", 500)]);
+            prop_assert!(parse_gguf_moe_layout(&data, file_size, n).is_none());
+        }
+
+        /// And no sequence of bytes makes it panic, whatever layer count it
+        /// is handed alongside them.
+        #[test]
+        fn parse_gguf_moe_layout_never_panics(
+            data in proptest::collection::vec(any::<u8>(), 0..1024),
+            file_size in any::<u64>(),
+            n in 0u32..=MAX_LAYERS,
+        ) {
+            let _ = parse_gguf_moe_layout(&data, file_size, n);
+        }
     }
 }
 

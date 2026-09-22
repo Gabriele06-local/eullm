@@ -13,6 +13,18 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **A `keep_alive` ending in an accented letter, an emoji or any other
+  non-ASCII character crashed the request that carried it.** `"5à"`,
+  `"30s€"`, `"1h☃"` — or just `"¡"` on its own — took down the handler task
+  instead of being treated as the malformed value they are. The unit was
+  split off by byte position, which lands inside a multi-byte character.
+  Reachable from any request body, and from `--keep-alive` on the command
+  line. Plain `"5m"`, `"30s"`, `"2h"` and bare numbers are unaffected and
+  behave exactly as before.
+
 ## 0.7.6 — 2026-09-21
 
 ### Fixed
