@@ -36,9 +36,34 @@
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
-#SBATCH --mem=450G
+# THREE GPUs, and only this chain asks for three.
+#
+# The layout uses three — teacher on 0-1, student on 2 — so asking for four
+# asked for a whole node, and a whole node has to be entirely idle before it
+# can be given away. On 2026-09-22 `boost_usr_prod` had 301 nodes in `mix`
+# and exactly one `idle`, itself unresponsive. Three GPUs make every node with
+# a single free card a candidate.
+#
+# THIS IS NOT WHY THE OTHER CHAINS STALL, and the distinction matters. The
+# split arm has been asking for four GPUs and getting them all month: 12-hour
+# links completed on the 16th, 18th and 21st, and 3h23 on the morning of the
+# 22nd. Its current wait is contention that worsened, not a defect in its
+# request. So it keeps four, and its exclusive node, because sharing would
+# cost throughput and break comparability with everything already measured on
+# it — the +13.5 % design-B figure above all.
+#
+# This chain has no such history to protect. It is new, its whole purpose is
+# to raise concurrency, and a slower run that runs beats a faster one that
+# waits. THE COST, for the report rather than a footnote: the node is shared,
+# memory bandwidth and PCIe are contended, and throughput may fall by an
+# unmeasured amount. Its throughput must not be tabulated beside the split
+# arm's.
+#
+# CUDA_VISIBLE_DEVICES renumbers the three to 0,1,2, so the config's
+# `teacher_gpus: [0, 1]` and `student_device: cuda:2` are unchanged.
+#SBATCH --cpus-per-task=24
+#SBATCH --gres=gpu:3
+#SBATCH --mem=340G
 #SBATCH --time=24:00:00
 #SBATCH --output=logs/%x-%j.out
 
@@ -98,8 +123,8 @@ source "$EULLM_REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
 python "$EULLM_REPO/forge/scripts/check_training_env.py" \
-    --offline --expect-gpus 4 --data-dir "$EULLM_DATA_DIR" \
-    --tokenizer-model Qwen/Qwen3-4B-Base \
+    --offline --expect-gpus 3 --data-dir "$EULLM_DATA_DIR" \
+    --tokenizer-model Qwen/Qwen3-8B-Base \
     --assert-frozen-base "$CFG"
 
 # Gate: the teacher is quantized, and in distillation its distribution IS

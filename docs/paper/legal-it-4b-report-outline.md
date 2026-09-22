@@ -197,8 +197,10 @@ base had seen none of it.
 That inflates the gap, by an amount this measurement cannot bound. What it
 does not plausibly do is reverse the ordering: the base is worse than both
 students on both samples, by a margin far outside the confidence intervals.
-Treat the direction as established and the **magnitude as an upper bound**
-until it is remeasured against text with no document-level overlap.
+Treat the direction as established and the **magnitude as an upper bound**.
+
+It has since been remeasured against text with no overlap at all — see
+**The clean number**, below, which is the one to quote.
 
 Two independent samples of the split, ~73 kB each, because a single 28-document
 slice cannot tell a result from its sample:
@@ -215,16 +217,76 @@ roughly halves the base model's perplexity, and step-28000 beats step-8400 by
 two chunk-level samples, as an upper bound** — not a single figure, and not a
 document-level held-out result.
 
+### The clean number
+
+Consiglio di Stato, 2025. A court the training never touched, in a different
+jurisdiction, from an index the project had not used before — clean by
+construction rather than by an argument about splits. 300 judgments fetched
+from the institutional portal against the CC BY 4.0 OpenGA metadata; the
+evaluation corpus is 11 of them, 230,134 bytes, 120 chunks at ctx 512.
+
+| | PPL | vs base |
+|---|---|---|
+| Qwen3-4B-Base, untouched | 6.4607 ± 0.089 | — |
+| legal-it-4b **step-28000** | **4.9589 ± 0.064** | **−23.25 %** |
+
+**This is the figure to quote**, and the one the abstract should carry. A 4 B
+student, quantized to Q4_K_M at 4.95 bits per weight and 2.4 GB on disk,
+reads administrative-law judgments 23 % less perplexedly than the model it
+was distilled from — on a corpus neither of them had seen. The confidence
+intervals are ±0.09 and ±0.06 against a gap of 1.5, so the effect is not in
+question.
+
+**Half of the in-domain gap does not survive the move**, and saying so is the
+point of having both numbers:
+
+| | Cassazione (chunk-level split) | Consiglio di Stato (clean) |
+|---|---|---|
+| step-28000 vs base | −54.4 % / −52.6 % | **−23.25 %** |
+
+Two causes act at once and **this measurement does not separate them**: the
+split contamination described above, and a genuine domain shift from ordinary
+to administrative jurisdiction, where the institutes, the procedural frame and
+the recurring formulas all differ. Attributing the drop to either alone would
+be choosing the more convenient story. What the pair does establish is a
+floor: whatever part of the in-domain figure was contamination, **at least
+23 % is transfer to legal Italian the model had never read**.
+
+Absolute perplexities are not comparable across the two corpora and should
+not be tabulated as if they were. Only the ratios within a corpus mean
+anything.
+
+**Still to come**: the same measurement at steps 7,000, 14,000 and 21,000,
+from checkpoints still on disk, packaged and scored by
+`sbatch_transfer_curve.slurm`. Four points say whether the gap is still
+opening at 28,000 — 40 % of one epoch, with the cosine schedule at two thirds
+of peak learning rate and no anneal yet — or whether it flattened earlier.
+That distinction decides where the remaining weeks of the allocation go, and
+it is cheap: the whole curve is CPU work on the serial partition.
+
+| step | PPL | vs base | share of epoch |
+|---|---|---|---|
+| 7,000 | | | 9.9 % |
+| 14,000 | | | 19.9 % |
+| 21,000 | | | 29.8 % |
+| 28,000 | 4.9589 | −23.25 % | 39.7 % |
+
 **Four things this does not say**, each of which a reader will ask:
 
 * **The split is chunk-level, not document-level.** Stated above and repeated
   here because it is the one a reviewer finds by opening
   `format_pretraining.py`. `split_indices` shuffles the record list and takes
   1 %; the records are chunks. Grouping by `sentence_id` before splitting is a
-  four-line change and is the fix for `medical-de` and `finance-fr`; it cannot
-  retroactively clean this run's split, because with chunks assigned
+  four-line change, shipped, and is the fix for `medical-de` and `finance-fr`;
+  it cannot retroactively clean this run's split, because with chunks assigned
   independently the chance that any multi-chunk ruling landed wholly in val is
-  effectively nil. A clean number needs a corpus the training never touched.
+  effectively nil. That is why the clean number above comes from a different
+  court rather than from a better slice of this corpus.
+
+  The same leak had a second mouth: legislation chunks carried `source_id`
+  but no `sentence_id`, so every one of them became its own group and the
+  codes' articles — whose text repeats verbatim across chunks — scattered
+  across both sides too. Found and fixed separately.
 
 * **It is not legal knowledge.** Asked for the content of art. 2086 c.c., both
   checkpoints answered fluently with the content of *other* articles — one
@@ -253,12 +315,55 @@ differ at once. The clean A/B exists only when the split arm reaches 28,000.
 
 ### Budget
 
+Measured 2026-09-22, day 20 of 61. Snapshots in
+[`measurements/`](measurements/), frozen daily because `sacct` forgets and
+`sprio` never remembers.
+
 | Quantity | Value |
 |---|---|
 | Node-hours allocated | 1,250 |
-| Node-hours spent, by phase | |
+| Node-hours consumed | 256.0 (**20.0 %**) |
+| Calendar elapsed | 495.7 h of 1,464 (**33.9 %**) |
 | Node-hours lost to failed runs | 0.67 (job 56760964, ZeRO-3 OOM) |
-| Queue wait time, total | |
+
+**Consumption is running at 61 % of the rate the calendar demands.** On this
+trajectory the allocation closes around 60 % used — roughly 490 node-hours
+unspent. Under-use is a reportable outcome and counts against the next
+request, so the reasons matter more than the number.
+
+| Where the calendar went | hours | share |
+|---|---|---|
+| At least one job running | 236.0 | 47.6 % |
+| Idle, **cluster full** | 98.0 | 19.8 % |
+| Idle, **queue empty** | 161.7 | 32.6 % |
+| Mean nodes while busy | **1.08** | |
+
+**The empty queue is ours and nearly all of it is the first week**: 65h50m
+from 02/09 to 04/09, 37h46m to 06/09, 42h35m to 08/09 — the days of the
+non-existent model ids, the ZeRO-3 OOM and the pre-flight that checked the
+wrong tokenizer. Those are in the incidents log with their costs. After
+08/09 the empty-queue intervals are minutes, not days.
+
+**The full cluster is not.** On 2026-09-22 the account's fairshare was
+**0.751**, with effective usage 0.000086 against 0.000208 of shares — using a
+third of what it was entitled to. Its jobs' priority of 141,963 decomposed as
+QOS 120,000 + fairshare 18,783 + age 3,175, against a partition whose pending
+priorities ran to **60,259,060**, with competitors at 212,303–275,734 and
+**exactly one idle node** in `boost_usr_prod`, itself unresponsive. An account
+under-using its share cannot close a 70,000-point gap by waiting: age
+contributes three thousand.
+
+**The 1.08 is the part we can still act on.** The allocation plan of
+2026-09-11 said that averaging one busy node requires stretches at two or
+three, because gaps are certain. That never happened: even while running, we
+ran one node. The same 236 busy hours at two nodes would have delivered 470
+node-hours rather than 256.
+
+Two responses are in flight, and the report should say which worked: every
+queued link cut from 24 h to 4 h, on the reasoning that a job no scheduler
+can fit into a backfill window never runs on a saturated cluster; and an 8 B
+student prepared as a second independent chain, which raises concurrency and
+covers the other chain's queue gaps.
 
 ## Predictions, scored
 
