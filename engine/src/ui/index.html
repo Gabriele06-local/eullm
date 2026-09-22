@@ -125,6 +125,10 @@
         reaches HuggingFace, and this works on a machine whose browser has no route out.
       </p>
       <input id="catalog-search" type="search" placeholder="Search HuggingFace for GGUF models — e.g. qwen3, mistral, gemma" autocomplete="off"/>
+      <form id="catalog-direct" class="catalog-direct">
+        <input id="catalog-direct-input" type="text" placeholder="…or open a repo by name: hf.co/owner/repo" autocomplete="off" spellcheck="false"/>
+        <button type="submit" class="btn-send small">Open</button>
+      </form>
       <div id="catalog-results" class="catalog-results"></div>
       <div id="catalog-detail" class="catalog-detail" hidden></div>
     </div>

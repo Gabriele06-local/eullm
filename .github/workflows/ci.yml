@@ -289,6 +289,20 @@ jobs:
           fi
           sccache --version
 
+      # The list of architectures this binary can load is generated from the
+      # vendored llama.cpp, because `llama.h` offers no way to ask at runtime.
+      # Generated, not hand-written: a bump that adds an architecture would
+      # otherwise leave the catalog telling users a model will not load when it
+      # would, and nothing would ever catch it. Regenerating here and diffing
+      # is what makes the file impossible to merge stale.
+      - name: The generated architecture list matches the submodule
+        run: |
+          ./tools/gen-llama-archs.sh
+          git diff --exit-code -- engine/src/llama_archs.rs || {
+            echo "::error::engine/src/llama_archs.rs is out of date with the llama.cpp submodule. Run tools/gen-llama-archs.sh and commit the result."
+            exit 1
+          }
+
       - name: Build
         working-directory: engine
         run: cargo build
