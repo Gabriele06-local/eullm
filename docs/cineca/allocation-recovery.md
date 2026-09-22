@@ -46,6 +46,62 @@ resta — siamo dietro di due ordini di grandezza — ma l'attribuzione causale
 al solo `PriorityWeightJobSize` è un'ipotesi, non una misura. È il motivo per
 cui la mail al supporto la formula come domanda.
 
+## Quanto costa una finestra: le misure del 22 settembre
+
+Tre numeri misurati la sera del 22, che insieme decidono la lunghezza di un
+anello. Nessuno dei tre era noto prima, e due contraddicono le stime su cui
+avevamo ragionato per mezza giornata.
+
+**Un job corto viene collocato in cinquanta secondi.** Un probe identico alle
+catene — un nodo, 4 A100, 32 core, 450 GB, QOS `normal` — con `--time=30:00`
+ha preso un nodo in 50 s (submit 19:16:13, start 19:17:03). Lo stesso probe a
+`--time=01:00:00` ci ha messo gli stessi 50 s. A 2, 3, 4 e 6 ore era ancora
+pending mezz'ora dopo, contro le 28 ore delle teste da 4 ore già in coda.
+
+Il cluster non è pieno: le finestre da un'ora ci sono sempre. Quello che non
+esiste è un buco da quattro ore. Non stiamo aspettando risorse, stiamo
+chiedendo una forma che non c'è.
+
+Il probe si fattura sul tempo reale (5 s) e si colloca sul walltime richiesto,
+per cui l'intera scala è costata meno di un minuto di nodo.
+
+**Lo startup di un anello è di ~14 minuti**, da `eullm-p2b-split-57893877`:
+3 minuti di pre-flight (import di transformers da Lustre) e 11 di caricamento
+del teacher da 61 GB in BF16. Il riavvolgimento del dataloader alla ripresa da
+`checkpoint-8400` è risultato trascurabile — una decina di secondi fra
+"modelli caricati" e primo step — quindi quel pedaggio non lo paghiamo. Vale
+la pena riguardarlo a step molto più alti, dove un eventuale salto
+crescerebbe in proporzione.
+
+**Il throughput è di ~379 step/ora**, misurato su otto intervalli consecutivi
+di `logging_steps: 20` (~190 s ciascuno), non i 333 stimati.
+
+### La conseguenza, che è il motivo per cui le misure servivano
+
+| anello | training netto | step | salvati a `save_steps: 300` | utile |
+|---|---|---|---|---|
+| 1 h | 46 min | 291 | **nessuno** | 0 % |
+| 1 h, `save_steps: 100` | 46 min | 291 | 200 | 53 % |
+| 2 h | 106 min | 670 | 600 | 79 % |
+| 3 h | 166 min | 1.048 | 900 | 79 % |
+| 24 h | 23h46 | 9.010 | 9.000 | 99 % |
+
+Un anello da un'ora con la configurazione attuale **produce zero**: 291 step
+contro un primo salvataggio a 300. Girerebbe, morirebbe in TIMEOUT e il
+successore ripartirebbe dallo stesso punto. Abbassare il walltime senza
+toccare `save_steps` sarebbe stato un peggioramento invisibile per giorni.
+
+E anche con `save_steps` corretto, un'ora rende ~12,5 node-ora utili al
+giorno, contro una media storica di 12,3: un pareggio, non un guadagno.
+
+**Gli anelli corti non sono un moltiplicatore, sono un pavimento.** Il che
+serve comunque, perché quel 12,3 è la media di giornate a 36 e di sette
+giornate a zero — `saldo -r` le elenca. Un anello corto non alza il tetto,
+toglie gli zeri. Per questo la struttura giusta somma le due cose invece di
+sceglierne una: le catene da 24 ore restano in coda per le finestre grandi al
+99 % di efficienza, una catena ad anelli corti bruca in continuo, e i due si
+sommano fino alla quota mensile.
+
 ## La leva che conta: catene indipendenti concorrenti
 
 Una catena `afterany` ha **un solo job eleggibile alla volta**: il capo. Gli
