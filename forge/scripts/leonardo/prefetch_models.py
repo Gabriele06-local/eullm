@@ -28,9 +28,17 @@ import sys
 # Base. Both failed with 404 on the first prefetch run on Leonardo,
 # after the 3.5 GB smoke model had already downloaded. See the Phase-1
 # Leonardo config header for why the replacements are what they are.
+#
+# ADDING AN ARM MEANS ADDING ITS MODELS HERE. On 2026-09-22 the 8 B arm's
+# very first job waited thirty hours for a node, got one, and died after 174
+# seconds because Qwen3-8B-Base had never been downloaded — the config and
+# the launcher were written and this list was not touched. Compute nodes have
+# no network, so a model missing here is a job that cannot possibly run, and
+# the cost is not the two minutes: it is the window.
 DEFAULT_MODELS = [
     "Qwen/Qwen3-1.7B-Base",     # smoke test
     "Qwen/Qwen3-4B-Base",       # Phase-2 student (~8 GB)
+    "Qwen/Qwen3-8B-Base",       # Phase-2 larger student (~16 GB)
     "Qwen/Qwen3-30B-A3B-Base",  # Phase-1/2 teacher, MoE 128e/8a (~60 GB)
 ]
 
