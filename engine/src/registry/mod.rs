@@ -709,22 +709,37 @@ pub async fn list_hf_ggufs(
     Ok(ggufs)
 }
 
-/// The `general.architecture` the Hub reports for a repo's GGUF files, if it
-/// reports one.
+/// What the Hub says about a repo, beyond its file list.
 ///
-/// `Ok(None)` and `Err(..)` are not the same answer and callers must not merge
-/// them. The Hub fills this in by parsing a GGUF it found in the repo, and it
-/// does not always manage — a sharded repo, an unusual layout, a file it could
-/// not read. "The Hub did not say" is not "this model will not load", and
-/// telling a user the second when we only know the first sends them away from
-/// a model that works.
+/// Every field is optional and a missing one means "the Hub did not say",
+/// never "no". Callers must keep that apart from an error: the Hub fills the
+/// architecture in by parsing a GGUF it found, and does not always manage — a
+/// sharded repo, an unusual layout, a file it could not read. Reporting "this
+/// model will not load" on the strength of a silence sends a user away from a
+/// model that works.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct HubFacts {
+    /// `general.architecture`, as the Hub parsed it out of a GGUF in the repo.
+    pub architecture: Option<String>,
+    /// `cardData.license`: an SPDX-style id, or the literal `other` when the
+    /// weights ship under terms of their own.
+    pub license: Option<String>,
+    /// `cardData.license_name`, which repos fill in when `license` is `other`
+    /// — `qwen-community-1.0` and the like.
+    pub license_name: Option<String>,
+    /// Where to read the terms. The model page always has them; a repo that
+    /// names a licence file gets linked to that instead.
+    pub license_url: Option<String>,
+}
+
+/// Read [`HubFacts`] for a repo.
 ///
 /// Hits the same `https://huggingface.co/api/models/{repo}` document
-/// [`list_hf_ggufs`] reads; the architecture was always in that body, and was
+/// [`list_hf_ggufs`] reads. All of this was always in that body, and was
 /// always discarded.
-pub async fn hf_declared_architecture(
+pub async fn hf_model_facts(
     repo: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<HubFacts, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://huggingface.co/api/models/{repo}");
     let client = reqwest::Client::builder()
         .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
@@ -741,22 +756,46 @@ pub async fn hf_declared_architecture(
     }
 
     let body: serde_json::Value = response.json().await?;
-    Ok(architecture_from_model_info(&body))
+    Ok(facts_from_model_info(&body, repo))
 }
 
-/// Pull `gguf.architecture` out of a Hub model document.
+/// Pull the facts out of a Hub model document.
 ///
-/// Split from the request so the part with rules in it can be tested without
-/// a network: the whole value of this function is telling "the Hub says
-/// `spark2_5`" apart from "the Hub said nothing", and a blank string is the
-/// second dressed as the first.
-fn architecture_from_model_info(body: &serde_json::Value) -> Option<String> {
-    body.get("gguf")
-        .and_then(|g| g.get("architecture"))
-        .and_then(|a| a.as_str())
-        .map(str::trim)
-        .filter(|a| !a.is_empty())
-        .map(str::to_string)
+/// Split from the request so the part with rules in it can be tested without a
+/// network. The rules are all of the same kind: a present-but-blank field is a
+/// silence wearing the costume of an answer, and has to be read as the
+/// silence it is.
+///
+/// Nothing here classifies a licence. `apache-2.0` is a name a reader either
+/// knows or can look up, and `other` is the Hub already saying "terms of their
+/// own, go and read them" — a judgement of our own on top of that would be a
+/// legal opinion we are not in a position to give, kept in a list we would
+/// have to maintain by hand.
+fn facts_from_model_info(body: &serde_json::Value, repo: &str) -> HubFacts {
+    let text = |v: Option<&serde_json::Value>| {
+        v.and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    let card = body.get("cardData");
+
+    // A repo that names a licence file gets linked to the file; everything
+    // else to the model page, which carries the terms in every case and can
+    // never 404 for a repo we just read.
+    let link = text(card.and_then(|c| c.get("license_link")));
+    let license_url = Some(match link {
+        Some(l) if l.starts_with("http://") || l.starts_with("https://") => l,
+        Some(l) => format!("https://huggingface.co/{repo}/blob/main/{}", l.trim_start_matches('/')),
+        None => format!("https://huggingface.co/{repo}"),
+    });
+
+    HubFacts {
+        architecture: text(body.get("gguf").and_then(|g| g.get("architecture"))),
+        license: text(card.and_then(|c| c.get("license"))),
+        license_name: text(card.and_then(|c| c.get("license_name"))),
+        license_url,
+    }
 }
 
 /// Resolve a HuggingFace ref to a single GGUF filename to download.
@@ -907,14 +946,14 @@ mod tests {
     fn an_architecture_is_reported_only_when_the_hub_states_one() {
         let declared = serde_json::json!({ "gguf": { "architecture": "spark2_5" } });
         assert_eq!(
-            architecture_from_model_info(&declared).as_deref(),
+            facts_from_model_info(&declared, "o/r").architecture.as_deref(),
             Some("spark2_5")
         );
 
         // Padded by the Hub, or by whoever wrote the file.
         let padded = serde_json::json!({ "gguf": { "architecture": "  qwen4exp  " } });
         assert_eq!(
-            architecture_from_model_info(&padded).as_deref(),
+            facts_from_model_info(&padded, "o/r").architecture.as_deref(),
             Some("qwen4exp")
         );
 
@@ -928,11 +967,60 @@ mod tests {
             serde_json::json!({ "gguf": null }),
         ] {
             assert_eq!(
-                architecture_from_model_info(&quiet),
+                facts_from_model_info(&quiet, "o/r").architecture,
                 None,
                 "should report nothing for {quiet}"
             );
         }
+    }
+
+    /// The two shapes a licence arrives in, both taken from real repos.
+    /// `apache-2.0` names itself; `other` is the Hub saying the weights ship
+    /// under terms of their own, with `license_name` carrying which. We report
+    /// both and judge neither.
+    #[test]
+    fn a_licence_is_reported_as_the_hub_states_it() {
+        // XHToken/Spark-X2.5-4B-GGUF.
+        let spdx = serde_json::json!({ "cardData": { "license": "apache-2.0" } });
+        let f = facts_from_model_info(&spdx, "XHToken/Spark-X2.5-4B-GGUF");
+        assert_eq!(f.license.as_deref(), Some("apache-2.0"));
+        assert_eq!(f.license_name, None);
+        assert_eq!(
+            f.license_url.as_deref(),
+            Some("https://huggingface.co/XHToken/Spark-X2.5-4B-GGUF")
+        );
+
+        // Qwen/Qwen3.8-Flash-Next: custom terms, named, with the file beside
+        // them. The link points at the file rather than the page.
+        let custom = serde_json::json!({ "cardData": {
+            "license": "other",
+            "license_name": "qwen-community-1.0",
+            "license_link": "LICENSE"
+        }});
+        let f = facts_from_model_info(&custom, "Qwen/Qwen3.8-Flash-Next");
+        assert_eq!(f.license.as_deref(), Some("other"));
+        assert_eq!(f.license_name.as_deref(), Some("qwen-community-1.0"));
+        assert_eq!(
+            f.license_url.as_deref(),
+            Some("https://huggingface.co/Qwen/Qwen3.8-Flash-Next/blob/main/LICENSE")
+        );
+
+        // An absolute link is taken as given, not glued onto the repo path.
+        let elsewhere = serde_json::json!({ "cardData": {
+            "license": "other",
+            "license_link": "https://example.org/terms"
+        }});
+        assert_eq!(
+            facts_from_model_info(&elsewhere, "o/r").license_url.as_deref(),
+            Some("https://example.org/terms")
+        );
+
+        // No card at all: still a link, because the model page always has the
+        // terms and a repo we just read cannot 404.
+        let bare = serde_json::json!({});
+        let f = facts_from_model_info(&bare, "o/r");
+        assert_eq!(f.license, None);
+        assert_eq!(f.license_url.as_deref(), Some("https://huggingface.co/o/r"));
     }
 
     #[test]

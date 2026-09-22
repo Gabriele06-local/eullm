@@ -186,9 +186,9 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
     }
     // Two Hub documents, fetched together: the file tree, and the model card
     // the architecture was parsed out of. One user action should cost one wait.
-    let (contents, arch) = tokio::join!(
+    let (contents, facts) = tokio::join!(
         crate::registry::list_hf_repo_contents(id),
-        crate::registry::hf_declared_architecture(id),
+        crate::registry::hf_model_facts(id),
     );
     let contents = match contents {
         Ok(c) => c,
@@ -203,8 +203,11 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
     // repo: the quantizations and their sizes are what this call is for, and
     // they are already in hand. A failure here becomes "not declared", which
     // the UI renders as a question rather than as a verdict.
-    let arch = arch.ok().flatten();
-    let arch_supported = arch.as_deref().map(crate::llama_archs::is_supported);
+    let facts = facts.unwrap_or_default();
+    let arch_supported = facts
+        .architecture
+        .as_deref()
+        .map(crate::llama_archs::is_supported);
 
     let vram = crate::fit::vram_bytes();
     let ram = crate::fit::system_ram_bytes();
@@ -249,8 +252,17 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
             // Hub did not say which architecture this is — not that this build
             // cannot load it. Only `architecture_supported: false` means that,
             // and only then may the UI tell a user the download is wasted.
-            "architecture": arch,
+            "architecture": facts.architecture,
             "architecture_supported": arch_supported,
+            // Reported, not judged. `apache-2.0` is a name the reader knows or
+            // can look up; `other` is the Hub itself saying the weights carry
+            // terms of their own, with `license_name` saying which. What those
+            // terms permit is between the licence and whoever runs the model —
+            // our part is to put it in front of them before the download, not
+            // after, and to link the text rather than summarise it.
+            "license": facts.license,
+            "license_name": facts.license_name,
+            "license_url": facts.license_url,
         })),
     )
 }

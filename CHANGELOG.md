@@ -15,6 +15,20 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Added
+- **The model browser now shows a repository's licence before you download
+  it.** Browsing a HuggingFace repo in the web UI puts the licence next to the
+  architecture, with a link straight to the terms — the licence file when the
+  repo names one, the model page otherwise. Repositories that ship under terms
+  of their own are labelled as such and named, `qwen-community-1.0` and the
+  like, rather than being flattened into a standard licence they are not.
+
+  The licence is reported, not judged. Whether terms that forbid commercial
+  use or hosting allow what you intend to do is between you and the licence;
+  what changes here is that you see it before the download instead of after.
+  Repositories the Hub states nothing for say exactly that, which is not the
+  same as having no licence.
+
 ### Fixed
 - **A `keep_alive` ending in an accented letter, an emoji or any other
   non-ASCII character crashed the request that carried it.** `"5à"`,

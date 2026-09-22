@@ -1410,6 +1410,37 @@
     }
     head.appendChild(arch);
 
+    // Stated, not interpreted. `apache-2.0` is a name the reader knows or can
+    // look up; `other` is the Hub saying these weights carry terms of their
+    // own. What those terms permit is between the licence and whoever runs the
+    // model — our part is to put it here, before the download rather than
+    // after, and to link the text instead of summarising it.
+    const lic = document.createElement("p");
+    lic.className = "catalog-note";
+    // `other` is not a name, so it never reaches the page as one: it means the
+    // repo named its own terms in `license_name`, or did not name them at all.
+    const named = data.license === "other" ? data.license_name : data.license;
+    let stated;
+    if (data.license === "other") {
+      stated = named
+        ? `Licence ${named}: terms of its own rather than a standard licence. `
+        : "Licence: terms of its own rather than a standard licence. ";
+    } else if (named) {
+      stated = `Licence ${named}. `;
+    } else {
+      stated = "Licence: the Hub did not state one. ";
+    }
+    lic.append(document.createTextNode(stated));
+    if (data.license_url) {
+      const a = document.createElement("a");
+      a.href = data.license_url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.textContent = "Read the terms";
+      lic.appendChild(a);
+    }
+    head.appendChild(lic);
+
     if (data.mmproj) {
       const mm = document.createElement("p");
       mm.className = "catalog-note";
