@@ -1,0 +1,513 @@
+{
+  "captured_at": "2026-09-11T21:39:49",
+  "allocation_start": "2026-09-02",
+  "jobs": [
+    {
+      "id": "55662184",
+      "name": "bash",
+      "state": "FAILED",
+      "submit": "2026-09-04T17:50:46",
+      "start": "2026-09-04T17:50:48",
+      "end": "2026-09-04T17:51:48",
+      "nodes": 1,
+      "node_seconds": 60
+    },
+    {
+      "id": "55662195",
+      "name": "bash",
+      "state": "FAILED",
+      "submit": "2026-09-04T17:50:51",
+      "start": "2026-09-04T17:50:53",
+      "end": "2026-09-04T18:11:04",
+      "nodes": 1,
+      "node_seconds": 1211
+    },
+    {
+      "id": "55690964",
+      "name": "bash",
+      "state": "FAILED",
+      "submit": "2026-09-04T19:38:04",
+      "start": "2026-09-04T19:38:04",
+      "end": "2026-09-04T19:43:57",
+      "nodes": 1,
+      "node_seconds": 353
+    },
+    {
+      "id": "55697464",
+      "name": "bash",
+      "state": "TIMEOUT",
+      "submit": "2026-09-04T20:06:46",
+      "start": "2026-09-04T20:06:46",
+      "end": "2026-09-04T20:40:09",
+      "nodes": 1,
+      "node_seconds": 2003
+    },
+    {
+      "id": "55701888",
+      "name": "bash",
+      "state": "COMPLETED",
+      "submit": "2026-09-04T20:40:35",
+      "start": "2026-09-04T20:40:35",
+      "end": "2026-09-04T20:55:35",
+      "nodes": 1,
+      "node_seconds": 900
+    },
+    {
+      "id": "55704570",
+      "name": "bash",
+      "state": "TIMEOUT",
+      "submit": "2026-09-04T20:58:02",
+      "start": "2026-09-04T20:58:02",
+      "end": "2026-09-04T21:31:23",
+      "nodes": 1,
+      "node_seconds": 2001
+    },
+    {
+      "id": "56200911",
+      "name": "bash",
+      "state": "CANCELLED by 134571",
+      "submit": "2026-09-06T11:17:22",
+      "start": "2026-09-06T11:17:28",
+      "end": "2026-09-06T11:28:51",
+      "nodes": 1,
+      "node_seconds": 683
+    },
+    {
+      "id": "56205905",
+      "name": "bash",
+      "state": "COMPLETED",
+      "submit": "2026-09-06T12:08:57",
+      "start": "2026-09-06T12:09:11",
+      "end": "2026-09-06T12:29:56",
+      "nodes": 1,
+      "node_seconds": 1245
+    },
+    {
+      "id": "56208850",
+      "name": "bash",
+      "state": "TIMEOUT",
+      "submit": "2026-09-06T12:32:37",
+      "start": "2026-09-06T12:33:08",
+      "end": "2026-09-06T12:56:37",
+      "nodes": 1,
+      "node_seconds": 1409
+    },
+    {
+      "id": "56210421",
+      "name": "bash",
+      "state": "COMPLETED",
+      "submit": "2026-09-06T12:59:00",
+      "start": "2026-09-06T12:59:15",
+      "end": "2026-09-06T13:18:28",
+      "nodes": 1,
+      "node_seconds": 1153
+    },
+    {
+      "id": "56222180",
+      "name": "bash",
+      "state": "COMPLETED",
+      "submit": "2026-09-06T15:25:14",
+      "start": "2026-09-06T15:25:43",
+      "end": "2026-09-06T15:47:59",
+      "nodes": 1,
+      "node_seconds": 1336
+    },
+    {
+      "id": "56230814",
+      "name": "bash",
+      "state": "COMPLETED",
+      "submit": "2026-09-06T17:12:04",
+      "start": "2026-09-06T17:12:24",
+      "end": "2026-09-06T17:53:33",
+      "nodes": 1,
+      "node_seconds": 2469
+    },
+    {
+      "id": "56700490",
+      "name": "eullm-smoke",
+      "state": "FAILED",
+      "submit": "2026-09-08T12:28:53",
+      "start": "2026-09-08T12:28:54",
+      "end": "2026-09-08T12:32:16",
+      "nodes": 1,
+      "node_seconds": 202
+    },
+    {
+      "id": "56729896",
+      "name": "eullm-smoke",
+      "state": "COMPLETED",
+      "submit": "2026-09-08T14:30:15",
+      "start": "2026-09-08T14:30:45",
+      "end": "2026-09-08T14:48:08",
+      "nodes": 1,
+      "node_seconds": 1043
+    },
+    {
+      "id": "56760964",
+      "name": "eullm-p1-cpt32b",
+      "state": "FAILED",
+      "submit": "2026-09-08T17:18:20",
+      "start": "2026-09-08T17:18:48",
+      "end": "2026-09-08T17:58:50",
+      "nodes": 1,
+      "node_seconds": 2402
+    },
+    {
+      "id": "56768626",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "FAILED",
+      "submit": "2026-09-08T18:05:50",
+      "start": "2026-09-08T18:06:15",
+      "end": "2026-09-08T18:49:58",
+      "nodes": 1,
+      "node_seconds": 2623
+    },
+    {
+      "id": "56775410",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "FAILED",
+      "submit": "2026-09-08T18:57:23",
+      "start": "2026-09-08T18:58:34",
+      "end": "2026-09-08T19:07:23",
+      "nodes": 1,
+      "node_seconds": 529
+    },
+    {
+      "id": "56781343",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "FAILED",
+      "submit": "2026-09-08T19:23:31",
+      "start": "2026-09-08T19:23:39",
+      "end": "2026-09-08T20:07:25",
+      "nodes": 1,
+      "node_seconds": 2626
+    },
+    {
+      "id": "56803262",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "TIMEOUT",
+      "submit": "2026-09-08T20:56:51",
+      "start": "2026-09-08T20:57:02",
+      "end": "2026-09-09T21:00:06",
+      "nodes": 1,
+      "node_seconds": 86584
+    },
+    {
+      "id": "56818854",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "TIMEOUT",
+      "submit": "2026-09-08T22:08:26",
+      "start": "2026-09-09T21:03:26",
+      "end": "2026-09-10T21:07:03",
+      "nodes": 1,
+      "node_seconds": 86617
+    },
+    {
+      "id": "56818982",
+      "name": "eullm-p1-cpt30ba3b",
+      "state": "RUNNING",
+      "submit": "2026-09-08T22:08:52",
+      "start": "2026-09-11T04:13:23",
+      "end": "2026-09-11T21:39:49",
+      "nodes": 1,
+      "node_seconds": 62786
+    },
+    {
+      "id": "57296319",
+      "name": "eullm-queue-stats",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T10:24:45",
+      "start": "2026-09-11T10:24:46",
+      "end": "2026-09-11T10:24:49",
+      "nodes": 1,
+      "node_seconds": 3
+    },
+    {
+      "id": "57294041",
+      "name": "eullm-p6-int8-vs-bf16",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T10:03:03",
+      "start": "2026-09-11T10:36:03",
+      "end": "2026-09-11T10:45:15",
+      "nodes": 1,
+      "node_seconds": 552
+    },
+    {
+      "id": "57298325",
+      "name": "eullm-queue-stats",
+      "state": "FAILED",
+      "submit": "2026-09-11T10:41:53",
+      "start": "2026-09-11T10:41:54",
+      "end": "2026-09-11T10:41:56",
+      "nodes": 1,
+      "node_seconds": 2
+    },
+    {
+      "id": "57299084",
+      "name": "eullm-queue-stats",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T10:47:13",
+      "start": "2026-09-11T10:47:14",
+      "end": "2026-09-11T10:47:16",
+      "nodes": 1,
+      "node_seconds": 2
+    },
+    {
+      "id": "57301651",
+      "name": "eullm-p6-int8-vs-bf16",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T11:07:40",
+      "start": "2026-09-11T11:21:51",
+      "end": "2026-09-11T11:32:45",
+      "nodes": 1,
+      "node_seconds": 654
+    },
+    {
+      "id": "57349914",
+      "name": "eullm-p6-int8-vs-bf16",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T19:47:08",
+      "start": "2026-09-11T19:58:20",
+      "end": "2026-09-11T20:09:19",
+      "nodes": 1,
+      "node_seconds": 659
+    },
+    {
+      "id": "57350798",
+      "name": "eullm-p1-logprobs",
+      "state": "FAILED",
+      "submit": "2026-09-11T20:01:31",
+      "start": "2026-09-11T20:07:30",
+      "end": "2026-09-11T20:11:23",
+      "nodes": 1,
+      "node_seconds": 233
+    },
+    {
+      "id": "57354859",
+      "name": "python",
+      "state": "COMPLETED",
+      "submit": "2026-09-11T21:00:17",
+      "start": "2026-09-11T21:00:47",
+      "end": "2026-09-11T21:02:45",
+      "nodes": 1,
+      "node_seconds": 118
+    },
+    {
+      "id": "57355129",
+      "name": "eullm-p1-logprobs",
+      "state": "RUNNING",
+      "submit": "2026-09-11T21:03:11",
+      "start": "2026-09-11T21:37:00",
+      "end": "2026-09-11T21:39:49",
+      "nodes": 1,
+      "node_seconds": 169
+    }
+  ],
+  "resource_waits": [
+    {
+      "job": "56775410",
+      "from": "2026-09-08T18:57:23",
+      "to": "2026-09-08T18:58:34",
+      "seconds": 71.0
+    },
+    {
+      "job": "56818854",
+      "from": "2026-09-09T21:00:06",
+      "to": "2026-09-09T21:03:26",
+      "seconds": 200.0
+    },
+    {
+      "job": "56818982",
+      "from": "2026-09-10T21:07:03",
+      "to": "2026-09-11T04:13:23",
+      "seconds": 25580.0
+    },
+    {
+      "job": "57294041",
+      "from": "2026-09-11T10:03:03",
+      "to": "2026-09-11T10:36:03",
+      "seconds": 1980.0
+    },
+    {
+      "job": "57301651",
+      "from": "2026-09-11T11:07:40",
+      "to": "2026-09-11T11:21:51",
+      "seconds": 851.0
+    },
+    {
+      "job": "57349914",
+      "from": "2026-09-11T19:47:08",
+      "to": "2026-09-11T19:58:20",
+      "seconds": 672.0
+    },
+    {
+      "job": "57350798",
+      "from": "2026-09-11T20:01:31",
+      "to": "2026-09-11T20:07:30",
+      "seconds": 359.0
+    },
+    {
+      "job": "57355129",
+      "from": "2026-09-11T21:03:11",
+      "to": "2026-09-11T21:37:00",
+      "seconds": 2029.0
+    }
+  ],
+  "idle_gaps": [
+    {
+      "from": "2026-09-02T00:00:00",
+      "to": "2026-09-04T17:50:48",
+      "seconds": 237048.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-04T18:11:04",
+      "to": "2026-09-04T19:38:04",
+      "seconds": 5220.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-04T19:43:57",
+      "to": "2026-09-04T20:06:46",
+      "seconds": 1369.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-04T20:40:09",
+      "to": "2026-09-04T20:40:35",
+      "seconds": 26.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-04T20:55:35",
+      "to": "2026-09-04T20:58:02",
+      "seconds": 147.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-04T21:31:23",
+      "to": "2026-09-06T11:17:28",
+      "seconds": 135965.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T11:28:51",
+      "to": "2026-09-06T12:09:11",
+      "seconds": 2420.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T12:29:56",
+      "to": "2026-09-06T12:33:08",
+      "seconds": 192.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T12:56:37",
+      "to": "2026-09-06T12:59:15",
+      "seconds": 158.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T13:18:28",
+      "to": "2026-09-06T15:25:43",
+      "seconds": 7635.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T15:47:59",
+      "to": "2026-09-06T17:12:24",
+      "seconds": 5065.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-06T17:53:33",
+      "to": "2026-09-08T12:28:54",
+      "seconds": 153321.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T12:32:16",
+      "to": "2026-09-08T14:30:45",
+      "seconds": 7109.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T14:48:08",
+      "to": "2026-09-08T17:18:48",
+      "seconds": 9040.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T17:58:50",
+      "to": "2026-09-08T18:06:15",
+      "seconds": 445.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T18:49:58",
+      "to": "2026-09-08T18:58:34",
+      "seconds": 516.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T19:07:23",
+      "to": "2026-09-08T19:23:39",
+      "seconds": 976.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-08T20:07:25",
+      "to": "2026-09-08T20:57:02",
+      "seconds": 2977.0,
+      "cause": "queue empty",
+      "waiting": []
+    },
+    {
+      "from": "2026-09-09T21:00:06",
+      "to": "2026-09-09T21:03:26",
+      "seconds": 200.0,
+      "cause": "cluster full",
+      "waiting": [
+        "56818854",
+        "56818982"
+      ]
+    },
+    {
+      "from": "2026-09-10T21:07:03",
+      "to": "2026-09-11T04:13:23",
+      "seconds": 25580.0,
+      "cause": "cluster full",
+      "waiting": [
+        "56818982"
+      ]
+    }
+  ],
+  "totals": {
+    "node_hours_used": 72.95194444444445,
+    "calendar_hours": 237.66373378083333,
+    "busy_hours": 72.27234489194444,
+    "idle_cluster_full_hours": 7.161111111111111,
+    "idle_queue_empty_hours": 158.2302777777778,
+    "mean_nodes_when_busy": 1.0094033139995124,
+    "resource_wait_seconds": 31997.0,
+    "dependency_wait_seconds": 251391.0
+  }
+}
