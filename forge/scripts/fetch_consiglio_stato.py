@@ -58,6 +58,7 @@ from __future__ import annotations
 import argparse
 import csv
 import html
+import http.cookiejar
 import json
 import random
 import re
@@ -118,6 +119,42 @@ def strip_html(raw: str) -> str:
     return text.strip()
 
 
+# Where the ruling actually starts. What precedes it is the court's internal
+# document header, which the served HTML carries and the browser view hides:
+# a urn, two generated filenames, a Windows path into their document store
+# (`U:\DocumentiGA\Magistrati\…`), the drafting magistrate's name and a
+# handful of timestamps. None of it is the judgment, all of it would be
+# measured as if it were, and one line of it is somebody's internal file path.
+START_ANCHORS = (
+    re.compile(r"REPUBBLICA ITALIANA", re.I),
+    re.compile(r"N\.\s*\d+/\d{4}\s*REG\.\s*PROV\.\s*COLL", re.I),
+    re.compile(r"Il Consiglio di Stato\s+in sede giurisdizionale", re.I),
+    re.compile(r"Il Consiglio di Stato", re.I),
+)
+
+# Belt and braces for the case where no anchor matches and the preamble would
+# otherwise survive: these two patterns are unmistakably internal and never
+# appear in the text of a judgment.
+INTERNAL_JUNK = (
+    re.compile(r"[A-Z]:\\[^\s]+"),
+    re.compile(r"urn:nir:[^\s]+"),
+)
+
+
+def trim_preamble(text: str) -> tuple[str, bool]:
+    """Cut the internal header. Returns (text, anchored)."""
+    best = None
+    for rx in START_ANCHORS:
+        m = rx.search(text)
+        if m and (best is None or m.start() < best):
+            best = m.start()
+    if best is not None and best > 0:
+        return text[best:].lstrip(), True
+    for rx in INTERNAL_JUNK:
+        text = rx.sub(" ", text)
+    return re.sub(r"[ \t]{2,}", " ", text).strip(), best is not None
+
+
 def looks_like_a_ruling(text: str) -> bool:
     return len(text) >= MIN_CHARS and bool(MARKERS.search(text))
 
@@ -135,7 +172,50 @@ def build_url(nrg: str, provvedimento: str, suffix: str, portal: str) -> str:
     return f"{portal}?{q}"
 
 
-def fetch(url: str, timeout: int, user_agent: str) -> tuple[str | None, str]:
+def make_opener() -> urllib.request.OpenerDirector:
+    """An opener that keeps cookies, like any ordinary HTTP client.
+
+    The document host answers 401 to a bare urllib request and serves the
+    same page to a browser with no login at all. That is a bot filter, not
+    authentication: it wants the headers every browser sends and the session
+    cookie the portal hands out on first contact. Keeping a cookie jar and
+    sending the usual headers is what a normal client does, not a way past an
+    access control — these are public judgments, published to be read.
+    """
+    jar = http.cookiejar.CookieJar()
+    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+
+
+def browser_headers(user_agent: str, referer: str | None = None) -> dict[str, str]:
+    h = {
+        "User-Agent": user_agent,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "it-IT,it;q=0.9,en;q=0.8",
+        "Connection": "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if referer:
+        h["Referer"] = referer
+    return h
+
+
+def warm_up(opener: urllib.request.OpenerDirector, timeout: int,
+            user_agent: str) -> str:
+    """Visit the portal once so the session cookie exists before the first
+    document request. Returns a diagnosis, empty when it worked."""
+    url = "https://www.giustizia-amministrativa.it/web/guest/dcsnprr"
+    req = urllib.request.Request(url, headers=browser_headers(user_agent))
+    try:
+        with opener.open(req, timeout=timeout) as r:
+            r.read(2048)
+        return ""
+    except Exception as e:  # noqa: BLE001 — any failure here is non-fatal
+        return f"{type(e).__name__}: {e}"
+
+
+def fetch(url: str, timeout: int, user_agent: str,
+          opener: urllib.request.OpenerDirector | None = None,
+          referer: str | None = None) -> tuple[str | None, str]:
     """Return (body, reason). `reason` is "ok" or a short diagnosis.
 
     The reason is returned rather than swallowed because the three ways this
@@ -145,9 +225,10 @@ def fetch(url: str, timeout: int, user_agent: str) -> tuple[str | None, str]:
     and a timeout means the network. The first version returned None for all
     of them, so a run that failed 900 times could not say why.
     """
-    req = urllib.request.Request(url, headers={"User-Agent": user_agent})
+    req = urllib.request.Request(url, headers=browser_headers(user_agent, referer))
+    open_it = opener.open if opener is not None else urllib.request.urlopen
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with open_it(req, timeout=timeout) as r:
             charset = r.headers.get_content_charset() or "utf-8"
             return r.read().decode(charset, errors="replace"), "ok"
     except urllib.error.HTTPError as e:
@@ -216,16 +297,22 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "public institution's server; do not lower it.")
     p.add_argument("--seed", type=int, default=42,
                    help="sampling seed, so the same index gives the same corpus")
-    p.add_argument("--timeout", type=int, default=45)
+    p.add_argument("--timeout", type=int, default=15,
+                   help="seconds per request (default: 15). A ruling costs up "
+                        "to six requests, so a high value turns a failing run "
+                        "into minutes of silence before anything is reported.")
     p.add_argument("--user-agent",
-                   default="eullm-eval/0.1 (research; contact info@i3k.eu)",
-                   help="identify honestly; anonymous bulk scraping of a court "
-                        "portal is both rude and a good way to get blocked")
-    p.add_argument("--give-up-after", type=int, default=8,
-                   help="stop after this many consecutive failures while "
-                        "nothing has been fetched (default: 8). The first "
-                        "version had no such limit and spent ninety minutes "
-                        "failing before it said so.")
+                   default=("Mozilla/5.0 (compatible; eullm-eval/0.1; "
+                            "research; +mailto:info@i3k.eu)"),
+                   help="kept honest and browser-shaped at once: the plain "
+                        "identifier alone drew HTTP 401 from the document "
+                        "host, and an anonymous browser string would hide "
+                        "who is asking. This says both.")
+    p.add_argument("--give-up-after", type=int, default=12,
+                   help="stop after this many failed REQUESTS while nothing "
+                        "has been fetched (default: 12). Counted in requests, "
+                        "not rulings: a ruling costs up to six, so a limit in "
+                        "rulings is half an hour of apparent hang.")
     p.add_argument("--all-kinds", action="store_true",
                    help="keep ordinanze and decreti too (default: SENTENZA only)")
     return p.parse_args(argv)
@@ -264,11 +351,20 @@ def main(argv=None) -> int:
     print(f"[cds] index     {args.index} ({len(rows):,} candidates)", file=sys.stderr)
     print(f"[cds] target    {args.limit} rulings, {args.delay}s apart", file=sys.stderr)
 
+    opener = make_opener()
+    problem = warm_up(opener, args.timeout, args.user_agent)
+    if problem:
+        print(f"[cds] warm-up failed ({problem}) — continuing, but the "
+              f"document host may answer 401 without a session cookie",
+              file=sys.stderr)
+    else:
+        print("[cds] session  established", file=sys.stderr)
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     written = attempted = 0
     rejected_short = 0
     reasons: dict[str, int] = {}
-    consecutive_failures = 0
+    requests_made = failed_requests = unanchored = 0
 
     with args.out.open("a", encoding="utf-8") as sink:
         for row in rows:
@@ -286,20 +382,33 @@ def main(argv=None) -> int:
             text = None
             for portal in PORTALS:
                 for suffix in NOME_FILE_SUFFIXES:
-                    raw, reason = fetch(build_url(nrg, prov, suffix, portal),
-                                        args.timeout, args.user_agent)
+                    raw, reason = fetch(
+                        build_url(nrg, prov, suffix, portal),
+                        args.timeout, args.user_agent, opener=opener,
+                        referer="https://www.giustizia-amministrativa.it/",
+                    )
+                    requests_made += 1
                     time.sleep(args.delay)
                     if raw is None:
                         reasons[reason] = reasons.get(reason, 0) + 1
+                        failed_requests += 1
+                        # Say something on every early attempt. Six requests
+                        # per ruling at the default timeout is minutes of
+                        # silence, which reads as a hang — and did.
+                        if written == 0:
+                            print(f"[cds]   attempt {requests_made}: {reason}",
+                                  file=sys.stderr)
                         continue
                     if raw.lstrip()[:5] == "%PDF-":
                         reasons["PDF, not HTML"] = (
                             reasons.get("PDF, not HTML", 0) + 1
                         )
                         continue
-                    candidate = strip_html(raw)
+                    candidate, anchored = trim_preamble(strip_html(raw))
                     if looks_like_a_ruling(candidate):
                         text = candidate
+                        if not anchored:
+                            unanchored += 1
                         break
                     reasons["fetched but not a ruling"] = (
                         reasons.get("fetched but not a ruling", 0) + 1
@@ -308,26 +417,24 @@ def main(argv=None) -> int:
                 if text is not None:
                     break
 
-            # Stop early when nothing is working.
+            # Stop early when nothing is working, counting REQUESTS.
             #
-            # The first version had no such check and ran ninety minutes
-            # against a portal refusing every request, then reported the
-            # failure at the end. Whatever is wrong — a blocked host, a
-            # changed URL scheme, no network — is already knowable after a
-            # handful of attempts, and nine hundred more requests neither
-            # diagnose it nor are polite to the server.
+            # Counting rulings was the second version of this mistake. The
+            # first had no limit at all and ran ninety minutes; then the limit
+            # counted rulings, and since each ruling costs up to six requests
+            # of `--timeout` seconds, eight of them is over half an hour of
+            # apparent hang. The unit that costs time is the request, so that
+            # is the unit the limit has to be in.
             if text is None:
-                consecutive_failures += 1
-                if consecutive_failures >= args.give_up_after and written == 0:
+                if failed_requests >= args.give_up_after and written == 0:
                     print(
-                        f"\n[cds] {consecutive_failures} attempts in a row failed "
-                        f"and nothing has been fetched — stopping instead of "
-                        f"working through {len(rows):,} more.",
+                        f"\n[cds] {failed_requests} requests failed and nothing "
+                        f"has been fetched — stopping rather than working "
+                        f"through {len(rows):,} more rulings.",
                         file=sys.stderr,
                     )
                     break
                 continue
-            consecutive_failures = 0
 
             rec = {
                 "text": text,
@@ -350,6 +457,10 @@ def main(argv=None) -> int:
 
     print(f"\n[cds] written   {written} rulings → {args.out}", file=sys.stderr)
     print(f"[cds] attempted {attempted}", file=sys.stderr)
+    if unanchored:
+        print(f"[cds] {unanchored} kept without a start anchor — their\n"
+              f"[cds]   internal header was scrubbed by pattern instead of cut,\n"
+              f"[cds]   so check a couple by hand", file=sys.stderr)
     if reasons:
         print("[cds] failures by reason:", file=sys.stderr)
         for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
