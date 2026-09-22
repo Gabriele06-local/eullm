@@ -216,16 +216,19 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "public institution's server; do not lower it.")
     p.add_argument("--seed", type=int, default=42,
                    help="sampling seed, so the same index gives the same corpus")
-    p.add_argument("--timeout", type=int, default=45)
+    p.add_argument("--timeout", type=int, default=15,
+                   help="seconds per request (default: 15). A ruling costs up "
+                        "to six requests, so a high value turns a failing run "
+                        "into minutes of silence before anything is reported.")
     p.add_argument("--user-agent",
                    default="eullm-eval/0.1 (research; contact info@i3k.eu)",
                    help="identify honestly; anonymous bulk scraping of a court "
                         "portal is both rude and a good way to get blocked")
-    p.add_argument("--give-up-after", type=int, default=8,
-                   help="stop after this many consecutive failures while "
-                        "nothing has been fetched (default: 8). The first "
-                        "version had no such limit and spent ninety minutes "
-                        "failing before it said so.")
+    p.add_argument("--give-up-after", type=int, default=12,
+                   help="stop after this many failed REQUESTS while nothing "
+                        "has been fetched (default: 12). Counted in requests, "
+                        "not rulings: a ruling costs up to six, so a limit in "
+                        "rulings is half an hour of apparent hang.")
     p.add_argument("--all-kinds", action="store_true",
                    help="keep ordinanze and decreti too (default: SENTENZA only)")
     return p.parse_args(argv)
@@ -268,7 +271,7 @@ def main(argv=None) -> int:
     written = attempted = 0
     rejected_short = 0
     reasons: dict[str, int] = {}
-    consecutive_failures = 0
+    requests_made = failed_requests = 0
 
     with args.out.open("a", encoding="utf-8") as sink:
         for row in rows:
@@ -288,9 +291,17 @@ def main(argv=None) -> int:
                 for suffix in NOME_FILE_SUFFIXES:
                     raw, reason = fetch(build_url(nrg, prov, suffix, portal),
                                         args.timeout, args.user_agent)
+                    requests_made += 1
                     time.sleep(args.delay)
                     if raw is None:
                         reasons[reason] = reasons.get(reason, 0) + 1
+                        failed_requests += 1
+                        # Say something on every early attempt. Six requests
+                        # per ruling at the default timeout is minutes of
+                        # silence, which reads as a hang — and did.
+                        if written == 0:
+                            print(f"[cds]   attempt {requests_made}: {reason}",
+                                  file=sys.stderr)
                         continue
                     if raw.lstrip()[:5] == "%PDF-":
                         reasons["PDF, not HTML"] = (
@@ -308,26 +319,24 @@ def main(argv=None) -> int:
                 if text is not None:
                     break
 
-            # Stop early when nothing is working.
+            # Stop early when nothing is working, counting REQUESTS.
             #
-            # The first version had no such check and ran ninety minutes
-            # against a portal refusing every request, then reported the
-            # failure at the end. Whatever is wrong — a blocked host, a
-            # changed URL scheme, no network — is already knowable after a
-            # handful of attempts, and nine hundred more requests neither
-            # diagnose it nor are polite to the server.
+            # Counting rulings was the second version of this mistake. The
+            # first had no limit at all and ran ninety minutes; then the limit
+            # counted rulings, and since each ruling costs up to six requests
+            # of `--timeout` seconds, eight of them is over half an hour of
+            # apparent hang. The unit that costs time is the request, so that
+            # is the unit the limit has to be in.
             if text is None:
-                consecutive_failures += 1
-                if consecutive_failures >= args.give_up_after and written == 0:
+                if failed_requests >= args.give_up_after and written == 0:
                     print(
-                        f"\n[cds] {consecutive_failures} attempts in a row failed "
-                        f"and nothing has been fetched — stopping instead of "
-                        f"working through {len(rows):,} more.",
+                        f"\n[cds] {failed_requests} requests failed and nothing "
+                        f"has been fetched — stopping rather than working "
+                        f"through {len(rows):,} more rulings.",
                         file=sys.stderr,
                     )
                     break
                 continue
-            consecutive_failures = 0
 
             rec = {
                 "text": text,
