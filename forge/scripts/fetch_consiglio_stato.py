@@ -68,7 +68,19 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-PORTAL = "https://portali.giustizia-amministrativa.it/portale/pages/istituzionale/visualizza"
+# The document host, and it is not the one the portal's own links advertise.
+#
+# A search result gives
+# portali.giustizia-amministrativa.it/portale/pages/istituzionale/visualizza,
+# and a browser following it ends up on mdp.giustizia-amministrativa.it with a
+# shorter path. Opening one ruling by hand and reading the address bar is what
+# established that — the first version used the advertised URL and fetched
+# nothing. Both are kept, canonical first: if the redirect ever moves again,
+# the fallback keeps this working rather than failing wholesale.
+PORTALS = (
+    "https://mdp.giustizia-amministrativa.it/visualizza/",
+    "https://portali.giustizia-amministrativa.it/portale/pages/istituzionale/visualizza",
+)
 
 # The suffix on `nomeFile` is a document-kind code and is not always _11, so
 # the ones seen in the wild are tried in order rather than assumed. Guessing a
@@ -110,7 +122,7 @@ def looks_like_a_ruling(text: str) -> bool:
     return len(text) >= MIN_CHARS and bool(MARKERS.search(text))
 
 
-def build_url(nrg: str, provvedimento: str, suffix: str) -> str:
+def build_url(nrg: str, provvedimento: str, suffix: str, portal: str) -> str:
     q = urllib.parse.urlencode(
         {
             "nodeRef": "",
@@ -120,7 +132,7 @@ def build_url(nrg: str, provvedimento: str, suffix: str) -> str:
             "subDir": "Provvedimenti",
         }
     )
-    return f"{PORTAL}?{q}"
+    return f"{portal}?{q}"
 
 
 def fetch(url: str, timeout: int, user_agent: str) -> tuple[str | None, str]:
@@ -272,21 +284,29 @@ def main(argv=None) -> int:
 
             attempted += 1
             text = None
-            for suffix in NOME_FILE_SUFFIXES:
-                raw, reason = fetch(build_url(nrg, prov, suffix), args.timeout,
-                                    args.user_agent)
-                time.sleep(args.delay)
-                if raw is None:
-                    reasons[reason] = reasons.get(reason, 0) + 1
-                    continue
-                candidate = strip_html(raw)
-                if looks_like_a_ruling(candidate):
-                    text = candidate
+            for portal in PORTALS:
+                for suffix in NOME_FILE_SUFFIXES:
+                    raw, reason = fetch(build_url(nrg, prov, suffix, portal),
+                                        args.timeout, args.user_agent)
+                    time.sleep(args.delay)
+                    if raw is None:
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                        continue
+                    if raw.lstrip()[:5] == "%PDF-":
+                        reasons["PDF, not HTML"] = (
+                            reasons.get("PDF, not HTML", 0) + 1
+                        )
+                        continue
+                    candidate = strip_html(raw)
+                    if looks_like_a_ruling(candidate):
+                        text = candidate
+                        break
+                    reasons["fetched but not a ruling"] = (
+                        reasons.get("fetched but not a ruling", 0) + 1
+                    )
+                    rejected_short += 1
+                if text is not None:
                     break
-                reasons["fetched but not a ruling"] = (
-                    reasons.get("fetched but not a ruling", 0) + 1
-                )
-                rejected_short += 1
 
             # Stop early when nothing is working.
             #
