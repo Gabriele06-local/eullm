@@ -330,8 +330,11 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         let advanced = match target {
             Some(slot) => match c.read_uint_as_u64(value_type) {
                 Some(v) => {
-                    // Clamp into u32; all of these counts are small.
-                    *slot = u32::try_from(v).ok().or(Some(u32::MAX));
+                    // No saturation: these counts come from the file, and a
+                    // value that does not fit u32 is corrupt — recording
+                    // u32::MAX for it would send the sizer into a
+                    // ~4-billion-iteration loop below.
+                    *slot = u32::try_from(v).ok();
                     true
                 }
                 // Unexpected type for a key we wanted; skip to stay aligned.
@@ -482,6 +485,12 @@ fn align_up(pos: u64, alignment: u64) -> Option<u64> {
 /// [`parse_gguf_header`] — the caller treats that as "not a MoE model" and
 /// falls back to the ordinary dense `--fit` path.
 pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Option<MoeLayout> {
+    if n_layers > MAX_LAYERS {
+        // Same corrupt-header class `compute_fit` refuses above: without
+        // this the scratch vector below prices ~8 bytes per layer off one
+        // untrusted integer.
+        return None;
+    }
     let mut c = Cursor::new(data);
 
     if c.u32()? != GGUF_MAGIC {
@@ -722,6 +731,12 @@ pub(crate) const EMBEDDING_COMPUTE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 /// dims are present.
 const FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER: f64 = 128.0;
 
+/// Sanity ceiling for a layer count read from a GGUF header. Real
+/// architectures ship well under 200 layers; anything past this is a corrupt
+/// file, and without a ceiling it prices loop iterations and scratch vectors
+/// off one untrusted integer (see `compute_fit` and `parse_gguf_moe_layout`).
+const MAX_LAYERS: u32 = 4096;
+
 /// Compute the fit decision from probed VRAM, the GGUF info, the on-disk file
 /// size (a proxy for total weight bytes), and the chosen KV cache element
 /// sizes.
@@ -752,7 +767,15 @@ pub fn compute_fit(
         }
     };
     let info = match info {
-        Some(i) if i.n_layers > 0 => i,
+        Some(i) if i.n_layers > 0 && i.n_layers <= MAX_LAYERS => i,
+        Some(i) if i.n_layers > MAX_LAYERS => {
+            return FitDecision::Unknown {
+                reason: format!(
+                    "absurd layer count {} in the GGUF header (past the {MAX_LAYERS} sanity ceiling)",
+                    i.n_layers
+                ),
+            };
+        }
         _ => {
             return FitDecision::Unknown {
                 reason: "could not parse layer count from the GGUF header".to_string(),
@@ -1228,6 +1251,15 @@ mod tests {
         assert_eq!(info.n_layers, 36);
     }
 
+    /// A block_count that does not fit u32 must not saturate to u32::MAX:
+    /// that value would send compute_fit into a ~4-billion-iteration loop
+    /// and size a ~32 GiB MoE scratch vector.
+    #[test]
+    fn overflowing_block_count_is_unknown_not_max() {
+        let data = make_gguf(u64::MAX, true);
+        assert!(parse_gguf_header(&data).is_none());
+    }
+
     #[test]
     fn rejects_bad_magic() {
         let mut data = make_gguf(28, false);
@@ -1265,6 +1297,23 @@ mod tests {
     fn fit_unknown_when_no_vram() {
         let info = info_layers(28);
         let d = compute_fit(None, Some(&info), 5_000_000_000, 4096, F16.0, F16.1);
+        assert!(matches!(d, FitDecision::Unknown { .. }));
+    }
+
+    /// An absurd layer count returns Unknown immediately (no million-iteration
+    /// loop): real architectures ship under 200 layers, so anything past the
+    /// sanity ceiling is a corrupt header, not a model to size.
+    #[test]
+    fn absurd_layer_count_is_unknown_not_a_hang() {
+        let info = info_layers(1_000_000);
+        let d = compute_fit(
+            Some((8 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024)),
+            Some(&info),
+            20_000_000_000,
+            4096,
+            F16.0,
+            F16.1,
+        );
         assert!(matches!(d, FitDecision::Unknown { .. }));
     }
 
@@ -1815,6 +1864,16 @@ mod moe_layout_tests {
         // only the tail wouldn't actually exercise a truncated *header*.
         let truncated = &data[..30];
         assert!(parse_gguf_moe_layout(truncated, file_size, 2).is_none());
+    }
+
+    /// An absurd layer count returns None before sizing any scratch vector:
+    /// with valid tensor data the old code allocated ~8 bytes per layer off
+    /// one untrusted integer.
+    #[test]
+    fn absurd_layer_count_returns_none_without_allocating() {
+        let (data, file_size) =
+            make_gguf_with_tensors(None, &[("blk.0.ffn_gate_exps.weight", 500)]);
+        assert!(parse_gguf_moe_layout(&data, file_size, 1_000_000).is_none());
     }
 
     #[test]
