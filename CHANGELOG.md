@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.7 — 2026-09-22
 
 ### Added
 - **Spark-X2.5 is in the catalog, in both sizes.** `spark-x2.5-1.7b` and
