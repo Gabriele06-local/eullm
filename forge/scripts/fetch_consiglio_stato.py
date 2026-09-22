@@ -123,22 +123,62 @@ def build_url(nrg: str, provvedimento: str, suffix: str) -> str:
     return f"{PORTAL}?{q}"
 
 
-def fetch(url: str, timeout: int, user_agent: str) -> str | None:
+def fetch(url: str, timeout: int, user_agent: str) -> tuple[str | None, str]:
+    """Return (body, reason). `reason` is "ok" or a short diagnosis.
+
+    The reason is returned rather than swallowed because the three ways this
+    fails need three different responses and look identical from the outside:
+    503 means the portal is refusing this host and no amount of retrying will
+    help, 404 means the nomeFile suffix is wrong and another should be tried,
+    and a timeout means the network. The first version returned None for all
+    of them, so a run that failed 900 times could not say why.
+    """
     req = urllib.request.Request(url, headers={"User-Agent": user_agent})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             charset = r.headers.get_content_charset() or "utf-8"
-            return r.read().decode(charset, errors="replace")
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
-        return None
+            return r.read().decode(charset, errors="replace"), "ok"
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except urllib.error.URLError as e:
+        return None, f"network: {e.reason}"
+    except TimeoutError:
+        return None, "timeout"
+    except OSError as e:
+        return None, f"os: {e}"
 
 
 def read_index(path: Path, only_sentenze: bool) -> list[dict]:
+    """Parse the OpenGA CSV, refusing anything that is not one.
+
+    A failed download leaves an HTML error page at the path the caller asked
+    for, and `csv.DictReader` parses HTML happily — into one column of
+    nonsense. Without this check that surfaces an hour later as "every fetch
+    failed", which is the wrong diagnosis entirely.
+    """
     with path.open(encoding="utf-8-sig", newline="") as f:
         head = f.read(8192)
+        if head.lstrip()[:1] == "<":
+            raise SystemExit(
+                f"[err] {path} is HTML, not CSV — the index download failed and "
+                f"saved an error page. Re-download it and check the first line:\n"
+                f"      head -1 {path}"
+            )
         f.seek(0)
         delim = ";" if head.count(";") > head.count(",") else ","
         rows = list(csv.DictReader(f, delimiter=delim))
+
+    required = {"TIPO_PROVVEDIMENTO", "NUMERO_RICORSO", "NUMERO_PROVVEDIMENTO"}
+    present = set(rows[0].keys()) if rows else set()
+    missing = required - present
+    if missing:
+        raise SystemExit(
+            f"[err] {path} is missing the columns this needs: "
+            f"{', '.join(sorted(missing))}.\n"
+            f"      Found: {', '.join(sorted(present)) or '(no columns)'}\n"
+            f"      Expected the OpenGA 'CDS - Sentenze' CSV."
+        )
+
     if only_sentenze:
         rows = [
             r for r in rows
@@ -169,6 +209,11 @@ def parse_args(argv=None) -> argparse.Namespace:
                    default="eullm-eval/0.1 (research; contact info@i3k.eu)",
                    help="identify honestly; anonymous bulk scraping of a court "
                         "portal is both rude and a good way to get blocked")
+    p.add_argument("--give-up-after", type=int, default=8,
+                   help="stop after this many consecutive failures while "
+                        "nothing has been fetched (default: 8). The first "
+                        "version had no such limit and spent ninety minutes "
+                        "failing before it said so.")
     p.add_argument("--all-kinds", action="store_true",
                    help="keep ordinanze and decreti too (default: SENTENZA only)")
     return p.parse_args(argv)
@@ -209,7 +254,10 @@ def main(argv=None) -> int:
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     written = attempted = 0
-    rejected_short = rejected_http = 0
+    rejected_short = 0
+    reasons: dict[str, int] = {}
+    consecutive_failures = 0
+    aborted = False
 
     with args.out.open("a", encoding="utf-8") as sink:
         for row in rows:
@@ -226,19 +274,42 @@ def main(argv=None) -> int:
             attempted += 1
             text = None
             for suffix in NOME_FILE_SUFFIXES:
-                raw = fetch(build_url(nrg, prov, suffix), args.timeout,
-                            args.user_agent)
+                raw, reason = fetch(build_url(nrg, prov, suffix), args.timeout,
+                                    args.user_agent)
                 time.sleep(args.delay)
                 if raw is None:
-                    rejected_http += 1
+                    reasons[reason] = reasons.get(reason, 0) + 1
                     continue
                 candidate = strip_html(raw)
                 if looks_like_a_ruling(candidate):
                     text = candidate
                     break
+                reasons["fetched but not a ruling"] = (
+                    reasons.get("fetched but not a ruling", 0) + 1
+                )
                 rejected_short += 1
+
+            # Stop early when nothing is working.
+            #
+            # The first version had no such check and ran ninety minutes
+            # against a portal refusing every request, then reported the
+            # failure at the end. Whatever is wrong — a blocked host, a
+            # changed URL scheme, no network — is already knowable after a
+            # handful of attempts, and nine hundred more requests neither
+            # diagnose it nor are polite to the server.
             if text is None:
+                consecutive_failures += 1
+                if consecutive_failures >= args.give_up_after and written == 0:
+                    aborted = True
+                    print(
+                        f"\n[cds] {consecutive_failures} attempts in a row failed "
+                        f"and nothing has been fetched — stopping instead of "
+                        f"working through {len(rows):,} more.",
+                        file=sys.stderr,
+                    )
+                    break
                 continue
+            consecutive_failures = 0
 
             rec = {
                 "text": text,
@@ -261,15 +332,42 @@ def main(argv=None) -> int:
 
     print(f"\n[cds] written   {written} rulings → {args.out}", file=sys.stderr)
     print(f"[cds] attempted {attempted}", file=sys.stderr)
-    print(f"[cds] discarded {rejected_short} too short / not a ruling, "
-          f"{rejected_http} network or HTTP failures", file=sys.stderr)
+    if reasons:
+        print("[cds] failures by reason:", file=sys.stderr)
+        for reason, count in sorted(reasons.items(), key=lambda kv: -kv[1]):
+            print(f"[cds]   {count:5d}  {reason}", file=sys.stderr)
+
     if written == 0:
-        print(
-            "[cds] Nothing was written. If every attempt failed at the network "
-            "layer, the portal is refusing this host — it answers 503 to "
-            "datacenter addresses. Run this from a normal connection.",
-            file=sys.stderr,
-        )
+        # Name the likely cause from what was actually observed, instead of
+        # offering the same three guesses whatever happened.
+        top = max(reasons, key=reasons.get) if reasons else ""
+        print("\n[cds] Nothing was written.", file=sys.stderr)
+        if "503" in top:
+            print(
+                "[cds] Every request came back 503: the portal is refusing this\n"
+                "[cds] host. It does that for datacenter addresses. Run this from\n"
+                "[cds] an ordinary connection, or from the cluster's login node.",
+                file=sys.stderr,
+            )
+        elif "404" in top:
+            print(
+                "[cds] Every request came back 404: the addresses are wrong, not\n"
+                f"[cds] refused. The nomeFile suffixes tried were "
+                f"{', '.join(NOME_FILE_SUFFIXES)}; open one ruling in a browser\n"
+                "[cds] from the portal's own search and read the suffix out of the\n"
+                "[cds] URL, then add it to NOME_FILE_SUFFIXES.",
+                file=sys.stderr,
+            )
+        elif "not a ruling" in top:
+            print(
+                "[cds] Pages were fetched but none parsed as a ruling — the portal\n"
+                "[cds] is probably returning a search form or a consent page at\n"
+                "[cds] HTTP 200. Save one by hand and look at it.",
+                file=sys.stderr,
+            )
+        elif top:
+            print(f"[cds] Dominant failure: {top}. Check connectivity first.",
+                  file=sys.stderr)
         return 1
     print("[cds] next: forge/scripts/make_ppl_corpus.py --val "
           f"{args.out} --out <corpus.txt> --target-chunks 40", file=sys.stderr)
