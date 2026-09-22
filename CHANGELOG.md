@@ -16,6 +16,14 @@ something changed, less so for understanding what it means.
 ## Unreleased
 
 ### Added
+- **Three more model architectures load**, as a consequence of moving the
+  vendored llama.cpp from b10818 (5 September) to b11100: `spark2_5`,
+  `hrm_text` and `maple`. The engine now knows 152 architectures. The C
+  interface barely moved in those two and a half weeks: the multimodal and
+  backend headers are byte-identical, and the one signature that changed
+  (`llama_sampler_chain_n`, `int` to `int32_t`) is the same type on every
+  platform we build for.
+
 - **The model browser now shows a repository's licence before you download
   it.** Browsing a HuggingFace repo in the web UI puts the licence next to the
   architecture, with a link straight to the terms — the licence file when the

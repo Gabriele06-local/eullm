@@ -1087,7 +1087,7 @@ The R&D code lives in git history at tag [`EuLLM-v0.5.7`](https://github.com/eul
 
 [llama.cpp #21038](https://github.com/ggml-org/llama.cpp/pull/21038), *"llama : rotate activations for better quantization"*, was merged upstream on **1 April 2026**, authored by llama.cpp's lead maintainer. It is the Walsh-Hadamard half of the TurboQuant idea without the Lloyd-Max codebook: Q, K and V are multiplied by an orthonormal Hadamard matrix before the KV cache is written and rotated back after attention. Rotation spreads the outlier channels that make a low-bit KV cache lossy, and because the matrix is its own inverse it changes nothing mathematically — the cache stays in the ordinary `q4_0` / `q8_0` formats, readable by any llama.cpp.
 
-It reached us exactly as the section above predicted, through a submodule bump and no engineering of our own. The llama.cpp we pin (`4d91760`, b10818) carries it in `src/llama-kv-cache.cpp`, with a Fast Walsh-Hadamard Transform kernel for CPU, CUDA/HIP, Metal, Vulkan and SYCL, so every published EuLLM binary — CPU, CUDA, ROCm, Vulkan, Metal — contains it.
+It reached us exactly as the section above predicted, through a submodule bump and no engineering of our own. The llama.cpp we pin (`7ab4ee7`, b11100) carries it in `src/llama-kv-cache.cpp`, with a Fast Walsh-Hadamard Transform kernel for CPU, CUDA/HIP, Metal, Vulkan and SYCL, so every published EuLLM binary — CPU, CUDA, ROCm, Vulkan, Metal — contains it.
 
 **It engages only where it can help.** The rotation is enabled per cache, at model load, when the KV type is quantized **and** the head dimension is a multiple of 64:
 
