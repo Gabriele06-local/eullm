@@ -2556,6 +2556,82 @@ diligenza manuale.
   regola di `engine/CLAUDE.md`, una build pulita non basta. Se possibile,
   caricare anche un vero GGUF Qwen3.8-Flash-Next per confermare che
   l'architettura funzioni davvero end-to-end e non solo a compile-time.
+- [ ] **H4-J · Bump di `llama.cpp` da `b10818` a `b11100` e ri-vendor di
+  `llama-cpp-rs` 0.1.154 → 0.1.156: architetture `spark2_5`, `hrm_text`,
+  `maple`, zero rotture d'API — in attesa di validazione su hardware
+  reale** *(P2)*
+  Occasione diretta: mettere la serie Spark-X2.5 in catalogo. `spark2_5`
+  entra a monte esattamente a `b10828` — verificato un tag alla volta,
+  `b10827` non ce l'ha — quindi col pin fermo a `b10818` il modello si
+  sarebbe scaricato e non caricato. Distanza recuperata: 18 giorni,
+  `4d917609` (4 settembre) → `7ab4ee7b` (22 settembre), dentro la regola
+  del bump piccolo e frequente invece delle 3 settimane/400 build di H4-I.
+
+  **A differenza di H4-I e H3-Y, nessuna rottura d'API da portare a mano.**
+  Misurato sui sorgenti prima di toccare il pin, non dedotto:
+  * `include/llama.h`: 40 righe di diff. Una variante d'enum nuova
+    (`LLAMA_VOCAB_TYPE_TEST`), una funzione nuova
+    (`llama_adapter_lora_init_from_file_ptr`), due righe di commento, e
+    `llama_sampler_chain_n` che passa da `int` a `int32_t` — lo stesso
+    tipo su ogni piattaforma per cui compiliamo, quindi bindgen produce
+    `i32` in entrambi i casi e non cambia nulla.
+  * `tools/mtmd/mtmd.h`, `tools/mtmd/mtmd-helper.h`,
+    `ggml/include/ggml-backend.h`: **byte-identici**. Sono esattamente i
+    due header che avevano rotto H3-R e H4-I.
+  * `ggml/include/ggml.h`: le 7 righe che spariscono nel diff sono
+    l'enum `ggml_prec` spostato, non rimosso — ogni simbolo è ancora
+    presente, e dal nostro Rust non ne usiamo nessuno.
+
+  **Ri-vendor fatto per merge a tre vie, non per copia.** Base upstream
+  0.1.154, un lato il nostro albero vendorizzato, l'altro 0.1.156: un
+  solo conflitto, la de-inlining di `[workspace.dependencies]` in
+  `llama-cpp-2/Cargo.toml`, che è una nostra scelta deliberata e va
+  tenuta. Tutte le aggiunte elencate nel commento di quel file sono state
+  verificate presenti una per una a merge fatto. È il metodo che H3-Y
+  avrebbe evitato di perdere `model.rs`/`wrapper_common.*` sovrascrivendoli
+  in blocco, ed è ora scritto nel commento stesso come procedura.
+
+  Cosa porta 0.1.156, oltre all'allineamento:
+  1. `model.rs`, `decode_piece`: il buffer di destinazione era allocato a
+     `bytes.len()` assumendo un byte in ingresso = un carattere in uscita,
+     e `decode_to_string` non fa mai crescere la destinazione. Quando la
+     decodifica produce più byte dell'input — un byte non valido diventa
+     U+FFFD, che ne occupa tre — l'uscita veniva troncata in silenzio.
+     Ora la capacità viene da `max_utf8_buffer_length` e un `assert!`
+     verifica che il token sia stato consumato per intero.
+  2. `llguidance_sampler.rs`: `llama_sampler_i` ha guadagnato a monte i
+     campi `backend_reset` e `copy_state`. Non ci tocca oggi (compiliamo
+     con `features = ["sampler"]`, non `llguidance`), ma è la differenza
+     fra un wrapper che sta dietro al C e uno che comincia a staccarsi.
+  3. `lib.rs`/`log.rs`: i log di mtmd instradati a `tracing` con uno stato
+     separato, così i log CONT di llama.cpp, ggml e mtmd non si
+     intrecciano più fra loro.
+
+  **La nostra patch `mtmd.rs` resta necessaria e non era elencata.** Il 4°
+  parametro `opt` di `mtmd_helper_bitmap_init_from_file`/`_from_buf`
+  (punto 2 di H4-I) c'è ancora a `b11100`, e `utilityai/llama-cpp-rs` non
+  si è mai adeguato a quella firma: senza la nostra patch il crate non
+  compila contro nessun llama.cpp da `b10818` in poi. È l'unica patch di
+  compatibilità API ancora viva delle quattro di H4-I, ed è stata aggiunta
+  alla lista in `llama-cpp-2/Cargo.toml`, dove mancava.
+
+  Lista architetture rigenerata con `tools/gen-llama-archs.sh`: 149 → 152.
+  Il passo di CI che confronta il generato col committato copre il resto.
+
+  Validato qui, in locale, senza GPU in questo ambiente: `cargo build`
+  pulito con le feature di default, `cargo test` verde (348 test),
+  `cargo clippy --no-deps --all-targets -- -D warnings` pulito (stessi
+  flag di CI). I percorsi CUDA, ROCm, Vulkan e Metal non sono validati
+  qui — restano ai job di CI.
+
+  **Da validare su hardware reale prima che questo bump arrivi su `main`**:
+  ricaricare ogni famiglia di modelli disponibile in locale, incluso il
+  template di ragionamento DeepSeek e un modello multimodale (è il
+  percorso `mtmd`, quello che questo bump tocca di più). In più, caricare
+  davvero un GGUF Spark-X2.5 — `XHToken/Spark-X2.5-4B-GGUF`, che è la
+  ragione del bump — per confermare che `spark2_5` funzioni end-to-end e
+  non solo a compile-time. Resta aperta anche la verifica di `qwen4exp`
+  di H4-I, mai eseguita.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci

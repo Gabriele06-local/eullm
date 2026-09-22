@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "updated_at": "2026-08-11",
-  "notes": "Catalog of permissively-licensed open-weight models, curated June 2026. Each entry's hf_repo + hf_filename has been HEAD-verified on huggingface.co at the time of update. unsloth/* is the preferred GGUF source (dynamic-quant, kept current); bartowski/* is the fallback when an unsloth repo is gated or absent. Models older than the listed entries (Qwen3-72B which never shipped, Mixtral-8x7B v1, Mistral-7B-v0.3, Mistral-Small-22B-2409, granite-3.1) were removed as either non-existent, gated, or superseded by the entries below. SHA256 digests are intentionally empty so the catalog stays usable without a multi-TB pre-scan: the engine treats empty digests as 'skip verification with a warning'.",
+  "updated_at": "2026-09-22",
+  "notes": "Catalog of permissively-licensed open-weight models, curated June 2026. Each entry's hf_repo + hf_filename has been HEAD-verified on huggingface.co at the time of update. unsloth/* is the preferred GGUF source (dynamic-quant, kept current); bartowski/* is the fallback when an unsloth repo is gated or absent. Models older than the listed entries (Qwen3-72B which never shipped, Mixtral-8x7B v1, Mistral-7B-v0.3, Mistral-Small-22B-2409, granite-3.1) were removed as either non-existent, gated, or superseded by the entries below. SHA256 digests are the HuggingFace LFS object id of the exact file, which is the sha256 of its contents — no download is needed to fill one in. The engine treats an empty digest as 'skip verification with a warning', so an entry can ship without one, but every entry currently has one.",
   "models": [
     {
       "id": "qwen3-0.6b",
@@ -86,6 +86,37 @@
       "recommended": false
     },
     {
+      "id": "spark-x2.5-1.7b",
+      "name": "Spark-X2.5 1.7B",
+      "description": "Hybrid attention (one full-attention layer per three sliding-window ones) with a 1M-token native context. Runs on almost any machine.",
+      "params_b": 1.7,
+      "quantization": "Q4_K_M",
+      "size_bytes": 1100000000,
+      "vram_gb": 2,
+      "languages": [
+        "en",
+        "zh",
+        "it",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "nl"
+      ],
+      "domain": "general",
+      "license": "Apache-2.0",
+      "tags": [
+        "instruct",
+        "multilingual",
+        "long-context",
+        "agent"
+      ],
+      "hf_repo": "XHToken/Spark-X2.5-1.7B-GGUF",
+      "hf_filename": "Spark-X2.5-1.7B-Q4_K_M.gguf",
+      "digest": "sha256:902bde2522394954ac17821b3e5fd0df02defbc6944f122253f2580acf0503f4",
+      "recommended": false
+    },
+    {
       "id": "smollm3-3b",
       "name": "SmolLM3 3B",
       "description": "SmolLM3, the latest HuggingFace small model. Strong reasoning per parameter, ~2 GB Q4.",
@@ -136,6 +167,38 @@
       "hf_filename": "Qwen3-4B-Q4_K_M.gguf",
       "digest": "sha256:f6f851777709861056efcdad3af01da38b31223a3ba26e61a4f8bf3a2195813a",
       "recommended": true
+    },
+    {
+      "id": "spark-x2.5-4b",
+      "name": "Spark-X2.5 4B",
+      "description": "Hybrid attention with a 1M-token native context, tuned for tool use and agent harnesses. Strong coding for its size, in ~2.6 GB.",
+      "params_b": 4.0,
+      "quantization": "Q4_K_M",
+      "size_bytes": 2600000000,
+      "vram_gb": 4,
+      "languages": [
+        "en",
+        "zh",
+        "it",
+        "de",
+        "fr",
+        "es",
+        "pt",
+        "nl"
+      ],
+      "domain": "general",
+      "license": "Apache-2.0",
+      "tags": [
+        "instruct",
+        "multilingual",
+        "long-context",
+        "agent",
+        "code"
+      ],
+      "hf_repo": "XHToken/Spark-X2.5-4B-GGUF",
+      "hf_filename": "Spark-X2.5-4B-Q4_K_M.gguf",
+      "digest": "sha256:adfcfa19a4ed6a5985da8bf565fe15f8e1a7e131d79bae2d19d48d1c40109428",
+      "recommended": false
     },
     {
       "id": "gemma-4-e4b",

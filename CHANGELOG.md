@@ -13,7 +13,35 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.7 — 2026-09-22
+
+### Added
+- **Spark-X2.5 is in the catalog, in both sizes.** `spark-x2.5-1.7b` and
+  `spark-x2.5-4b`, Apache-2.0, from the publisher's own GGUF repositories.
+  They use a hybrid attention layout — one full-attention layer for every
+  three sliding-window ones — which is what buys them a 1M-token context
+  without the memory a full-attention model of that length would need.
+
+- **Three more model architectures load**, as a consequence of moving the
+  vendored llama.cpp from b10818 (5 September) to b11100: `spark2_5`,
+  `hrm_text` and `maple`. The engine now knows 152 architectures. The C
+  interface barely moved in those two and a half weeks: the multimodal and
+  backend headers are byte-identical, and the one signature that changed
+  (`llama_sampler_chain_n`, `int` to `int32_t`) is the same type on every
+  platform we build for.
+
+- **The model browser now shows a repository's licence before you download
+  it.** Browsing a HuggingFace repo in the web UI puts the licence next to the
+  architecture, with a link straight to the terms — the licence file when the
+  repo names one, the model page otherwise. Repositories that ship under terms
+  of their own are labelled as such and named, `qwen-community-1.0` and the
+  like, rather than being flattened into a standard licence they are not.
+
+  The licence is reported, not judged. Whether terms that forbid commercial
+  use or hosting allow what you intend to do is between you and the licence;
+  what changes here is that you see it before the download instead of after.
+  Repositories the Hub states nothing for say exactly that, which is not the
+  same as having no licence.
 
 ### Fixed
 - **A `keep_alive` ending in an accented letter, an emoji or any other

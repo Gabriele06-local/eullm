@@ -1,17 +1,25 @@
-# Vendored at utilityai/llama-cpp-rs main @ 09fc815d (2026-08-18), which pins
-# llama.cpp at e79e4bf6 (b10405) — replacing the 2026-07-31 vendoring at
-# 8625c7c4 (see H3-P/H3-R/H3-Y in docs/backlog-fix-e-hardening.md).
+# Vendored at utilityai/llama-cpp-rs 0.1.156 @ 63e5497 (2026-09-22), replacing
+# the 0.1.154 vendoring at 09fc815d (2026-08-18) and, before that, the
+# 2026-07-31 one at 8625c7c4 (see H3-P/H3-R/H3-Y in
+# docs/backlog-fix-e-hardening.md).
 #
-# The llama.cpp SUBMODULE HAS MOVED SINCE and this crate has not: it is at
-# 4d917609 (b10818, 2026-09-05), bumped on its own without re-vendoring
-# llama-cpp-rs. So the b10405 above dates the Rust crate, not the C++ tree —
-# read the pin from `git ls-tree HEAD
+# The llama.cpp submodule moved in the same change, to 7ab4ee7 (b11100,
+# 2026-09-22) — the first time since 09fc815d that the two have moved
+# together, which is the state to keep them in. The version above still dates
+# the Rust crate and not the C++ tree, so read the pin from `git ls-tree HEAD
 # engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`, never from here.
 #
-# Upstream
-# has since caught up past and superseded the three local API patches that
-# base needed (load_mode, mtmd_input_text.text_len,
-# mtmd_helper_bitmap_wrapper); none remain.
+# Upstream has caught up past and superseded the three API patches the
+# 2026-07-31 base needed (load_mode, mtmd_input_text.text_len,
+# mtmd_helper_bitmap_wrapper); none of those remain. One API patch still
+# does — `mtmd.rs`, in the list below.
+#
+# Re-vendor by three-way merge, not by copying upstream over this tree: take
+# the upstream tag this comment names as the base, our tree as one side and
+# the new tag as the other, and let git carry both. The 0.1.156 re-vendor was
+# done that way and produced exactly one conflict (the de-inlined
+# [workspace.dependencies] below); copying wholesale is what lost the
+# additions in H3-Y.
 #
 # EuLLM ALSO carries whole functionality upstream doesn't have, on top of
 # whichever base this comment names — every one of these must be re-applied
@@ -39,6 +47,12 @@
 #     upstream never exposed the raw struct's `n_outputs_max` field, and its
 #     n_batch default costs ~300 MiB of compute buffer per loaded model for
 #     callers that read one logit per sequence per step (see the method doc).
+#   - `mtmd.rs`: the `opt` argument threaded into
+#     `mtmd_helper_bitmap_init_from_file` and `_from_buf`, filled from
+#     `mtmd_helper_init_opt_default()`. Upstream llama-cpp-rs has never
+#     adapted to that signature, so this is the one API-compat patch still
+#     load-bearing: without it the crate does not compile against any
+#     llama.cpp from b10818 on.
 #   - `llama-cpp-sys-2/build.rs`: three CMake defines that are EuLLM policy
 #     rather than upstream behaviour, each with its reasoning inline —
 #     `GGML_METAL=OFF` whenever the `metal` feature is absent (ggml defaults it
@@ -50,7 +64,7 @@
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"
-version = "0.1.154"
+version = "0.1.156"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/utilityai/llama-cpp-rs"
@@ -59,11 +73,12 @@ repository = "https://github.com/utilityai/llama-cpp-rs"
 
 [dependencies]
 enumflags2 = "0.7.12"
-llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.154" }
+llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.156" }
 # EuLLM vendoring: this crate lives under the workspace root (so Cargo treats
 # it as a member) but the EuLLM root defines no [workspace.dependencies]; the
 # upstream `{ workspace = true }` inheritance is de-inlined to upstream's exact
-# values (utilityai/llama-cpp-rs main @ 09fc815d [workspace.dependencies]).
+# values (utilityai/llama-cpp-rs 0.1.156 @ 63e5497 [workspace.dependencies],
+# unchanged since 0.1.154).
 thiserror = "2"
 tracing = "0.1"
 tracing-core = "0.1"
@@ -109,7 +124,7 @@ dynamic-backends = ["llama-cpp-sys-2/dynamic-backends"]
 
 
 [target.'cfg(all(target_os = "macos", any(target_arch = "aarch64", target_arch = "arm64")))'.dependencies]
-llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.154", features = [
+llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.156", features = [
     "metal",
 ] }
 
