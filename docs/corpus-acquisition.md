@@ -35,6 +35,27 @@ year is a field, not a bookkeeping decision) and because it measures the
 harder and more realistic thing: whether a model holds up on judgments handed
 down after the ones it read.
 
+**The 2017-2024 side is training data, and is meant to be used.** It is the
+corpus of the arm in
+`forge/training/configs/leonardo/distill_qwen3_30b_a3b_to_4b_cds.yaml`, which
+holds every other variable identical to the split arm so that the difference
+between the two is the corpus and nothing else.
+
+**The split is enforced, not remembered.**
+`forge/scripts/check_corpus_holdout.py` scans the formatted `train.jsonl` and
+exits non-zero if any Consiglio di Stato record is dated 2025 or later — or
+if a record from that source carries no year at all, since a record that
+cannot be shown to be outside the range is not evidence that it is. The
+Leonardo launcher runs it before the job does anything expensive.
+
+This is a gate rather than a warning because the failure is silent in the
+worst possible way: a contaminated corpus trains normally and reports a
+*better* number, and it invalidates retroactively every transfer-curve point
+already measured, since those would no longer be comparable with the ones
+after. A blanket ban on recent years would be simpler and wrong — Cassazione
+2021-2026 is all training data, so only the Consiglio di Stato years are
+held out.
+
 ## Processing, in order
 
 1. **Anonymisation** (`forge/eullm_forge/datasets/anonymize.py`). Judgments
