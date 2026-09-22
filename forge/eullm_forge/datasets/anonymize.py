@@ -37,7 +37,8 @@ The substitution itself is one-way: `[PERSONA_1]` carries no information about
 the name it replaced. But the *record* is not anonymous, for two reasons:
 
 1. `anonymize_record` rewrites the ``text`` field only. The source record
-   (see ``datasets/italgiure.py``) also carries ``sentence_id``,
+   (produced by the ItalGiure fetcher, which lives in the separate
+   eullm-priv repository) also carries ``sentence_id``,
    ``article_num`` and ``metadata.ecli`` — each of which uniquely identifies
    the ruling in a public archive. It used to carry ``url`` as well, a direct
    link to the original un-redacted PDF; `anonymize_record` now drops it (see
