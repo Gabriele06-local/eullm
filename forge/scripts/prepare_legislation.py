@@ -91,6 +91,12 @@ def _write_source(
                 record = {
                     "text": ch,
                     "source_id": source_record_id,
+                    # The document this chunk came from. format_pretraining
+                    # groups the train/val split on sentence_id, and a record
+                    # without one becomes its own group — scattering one
+                    # article's chunks across both sides, the leakage the
+                    # per-document split exists to prevent.
+                    "sentence_id": source_record_id,
                     "kind": "legge",
                     "code": source_id,
                     "article_num": article_num,
