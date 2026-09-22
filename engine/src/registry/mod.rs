@@ -709,6 +709,56 @@ pub async fn list_hf_ggufs(
     Ok(ggufs)
 }
 
+/// The `general.architecture` the Hub reports for a repo's GGUF files, if it
+/// reports one.
+///
+/// `Ok(None)` and `Err(..)` are not the same answer and callers must not merge
+/// them. The Hub fills this in by parsing a GGUF it found in the repo, and it
+/// does not always manage — a sharded repo, an unusual layout, a file it could
+/// not read. "The Hub did not say" is not "this model will not load", and
+/// telling a user the second when we only know the first sends them away from
+/// a model that works.
+///
+/// Hits the same `https://huggingface.co/api/models/{repo}` document
+/// [`list_hf_ggufs`] reads; the architecture was always in that body, and was
+/// always discarded.
+pub async fn hf_declared_architecture(
+    repo: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let url = format!("https://huggingface.co/api/models/{repo}");
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let response = client.get(&url).send().await?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "HuggingFace API returned HTTP {} for {repo}",
+            response.status()
+        )
+        .into());
+    }
+
+    let body: serde_json::Value = response.json().await?;
+    Ok(architecture_from_model_info(&body))
+}
+
+/// Pull `gguf.architecture` out of a Hub model document.
+///
+/// Split from the request so the part with rules in it can be tested without
+/// a network: the whole value of this function is telling "the Hub says
+/// `spark2_5`" apart from "the Hub said nothing", and a blank string is the
+/// second dressed as the first.
+fn architecture_from_model_info(body: &serde_json::Value) -> Option<String> {
+    body.get("gguf")
+        .and_then(|g| g.get("architecture"))
+        .and_then(|a| a.as_str())
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(str::to_string)
+}
+
 /// Resolve a HuggingFace ref to a single GGUF filename to download.
 ///
 /// Combines [`list_hf_ggufs`] and [`select_gguf`]. Each returned string is an
@@ -845,6 +895,44 @@ mod tests {
     #[test]
     fn split_ranges_empty() {
         assert!(split_ranges(0, 16).is_empty());
+    }
+
+    /// The three states this feeds, and why the third is not the second. A
+    /// repo the Hub could not parse returns `None`, exactly like a repo with
+    /// no GGUF at all — and `None` must reach the user as "not known", never
+    /// as "this build cannot load it". The shapes below are what the Hub
+    /// actually returns: `spark2_5` for Spark-X2.5, nothing at all for repos
+    /// whose layout it did not manage to read.
+    #[test]
+    fn an_architecture_is_reported_only_when_the_hub_states_one() {
+        let declared = serde_json::json!({ "gguf": { "architecture": "spark2_5" } });
+        assert_eq!(
+            architecture_from_model_info(&declared).as_deref(),
+            Some("spark2_5")
+        );
+
+        // Padded by the Hub, or by whoever wrote the file.
+        let padded = serde_json::json!({ "gguf": { "architecture": "  qwen4exp  " } });
+        assert_eq!(
+            architecture_from_model_info(&padded).as_deref(),
+            Some("qwen4exp")
+        );
+
+        // Every way of saying nothing.
+        for quiet in [
+            serde_json::json!({}),
+            serde_json::json!({ "gguf": {} }),
+            serde_json::json!({ "gguf": { "architecture": "" } }),
+            serde_json::json!({ "gguf": { "architecture": "   " } }),
+            serde_json::json!({ "gguf": { "architecture": 7 } }),
+            serde_json::json!({ "gguf": null }),
+        ] {
+            assert_eq!(
+                architecture_from_model_info(&quiet),
+                None,
+                "should report nothing for {quiet}"
+            );
+        }
     }
 
     #[test]

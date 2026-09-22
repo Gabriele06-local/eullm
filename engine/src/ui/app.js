@@ -1259,6 +1259,8 @@
     search: $("catalog-search"),
     results: $("catalog-results"),
     detail: $("catalog-detail"),
+    direct: $("catalog-direct"),
+    directInput: $("catalog-direct-input"),
   };
 
   const humanBytes = (n) => {
@@ -1284,6 +1286,20 @@
     p.className = "catalog-error";
     p.textContent = msg;
     where.appendChild(p);
+  }
+
+  // `hf.co/owner/repo` typed straight in, for a repo the search does not
+  // surface. It only jumps to the detail view a search result would have
+  // opened, so every check there — sizes, traffic lights, architecture —
+  // applies unchanged, and nothing new crosses the perimeter: the engine
+  // still talks to the Hub and to nothing else.
+  function repoIdFromInput(raw) {
+    const t = raw
+      .trim()
+      .replace(/^https?:\/\//i, "")
+      .replace(/^(hf\.co|huggingface\.co)\//i, "");
+    const m = t.match(/^([A-Za-z0-9][\w.-]*)\/([\w.-]+?)\/?$/);
+    return m ? `${m[1]}/${m[2]}` : null;
   }
 
   async function searchCatalog(q) {
@@ -1373,6 +1389,26 @@
     if (data.ram_total_bytes) parts.push(`${humanBytes(data.ram_total_bytes)} RAM`);
     basis.textContent = `Judged against: ${parts.join(", ")}. An estimate from the download size — the exact layer split is computed after the model is on disk.`;
     head.appendChild(basis);
+
+    // What the file says it is, and whether this binary has that architecture
+    // compiled in. Three states, and the third is a question rather than a
+    // verdict: the Hub does not always parse an architecture out of a repo,
+    // and "it did not say" must never be shown as "this will not load".
+    const arch = document.createElement("p");
+    arch.className = "catalog-note";
+    if (data.architecture && data.architecture_supported === false) {
+      arch.classList.add("catalog-warn");
+      arch.textContent =
+        `Architecture ${data.architecture}: this build cannot load it. Downloading would ` +
+        `spend the transfer for nothing — it needs a newer llama.cpp than this binary was built with.`;
+    } else if (data.architecture) {
+      arch.textContent = `Architecture ${data.architecture}: this build can load it.`;
+    } else {
+      arch.textContent =
+        "Architecture: the Hub did not report one for this repo, so whether this build can " +
+        "load it is not known until the file is on disk.";
+    }
+    head.appendChild(arch);
 
     if (data.mmproj) {
       const mm = document.createElement("p");
@@ -1499,6 +1535,20 @@
   catalogEls.open?.addEventListener("click", () => {
     catalogEls.modal.showModal();
     catalogEls.search.focus();
+  });
+  catalogEls.direct?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const id = repoIdFromInput(catalogEls.directInput.value);
+    if (!id) {
+      catalogEls.results.hidden = false;
+      catalogEls.detail.hidden = true;
+      catalogError(
+        catalogEls.results,
+        "Expected owner/repo, optionally prefixed with hf.co/ — for example hf.co/unsloth/Qwen3-8B-GGUF.",
+      );
+      return;
+    }
+    showRepo(id);
   });
   catalogEls.close?.addEventListener("click", () => catalogEls.modal.close());
 

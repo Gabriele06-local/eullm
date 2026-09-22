@@ -6,6 +6,7 @@ mod fit;
 mod gguf_patch;
 mod inference;
 mod lineedit;
+mod llama_archs;
 mod models;
 mod picker;
 mod registry;

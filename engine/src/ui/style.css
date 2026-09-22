@@ -751,6 +751,18 @@ dialog#catalog-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
 .quant-row .pull-state { font-size: 0.78rem; color: var(--text-dim); grid-column: 1 / -1; }
 .catalog-error { color: var(--danger); font-size: 0.85rem; }
 
+/* The architecture line when this build cannot load the model. It sits among
+   the other catalog notes and has to be the one that stops the eye, because
+   it is the only one that says the download is wasted. Colour is not the
+   whole signal — the sentence says it too, for anyone who cannot see the
+   difference. */
+.catalog-note.catalog-warn { color: var(--danger); font-weight: 600; }
+
+/* Opening a repo by name, under the search box it complements. */
+.catalog-direct { display: flex; gap: 0.5rem; }
+.catalog-direct input { flex: 1; min-width: 0; }
+.catalog-direct .btn-send.small { padding: 0.35rem 0.8rem; font-size: 0.85rem; }
+
 /* The detail panel scrolls its quantization list only: the repo name and the
    line saying what the traffic lights were judged against stay put. */
 .catalog-detail { overflow: hidden; display: flex; flex-direction: column; gap: 0.5rem; }

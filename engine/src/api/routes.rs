@@ -184,7 +184,13 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
             Json(json!({ "error": "`id` must be owner/repo" })),
         );
     }
-    let contents = match crate::registry::list_hf_repo_contents(id).await {
+    // Two Hub documents, fetched together: the file tree, and the model card
+    // the architecture was parsed out of. One user action should cost one wait.
+    let (contents, arch) = tokio::join!(
+        crate::registry::list_hf_repo_contents(id),
+        crate::registry::hf_declared_architecture(id),
+    );
+    let contents = match contents {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -193,6 +199,12 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
             );
         }
     };
+    // Not being able to read the architecture is not being unable to read the
+    // repo: the quantizations and their sizes are what this call is for, and
+    // they are already in hand. A failure here becomes "not declared", which
+    // the UI renders as a question rather than as a verdict.
+    let arch = arch.ok().flatten();
+    let arch_supported = arch.as_deref().map(crate::llama_archs::is_supported);
 
     let vram = crate::fit::vram_bytes();
     let ram = crate::fit::system_ram_bytes();
@@ -233,6 +245,12 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
             "vram_free_bytes": vram.map(|(f, _)| f),
             "vram_total_bytes": vram.map(|(_, t)| t),
             "ram_total_bytes": ram,
+            // Three states, and the third is not the second. `null` means the
+            // Hub did not say which architecture this is — not that this build
+            // cannot load it. Only `architecture_supported: false` means that,
+            // and only then may the UI tell a user the download is wasted.
+            "architecture": arch,
+            "architecture_supported": arch_supported,
         })),
     )
 }
