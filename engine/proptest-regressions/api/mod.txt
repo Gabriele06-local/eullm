@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bacffc685b6e98869aaa5b033be76b16ead751cce167b68a2b6f7c5b38733255 # shrinks to s = "¡"
+cc ff88a0ddbd45302687123a0cee20fe0b0851d6ba2cf219898463db48f1bb8a7b # shrinks to s = "¡"
+cc e6f5ed77192fa41a1c17f53719a04c9a13bd3a6cb3699a034389e95eea78a193 # shrinks to v = String("\u{e000}")

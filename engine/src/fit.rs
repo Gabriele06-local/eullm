@@ -1421,6 +1421,76 @@ mod tests {
         // head_dim = 5120/40 = 128 → 8 × 128 = 1024 elems/token/layer, K and V alike.
         assert_eq!(info.kv_elems_per_token_per_layer(), Some((1024.0, 1024.0)));
     }
+
+    // ── Properties ───────────────────────────────────────────────────────
+    //
+    // A GGUF is bytes we did not write. `eullm pull hf.co/...` records no
+    // digest, so a corrupt or hostile file reaches this parser intact, and
+    // #490 showed what one integer in it can buy: a four-billion-iteration
+    // loop and a 32 GiB allocation, both under the lock that serialises model
+    // swaps.
+    //
+    // Uniformly random bytes would fail the magic check and never get inside,
+    // so the strategy keeps a valid prelude and randomises what follows —
+    // header fields first, then the metadata block. That is where the numbers
+    // the sizer trusts actually live. (Reaching deeper than this is what a
+    // coverage-guided fuzzer is for; a property test cannot guess its way
+    // into a nested branch.)
+    use proptest::prelude::*;
+
+    /// A GGUF prelude that passes the magic check, followed by arbitrary bytes.
+    fn gguf_shaped() -> impl Strategy<Value = Vec<u8>> {
+        (
+            any::<u32>(),
+            any::<u64>(),
+            any::<u64>(),
+            proptest::collection::vec(any::<u8>(), 0..512),
+        )
+            .prop_map(|(version, tensor_count, kv_count, rest)| {
+                let mut b = Vec::new();
+                b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+                b.extend_from_slice(&version.to_le_bytes());
+                b.extend_from_slice(&tensor_count.to_le_bytes());
+                b.extend_from_slice(&kv_count.to_le_bytes());
+                b.extend_from_slice(&rest);
+                b
+            })
+    }
+
+    proptest! {
+        /// No sequence of bytes makes the header parser panic. It answers or
+        /// gives up; it never takes the process with it.
+        #[test]
+        fn parse_gguf_header_never_panics(data in proptest::collection::vec(any::<u8>(), 0..1024)) {
+            let _ = parse_gguf_header(&data);
+        }
+
+        /// Same, for bytes that get past the magic and into the parsing proper.
+        #[test]
+        fn parse_gguf_header_never_panics_on_well_formed_prelude(data in gguf_shaped()) {
+            let _ = parse_gguf_header(&data);
+        }
+
+        /// #490 as a rule rather than three examples. The parser deliberately
+        /// reports whatever the file claims; the ceiling lives in the
+        /// consumers, and there are two of them, which is the whole reason to
+        /// state this over every absurd count instead of trusting one call
+        /// site to remember. A regression does not fail this assertion — it
+        /// hangs the test in a four-billion-iteration loop, which is the
+        /// loudest signal this class allows.
+        #[test]
+        fn no_absurd_layer_count_ever_reaches_the_sizing_loop(n in (MAX_LAYERS + 1)..=u32::MAX) {
+            let d = compute_fit(
+                Some((8 * 1024 * 1024 * 1024, 8 * 1024 * 1024 * 1024)),
+                Some(&info_layers(n)),
+                20_000_000_000,
+                4096,
+                F16.0,
+                F16.1,
+            );
+            prop_assert!(matches!(d, FitDecision::Unknown { .. }), "{n} layers gave {d:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1888,6 +1958,41 @@ mod moe_layout_tests {
         assert!(is_expert_tensor_name("blk.0.ffn_gate_up_exps.weight"));
         assert!(!is_expert_tensor_name("blk.0.ffn_gate.weight"));
         assert!(!is_expert_tensor_name("blk.0.attn_q.weight"));
+    }
+
+    // ── Properties ───────────────────────────────────────────────────────
+    //
+    // The other half of #490. This entry point is reached from `run_moe_fit`
+    // without passing through `compute_fit`, so the ceiling checked there
+    // covers nothing here — which is exactly the kind of gap a rule closes
+    // and an example does not.
+    use proptest::prelude::*;
+
+    proptest! {
+        /// No layer count past the ceiling ever gets as far as sizing the
+        /// per-layer vector. The data is valid on purpose: with a real tensor
+        /// block the parser would otherwise reach the allocation, and at
+        /// `u32::MAX` that is 32 GiB. A regression here does not fail the
+        /// assertion, it takes the runner's memory with it.
+        #[test]
+        fn no_absurd_layer_count_ever_sizes_the_per_layer_vector(
+            n in (MAX_LAYERS + 1)..=u32::MAX,
+        ) {
+            let (data, file_size) =
+                make_gguf_with_tensors(None, &[("blk.0.ffn_gate_exps.weight", 500)]);
+            prop_assert!(parse_gguf_moe_layout(&data, file_size, n).is_none());
+        }
+
+        /// And no sequence of bytes makes it panic, whatever layer count it
+        /// is handed alongside them.
+        #[test]
+        fn parse_gguf_moe_layout_never_panics(
+            data in proptest::collection::vec(any::<u8>(), 0..1024),
+            file_size in any::<u64>(),
+            n in 0u32..=MAX_LAYERS,
+        ) {
+            let _ = parse_gguf_moe_layout(&data, file_size, n);
+        }
     }
 }
 

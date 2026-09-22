@@ -67,3 +67,10 @@ rustyline = { version = "18.0.1", default-features = false }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
+# Property testing for the parsers that read bytes we did not write: GGUF
+# headers, `keep_alive` out of a request body, durations off the CLI. Every
+# panic fixed in those this month (#454, #463, #483, #490) was one specific
+# value nobody had thought to put in a test; a property states the rule once
+# and lets proptest hunt for the value. Dev-only, so it never reaches a
+# published binary, and it runs inside the `cargo test` the CI already has.
+proptest = "1.11"

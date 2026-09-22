@@ -1047,13 +1047,19 @@ fn parse_duration_string(s: &str) -> Option<f64> {
     let s = s.trim();
     if s.is_empty() {
         // An empty (or whitespace-only) string has no number to split off:
-        // without this, `split_at(s.len() - 1)` underflows below.
+        // without this, the split below underflows.
         return None;
     }
     if let Ok(n) = s.parse::<f64>() {
         return Some(n);
     }
-    let (number, unit) = s.split_at(s.len() - 1);
+    // Split off the last CHARACTER, not the last byte. `s.len() - 1` lands
+    // inside a multi-byte one and panics the handler task: `"¡"` is the
+    // smallest input that does it, and a `keep_alive` of `"5à"` or `"30s€"`
+    // arrives from a request body like any other string. The empty case is
+    // already out above, so there is always a last character to measure.
+    let split = s.len() - s.chars().next_back().map_or(0, char::len_utf8);
+    let (number, unit) = s.split_at(split);
     let n: f64 = number.parse().ok()?;
     match unit {
         "s" => Some(n),
@@ -1235,6 +1241,104 @@ mod keep_alive_tests {
         let deadline = tokio::sync::Mutex::new(Some(tokio::time::Instant::now()));
         touch_deadline(&deadline, KeepAlive::Immediate, Some(Duration::from_secs(300)));
         assert!(deadline.try_lock().unwrap().is_none());
+    }
+
+    /// A duration whose last character is multi-byte used to panic the
+    /// handler task: the unit was split off by byte index, and `s.len() - 1`
+    /// lands inside such a character. The empty-string guard above covered
+    /// only the length-zero case. Found by the property below, which shrank
+    /// it to a single `"¡"`; kept here by name because a failing list reads
+    /// better than a seed hash.
+    #[test]
+    fn a_multibyte_tail_is_malformed_not_a_panic() {
+        for raw in ["¡", "5à", "30s€", "1h☃", "¡¡¡"] {
+            assert_eq!(
+                parse_keep_alive(Some(&serde_json::json!(raw))),
+                KeepAlive::Default
+            );
+            assert!(parse_keep_alive_flag(raw).is_err());
+        }
+        // The ASCII grammar is untouched.
+        assert_eq!(
+            parse_keep_alive_flag("5m").unwrap(),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            parse_keep_alive_flag("30s").unwrap(),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            parse_keep_alive_flag("2h").unwrap(),
+            Duration::from_secs(7200)
+        );
+    }
+
+    // ── Properties ───────────────────────────────────────────────────────
+    //
+    // The tests above name values somebody thought of. These name the rules
+    // instead, and let proptest hunt for the value that breaks one. Both
+    // panics fixed in this function during September were a value nobody had
+    // thought to write down: an empty string (#454) and `1e20` (#483). A
+    // property would have produced each of them on the first run.
+    //
+    // `keep_alive` arrives inside a request body, so the strategy generates
+    // what a body can actually carry: any JSON scalar, and strings both
+    // arbitrary and duration-shaped. Note that NaN and infinity cannot be
+    // JSON *numbers* — `serde_json` has no representation for them — which is
+    // exactly why `"nan"` and `"inf"` have to be reachable as strings.
+    use proptest::prelude::*;
+
+    /// Any JSON scalar a `keep_alive` field can hold.
+    fn any_keep_alive_value() -> impl Strategy<Value = serde_json::Value> {
+        prop_oneof![
+            proptest::num::f64::ANY.prop_map(|f| serde_json::json!(f)),
+            any::<i64>().prop_map(|i| serde_json::json!(i)),
+            ".*".prop_map(|s: String| serde_json::json!(s)),
+            // Duration-shaped strings, the grammar the parser documents.
+            (
+                any::<f64>(),
+                prop_oneof![Just(""), Just("s"), Just("m"), Just("h")]
+            )
+                .prop_map(|(n, u)| serde_json::json!(format!("{n}{u}"))),
+            any::<bool>().prop_map(|b| serde_json::json!(b)),
+            Just(serde_json::Value::Null),
+        ]
+    }
+
+    proptest! {
+        /// Whatever a request body carries, this returns — it never takes the
+        /// handler task down with it. The documented contract is that a
+        /// malformed value falls back to the server default; a panic is not a
+        /// fallback.
+        #[test]
+        fn parse_keep_alive_never_panics(v in any_keep_alive_value()) {
+            let _ = parse_keep_alive(Some(&v));
+        }
+
+        /// Sign decides the variant, and nothing else does. Negative means
+        /// "never unload", zero means "unload now" — for every negative and
+        /// every zero, not just the ones in the examples above.
+        #[test]
+        fn sign_alone_decides_forever_and_immediate(f in proptest::num::f64::NEGATIVE) {
+            prop_assert_eq!(parse_keep_alive(Some(&serde_json::json!(f))), KeepAlive::Forever);
+            prop_assert_eq!(parse_keep_alive(Some(&serde_json::json!(0.0))), KeepAlive::Immediate);
+        }
+
+        /// The CLI flag answers or refuses, never panics.
+        #[test]
+        fn parse_keep_alive_flag_never_panics(s in ".*") {
+            let _ = parse_keep_alive_flag(&s);
+        }
+
+        /// And when it answers, the answer is a positive duration. Accepting
+        /// zero here is the bug the flag parser exists to prevent: it would be
+        /// read as `Duration::ZERO` and evict every model the moment it loads.
+        #[test]
+        fn the_flag_never_accepts_a_non_positive_duration(s in ".*") {
+            if let Ok(d) = parse_keep_alive_flag(&s) {
+                prop_assert!(d > Duration::ZERO, "accepted {s:?} as {d:?}");
+            }
+        }
     }
 }
 
