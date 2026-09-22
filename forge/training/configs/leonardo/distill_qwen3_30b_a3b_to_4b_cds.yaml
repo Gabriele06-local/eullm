@@ -1,0 +1,95 @@
+# Phase 2 — the LARGER CORPUS. Same everything, Cassazione + Consiglio di
+# Stato 2017-2024 instead of Cassazione alone.
+#
+# The variable under test here is THE CORPUS, so the model side is copied
+# verbatim from distill_qwen3_30b_a3b_to_4b_split.yaml: same teacher, same
+# Phase-1 adapter, same student, same LoRA rank and alpha, same objective,
+# same schedule, same seed, same node layout. At matched steps on the same
+# held-out corpus, the difference between this arm and the split arm is the
+# corpus and nothing else. That is a question the report wants answered and
+# could not ask before: does more in-domain text from a *different court*
+# help, or does the gain saturate on Cassazione alone?
+#
+# THE YEARS ARE NOT NEGOTIABLE. Consiglio di Stato 2025-2026 is the held-out
+# evaluation set — the only clean number the project has, and the basis of
+# every point on the transfer curve. Only 2017-2024 may enter this corpus.
+# `docs/corpus-acquisition.md` states the partition; the check belongs in the
+# data directory's own provenance, and sbatch_phase2_cds.slurm refuses to
+# start without it. A corpus that quietly included 2025 would not fail — it
+# would produce a better-looking number that means nothing.
+#
+# ITS OWN RUN DIRECTORY AND ITS OWN output_dir, for the same reason the other
+# arms have theirs: two Phase-2 runs writing `checkpoint-N` into one directory
+# resume from each other's state.
+#
+#   export EULLM_RUN_DIR=$WORK/eullm_runs/legal_it_cds
+#
+# Launch:
+#   sbatch "$EULLM_REPO/forge/scripts/leonardo/sbatch_phase2_cds.slurm"
+
+### models
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+# The SAME Phase-1 adapter as every other arm. The teacher must not be a
+# variable — see the split config's header.
+teacher_adapter: ./checkpoints/qwen3_30b_a3b_legal_it_continued_pt
+student_model: Qwen/Qwen3-4B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+
+### teacher placement — design B, identical to the split arm
+teacher_device_map: split
+teacher_gpus: [0, 1]
+teacher_gib_per_gpu: 58
+student_device: cuda:2
+
+### student fine-tuning method
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+### data
+# Overridden by the data-dir argument distill.sh passes on the CLI; the
+# launcher points it at the combined corpus. Named here so that reading the
+# config alone says which corpus this arm belongs to.
+dataset_dir: ~/datasets/legal_it_cds
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+
+### training
+output_dir: ./checkpoints/qwen3_4b_legal_it_cds_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 1000
+# 300, as on the split arm: at ~333 steps/hour a longer interval hands the
+# next link of the chain up to three hours of work to redo. It is also the
+# sampling rate of the deliverable — every checkpoint is a shippable model.
+save_steps: 300
+save_total_limit: 3
+eval_steps: 1000
+eval_max_batches: 200
+logging_steps: 20
+
+### distillation
+kl_temperature: 2.0
+kl_alpha: 0.7
+
+### hardware
+bf16: true
+gradient_checkpointing: true
+seed: 42
