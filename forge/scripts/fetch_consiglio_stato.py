@@ -257,7 +257,6 @@ def main(argv=None) -> int:
     rejected_short = 0
     reasons: dict[str, int] = {}
     consecutive_failures = 0
-    aborted = False
 
     with args.out.open("a", encoding="utf-8") as sink:
         for row in rows:
@@ -300,7 +299,6 @@ def main(argv=None) -> int:
             if text is None:
                 consecutive_failures += 1
                 if consecutive_failures >= args.give_up_after and written == 0:
-                    aborted = True
                     print(
                         f"\n[cds] {consecutive_failures} attempts in a row failed "
                         f"and nothing has been fetched — stopping instead of "
