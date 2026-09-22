@@ -42,3 +42,30 @@ An account under-using its share, sitting behind jobs with 1.5x to 424x its
 priority, on a partition with nothing free, is a condition of the machine
 rather than a failure of planning. That distinction is worth a lot in a
 report, and it survives only if somebody recorded it on the day.
+
+
+## How these get here
+
+Both snapshots are written daily on the cluster by
+`sbatch_queue_stats.slurm`, which re-arms itself until the allocation ends.
+Nobody has to remember a command — which matters most for the priority
+snapshot, since a day not captured is a day that cannot be reconstructed.
+
+They land in the job's submit directory on `$WORK`, which has no backup, so
+they are copied into git periodically. Weekly is enough: `sacct` keeps weeks
+of history and the files accumulate safely in the meantime.
+
+From a machine that can push (not the cluster — GitHub credentials do not
+belong on a shared HPC home directory):
+
+```sh
+rsync -avP \
+  <user>@login.leonardo.cineca.it:/leonardo_work/AIFAC_P02_1147/eullm_runs/qstats/*.json \
+  docs/paper/measurements/
+git add docs/paper/measurements && git commit -m "docs(paper): sync measurements"
+```
+
+The daily job runs from the checkout named by `EULLM_QSTATS_REPO`, which
+defaults to `$WORK/eullm-v11` — the pilot tree, kept separate so the frozen
+chain has its own. Pull there too, or the priority snapshot is skipped with a
+line in the log saying so.
