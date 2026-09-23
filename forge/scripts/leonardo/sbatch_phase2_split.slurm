@@ -21,10 +21,58 @@
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
-#SBATCH --mem=450G
-#SBATCH --time=24:00:00
+# THREE GPUs, 24 cores, 340 GB — a SHARE of a node, not a whole one, and
+# every one of the three numbers matters.
+#
+# Measured on 2026-09-23 with two probes submitted in the same second,
+# identical in walltime, cores and memory, differing only in `--gres`:
+#
+#   probe-g3   submit 13:46:22   start 13:47:49   → 87 seconds
+#   probe-g4   submit 13:46:22   still pending
+#
+# This arm and the control arm had then been pending for FIFTEEN HOURS at
+# two hours of walltime, while the 8 B chain — which asks for three GPUs —
+# took five nodes overnight with gaps of 4, 16 and 23 minutes. A node with
+# one free card is common; an entirely empty node is not.
+#
+# The cores and the memory are part of the same request. A Booster node has
+# 32 cores, so `--cpus-per-task=32` made the job exclusive by CPU however
+# few GPUs it asked for, and 450 GB of ~494 left too little behind to be
+# worth anyone's while. Changing only the GRES would have changed nothing.
+#
+# THIS ARM ALREADY USED ONLY THREE. The config puts the teacher on GPUs 0-1
+# and the student on cuda:2, and left GPU 3 idle deliberately so that the
+# node was exclusive and the throughput comparable with the control arm.
+# That comparison is FINISHED — the +13.5 % design-B figure is measured —
+# so the fourth card was protecting a result we already have.
+#
+# WHAT IT COSTS, for the report rather than a footnote: the node is now
+# shared, memory bandwidth and PCIe are contended, and throughput falls by
+# an unmeasured amount. Node-hours-per-step before and after this change are
+# not comparable and the switch date belongs in the record. What it does NOT
+# cost is correctness: sharing changes how fast the arm trains, not what it
+# learns, so the loss curve, the perplexity series and the transfer curve
+# carry across the boundary untouched.
+#
+# CUDA_VISIBLE_DEVICES renumbers the three to 0,1,2, so the config's
+# `teacher_gpus: [0, 1]` and `student_device: cuda:2` are unchanged.
+#SBATCH --cpus-per-task=24
+#SBATCH --gres=gpu:3
+#SBATCH --mem=340G
+# TWO HOURS, which is a measurement and not a preference.
+#
+# Probes identical to this job but for their walltime were placed in 50
+# seconds at 30 minutes and at 1 hour, and never placed at 3, 4 or 6 — while
+# the real 4-hour heads sat pending for 28 hours. Two hours was placed
+# twice. The fixed cost of a link is ~22 minutes (14 of startup plus, on
+# average, half a save interval of unsaved tail), so 2 h returns ~82 % of the
+# node-hours it spends against ~63 % at one hour, and one hour with
+# `save_steps: 300` would return nothing at all — 291 steps against a first
+# save at 300.
+#
+# The links end in TIMEOUT by design and resume from the last checkpoint, so
+# the length is a scheduling choice and not a training one.
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 
 set -euo pipefail
@@ -82,8 +130,14 @@ CFG="$EULLM_REPO/forge/training/configs/leonardo/distill_qwen3_30b_a3b_to_4b_spl
 source "$EULLM_REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
+# THREE, and it must match the --gres above or every link of the chain dies
+# in the pre-flight after three minutes, having spent a node to do it. That
+# is not hypothetical: on 2026-09-22 the 8 B arm waited thirty hours for a
+# node and lost it in 174 seconds to a pre-flight it could not pass. The
+# resource request and what the job asserts about it are one change, never
+# two.
 python "$EULLM_REPO/forge/scripts/check_training_env.py" \
-    --offline --expect-gpus 4 --data-dir "$EULLM_DATA_DIR" \
+    --offline --expect-gpus 3 --data-dir "$EULLM_DATA_DIR" \
     --tokenizer-model Qwen/Qwen3-4B-Base \
     --assert-frozen-base "$CFG"
 
