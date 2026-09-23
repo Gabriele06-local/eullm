@@ -86,6 +86,8 @@ def split_indices(
     target is reached, so the realised ratio depends on group sizes and the
     caller should report what it got rather than what it asked for.
     """
+    if not 0 < val_ratio < 1:
+        raise ValueError(f"val_ratio must be in (0, 1), got {val_ratio!r}")
     import random
     rng = random.Random(seed)
 
