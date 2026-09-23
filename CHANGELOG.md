@@ -13,6 +13,29 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **A corrupt GGUF could end `eullm import` with a crash instead of being
+  refused.** Importing a model from Ollama streams the file's metadata to
+  look for the array lengths llama.cpp needs patched, and the importer is
+  written so that anything it cannot read means "copy the file as it is" —
+  the import still succeeds, it just skips the patch. Several fields could
+  not reach that fallback: a length field the file made up was used to size
+  an allocation before anything checked it, which past a certain size ends
+  the command with a Rust stack trace; a metadata type the parser does not
+  recognise was measured as zero bytes and skipped over, leaving the scan
+  reading from a position that could not be right; and an element count too
+  large to be real was walked one element at a time, which on a multi-gigabyte
+  file is a wait long enough to look like a hang. Every one of those is now a
+  refusal, and a refusal is the fallback: the file is copied verbatim.
+
+  Nothing changes for a well-formed GGUF, which is every file anyone is
+  likely to have. Overflowing array sizes in the same scan were fixed by
+  [@Gabriele06-local](https://github.com/Gabriele06-local) in
+  [#501](https://github.com/eullm/eullm/pull/501); this is the rest of the
+  same sweep.
+
 ## 0.7.7 — 2026-09-22
 
 ### Added
