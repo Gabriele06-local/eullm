@@ -161,7 +161,33 @@ def train_val_split(
     """Split records into train and validation sets.
 
     Deterministic split: last val_ratio fraction goes to validation.
+
+    Both arguments are checked, because the arithmetic below fails
+    *silently* and the silence is the expensive part. ``max(1, int(n *
+    ratio))`` has no upper bound, so a ratio of 1.5 — which is what someone
+    writes when they read "ratio" as a percentage, the default being 0.05 —
+    makes ``n_val`` larger than the corpus. ``records[:-n_val]`` is then
+    empty and ``records[-n_val:]`` is everything: an empty training set
+    returned as a success, discovered hours later on a compute node. A ratio
+    of 0 or below collapses to 1 through the ``max``, holding out a single
+    record instead of none.
+
+    Fewer than two records cannot be split at all: one record would go to
+    validation and leave training empty, by the same arithmetic and with
+    the same silence.
     """
+    if not 0 < val_ratio < 1:
+        raise ValueError(
+            f"val_ratio must be a fraction in (0, 1), got {val_ratio!r} — "
+            f"0.05 means 5%, not 5"
+        )
+    if len(records) < 2:
+        raise ValueError(
+            f"cannot split {len(records)} record(s): a split needs at least "
+            f"one on each side"
+        )
+    # Safe now: ratio < 1 means int(n * ratio) <= n - 1, and the max() floor
+    # of 1 is also <= n - 1 once n >= 2, so training is never emptied.
     n_val = max(1, int(len(records) * val_ratio))
     return records[:-n_val], records[-n_val:]
 
