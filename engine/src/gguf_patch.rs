@@ -47,6 +47,20 @@ fn scalar_size(t: u32) -> u64 {
     }
 }
 
+/// Byte size of `count` fixed-size elements, refusing overflow.
+///
+/// Both array-skipping paths multiply an untrusted count by an element size;
+/// in release a wrap would skip a small distance and misalign the whole
+/// scan, in debug it panics.
+fn array_byte_size(count: u64, elem_size: u64) -> io::Result<u64> {
+    count.checked_mul(elem_size).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("array byte size overflows: {count} elements of {elem_size} bytes"),
+        )
+    })
+}
+
 /// A patch to apply: extend an array from `current_count` to `target_count`
 /// by appending zero-filled elements.
 struct ArrayPatch {
@@ -101,7 +115,7 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
                 0 // not a fixed-size element
             } else {
                 let sz = scalar_size(elem_type);
-                skip_n(&mut f, count * sz)?;
+                skip_n(&mut f, array_byte_size(count, sz)?)?;
                 sz
             };
 
@@ -246,7 +260,8 @@ fn skip_gguf_value(r: &mut (impl Read + Seek), vtype: u32) -> io::Result<()> {
                 }
                 Ok(())
             } else {
-                skip_n(r, count * scalar_size(elem_type))
+                skip_n(r, array_byte_size(count, scalar_size(elem_type))?)?;
+                Ok(())
             }
         }
         _ => Err(io::Error::new(
@@ -270,4 +285,38 @@ fn copy_exact(r: &mut impl Read, w: &mut impl Write, mut n: u64) -> io::Result<(
 
 fn align_up(v: u64, alignment: u64) -> u64 {
     v.div_ceil(alignment) * alignment
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// An array value's raw bytes: element type followed by count.
+    fn array_value(elem_type: u32, count: u64) -> Cursor<Vec<u8>> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&elem_type.to_le_bytes());
+        b.extend_from_slice(&count.to_le_bytes());
+        Cursor::new(b)
+    }
+
+    /// A count whose byte size overflows u64 must be refused, not wrapped
+    /// into a small skip that misaligns the whole scan (release) or panics
+    /// (debug).
+    #[test]
+    fn overflowing_array_byte_size_is_rejected() {
+        assert!(array_byte_size(u64::MAX, 4).is_err());
+        let mut c = array_value(TYPE_UINT32, u64::MAX);
+        assert!(skip_gguf_value(&mut c, TYPE_ARRAY).is_err());
+    }
+
+    #[test]
+    fn ordinary_array_values_still_skip() {
+        assert_eq!(array_byte_size(3, 4).unwrap(), 12);
+        let mut c = array_value(TYPE_UINT32, 3);
+        // 3 elements of 4 bytes of payload must follow the header.
+        c.get_mut().extend_from_slice(&[0u8; 12]);
+        assert!(skip_gguf_value(&mut c, TYPE_ARRAY).is_ok());
+        assert_eq!(c.position(), 4 + 8 + 12);
+    }
 }
