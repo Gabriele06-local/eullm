@@ -1,0 +1,123 @@
+# Phase 2 — the LoRA RANK ABLATION. Rank 32 against the split arm's 128,
+# everything else held identical.
+#
+# The question is whether the adapter needs to be that large. Rank 128 over
+# seven projections was chosen for the v1.0 arm and never tested against
+# anything; if 32 matches it on the held-out corpus, the whole pipeline gets
+# cheaper — a smaller adapter to merge, less optimizer state, less memory,
+# and more steps per node-hour. If it does not match, the report can say by
+# how much rather than asserting that 128 was necessary.
+#
+# ALPHA MOVES WITH RANK. 64/32 keeps the same alpha/rank ratio of 2 as the
+# split arm's 256/128, so the effective scaling of the update is unchanged
+# and the only variable is the adapter's capacity. Changing rank alone would
+# have confounded capacity with learning-rate scale.
+#
+# EVERYTHING ELSE IS COPIED VERBATIM from
+# distill_qwen3_30b_a3b_to_4b_split.yaml: teacher, Phase-1 adapter, student,
+# node layout, corpus, objective, schedule, seed. At matched steps on the
+# same held-out corpus the difference between the two arms is the rank and
+# nothing else.
+#
+#   GPU 0-1   teacher Qwen3-30B-A3B BF16, ~30.5 GB per card
+#   GPU 2     student Qwen3-4B + LoRA + AdamW + activations
+#
+# The job asks for THREE GPUs, not four, for the reason measured on
+# 2026-09-23: two probes submitted in the same second and differing only in
+# --gres were placed in 87 seconds at three and not at all at four. See
+# sbatch_phase2_split.slurm.
+#
+# IT IS ALSO THE FOURTH CHAIN, which is the allocation's other problem. Two
+# grazing chains return 25-30 node-hours a day against a September budget
+# that allows ~40; an independent arm is the only thing that raises the
+# ceiling, since a chain has one eligible job at a time however many links
+# are queued behind it.
+#
+# ITS OWN RUN DIRECTORY AND ITS OWN output_dir, or two Phase-2 runs write
+# `checkpoint-N` into one place and resume from each other's state:
+#
+#   export EULLM_RUN_DIR=$WORK/eullm_runs/legal_it_r32
+#   mkdir -p $EULLM_RUN_DIR/checkpoints
+#   ln -s $WORK/eullm_runs/legal_it/checkpoints/qwen3_30b_a3b_legal_it_continued_pt \
+#         $EULLM_RUN_DIR/checkpoints/
+#
+# `save_steps: 100` rather than the split arm's 300 because the links are two
+# hours: at ~379 steps/hour a link trains ~670 steps, and a shorter interval
+# costs a few seconds of Lustre and shortens the unsaved tail a TIMEOUT
+# leaves behind. It changes the sampling rate of the deliverable, not the
+# training.
+#
+# Launch:
+#   sbatch "$EULLM_REPO/forge/scripts/leonardo/sbatch_phase2_rank32.slurm"
+
+### models
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+# Phase-1 LoRA adapter, relative to the job's working directory. The SAME
+# adapter the control arm uses — the pipeline is the variable under test, so
+# the teacher must not be.
+teacher_adapter: ./checkpoints/qwen3_30b_a3b_legal_it_continued_pt
+student_model: Qwen/Qwen3-4B-Base
+# BF16. This is the difference the split pays for; turning either of these on
+# would spend a whole node layout to arrive back where v1.0 already is.
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+
+### teacher placement — design B
+teacher_device_map: split
+teacher_gpus: [0, 1]
+teacher_gib_per_gpu: 58
+student_device: cuda:2
+
+### student fine-tuning method
+# Identical to the control arm, so the A/B isolates the node layout.
+student_finetune: lora
+student_lora_rank: 32
+student_lora_alpha: 64
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+### data
+# Overridden by the data-dir argument distill.sh passes on the CLI.
+dataset_dir: ~/datasets/legal_it
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+
+### training
+# Its own directory — see the header.
+output_dir: ./checkpoints/qwen3_4b_legal_it_distilled_r32
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 1000
+# 300 and a bounded directory, for the reasons measured on the control arm:
+# at ~333 steps/hour a 1000-step interval hands the next link of the chain up
+# to three hours of work to redo.
+save_steps: 100
+save_total_limit: 3
+eval_steps: 1000
+eval_max_batches: 200
+logging_steps: 20
+
+### distillation
+# Same objective as the control arm. Changing these would make the A/B
+# measure two things at once.
+kl_temperature: 2.0
+kl_alpha: 0.7
+
+### hardware
+bf16: true
+gradient_checkpointing: true
+seed: 42
