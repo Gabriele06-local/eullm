@@ -141,6 +141,20 @@ def test_groups_length_must_match_record_count():
         split_indices(10, val_ratio=0.1, seed=1, groups=["a", "b"])
 
 
+def test_out_of_range_val_ratio_is_rejected_not_silently_applied():
+    """A ratio outside (0, 1) cannot mean anything: 1.5 would empty train,
+    0 would silently hold out one record instead of none. Fail before
+    writing an empty train.jsonl discovered at GPU time."""
+    import pytest
+
+    groups = [f"doc-{i // 5}" for i in range(100)]
+    for bad in (-0.1, 0, 0.0, 1.0, 1.5):
+        with pytest.raises(ValueError, match="val_ratio"):
+            split_indices(100, bad, seed=42)
+        with pytest.raises(ValueError, match="val_ratio"):
+            split_indices(100, bad, seed=42, groups=groups)
+
+
 def test_ungrouped_split_is_unchanged_when_groups_is_none():
     """The old behaviour must survive exactly, for reproducing old corpora."""
     a = split_indices(1000, val_ratio=0.05, seed=42)
