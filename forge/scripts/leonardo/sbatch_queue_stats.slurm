@@ -115,6 +115,36 @@ if ! "$PY" "$TOOL" "$ALLOC_START" \
     echo "[qstats] snapshot failed; re-arming anyway so one bad day is not fatal" >&2
 fi
 
+# The budget, frozen RAW and unparsed.
+#
+# `saldo -b` prints the one number nothing else on the system knows: the
+# monthly quota. On 2026-09-22 it read monthTotal 19672 against a total of
+# 40000, which is exactly 40000 x 30/61 — a static proration of the
+# allocation over a 30-day window, not a recomputation of what is left over
+# the months that remain. The distinction decides whether three weeks of
+# under-use can be made up in October or are simply gone, and a single
+# reading cannot tell them apart: inside the first month `monthConsumed` and
+# `totConsumed` are the same number.
+#
+# The answer arrives at the October boundary and only then. If monthTotal is
+# still 19672 the unspent quota is lost; if it has risen, it carried over.
+# `saldo` keeps no history, so a day not captured is a day that never
+# existed — the same reason priority_snapshot.py exists.
+#
+# Stored as raw text on purpose. The column layout is the vendor's and may
+# change; parsing it now would turn a formatting change into a silent wrong
+# number, where a text file stays readable whatever happens. Parse it later,
+# when there is something specific to ask it.
+if command -v saldo >/dev/null 2>&1; then
+    if saldo -b > "$OUT/saldo_$STAMP.txt" 2>&1; then
+        echo "[qstats] budget snapshot written"
+    else
+        echo "[qstats] saldo failed — continuing" >&2
+    fi
+else
+    echo "[qstats] no saldo on PATH — skipping the budget snapshot" >&2
+fi
+
 # The priority snapshot, taken here because it is the one that cannot be
 # taken later.
 #
