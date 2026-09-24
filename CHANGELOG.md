@@ -13,6 +13,16 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **The Linux CPU, CUDA and ROCm binaries could not say which commit they
+  were built from.** `eullm -V` and the startup banner print the commit
+  hash, so a bug report pins the exact build; those six binaries printed
+  `unknown` instead, because they are built in a container where git would
+  not read a checkout owned by another user. Windows, macOS, Vulkan and the
+  arm64 CPU builds were never affected.
+
 ## 0.7.8 — 2026-09-24
 
 ### Fixed
