@@ -1,0 +1,99 @@
+{
+  "taken_at": "2026-09-22T14:10:51Z",
+  "user": "fmarche2",
+  "partition": "boost_usr_prod",
+  "ours": {
+    "jobs": [
+      {
+        "jobid": "57353623",
+        "partition": "boost_usr",
+        "account": "aifac_p0",
+        "priority": 141978,
+        "age": 3185,
+        "fairshare": 18785,
+        "jobsize": 8,
+        "qos_name": "normal",
+        "qos": 120000
+      },
+      {
+        "jobid": "57893885",
+        "partition": "boost_usr",
+        "account": "aifac_p0",
+        "priority": 141712,
+        "age": 2920,
+        "fairshare": 18785,
+        "jobsize": 8,
+        "qos_name": "normal",
+        "qos": 120000
+      },
+      {
+        "jobid": "58373793",
+        "partition": "lrd_all_s",
+        "account": "aifac_p0",
+        "priority": 139149,
+        "age": 357,
+        "fairshare": 18785,
+        "jobsize": 8,
+        "qos_name": "normal",
+        "qos": 120000
+      },
+      {
+        "jobid": "58373794",
+        "partition": "lrd_all_s",
+        "account": "aifac_p0",
+        "priority": 139149,
+        "age": 357,
+        "fairshare": 18785,
+        "jobsize": 8,
+        "qos_name": "normal",
+        "qos": 120000
+      }
+    ],
+    "error": ""
+  },
+  "fairshare": {
+    "share": {
+      "account": "aifac_p02_1147",
+      "user": "fmarche2",
+      "norm_shares": "0.000208",
+      "raw_usage": "8681367",
+      "effective_usage": "0.000086",
+      "fairshare": "0.751398"
+    },
+    "error": ""
+  },
+  "competition": {
+    "n": 3688,
+    "min": 190,
+    "max": 60259017,
+    "p25": 134153,
+    "median": 138373,
+    "p75": 140841,
+    "p90": 142256,
+    "error": ""
+  },
+  "nodes": {
+    "by_state": {
+      "completing": 2,
+      "mixed-": 184,
+      "planned": 93,
+      "maint": 5,
+      "draining": 1,
+      "mixed": 180,
+      "allocated": 2785,
+      "idle": 1
+    },
+    "total": 3251,
+    "drained": [
+      {
+        "node": "lrdn3163",
+        "reason": "Kill task failed (JobId=58366491 StepId=batch)"
+      },
+      {
+        "node": "viz13",
+        "reason": "NHC: check_fs_mount:  /data not mounted"
+      }
+    ],
+    "error": ""
+  }
+}
