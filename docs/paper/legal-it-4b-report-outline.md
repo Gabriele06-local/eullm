@@ -256,20 +256,53 @@ Absolute perplexities are not comparable across the two corpora and should
 not be tabulated as if they were. Only the ratios within a corpus mean
 anything.
 
-**Still to come**: the same measurement at steps 7,000, 14,000 and 21,000,
-from checkpoints still on disk, packaged and scored by
-`sbatch_transfer_curve.slurm`. Four points say whether the gap is still
-opening at 28,000 — 40 % of one epoch, with the cosine schedule at two thirds
-of peak learning rate and no anneal yet — or whether it flattened earlier.
-That distinction decides where the remaining weeks of the allocation go, and
-it is cheap: the whole curve is CPU work on the serial partition.
+**The transfer curve**, measured on 2026-09-24 on the same corpus, the same
+120 chunks and the same base. The GGUFs had been packaged earlier; by the
+time they were scored their checkpoints were gone, because the trainer keeps
+only the last three — the reason a checkpoint that is not packaged on a
+cadence is a model that never existed.
 
-| step | PPL | vs base | share of epoch |
+| step | PPL | vs base | share of epoch | gain over the previous 7,000 steps |
+|---|---|---|---|---|
+| 7,000 | 5.2834 | −18.22 % | 9.9 % | 18.22 points |
+| 14,000 | 5.0875 | −21.25 % | 19.9 % | 3.03 |
+| 21,000 | 4.9951 | −22.68 % | 29.8 % | 1.43 |
+| 28,000 | 4.9589 | −23.25 % | 39.7 % | 0.57 |
+
+**Each block of 7,000 steps returns less than half the one before it**:
+3.03, then 1.43, then 0.57 points. That is flatter than logarithmic — a
+log-linear curve would return the same gain per doubling, and the second
+doubling here (14,000 → 28,000, +2.00) already returned a third less than
+the first (7,000 → 14,000, +3.03). Four-fifths of the gain measured at 28,000
+was present at 7,000, a tenth of the way through the epoch.
+
+Extrapolated, the remaining 60 % of the epoch is worth between 0.4 and 2.6
+points depending on the model fitted, and the data sit with the lower end.
+
+**What this does not settle** is the schedule. The learning rate follows a
+cosine over the full epoch and is still at two thirds of its peak at 28,000;
+the anneal in the last part of a cosine schedule is characteristically where
+a flattened curve bends down again, and part of what reads here as a plateau
+may be the high learning rate rather than the model. One point settles it:
+the checkpoint at ~37,000, which exists and is next to be packaged. If
+28,000 → 37,000 adds under half a point, the flattening is real.
+
+**Design B against the control arm, per step**, on the same corpus and base:
+
+| step | split arm (BF16 teacher) | control arm (8-bit teacher) | difference |
 |---|---|---|---|
-| 7,000 | | | 9.9 % |
-| 14,000 | | | 19.9 % |
-| 21,000 | | | 29.8 % |
-| 28,000 | 4.9589 | −23.25 % | 39.7 % |
+| 8,400 | −19.25 % | ≈ −19.0 % | 0.2 points |
+| 12,600 | −20.97 % | ≈ −20.8 % | 0.2 points |
+
+The control values at those steps are log-interpolated between its measured
+points, not measured. The difference — 0.2 points, about 0.013 in
+perplexity — is a fifth of the measurement's own confidence interval of
+±0.06, so **the BF16 teacher does not teach measurably better per step**.
+That is what P6 predicted: the 8-bit teacher matched the BF16 one at a KL of
+0.00616 nats with 99.955 % top-5 agreement, and two teachers whose
+distributions are that close produce students that learn alike. Design B's
+case rests on throughput and memory headroom — the room it leaves for a
+larger student — not on the quality of what it teaches.
 
 **Four things this does not say**, each of which a reader will ask:
 
