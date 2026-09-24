@@ -276,6 +276,15 @@ async fn fetch_chunk(
     }
 }
 
+/// Whether a range response carries the requested bytes.
+///
+/// Only 206 does: a 200 holds the whole file, and the worker below writes
+/// whatever arrives at the chunk's file offset. The probe already demands
+/// 206 before going parallel; accepting anything else here would undo that.
+fn is_range_response(status: reqwest::StatusCode) -> bool {
+    status == reqwest::StatusCode::PARTIAL_CONTENT
+}
+
 /// One attempt at fetching a byte range and writing it at its file offset.
 async fn fetch_chunk_once(
     client: &reqwest::Client,
@@ -292,8 +301,8 @@ async fn fetch_chunk_once(
         .await?;
 
     let status = resp.status();
-    if status != reqwest::StatusCode::PARTIAL_CONTENT && !status.is_success() {
-        return Err(format!("HTTP {status} for range {start}-{end}").into());
+    if !is_range_response(status) {
+        return Err(format!("expected 206 for range {start}-{end}, got HTTP {status}").into());
     }
 
     // Each worker opens its own handle and seeks to the chunk's offset; within
@@ -857,6 +866,24 @@ mod tests {
             hash,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    /// Only 206 carries the requested bytes: a 200 holds the whole file and
+    /// must go through the retry loop, not onto the chunk's file offset.
+    #[test]
+    fn only_206_counts_as_a_range_response() {
+        assert!(is_range_response(reqwest::StatusCode::PARTIAL_CONTENT));
+        for bad in [
+            reqwest::StatusCode::OK,
+            reqwest::StatusCode::CREATED,
+            reqwest::StatusCode::RANGE_NOT_SATISFIABLE,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            assert!(
+                !is_range_response(bad),
+                "{bad} must not pass as a range response"
+            );
+        }
     }
 
     #[test]
