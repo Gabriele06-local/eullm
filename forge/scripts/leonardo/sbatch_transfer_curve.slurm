@@ -34,6 +34,9 @@
 #   CURVE_BASE      base GGUF to compare against
 #   CURVE_CHUNKS    perplexity chunks (default 120)
 #   CURVE_KEEP      1 to keep the merged dir and F16 (default 0, delete both)
+#   CURVE_CSV       where the measurement row is appended
+#   CURVE_REPO      checkout to run (default: the one this file was
+#                   submitted from — never $EULLM_REPO, see below)
 #
 #SBATCH --job-name=eullm-curve
 #SBATCH --partition=lrd_all_serial
@@ -54,14 +57,29 @@ if [ -z "${STEP:-}" ]; then
     exit 1
 fi
 
+# Which checkout runs is decided by where THIS FILE was submitted from, and
+# not by $EULLM_REPO — the order matters and it was once the other way round.
+#
+# `env.sh` sets EULLM_REPO to whatever tree a training chain is pinned to, and
+# `sbatch --export=ALL` hands the submitting shell's value to the job. With
+# EULLM_REPO consulted first, a curve job submitted as
+# `$WORK/eullm/.../sbatch_transfer_curve.slurm` from a shell that had worked
+# on the split arm ran eullm-v12's copy instead. On 2026-09-24 that meant a
+# fix merged and pulled into $WORK/eullm could never have reached the job,
+# and a check on the pulled file would have passed while the job ran an
+# older one. Every training launcher already guards against this with a
+# variable of its own; this now does the same, and prints the tree it chose
+# on its first line so the wrong answer is visible immediately.
 SELF="$(scontrol show job "${SLURM_JOB_ID:-0}" 2>/dev/null |
         sed -n 's/.*Command=\([^ ]*\).*/\1/p' | head -1)"
-if [ -n "${EULLM_REPO:-}" ]; then
-    REPO="$EULLM_REPO"
+if [ -n "${CURVE_REPO:-}" ]; then
+    REPO="$CURVE_REPO"                             # explicit wins
 elif [ -n "$SELF" ] && [ -f "$SELF" ]; then
     REPO="$(cd "$(dirname "$SELF")/../../.." && pwd)"
+elif [ -n "${EULLM_REPO:-}" ]; then
+    REPO="$EULLM_REPO"                             # interactive runs, no job id
 else
-    echo "[curve] cannot locate the repository — set EULLM_REPO" >&2
+    echo "[curve] cannot locate the repository — set CURVE_REPO" >&2
     exit 1
 fi
 
