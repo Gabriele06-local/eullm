@@ -31,6 +31,8 @@ class IdentityConfig:
         num_epochs: Training epochs.
         learning_rate: Learning rate for LoRA training.
         dataset_path: Path to custom identity training data (optional).
+        max_length: Longest example, in tokens, kept for training; longer
+            ones are dropped rather than truncated.
     """
 
     model_path: str = ""
@@ -42,6 +44,7 @@ class IdentityConfig:
     num_epochs: int = 3
     learning_rate: float = 2e-4
     dataset_path: str = ""
+    max_length: int = 512
 
 
 def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
@@ -190,29 +193,170 @@ def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
     return examples
 
 
-def _format_for_sft(examples: list[dict[str, str]], tokenizer: object) -> list[str]:
-    """Format identity examples as chat-style training texts.
+# Label value the loss ignores (PyTorch's cross-entropy default).
+IGNORE_INDEX = -100
+
+# Used only when a tokenizer ships without a chat template. ChatML because it
+# is what the Qwen family — every student this project trains — already
+# speaks, so the tokens it relies on exist in the vocabulary as single
+# special tokens rather than as strings the model has never seen.
+CHATML_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{{ '<|im_start|>' + message['role'] + '\\n' + message['content'] + '<|im_end|>' + '\\n' }}"
+    "{%- endfor %}"
+    "{%- if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{%- endif %}"
+)
+
+
+def ensure_chat_template(tokenizer: object) -> bool:
+    """Make sure training and inference will format a conversation the same way.
+
+    Training used to fall back to an ad-hoc ``### Instruction:`` format when
+    the tokenizer had no chat template. Nothing at inference time uses that
+    format: the engine renders prompts with the template stored in the GGUF,
+    which comes from this tokenizer. The model learnt to answer a layout it
+    would never be shown, and nothing said so.
+
+    Now there is one format and it travels with the model: if the tokenizer
+    has a template it is used as is; if not, ChatML is set ON the tokenizer,
+    so `save_pretrained` writes it next to the adapter, the merge copies it,
+    and the GGUF carries the same template the weights were trained on.
 
     Args:
-        examples: List of instruction/output pairs.
-        tokenizer: HuggingFace tokenizer (for chat template).
+        tokenizer: HuggingFace tokenizer; modified in place when it has no
+            template.
 
     Returns:
-        List of formatted training strings.
+        True if ChatML was installed, False if the tokenizer already had a
+        template.
+
+    Raises:
+        ValueError: the tokenizer has no template and no ChatML special
+            tokens either. Adding them would need new embedding rows, which
+            a LoRA adapter does not train, so this refuses instead of
+            producing a model that never learns where an answer ends.
     """
-    formatted = []
+    if getattr(tokenizer, "chat_template", None):
+        return False
+    vocab = tokenizer.get_vocab()
+    missing = [t for t in ("<|im_start|>", "<|im_end|>") if t not in vocab]
+    if missing:
+        raise ValueError(
+            "tokenizer has no chat template and no ChatML tokens "
+            f"({', '.join(missing)} missing): give the model a chat template "
+            "before identity fine-tuning"
+        )
+    tokenizer.chat_template = CHATML_TEMPLATE
+    return True
+
+
+def build_sft_features(
+    examples: list[dict[str, str]],
+    tokenizer: object,
+    max_length: int = 512,
+) -> list[dict[str, list[int]]]:
+    """Tokenize instruction/output pairs so that only the answer is learnt.
+
+    Two things the previous version got wrong, both of which made the loss
+    measure something other than "does the model answer as it should":
+
+    * **Padding was trained on.** Every example was padded to 512 tokens and
+      the labels were a copy of the input ids, so a nine-token answer came
+      with some five hundred pad tokens — the EOS token, on Qwen — each
+      counted in the loss. The gradient was mostly "predict EOS after EOS".
+      Here nothing is padded at all; `collate_sft` pads per batch and masks
+      the padding out of the labels.
+    * **The question was trained on.** The user's turn counted in the loss
+      like the answer, teaching the model to write questions. Here the
+      prompt — everything up to and including the assistant header — is
+      masked with `IGNORE_INDEX`, and the loss sees only the answer and the
+      end-of-turn token that teaches it to stop.
+
+    The prompt/answer boundary comes from the template itself: the prompt is
+    rendered with ``add_generation_prompt=True``, which is exactly what the
+    engine sends at inference, and must be a prefix of the full rendering.
+    The two halves are tokenized separately and concatenated, so a merge
+    across the boundary cannot shift it.
+
+    Args:
+        examples: dicts with ``instruction`` and ``output``.
+        tokenizer: tokenizer with a chat template (see `ensure_chat_template`).
+        max_length: longest sequence kept. An example that does not fit is
+            dropped whole, not truncated: a truncated answer loses its
+            end-of-turn token, and a model trained on those learns not to
+            stop.
+
+    Returns:
+        One dict per kept example with ``input_ids``, ``attention_mask`` and
+        ``labels`` as plain lists of equal length.
+
+    Raises:
+        ValueError: the template does not render the prompt as a prefix of
+            the conversation, or no example fits in ``max_length``.
+    """
+    features = []
+    too_long = 0
     for ex in examples:
-        messages = [
-            {"role": "user", "content": ex["instruction"]},
-            {"role": "assistant", "content": ex["output"]},
-        ]
-        try:
-            text = tokenizer.apply_chat_template(messages, tokenize=False)
-        except Exception:
-            # Fallback if tokenizer has no chat template
-            text = f"### Instruction:\n{ex['instruction']}\n\n### Response:\n{ex['output']}"
-        formatted.append(text)
-    return formatted
+        prompt_msgs = [{"role": "user", "content": ex["instruction"]}]
+        full_msgs = prompt_msgs + [{"role": "assistant", "content": ex["output"]}]
+        prompt = tokenizer.apply_chat_template(
+            prompt_msgs, tokenize=False, add_generation_prompt=True,
+        )
+        full = tokenizer.apply_chat_template(full_msgs, tokenize=False)
+        if not full.startswith(prompt):
+            raise ValueError(
+                "the chat template does not render the prompt as a prefix of "
+                "the full conversation, so the answer cannot be separated "
+                f"from the question.\nprompt: {prompt!r}\nfull:   {full!r}"
+            )
+
+        # add_special_tokens=False: the template already writes whatever BOS
+        # the model expects; letting the tokenizer add another would train
+        # on a sequence the engine never produces.
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(full[len(prompt):], add_special_tokens=False)["input_ids"]
+        if len(prompt_ids) + len(answer_ids) > max_length:
+            too_long += 1
+            continue
+
+        input_ids = prompt_ids + answer_ids
+        features.append({
+            "input_ids": input_ids,
+            "attention_mask": [1] * len(input_ids),
+            "labels": [IGNORE_INDEX] * len(prompt_ids) + answer_ids,
+        })
+
+    if too_long:
+        logger.warning(
+            "Dropped %d of %d examples longer than %d tokens",
+            too_long, len(examples), max_length,
+        )
+    if not features:
+        raise ValueError(f"no identity example fits in max_length={max_length}")
+    return features
+
+
+def collate_sft(features: list[dict[str, list[int]]], pad_token_id: int) -> dict:
+    """Pad a batch to its longest member; padding never reaches the loss.
+
+    Args:
+        features: output of `build_sft_features`.
+        pad_token_id: id written into padded ``input_ids`` positions.
+
+    Returns:
+        Tensors ``input_ids``, ``attention_mask`` and ``labels``, with
+        ``labels`` set to `IGNORE_INDEX` wherever the input is padding.
+    """
+    import torch
+
+    width = max(len(f["input_ids"]) for f in features)
+    batch: dict[str, list[list[int]]] = {"input_ids": [], "attention_mask": [], "labels": []}
+    for f in features:
+        pad = width - len(f["input_ids"])
+        batch["input_ids"].append(f["input_ids"] + [pad_token_id] * pad)
+        batch["attention_mask"].append(f["attention_mask"] + [0] * pad)
+        batch["labels"].append(f["labels"] + [IGNORE_INDEX] * pad)
+    return {k: torch.tensor(v, dtype=torch.long) for k, v in batch.items()}
 
 
 def fine_tune_identity(config: IdentityConfig) -> str:
@@ -267,11 +411,21 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    if ensure_chat_template(tokenizer):
+        logger.info("  Tokenizer had no chat template: installed ChatML")
+
+    # bf16 where the GPU has it (every A100): Qwen activations overflow fp16
+    # often enough that a run can go non-finite for no reason in the data.
+    # fp32 on CPU, which cannot train in half precision at all.
+    use_cuda = torch.cuda.is_available()
+    bf16 = use_cuda and torch.cuda.is_bf16_supported()
+    fp16 = use_cuda and not bf16
+    dtype = torch.bfloat16 if bf16 else torch.float16 if fp16 else torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(
         config.model_path,
-        torch_dtype=torch.float16,
-        device_map="auto",
+        torch_dtype=dtype,
+        device_map="auto" if use_cuda else None,
         trust_remote_code=True,
     )
 
@@ -296,34 +450,24 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         100 * trainable_params / total_params,
     )
 
-    # Prepare training data
-    formatted_texts = _format_for_sft(examples, tokenizer)
-
-    # Tokenize
-    encodings = tokenizer(
-        formatted_texts,
-        truncation=True,
-        max_length=512,
-        padding="max_length",
-        return_tensors="pt",
+    features = build_sft_features(examples, tokenizer, config.max_length)
+    answer_tokens = sum(sum(t != IGNORE_INDEX for t in f["labels"]) for f in features)
+    logger.info(
+        "  Training on %d examples, %d answer tokens (prompts and padding masked)",
+        len(features), answer_tokens,
     )
 
-    # Create simple dataset
     class IdentityDataset(torch.utils.data.Dataset):
-        def __init__(self, encodings):
-            self.encodings = encodings
+        def __init__(self, features):
+            self.features = features
 
         def __len__(self):
-            return len(self.encodings["input_ids"])
+            return len(self.features)
 
         def __getitem__(self, idx):
-            return {
-                "input_ids": self.encodings["input_ids"][idx],
-                "attention_mask": self.encodings["attention_mask"][idx],
-                "labels": self.encodings["input_ids"][idx].clone(),
-            }
+            return self.features[idx]
 
-    dataset = IdentityDataset(encodings)
+    dataset = IdentityDataset(features)
 
     # Output directory
     output_dir = str(Path(config.model_path).parent / "identity-lora")
@@ -335,7 +479,8 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         learning_rate=config.learning_rate,
-        fp16=True,
+        bf16=bf16,
+        fp16=fp16,
         logging_steps=10,
         save_strategy="epoch",
         report_to="none",
@@ -346,6 +491,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         model=model,
         args=training_args,
         train_dataset=dataset,
+        data_collator=lambda batch: collate_sft(batch, tokenizer.pad_token_id),
     )
 
     logger.info("Starting LoRA training...")
