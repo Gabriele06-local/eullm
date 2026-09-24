@@ -16,6 +16,18 @@ something changed, less so for understanding what it means.
 ## Unreleased
 
 ### Fixed
+- **Importing a model whose file sets its own tensor alignment produced a
+  copy that would not load.** GGUF files say where their tensor data begins
+  by declaring `general.alignment`; almost every file leaves it at the
+  default of 32 and says nothing, and the importer assumed 32 for all of
+  them. For a file that declares anything else, the patched copy came out
+  with its tensor data at an offset the file's own header does not point to.
+  There was no error and no warning — the import reported success and the
+  model failed to load afterwards, which is the wrong end to find out.
+  The declared value is now read and used, and a file declaring one that
+  llama.cpp itself would reject, or one so large the data would sit past the
+  end of the file, is refused instead of copied.
+
 - **A corrupt GGUF could end `eullm import` with a crash instead of being
   refused.** Importing a model from Ollama streams the file's metadata to
   look for the array lengths llama.cpp needs patched, and the importer is
