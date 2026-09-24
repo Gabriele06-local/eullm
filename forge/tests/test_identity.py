@@ -68,3 +68,183 @@ def test_missing_custom_dataset_path_fails_closed(tmp_path):
     )
     with pytest.raises(FileNotFoundError, match="missing-custom.json"):
         fine_tune_identity(config)
+
+
+# --- SFT formatting: what the loss is actually computed on --------------------
+#
+# These use a real HuggingFace tokenizer built offline — a word-level vocabulary
+# with the ChatML tokens registered as special tokens, the way Qwen has them —
+# so the template rendering, the special-token splitting and the masking are
+# exercised as they run in training, with no download.
+
+CHATML_TOKENS = ["<|im_start|>", "<|im_end|>", "<|endoftext|>"]
+
+
+def make_tokenizer(texts, chatml=True):
+    pytest.importorskip("transformers")
+    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
+    from transformers import PreTrainedTokenizerFast
+
+    special = (CHATML_TOKENS if chatml else ["<|endoftext|>"]) + ["[UNK]"]
+    tok = Tokenizer(models.WordLevel(unk_token="[UNK]"))
+    tok.pre_tokenizer = pre_tokenizers.Whitespace()
+    words = texts + ["user assistant system"]
+    tok.train_from_iterator(words, trainers.WordLevelTrainer(special_tokens=special))
+    return PreTrainedTokenizerFast(
+        tokenizer_object=tok, unk_token="[UNK]",
+        eos_token="<|endoftext|>", pad_token="<|endoftext|>",
+        additional_special_tokens=CHATML_TOKENS[:2] if chatml else [],
+    )
+
+
+PAIRS = [
+    {"instruction": "Chi sei?", "output": "Sono LegalAI."},
+    {"instruction": "Come ti chiami davvero oggi?", "output": "Mi chiamo LegalAI e basta."},
+]
+
+
+def all_text(pairs):
+    return [p["instruction"] + " " + p["output"] for p in pairs]
+
+
+def test_chatml_is_installed_when_the_tokenizer_has_no_template():
+    from eullm_forge.identity import CHATML_TEMPLATE, ensure_chat_template
+
+    tok = make_tokenizer(all_text(PAIRS))
+    assert ensure_chat_template(tok) is True
+    assert tok.chat_template == CHATML_TEMPLATE
+    rendered = tok.apply_chat_template(
+        [{"role": "user", "content": "Chi sei?"}], tokenize=False, add_generation_prompt=True,
+    )
+    assert rendered == "<|im_start|>user\nChi sei?<|im_end|>\n<|im_start|>assistant\n"
+
+
+def test_an_existing_template_is_left_alone():
+    from eullm_forge.identity import ensure_chat_template
+
+    tok = make_tokenizer(all_text(PAIRS))
+    tok.chat_template = "{{ messages[0]['content'] }}"
+    assert ensure_chat_template(tok) is False
+    assert tok.chat_template == "{{ messages[0]['content'] }}"
+
+
+def test_no_template_and_no_chatml_tokens_is_refused():
+    """Inventing the tokens would need embedding rows a LoRA never trains."""
+    from eullm_forge.identity import ensure_chat_template
+
+    tok = make_tokenizer(all_text(PAIRS), chatml=False)
+    with pytest.raises(ValueError, match="no ChatML tokens"):
+        ensure_chat_template(tok)
+
+
+def test_only_the_answer_and_its_end_of_turn_are_trained_on():
+    from eullm_forge.identity import IGNORE_INDEX, build_sft_features, ensure_chat_template
+
+    tok = make_tokenizer(all_text(PAIRS))
+    ensure_chat_template(tok)
+    features = build_sft_features(PAIRS, tok)
+
+    assert len(features) == len(PAIRS)
+    for f, pair in zip(features, PAIRS):
+        assert len(f["input_ids"]) == len(f["attention_mask"]) == len(f["labels"])
+        # No padding at all: every position is a real token.
+        assert all(m == 1 for m in f["attention_mask"])
+        assert tok.pad_token_id not in f["input_ids"]
+
+        trained = [t for t in f["labels"] if t != IGNORE_INDEX]
+        text = tok.decode(trained)
+        # The answer, and the end-of-turn token that teaches the model to stop…
+        for word in pair["output"].rstrip(".").split():
+            assert word in text
+        assert "<|im_end|>" in text
+        # …and nothing of the question or the headers.
+        assert "Chi" not in text and "chiami" not in text
+        assert "user" not in text and "<|im_start|>" not in text
+
+        # The masked part is a prefix: the prompt, exactly as inference sends it.
+        n_masked = f["labels"].index(next(t for t in f["labels"] if t != IGNORE_INDEX))
+        prompt = tok.apply_chat_template(
+            [{"role": "user", "content": pair["instruction"]}],
+            tokenize=False, add_generation_prompt=True,
+        )
+        assert f["input_ids"][:n_masked] == tok(prompt, add_special_tokens=False)["input_ids"]
+
+
+def test_an_example_that_does_not_fit_is_dropped_not_truncated():
+    """A truncated answer loses its end-of-turn token; the model would learn not to stop."""
+    from eullm_forge.identity import build_sft_features, ensure_chat_template
+
+    tok = make_tokenizer(all_text(PAIRS))
+    ensure_chat_template(tok)
+    short, long_ = (len(f["input_ids"]) for f in build_sft_features(PAIRS, tok))
+    assert short < long_
+
+    kept = build_sft_features(PAIRS, tok, max_length=short)
+    assert len(kept) == 1 and len(kept[0]["input_ids"]) == short
+
+    with pytest.raises(ValueError, match="no identity example fits"):
+        build_sft_features(PAIRS, tok, max_length=short - 1)
+
+
+def test_a_template_that_cannot_separate_prompt_from_answer_is_refused():
+    from eullm_forge.identity import build_sft_features
+
+    tok = make_tokenizer(all_text(PAIRS))
+    # Renders the assistant header only when there is no answer: the prompt
+    # is then not a prefix of the conversation.
+    tok.chat_template = (
+        "{% for m in messages %}{{ m['content'] }} {% endfor %}"
+        "{% if add_generation_prompt %}assistant{% endif %}"
+    )
+    with pytest.raises(ValueError, match="not render the prompt as a prefix"):
+        build_sft_features(PAIRS, tok)
+
+
+def test_collate_pads_per_batch_and_masks_the_padding():
+    pytest.importorskip("torch")
+    from eullm_forge.identity import IGNORE_INDEX, collate_sft
+
+    batch = collate_sft(
+        [
+            {"input_ids": [5, 6, 7], "attention_mask": [1, 1, 1], "labels": [-100, 6, 7]},
+            {"input_ids": [8], "attention_mask": [1], "labels": [8]},
+        ],
+        pad_token_id=0,
+    )
+    assert batch["input_ids"].tolist() == [[5, 6, 7], [8, 0, 0]]
+    assert batch["attention_mask"].tolist() == [[1, 1, 1], [1, 0, 0]]
+    assert batch["labels"].tolist() == [[-100, 6, 7], [8, IGNORE_INDEX, IGNORE_INDEX]]
+
+
+def test_fine_tune_identity_runs_end_to_end_on_cpu(tmp_path, monkeypatch):
+    """The real training path on a tiny Qwen3, CPU only, nothing patched but the GPU check.
+
+    The adapter's tokenizer must carry the template the weights were trained
+    on: the merge copies it, and the GGUF takes its template from there.
+    """
+    pytest.importorskip("peft")
+    import torch
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from eullm_forge.identity import CHATML_TEMPLATE, fine_tune_identity
+
+    config = IdentityConfig(identity_name="LegalAI", languages=["it", "en"], num_epochs=1)
+    tok = make_tokenizer(all_text(generate_identity_dataset(config)))
+    model_dir = tmp_path / "student"
+    tok.save_pretrained(model_dir)
+    Qwen3ForCausalLM(Qwen3Config(
+        vocab_size=len(tok), hidden_size=16, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        head_dim=8, max_position_embeddings=128,
+    )).save_pretrained(model_dir)
+
+    # Force the CPU path so the test means the same on a machine with a GPU.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    config.model_path = str(model_dir)
+    adapter = fine_tune_identity(config)
+
+    from transformers import AutoTokenizer
+
+    saved = AutoTokenizer.from_pretrained(adapter)
+    assert saved.chat_template == CHATML_TEMPLATE
+    assert (tmp_path / "identity-lora" / "adapter" / "adapter_config.json").exists()
