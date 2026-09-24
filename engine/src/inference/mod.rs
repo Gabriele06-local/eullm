@@ -201,15 +201,16 @@ fn multimodal_batch_size() -> u32 {
     img_budget.max(512)
 }
 
-/// Fraction of GPU memory currently free, summed across every GPU-type
-/// backend device (`ggml_backend_dev_memory`) — skips CPU and accelerator
-/// devices, which aren't the resource a context's compute buffer and KV
-/// cache actually compete for. Used by `probe_and_shrink_context` to require
-/// some headroom left over, not just a successful allocation.
+/// GPU memory as `(free, total)` bytes, summed across every GPU-type backend
+/// device (`ggml_backend_dev_memory`) — skips CPU and accelerator devices,
+/// which aren't the resource a context's compute buffer and KV cache
+/// actually compete for. Used by `probe_and_shrink_context` to require some
+/// headroom left over, not just a successful allocation, and to say how far
+/// short it fell when there is none.
 ///
 /// Returns `None` when there is no GPU device at all (a CPU-only run has no
-/// VRAM margin to check) rather than a bogus ratio.
-fn gpu_free_ratio() -> Option<f64> {
+/// VRAM margin to check) rather than bogus figures.
+fn gpu_memory() -> Option<(u64, u64)> {
     let (mut free_sum, mut total_sum) = (0u64, 0u64);
     let device_count = unsafe { llama_cpp_sys_2::ggml_backend_dev_count() };
     for i in 0..device_count {
@@ -228,7 +229,7 @@ fn gpu_free_ratio() -> Option<f64> {
         free_sum += free as u64;
         total_sum += total as u64;
     }
-    (total_sum > 0).then(|| free_sum as f64 / total_sum as f64)
+    (total_sum > 0).then_some((free_sum, total_sum))
 }
 
 /// Build context params with flash attention, n_batch, and KV cache types applied.
@@ -1311,6 +1312,78 @@ pub struct InferenceEngine {
 unsafe impl Send for InferenceEngine {}
 unsafe impl Sync for InferenceEngine {}
 
+/// Whether the projector goes on the GPU: where sizing or the user put it,
+/// and otherwise beside the text model. `has_gpu_backend` applies either way —
+/// a decision to use a GPU the binary cannot reach is not one to honour. One
+/// place, because the loader and the error that blames the projector must
+/// never disagree about where it is.
+fn projector_uses_gpu(config: &InferenceConfig) -> bool {
+    cfg!(feature = "multimodal")
+        && config.mmproj_on_gpu.unwrap_or(config.gpu_layers != 0)
+        && has_gpu_backend()
+}
+
+/// Explain the context probe giving up at its floor.
+///
+/// [`context_alloc_error`] is right for a context the user configured, where
+/// a smaller `--ctx-size` is the lever. Here it was wrong three ways, and the
+/// report this was written for hit all three: it told a user to lower
+/// `--ctx-size` when the probe had already gone to its floor; it said the KV
+/// cache "did not fit" when the allocation had succeeded and only the margin
+/// after it was short; and it offered KV quantization, which at 512 tokens
+/// gave back 64 MiB against a gap of several hundred.
+///
+/// So this names only levers that can close the gap. The text layers always
+/// can. The projector, when it is on the GPU. KV quantization only when what
+/// it frees reaches the shortfall — which is known exactly for a margin
+/// rejection and not at all when llama.cpp refused the allocation outright,
+/// so in that case it is not offered.
+fn context_floor_error(
+    floor: u32,
+    rejection: &str,
+    shortfall_bytes: Option<u64>,
+    kv_saving_bytes: u64,
+    gpu_layers: i32,
+    n_layers: u32,
+    projector_on_gpu: bool,
+) -> String {
+    const MIB: u64 = 1024 * 1024;
+    let short = shortfall_bytes
+        .map(|b| format!(", {} MiB short", b.div_ceil(MIB)))
+        .unwrap_or_default();
+    let offloaded = if gpu_layers < 0 || gpu_layers as u64 >= u64::from(n_layers) {
+        format!("all {n_layers}")
+    } else {
+        format!("{gpu_layers} of {n_layers}")
+    };
+    let mut levers = vec![format!(
+        "offload fewer of its layers with --gpu-layers (it offloads {offloaded})"
+    )];
+    if projector_on_gpu {
+        levers.push("move its projector to system RAM with --no-mmproj-offload".to_string());
+    }
+    if let Some(gap) = shortfall_bytes
+        && kv_saving_bytes > 0
+        && kv_saving_bytes >= gap
+    {
+        levers.push(format!(
+            "quantize the KV cache with --cache-type-k q8_0 --cache-type-v q8_0, which gives \
+             back about {} MiB here",
+            kv_saving_bytes / MIB
+        ));
+    }
+    let levers = match levers.as_slice() {
+        [only] => only.clone(),
+        [init @ .., last] => format!("{}, or {last}", init.join(", ")),
+        [] => unreachable!("the text layers are always a lever"),
+    };
+    format!(
+        "not even the smallest context this engine tries ({floor} tokens) fits beside what is \
+         already on the GPU: {rejection}{short}. A smaller --ctx-size cannot help — {floor} is \
+         the floor. What holds the VRAM is the model: {levers}."
+    )
+}
+
 /// Explain a failed context allocation in terms of what the user chose.
 ///
 /// llama.cpp answers a KV cache that does not fit with a null pointer, which
@@ -1578,17 +1651,17 @@ impl InferenceEngine {
         // left over.
         enum ProbeRejection {
             Alloc(String),
-            Margin(f64),
+            Margin { free: u64, total: u64 },
         }
         impl std::fmt::Display for ProbeRejection {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
                     Self::Alloc(e) => write!(f, "{e}"),
-                    Self::Margin(ratio) => write!(
+                    Self::Margin { free, total } => write!(
                         f,
                         "allocation succeeded but left only {:.0}% of GPU memory free \
                          (below the {:.0}% minimum this probe requires)",
-                        ratio * 100.0,
+                        *free as f64 / *total as f64 * 100.0,
                         MIN_FREE_VRAM_RATIO * 100.0
                     ),
                 }
@@ -1608,10 +1681,14 @@ impl InferenceEngine {
                 // its memory is still held at this point, so this is asking
                 // "what would be left over if this candidate were kept."
                 Ok(ctx) => {
-                    let ratio = gpu_free_ratio();
+                    let memory = gpu_memory();
                     drop(ctx);
-                    match ratio {
-                        Some(r) if r < MIN_FREE_VRAM_RATIO => Ok(Some(ProbeRejection::Margin(r))),
+                    match memory {
+                        Some((free, total))
+                            if (free as f64) < total as f64 * MIN_FREE_VRAM_RATIO =>
+                        {
+                            Ok(Some(ProbeRejection::Margin { free, total }))
+                        }
                         _ => Ok(None),
                     }
                 }
@@ -1634,9 +1711,30 @@ impl InferenceEngine {
                     &config.cache_type_k,
                     &config.cache_type_v,
                 );
-                return Err(
-                    context_alloc_error(&rejection, candidate, info.kv_k_mib + info.kv_v_mib).into(),
-                );
+                let shortfall = match rejection {
+                    ProbeRejection::Margin { free, total } => {
+                        Some(((total as f64 * MIN_FREE_VRAM_RATIO) as u64).saturating_sub(free))
+                    }
+                    ProbeRejection::Alloc(_) => None,
+                };
+                // What moving the KV cache to q8_0 would give back, per side:
+                // nothing where a side is already that small or smaller.
+                let q8 = cache_type_bytes_per_elem(&KvCacheType::Q8_0);
+                let freed = |mib: f64, ct: &KvCacheType| {
+                    (mib * (1.0 - q8 / cache_type_bytes_per_elem(ct))).max(0.0)
+                };
+                let kv_saving_mib = freed(info.kv_k_mib, &config.cache_type_k)
+                    + freed(info.kv_v_mib, &config.cache_type_v);
+                return Err(context_floor_error(
+                    candidate,
+                    &rejection.to_string(),
+                    shortfall,
+                    (kv_saving_mib * 1024.0 * 1024.0) as u64,
+                    config.gpu_layers,
+                    model.n_layer(),
+                    config.mmproj_path.is_some() && projector_uses_gpu(config),
+                )
+                .into());
             }
             last_failure = Some(candidate);
             candidate = (candidate / 2).max(FLOOR);
@@ -1711,7 +1809,7 @@ impl InferenceEngine {
             // Where sizing or the user put it; otherwise, beside the text
             // model. `has_gpu_backend` applies either way: a decision to use
             // a GPU the binary cannot reach is not one to honour.
-            use_gpu: config.mmproj_on_gpu.unwrap_or(config.gpu_layers != 0) && has_gpu_backend(),
+            use_gpu: projector_uses_gpu(config),
             print_timings: false,
             n_threads: config.threads as i32,
             ..MtmdContextParams::default()
@@ -2582,6 +2680,94 @@ fn num_cpus() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const MIB: u64 = 1024 * 1024;
+    const GIB: u64 = 1024 * MIB;
+
+    /// The margin rejection exactly as the probe prints it.
+    fn margin_text(free: u64, total: u64) -> String {
+        format!(
+            "allocation succeeded but left only {:.0}% of GPU memory free \
+             (below the 12% minimum this probe requires)",
+            free as f64 / total as f64 * 100.0
+        )
+    }
+
+    /// The report this was written for, number for number: 10% free on a
+    /// 16 GiB card after a 512-token context, whose f16 KV cache is 128 MiB,
+    /// every layer of the model on the GPU and its projector there too. The
+    /// old message sent that user to `--ctx-size` and to KV quantization; the
+    /// first was already at its floor and the second gives back 60 MiB of the
+    /// 328 missing. Neither may appear as advice, and both real levers must.
+    #[test]
+    fn at_the_floor_only_the_levers_that_can_close_the_gap_are_named() {
+        let (total, free) = (16 * GIB, 16 * GIB / 10);
+        let shortfall = (total as f64 * 0.12) as u64 - free;
+        let kv_saving = (128.0 * (1.0 - (34.0 / 32.0) / 2.0) * MIB as f64) as u64;
+        let msg = context_floor_error(
+            512,
+            &margin_text(free, total),
+            Some(shortfall),
+            kv_saving,
+            -1,
+            64,
+            true,
+        );
+
+        assert!(
+            msg.contains(&margin_text(free, total)),
+            "the cause, verbatim: {msg}"
+        );
+        assert!(msg.contains("328 MiB short"), "{msg}");
+        assert!(msg.contains("A smaller --ctx-size cannot help"), "{msg}");
+        assert!(!msg.contains("Lower it with --ctx-size"), "{msg}");
+        assert!(msg.contains("--gpu-layers (it offloads all 64)"), "{msg}");
+        assert!(msg.contains("--no-mmproj-offload"), "{msg}");
+        assert!(
+            !msg.contains("--cache-type-k"),
+            "60 MiB cannot close a 328 MiB gap: {msg}"
+        );
+    }
+
+    /// When the gap is small enough, quantizing the KV cache does close it,
+    /// and then it is a lever like the others.
+    #[test]
+    fn kv_quantization_is_offered_only_when_it_reaches_the_shortfall() {
+        let msg = context_floor_error(512, "r", Some(40 * MIB), 60 * MIB, -1, 64, false);
+        assert!(
+            msg.contains("--cache-type-k q8_0 --cache-type-v q8_0"),
+            "{msg}"
+        );
+        assert!(msg.contains("about 60 MiB"), "{msg}");
+
+        // Already quantized: nothing to give back, nothing to offer.
+        let msg = context_floor_error(512, "r", Some(MIB), 0, -1, 64, false);
+        assert!(!msg.contains("--cache-type-k"), "{msg}");
+    }
+
+    /// llama.cpp refusing the allocation outright says nothing about how far
+    /// short it was, so no figure is invented and KV quantization, which can
+    /// only be judged against a figure, is not offered.
+    #[test]
+    fn an_outright_refusal_invents_no_shortfall() {
+        let msg = context_floor_error(512, "failed to allocate", None, 999 * MIB, 20, 64, false);
+        assert!(msg.contains(": failed to allocate."), "{msg}");
+        assert!(!msg.contains("MiB short"), "{msg}");
+        assert!(!msg.contains("--cache-type-k"), "{msg}");
+        assert!(msg.contains("(it offloads 20 of 64)"), "{msg}");
+        assert!(
+            !msg.contains("--no-mmproj-offload"),
+            "no projector on the GPU: {msg}"
+        );
+    }
+
+    /// The runtime error, for a context the user configured, keeps its
+    /// advice: there a smaller `--ctx-size` is exactly the lever.
+    #[test]
+    fn the_runtime_error_still_points_at_ctx_size() {
+        let msg = context_alloc_error(&"null", 131072, 17_000.0);
+        assert!(msg.contains("Lower it with --ctx-size"), "{msg}");
+    }
 
     // A binary with no GPU backend used to print "All inference will run on
     // CPU" and then hand llama.cpp n_gpu_layers=1000 anyway. Harmless where

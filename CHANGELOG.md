@@ -25,7 +25,13 @@ something changed, less so for understanding what it means.
   the projector then loaded into that margin — 888 MiB of weights and a
   248 MiB compute buffer for a 27B on a 16 GB card — and the check found 10%.
   The advice printed with it, to lower `--ctx-size` or quantize the KV cache,
-  could not have helped: the context was already at its floor.
+  could not have helped: the context was already at its floor, and
+  quantizing a 512-token cache gives back about 60 MiB of the 328 that were
+  missing. When the smallest context still does not fit, the message now
+  says so in those terms — how many MiB short, that `--ctx-size` cannot help
+  — and names only what can: fewer layers on the GPU, with how many are there
+  now; the projector, if it is on the GPU; and KV quantization only when
+  what it frees would actually close the gap.
 
   Sizing now counts the projector, and decides where it goes. It stays on
   the GPU when the whole text model still fits beside it. When it would not,
