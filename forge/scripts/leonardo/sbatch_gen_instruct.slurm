@@ -18,9 +18,20 @@
 #
 # Settable:
 #   GEN_LIMIT   pairs attempted (default 60, the pilot)
-#   GEN_BATCH   batch size (default 16)
-#   GEN_OUT     output JSONL (default $WORK/eullm_runs/stage3/instruct-pairs.jsonl)
+#   GEN_BATCH   batch size (default 48)
+#   GEN_OUT     output JSONL (default $WORK/eullm_runs/stage3/instruct-pairs-v2.jsonl)
 #   GEN_REPO    checkout to run (default: the one this file was submitted from)
+#
+# THE PILOT OF 24 SEPTEMBER (job 58559305, 60 pairs, first prompt) said:
+#   * 78 % accepted, 58 tok/s at batch 16 with the GPUs at 30-45 % and 27 of
+#     64 GB used per card — memory-bound it was not, so the batch is 48 now.
+#     Even unchanged, 6,000 pairs would be ~7-8 node-hours.
+#   * one closed-book question in three samples was about ONE case ("the
+#     appeal against the Bari ruling of 15 January 2024…"), unanswerable
+#     except by invention; and one answer carried a defendant's surname
+#     inside a case citation. Both are now filtered (instruct_gen.py), and
+#     the output file is new — v2 — so pairs from the first prompt, which
+#     had neither filter, are not mixed into the training set.
 #
 # Same geometry as the split arm — 3 GPUs, 24 cores, 340 GB, two hours —
 # because it is the one measured to be placed quickly (see
@@ -55,8 +66,8 @@ fi
 source "$REPO/forge/scripts/leonardo/env.sh"
 
 LIMIT="${GEN_LIMIT:-60}"
-BATCH="${GEN_BATCH:-16}"
-OUT="${GEN_OUT:-$WORK/eullm_runs/stage3/instruct-pairs.jsonl}"
+BATCH="${GEN_BATCH:-48}"
+OUT="${GEN_OUT:-$WORK/eullm_runs/stage3/instruct-pairs-v2.jsonl}"
 CORPUS="$EULLM_DATA_DIR/train.jsonl"
 MODEL="Qwen/Qwen3-30B-A3B-Instruct-2507"
 

@@ -86,11 +86,15 @@ _TASK_PROMPTS = {
         "Ecco un testo giuridico:\n\n<testo>\n{passage}\n</testo>\n\n"
         "Scrivi UNA domanda che un cittadino o un professionista potrebbe "
         "porre a un assistente legale, e la risposta corretta. La domanda "
-        "deve avere senso da sola, SENZA il testo: non dire \"secondo il "
-        "testo\", \"nel passaggio\" o simili. La risposta deve essere "
-        "completa, basata solo su quanto il testo afferma, e citare "
-        "l'articolo o la norma quando il testo li indica. Lunghezza della "
-        "risposta: da 3 a 10 frasi.\n\n"
+        "deve riguardare la REGOLA o il PRINCIPIO giuridico che il testo "
+        "applica, non la vicenda specifica: niente parti, date, città, "
+        "numeri di ricorso o esiti di questa causa. Deve avere senso per "
+        "chiunque, senza conoscere questa causa e SENZA il testo: non dire "
+        "\"secondo il testo\", \"nel passaggio\" o simili. La risposta "
+        "deve essere completa, basata solo su quanto il testo afferma, e "
+        "citare l'articolo o la norma quando il testo li indica; se cita una "
+        "sentenza, senza il nome delle parti. Lunghezza della risposta: da 3 "
+        "a 10 frasi.\n\n"
         'Formato: {{"domanda": "...", "risposta": "..."}}'
     ),
     "riassunto": (
@@ -135,6 +139,45 @@ RE_TEXT_REFERENCE = re.compile(
     r"\b(?:secondo|nel|dal|del|il|questo|quel)\s+(?:testo|passaggio|brano)\b(?!\s+unic)",
     re.IGNORECASE,
 )
+# A closed-book question about ONE case — "la sentenza della Corte d'Appello di
+# Bari del 15 gennaio 2024 è stata…" — has an answer the student cannot know,
+# only invent. Training on it teaches exactly that: stating the outcome of a
+# case with confidence. The pilot of 24 September produced one in three
+# samples. A full date or a case number in the question is the signature —
+# except that a date is also how Italian law names a STATUTE ("legge 7 agosto
+# 1990, n. 241"), and those questions are exactly the ones wanted, so a date
+# right after the name of a legislative act does not count.
+_MONTHS = ("gennaio|febbraio|marzo|aprile|maggio|giugno|luglio|agosto|"
+           "settembre|ottobre|novembre|dicembre")
+RE_FULL_DATE = re.compile(rf"\b\d{{1,2}}\s+(?:{_MONTHS})\s+\d{{4}}\b", re.IGNORECASE)
+RE_CASE_NUMBER = re.compile(
+    r"\b(?:ricorso|sentenza|ordinanza|r\.g\.)\s*n\.?\s*\d", re.IGNORECASE
+)
+RE_ACT_BEFORE_DATE = re.compile(
+    r"(?:legge|l\.|decreto(?:[- ]legge|\s+legislativo)?|d\.\s*lgs\.?|d\.\s*l\.|"
+    r"d\.\s*p\.\s*r\.|dpr|regolamento|direttiva|codice)\s*(?:\(\w+\)\s*)?$",
+    re.IGNORECASE,
+)
+
+
+def case_specific(question: str) -> str:
+    """The first case-specific marker in a question, or "" if there is none."""
+    m = RE_CASE_NUMBER.search(question)
+    if m:
+        return m.group()
+    for m in RE_FULL_DATE.finditer(question):
+        if not RE_ACT_BEFORE_DATE.search(question[max(0, m.start() - 40):m.start()]):
+            return m.group()
+    return ""
+# Italian case citations carry the defendant's surname between the date and
+# the Rv. number: "Sez. 6, n. 25273 del 23/05/2018, Zidane, Rv. 273392". The
+# anonymiser's regex layer does not see a Title-Case surname, and the pilot
+# let one through. The name is dropped and the citation kept: the citation is
+# how a lawyer finds the ruling, the surname is only personal data.
+RE_CITATION_NAME = re.compile(
+    r"(\b\d{4}|\d{1,2}/\d{1,2}/\d{2,4}),\s*"
+    r"[A-ZÀ-Ý][\w'’.-]*(?:\s+[A-ZÀ-Ý][\w'’.-]*){0,3},\s*(Rv\.)"
+)
 # Very common Italian words. A generated answer with almost none of them is
 # not Italian, whatever else it is.
 _IT_STOPWORDS = frozenset(
@@ -164,7 +207,7 @@ class GenConfig:
     min_answer_chars: int = 150
     max_answer_chars: int = 3000
     min_question_chars: int = 15
-    max_question_chars: int = 400
+    max_question_chars: int = 600
     min_italian_ratio: float = 0.18
     anonymiser: AnonymiserConfig = field(
         default_factory=lambda: AnonymiserConfig(use_ner=False)
@@ -190,6 +233,27 @@ class Rejected(ValueError):
         self.reason = reason
 
 
+def _whole_sentences(text: str) -> str:
+    """Trim a leading and trailing sentence fragment.
+
+    ``train.jsonl`` was cut into chunks for distillation, so a record can
+    begin "oggetto dello scorporo catastale. 2.2 Con il quarto motivo…". The
+    generator copes, but in the context tasks the passage IS the user's
+    message, and a user pastes a text that begins at the beginning. Only a
+    fragment is trimmed: a text starting with a capital or a digit is left
+    alone, and nothing is cut if no sentence boundary is near.
+    """
+    if text and not (text[0].isupper() or text[0].isdigit()):
+        m = re.search(r"[.;:!?]\s+(?=[A-ZÀ-Ý0-9])", text[:600])
+        if m:
+            text = text[m.end():]
+    if text and text[-1] not in ".;:!?)»\"":
+        cut = max(text.rfind(". "), text.rfind(".\n"))
+        if cut > len(text) - 600:
+            text = text[:cut + 1]
+    return text.strip()
+
+
 def passage_window(text: str, max_chars: int, rng: random.Random) -> str:
     """A window of at most ``max_chars`` that starts and ends at paragraph breaks.
 
@@ -198,7 +262,7 @@ def passage_window(text: str, max_chars: int, rng: random.Random) -> str:
     of the case. A seeded random window over paragraph starts samples the
     whole document instead of its header, reproducibly.
     """
-    text = text.strip()
+    text = _whole_sentences(text.strip())
     if len(text) <= max_chars:
         return text
     starts = [0] + [m.end() for m in re.finditer(r"\n\s*\n", text)]
@@ -250,7 +314,8 @@ def make_jobs(
         task = rng.choices(tasks, weights=probs)[0]
         key = hashlib.sha1(f"{task}\x00{passage}".encode()).hexdigest()[:20]
         prefix = rng.choice(_CONTEXT_INSTRUCTIONS[task]) if task in _CONTEXT_INSTRUCTIONS else ""
-        jobs.append(Job(key, task, passage, str(rec.get("source", "")), prefix))
+        source = rec.get("source") or rec.get("kind") or rec.get("source_id") or ""
+        jobs.append(Job(key, task, passage, str(source), prefix))
     return jobs
 
 
@@ -286,6 +351,11 @@ def italian_ratio(text: str) -> float:
     return sum(w in _IT_STOPWORDS for w in words) / len(words)
 
 
+def strip_citation_names(text: str) -> str:
+    """Drop the party surname from Cassazione-style citations, keep the rest."""
+    return RE_CITATION_NAME.sub(r"\1, \2", text)
+
+
 def _check_clean(text: str, what: str, cfg: GenConfig) -> None:
     if RE_PLACEHOLDER.search(text):
         raise Rejected("placeholder", f"{what}: {RE_PLACEHOLDER.search(text).group()}")
@@ -307,7 +377,7 @@ def parse_generation(raw: str, job: Job, cfg: GenConfig | None = None) -> dict:
         raise Rejected("thinking")
     obj = _extract_json(raw)
 
-    answer = str(obj.get("risposta", "")).strip()
+    answer = strip_citation_names(str(obj.get("risposta", "")).strip())
     if not answer:
         raise Rejected("empty_answer")
     if not cfg.min_answer_chars <= len(answer) <= cfg.max_answer_chars:
@@ -322,6 +392,9 @@ def parse_generation(raw: str, job: Job, cfg: GenConfig | None = None) -> dict:
             raise Rejected("question_length", str(len(question)))
         if RE_TEXT_REFERENCE.search(question) or RE_TEXT_REFERENCE.search(answer):
             raise Rejected("refers_to_text")
+        marker = case_specific(question)
+        if marker:
+            raise Rejected("case_specific", marker)
         _check_clean(question, "question", cfg)
         instruction = question
     else:
