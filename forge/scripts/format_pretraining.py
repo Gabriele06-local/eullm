@@ -201,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if groups is not None:
         missing = sum(1 for g in groups if g is None or g == "")
+        if n > 0 and missing == n:
+            parser.error(
+                f"--group-by '{args.group_by}' matches no record ({n:,} checked) -- "
+                f"refusing a per-chunk split by typo; pass 'none' explicitly "
+                f"for the old per-chunk split"
+            )
         if missing:
             print(
                 f"[WARN] {missing:,} of {n:,} records have no '{args.group_by}'. "
