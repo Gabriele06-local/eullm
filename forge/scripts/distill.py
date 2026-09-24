@@ -697,9 +697,13 @@ def _reload_student_from_checkpoint(
 
 def train(cfg: DistillConfig) -> None:
     torch.manual_seed(cfg.seed)
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA required.")
     device = cfg.student_device
+    # Require what the config asks for, not CUDA unconditionally: a student
+    # placed on CPU (the tests) has no use for a GPU, and faking one with a
+    # patched `torch.cuda.is_available` misleads torch itself — the optimizer
+    # then probes a driver that is not there.
+    if str(device).startswith("cuda") and not torch.cuda.is_available():
+        raise RuntimeError(f"student_device={device!r} but CUDA is not available.")
     dtype = torch.bfloat16 if cfg.bf16 else torch.float16
 
     output_dir = Path(cfg.output_dir)

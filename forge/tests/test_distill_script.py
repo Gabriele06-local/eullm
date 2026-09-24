@@ -331,7 +331,6 @@ def run_train(monkeypatch, tmp_path, *, n_batches=12, poison=(),
         loaded["teacher"] = True
         return teacher
 
-    monkeypatch.setattr(distill.torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(distill, "AutoTokenizer", StubTokenizer)
     monkeypatch.setattr(distill, "build_dataloaders",
                         lambda cfg, tok: (list(batches(n_batches)), []))
