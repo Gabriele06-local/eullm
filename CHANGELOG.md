@@ -16,6 +16,33 @@ something changed, less so for understanding what it means.
 ## Unreleased
 
 ### Fixed
+- **A vision model that sizing said would fit refused to load, all the way
+  down to 512 tokens of context.** The error was `could not allocate a
+  context of 512 tokens: allocation succeeded but left only 10% of GPU
+  memory free`, and it came from a projector that was loaded every time and
+  counted by nothing. Sizing picked the text model's GPU layers against the
+  free VRAM it measured, leaving the 12% margin the context check requires;
+  the projector then loaded into that margin — 888 MiB of weights and a
+  248 MiB compute buffer for a 27B on a 16 GB card — and the check found 10%.
+  The advice printed with it, to lower `--ctx-size` or quantize the KV cache,
+  could not have helped: the context was already at its floor.
+
+  Sizing now counts the projector, and decides where it goes. It stays on
+  the GPU when the whole text model still fits beside it. When it would not,
+  it moves to system RAM first, before any text layer is taken off the card,
+  because the two are not paid for the same way: a projector runs once per
+  image and is idle for every token after it, while a text layer in RAM
+  slows every token of every request. In the case above that means the
+  model loads with exactly the text layers sizing already chose, and images
+  are encoded on the CPU instead. The load log says which one happened.
+
+  `--mmproj-offload` keeps the projector on the GPU regardless, at the cost
+  of text layers — worth it when nearly every request carries an image —
+  and `--no-mmproj-offload` keeps it in RAM regardless. Both names are
+  llama.cpp's. Text-only models are unaffected, and so is any build that
+  cannot measure its VRAM, where the projector follows the text model as it
+  always did.
+
 - **Importing a model whose file sets its own tensor alignment produced a
   copy that would not load.** GGUF files say where their tensor data begins
   by declaring `general.alignment`; almost every file leaves it at the

@@ -354,6 +354,24 @@ struct RuntimeOpts {
     #[arg(long, value_name = "PATH")]
     mmproj: Option<PathBuf>,
 
+    /// Keep a multimodal model's projector on the GPU, whatever sizing
+    /// would decide. The name is llama.cpp's.
+    ///
+    /// By default, with sizing on, the projector goes on the GPU only when
+    /// the whole text model still fits beside it, and to system RAM
+    /// otherwise — before any text layer is moved off the card. A projector
+    /// runs once per image and sits idle for every token after it; a text
+    /// layer in RAM slows every token of every request. Worth forcing when
+    /// nearly every request carries an image, at the price of text layers.
+    #[arg(long, conflicts_with = "no_mmproj_offload")]
+    mmproj_offload: bool,
+
+    /// Keep a multimodal model's projector in system RAM, whatever sizing
+    /// would decide: the most VRAM for the text model, and images encoded
+    /// on the CPU. The name is llama.cpp's.
+    #[arg(long)]
+    no_mmproj_offload: bool,
+
     /// How long to keep a model resident after its last use, before
     /// unloading it to free VRAM/RAM. Accepts a duration ("5m", "30s",
     /// "2h") or a bare number of seconds. Applies to both the generation
@@ -696,9 +714,17 @@ async fn main() {
                 logfile,
                 rust_debug,
                 mmproj,
+                mmproj_offload,
+                no_mmproj_offload,
                 keep_alive,
                 embedding_model,
             } = opts;
+            // `None` lets sizing decide; either flag decides instead.
+            let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
             let keep_alive = keep_alive.as_deref().map(|s| {
                 api::parse_keep_alive_flag(s).unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
@@ -805,6 +831,7 @@ async fn main() {
                 image,
                 rust_debug,
                 mmproj,
+                mmproj_offload,
                 keep_alive,
                 embedding_model,
             )
@@ -844,9 +871,17 @@ async fn main() {
                 logfile,
                 rust_debug,
                 mmproj,
+                mmproj_offload,
+                no_mmproj_offload,
                 keep_alive,
                 embedding_model,
             } = opts;
+            // `None` lets sizing decide; either flag decides instead.
+            let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
             let keep_alive = keep_alive.as_deref().map(|s| {
                 api::parse_keep_alive_flag(s).unwrap_or_else(|e| {
                     eprintln!("Error: {e}");
@@ -909,6 +944,7 @@ async fn main() {
                 checkpoint_min_step,
                 rust_debug,
                 mmproj,
+                mmproj_offload,
                 keep_alive,
                 embedding_model,
             )
@@ -1758,6 +1794,7 @@ async fn cmd_run(
     image: Option<PathBuf>,
     rust_debug: bool,
     mmproj: Option<PathBuf>,
+    mmproj_offload: Option<bool>,
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
 ) {
@@ -2007,6 +2044,27 @@ async fn cmd_run(
 
         println!("Loading GGUF: {}", gguf_path.display());
 
+        // Look up an mmproj projector for this model (if any was pulled
+        // alongside the GGUF). On text-only builds the value is read but
+        // ignored at InferenceConfig level; on multimodal builds it is
+        // what enables `generate_multimodal`.
+        // Order of precedence, most explicit first: what the user named, what
+        // the store recorded when the model was pulled, and finally a
+        // projector sitting next to the weights — the layout of every
+        // HuggingFace vision repo, and the case that used to be unreachable.
+        //
+        // Resolved here, ahead of sizing, and not where it used to be: the
+        // projector loads with the model every time, and sizing that has not
+        // heard of it hands its VRAM to text layers, which the context probe
+        // then finds missing.
+        let mmproj_for_config = mmproj
+            .clone()
+            .or_else(|| store.mmproj_path(&model_name))
+            .or_else(|| store.mmproj_path(model))
+            .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
+        let mmproj_bytes = fit::mmproj_footprint_bytes(mmproj_for_config.as_deref());
+        let mut mmproj_placement = fit::MmprojPlacement::from_flag(mmproj_offload);
+
         // --fit: auto-size the GPU offload to free VRAM before loading. Opt-in;
         // headless-safe (never prompts unless both stdin and stdout are TTYs).
         //
@@ -2026,14 +2084,23 @@ async fn cmd_run(
             let ceiling = gpu_layers;
             let kv_bpe_k = inference::cache_type_bytes_per_elem(&cache_type_k);
             let kv_bpe_v = inference::cache_type_bytes_per_elem(&cache_type_v);
-            let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
-                fit::run_moe_fit(
+            if mmproj_offload.is_none() {
+                mmproj_placement = fit::decide_mmproj_placement(
                     &gguf_path,
+                    mmproj_bytes,
                     ctx_size,
                     kv_bpe_k,
                     kv_bpe_v,
                     embedding_reserve_bytes,
-                )
+                );
+            }
+            // Everything already spoken for before the text model is sized:
+            // a reserved embedding companion, and the projector unless it is
+            // going to RAM.
+            let sizing_reserve =
+                embedding_reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
+            let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
+                fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
             } else {
                 fit::MoeFitDecision::NotMoe
             };
@@ -2068,7 +2135,7 @@ async fn cmd_run(
                         fit_strict,
                         kv_bpe_k,
                         kv_bpe_v,
-                        embedding_reserve_bytes,
+                        sizing_reserve,
                     )
                 } else {
                     fit::run_fit_headless(
@@ -2078,7 +2145,7 @@ async fn cmd_run(
                         fit_strict,
                         kv_bpe_k,
                         kv_bpe_v,
-                        embedding_reserve_bytes,
+                        sizing_reserve,
                     )
                 } {
                     fit::FitOutcome::Proceed(n) => gpu_layers = n,
@@ -2117,21 +2184,9 @@ async fn cmd_run(
             std::process::exit(2);
         }
 
-        // Look up an mmproj projector for this model (if any was pulled
-        // alongside the GGUF). On text-only builds the value is read but
-        // ignored at InferenceConfig level; on multimodal builds it is
-        // what enables `generate_multimodal`.
-        // Order of precedence, most explicit first: what the user named, what
-        // the store recorded when the model was pulled, and finally a
-        // projector sitting next to the weights — the layout of every
-        // HuggingFace vision repo, and the case that used to be unreachable.
-        let mmproj_for_config = mmproj
-            .clone()
-            .or_else(|| store.mmproj_path(&model_name))
-            .or_else(|| store.mmproj_path(model))
-            .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
         if let Some(ref p) = mmproj_for_config {
             println!("Found mmproj: {}", p.display());
+            println!("  {}", mmproj_placement.describe());
         }
         // Only an explicit `--mmproj` becomes the server's fallback for
         // later swaps. A projector discovered for THIS model belongs to
@@ -2153,6 +2208,7 @@ async fn cmd_run(
             cache_type_k,
             cache_type_v,
             mmproj_path: mmproj_for_config.clone(),
+            mmproj_on_gpu: mmproj_placement.on_gpu(),
             cpu_moe,
             n_cpu_moe,
             rs_seq,
@@ -2358,6 +2414,9 @@ async fn cmd_run(
             // `run` resolves the projector itself and hands the loaded engine
             // over; this is only the fallback for a later swap.
             mmproj: api_mmproj,
+            // The flag, not `mmproj_placement`: that was worked out for the
+            // launch model, and each swap decides again for its own.
+            mmproj_offload,
             model_name: Some(api_model_name),
             engine,
             scheduler,
@@ -2445,6 +2504,7 @@ async fn cmd_serve(
     checkpoint_min_step: u32,
     rust_debug: bool,
     mmproj: Option<PathBuf>,
+    mmproj_offload: Option<bool>,
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
 ) {
@@ -2516,6 +2576,7 @@ async fn cmd_serve(
     if let Err(e) = api::serve(api::ServeConfig {
         port,
         mmproj,
+        mmproj_offload,
         model_name: None,
         engine: None,
         scheduler: None,
@@ -4017,6 +4078,30 @@ mod cli_default_parity_tests {
     fn no_fit_turns_sizing_off_on_its_own() {
         assert!(!sizing_on(&["eullm", "run", "m.gguf", "--no-fit"]));
         assert!(!sizing_on(&["eullm", "serve", "--no-fit"]));
+    }
+
+    /// Neither flag leaves the projector to sizing; either one decides, on
+    /// both subcommands, and asking for both is refused rather than resolved
+    /// by whichever clap happened to read last.
+    #[test]
+    fn the_projector_flags_force_a_placement_and_exclude_each_other() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            let o = runtime_opts(sub);
+            assert!(
+                !o.mmproj_offload && !o.no_mmproj_offload,
+                "unset by default"
+            );
+
+            let on = runtime_opts(&[sub, &["--mmproj-offload"]].concat());
+            assert!(on.mmproj_offload && !on.no_mmproj_offload);
+
+            let off = runtime_opts(&[sub, &["--no-mmproj-offload"]].concat());
+            assert!(off.no_mmproj_offload && !off.mmproj_offload);
+
+            let both =
+                Cli::try_parse_from([sub, &["--mmproj-offload", "--no-mmproj-offload"]].concat());
+            assert!(both.is_err(), "both flags at once must be refused");
+        }
     }
 
     /// `--gpu-layers` unset must reach the engine as the old default, so
