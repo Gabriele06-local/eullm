@@ -18,8 +18,15 @@ use std::path::Path;
 
 const GGUF_MAGIC: u32 = 0x4655_4747; // "GGUF" in little-endian
 
-/// Default alignment for tensor data in GGUF v3.
-const ALIGNMENT: u64 = 32;
+/// Alignment of the tensor data when the file does not say otherwise.
+///
+/// The same `GGUF_DEFAULT_ALIGNMENT` ggml uses, and a default rather than a
+/// rule: a file may set `general.alignment` to any other power of two, and
+/// [`declared_alignment`] reads it.
+const DEFAULT_ALIGNMENT: u64 = 32;
+
+/// The metadata key a file uses to set its own tensor-data alignment.
+const KEY_ALIGNMENT: &str = "general.alignment";
 
 // GGUF value type IDs.
 const TYPE_UINT8: u32 = 0;
@@ -55,6 +62,26 @@ fn scalar_size(t: u32) -> io::Result<u64> {
             format!("unknown GGUF scalar type {t}"),
         )),
     }
+}
+
+/// Accept a `general.alignment` a file declares, on ggml's terms.
+///
+/// `gguf.cpp` refuses the whole file for a value that is zero or not a power
+/// of two, and refuses it again if the key is not a `uint32`. Both rules are
+/// mirrored here rather than restated: a file ggml will not open is not one
+/// to patch, and the alternative — carrying on with 32 because the declared
+/// value looked wrong — writes the tensor data at an offset the file does not
+/// claim, which is the failure this whole function exists to avoid.
+///
+/// Zero matters twice over: `align_up` divides by it.
+fn accept_alignment(a: u32) -> io::Result<u64> {
+    if a == 0 || !a.is_power_of_two() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{KEY_ALIGNMENT} is {a}, which is not a power of two"),
+        ));
+    }
+    Ok(u64::from(a))
 }
 
 /// Bytes between the cursor and the end of the file.
@@ -143,12 +170,29 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
 
     // ── Scan metadata KV entries ─────────────────────────────────────
     let mut patches: Vec<ArrayPatch> = Vec::new();
+    // Where the tensor data begins is computed from this, twice, so a file
+    // that sets its own alignment and is read with 32 gets a patched copy
+    // whose tensor data is at an offset nothing in the file agrees with —
+    // and the copy is written, not rejected. Read it while passing over it.
+    let mut alignment = DEFAULT_ALIGNMENT;
 
     for _ in 0..kv_count {
         let key = read_gguf_string(&mut f)?;
         let vtype = read_u32(&mut f)?;
 
-        if vtype == TYPE_ARRAY {
+        if key == KEY_ALIGNMENT {
+            // Checked before the value's type is dispatched on, the way ggml
+            // does it: the key is wrong for the file whatever type it turns
+            // out to hold, and an array here would otherwise be read as an
+            // ordinary array and leave the alignment silently at 32.
+            if vtype != TYPE_UINT32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{KEY_ALIGNMENT} must be a uint32, found type {vtype}"),
+                ));
+            }
+            alignment = accept_alignment(read_u32(&mut f)?)?;
+        } else if vtype == TYPE_ARRAY {
             let elem_type = read_u32(&mut f)?;
             let count_offset = f.stream_position()?;
             let count = read_u64(&mut f)?;
@@ -197,7 +241,20 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
     }
 
     let end_of_header = f.stream_position()?;
-    let orig_data_start = align_up(end_of_header, ALIGNMENT);
+    let orig_data_start = align_up(end_of_header, alignment);
+
+    // A declared alignment can put the tensor data past the end of the file it
+    // came from. Reading on would skip to nowhere and stream an empty rest,
+    // producing a truncated copy that looks like a success.
+    let src_len = f.metadata()?.len();
+    if orig_data_start > src_len {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "alignment {alignment} puts the tensor data at {orig_data_start}, past the end of a {src_len} byte file"
+            ),
+        ));
+    }
 
     // Total extra bytes we are inserting into the metadata section.
     let extra_bytes: u64 = patches
@@ -205,7 +262,7 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
         .map(|p| (p.target_count - p.current_count) * p.elem_size)
         .sum();
 
-    let new_data_start = align_up(end_of_header + extra_bytes, ALIGNMENT);
+    let new_data_start = align_up(end_of_header + extra_bytes, alignment);
 
     // ── Write the patched file ───────────────────────────────────────
     f.seek(SeekFrom::Start(0))?;
@@ -244,9 +301,10 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
     copy_exact(&mut f, &mut w, end_of_header - src_pos)?;
 
     // Write new alignment padding.
-    let new_padding = new_data_start - (end_of_header + extra_bytes);
-    let pad = vec![0u8; new_padding as usize];
-    w.write_all(&pad)?;
+    // Written in blocks, not allocated whole: the padding used to be under 32
+    // bytes because the alignment was a constant 32, and it is now whatever
+    // the file asked for, up to a `uint32`.
+    write_zeros(&mut w, new_data_start - (end_of_header + extra_bytes))?;
 
     // Skip old alignment padding in source.
     let old_padding = orig_data_start - end_of_header;
@@ -369,6 +427,17 @@ fn skip_gguf_value(r: &mut (impl Read + Seek), vtype: u32) -> io::Result<()> {
     }
 }
 
+/// Write `n` zero bytes using an 8 KB buffer.
+fn write_zeros(w: &mut impl Write, mut n: u64) -> io::Result<()> {
+    let buf = [0u8; 8192];
+    while n > 0 {
+        let chunk = n.min(buf.len() as u64) as usize;
+        w.write_all(&buf[..chunk])?;
+        n -= chunk as u64;
+    }
+    Ok(())
+}
+
 /// Copy exactly `n` bytes from reader to writer using an 8 KB buffer.
 fn copy_exact(r: &mut impl Read, w: &mut impl Write, mut n: u64) -> io::Result<()> {
     let mut buf = [0u8; 8192];
@@ -381,6 +450,10 @@ fn copy_exact(r: &mut impl Read, w: &mut impl Write, mut n: u64) -> io::Result<(
     Ok(())
 }
 
+/// Round `v` up to the next multiple of `alignment`, which must be non-zero
+/// (`accept_alignment` is the only thing that produces one). The multiply
+/// cannot overflow for any value this module passes: `v` is a position in a
+/// file and the result is below `v + alignment`.
 fn align_up(v: u64, alignment: u64) -> u64 {
     v.div_ceil(alignment) * alignment
 }
@@ -389,6 +462,168 @@ fn align_up(v: u64, alignment: u64) -> u64 {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    /// Build a whole GGUF: one short `qwen35.rope.dimension_sections`, one
+    /// tensor, and optionally a declared `general.alignment`. Returns the
+    /// bytes and the offset the metadata ends at, which is what both the
+    /// source and the patched copy pad from.
+    fn gguf_with(alignment: Option<u32>, sections: &[u32], data: &[u8]) -> (Vec<u8>, u64) {
+        fn put_str(b: &mut Vec<u8>, v: &str) {
+            b.extend_from_slice(&(v.len() as u64).to_le_bytes());
+            b.extend_from_slice(v.as_bytes());
+        }
+
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes()); // version
+        b.extend_from_slice(&1u64.to_le_bytes()); // tensor_count
+        b.extend_from_slice(&(1 + u64::from(alignment.is_some())).to_le_bytes());
+
+        if let Some(a) = alignment {
+            put_str(&mut b, KEY_ALIGNMENT);
+            b.extend_from_slice(&TYPE_UINT32.to_le_bytes());
+            b.extend_from_slice(&a.to_le_bytes());
+        }
+
+        put_str(&mut b, "qwen35.rope.dimension_sections");
+        b.extend_from_slice(&TYPE_ARRAY.to_le_bytes());
+        b.extend_from_slice(&TYPE_UINT32.to_le_bytes());
+        b.extend_from_slice(&(sections.len() as u64).to_le_bytes());
+        for v in sections {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+
+        // One tensor info: name, n_dims, one dimension, type, offset. The
+        // name's length is load-bearing — see the alignment test, which needs
+        // the metadata to end at a specific offset to mean anything.
+        put_str(&mut b, "ten");
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+
+        let end_of_header = b.len() as u64;
+        let data_start = align_up(
+            end_of_header,
+            alignment.map_or(DEFAULT_ALIGNMENT, u64::from),
+        );
+        b.resize(data_start as usize, 0);
+        b.extend_from_slice(data);
+        (b, end_of_header)
+    }
+
+    fn temp_pair(what: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir();
+        let id = uuid::Uuid::new_v4();
+        (
+            dir.join(format!("eullm-{what}-src-{id}.gguf")),
+            dir.join(format!("eullm-{what}-dst-{id}.gguf")),
+        )
+    }
+
+    /// Run the patcher over a built file and hand back the patched bytes.
+    fn patch(bytes: &[u8], what: &str) -> io::Result<Option<Vec<u8>>> {
+        let (src, dst) = temp_pair(what);
+        std::fs::write(&src, bytes)?;
+        let r = patch_gguf_if_needed(&src, &dst);
+        let out = match &r {
+            Ok(true) => Some(std::fs::read(&dst)?),
+            _ => None,
+        };
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+        r.map(|_| out)
+    }
+
+    /// The offset the tensor data lands at is computed from the alignment,
+    /// twice, and the alignment used to be the constant 32 whatever the file
+    /// said.
+    ///
+    /// Which offset that produces is not simply "32 instead of 64": the old
+    /// code also streamed the source's own padding through unread, so for
+    /// most sizes the two errors cancelled and the data landed where it
+    /// belonged anyway. The first fixture written here was one of those, and
+    /// passed against the constant it was meant to catch. It is the *growth*
+    /// in padding that has to differ, and at 158 bytes of metadata it does:
+    /// the four bytes the patch appends cross a 32-boundary but not a
+    /// 64-boundary, which puts the data at 224 under the old constant and 192
+    /// under the declared alignment. Checked in both directions.
+    #[test]
+    fn a_declared_alignment_decides_where_the_tensor_data_goes() {
+        let data = b"TENSOR-BYTES";
+        let (bytes, end_of_header) = gguf_with(Some(64), &[1, 2, 3], data);
+        assert_eq!(
+            end_of_header, 158,
+            "the fixture stopped landing where 32 and 64 disagree"
+        );
+        // Where the data must end up. The old constant put it at 224: the
+        // padding it wrote grew by 32 and the source's own 34 bytes of
+        // padding were then copied through on top.
+        let patched_start = align_up(end_of_header + 4, 64);
+        assert_eq!(patched_start, 192);
+
+        let out = patch(&bytes, "align64").unwrap().expect("should patch");
+
+        // One u32 element appended, so the metadata is four bytes longer.
+        assert_eq!(
+            &out[patched_start as usize..],
+            data,
+            "tensor data is not where the declared alignment puts it"
+        );
+        assert!(
+            out[(end_of_header + 4) as usize..patched_start as usize]
+                .iter()
+                .all(|&b| b == 0),
+            "the gap before it must be padding"
+        );
+    }
+
+    /// The default path, unchanged: no key, so 32, which is what every file
+    /// anyone actually has says by saying nothing.
+    #[test]
+    fn a_file_that_declares_no_alignment_still_pads_to_32() {
+        let data = b"TENSOR-BYTES";
+        let (bytes, end_of_header) = gguf_with(None, &[1, 2, 3], data);
+        let out = patch(&bytes, "align-default")
+            .unwrap()
+            .expect("should patch");
+        let patched_start = align_up(end_of_header + 4, DEFAULT_ALIGNMENT);
+        assert_eq!(&out[patched_start as usize..], data);
+    }
+
+    /// ggml refuses the file outright for these, so patching it is pointless
+    /// and guessing 32 would write the data where the file does not claim it
+    /// is. Zero would also divide by zero in `align_up`.
+    #[test]
+    fn an_alignment_that_is_not_a_power_of_two_is_refused() {
+        for good in [1u32, 2, 32, 64, 4096, 1 << 31] {
+            assert_eq!(accept_alignment(good).unwrap(), u64::from(good));
+        }
+        for bad in [0u32, 3, 48, 100, u32::MAX] {
+            assert!(accept_alignment(bad).is_err(), "{bad} must be refused");
+        }
+
+        let (bytes, _) = gguf_with(Some(48), &[1, 2, 3], b"x");
+        assert!(patch(&bytes, "align48").is_err());
+    }
+
+    /// A declared alignment can put the tensor data past the end of the file
+    /// that declared it. Skipping to nowhere and streaming the empty rest
+    /// writes a truncated copy and calls it a success.
+    #[test]
+    fn an_alignment_past_the_end_of_the_file_is_refused() {
+        // Built well-formed, then cut short: a file declaring a megabyte of
+        // alignment without carrying a megabyte of padding. `gguf_with` pads
+        // to what it declares, so truncating is what makes this the malformed
+        // case rather than a large well-formed one.
+        let (mut bytes, end_of_header) = gguf_with(Some(1 << 20), &[1, 2, 3], b"x");
+        bytes.truncate(end_of_header as usize + 8);
+        assert!(
+            (bytes.len() as u64) < (1 << 20),
+            "the fixture must be shorter than the alignment it declares"
+        );
+        assert!(patch(&bytes, "align-past-end").is_err());
+    }
 
     /// An array value's raw bytes: element type followed by count.
     fn array_value(elem_type: u32, count: u64) -> Cursor<Vec<u8>> {
