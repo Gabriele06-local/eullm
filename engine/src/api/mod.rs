@@ -171,6 +171,12 @@ pub struct AppState {
     /// Normally `None`.
     pub fallback_mmproj: Option<PathBuf>,
 
+    /// `--mmproj-offload` / `--no-mmproj-offload` as the user gave them, or
+    /// `None` to let sizing place each model's projector. The flag and not a
+    /// decision, for the same reason `gpu_layers` is the flag: a placement
+    /// worked out for the launch model says nothing about the next one.
+    pub mmproj_offload: Option<bool>,
+
     /// Whether a request's `model` field may name an arbitrary filesystem
     /// path. Off by default — see `resolve_model`.
     pub allow_model_paths: bool,
@@ -364,10 +370,25 @@ impl AppState {
         let mut gpu_layers = self.gpu_layers;
         let mut cpu_moe = self.cpu_moe;
         let mut n_cpu_moe = self.n_cpu_moe;
+        // The projector is loaded with the model, always, so sizing has to
+        // count it — see `fit::place_mmproj` for where it goes and why.
+        let mmproj_bytes = crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref());
+        let mut mmproj_placement = crate::fit::MmprojPlacement::from_flag(self.mmproj_offload);
         if self.fit {
             let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
             let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
-            let reserve_bytes = self.reserved_embedding_bytes().await;
+            let mut reserve_bytes = self.reserved_embedding_bytes().await;
+            if self.mmproj_offload.is_none() {
+                mmproj_placement = crate::fit::decide_mmproj_placement(
+                    &gguf_path,
+                    mmproj_bytes,
+                    effective_ctx,
+                    kv_bpe_k,
+                    kv_bpe_v,
+                    reserve_bytes,
+                );
+            }
+            reserve_bytes = reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
             let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
                 crate::fit::run_moe_fit(&gguf_path, effective_ctx, kv_bpe_k, kv_bpe_v, reserve_bytes)
             } else {
@@ -438,10 +459,14 @@ impl AppState {
             // `engine.generate_multimodal()`. Models without an mmproj keep
             // the text-only fast path (None → no extra VRAM, no init cost).
             mmproj_path: mmproj_path.clone(),
+            mmproj_on_gpu: mmproj_placement.on_gpu(),
             cpu_moe,
             n_cpu_moe,
             rs_seq: self.rs_seq,
         };
+        if mmproj_path.is_some() {
+            tracing::info!("{}", mmproj_placement.describe());
+        }
 
         // The continuous-batching scheduler is text-only — it does not route
         // mtmd chunks. For multimodal models we therefore force the sequential
@@ -1379,6 +1404,8 @@ pub struct ServeConfig {
     pub port: u16,
     /// See `AppState::fallback_mmproj`.
     pub mmproj: Option<PathBuf>,
+    /// See `AppState::mmproj_offload`.
+    pub mmproj_offload: Option<bool>,
     pub model_name: Option<String>,
     pub engine: Option<Arc<InferenceEngine>>,
     pub scheduler: Option<SchedulerHandle>,
@@ -1548,6 +1575,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState {
         backend: cfg.backend,
         fallback_mmproj: cfg.mmproj.clone(),
+        mmproj_offload: cfg.mmproj_offload,
         slot: tokio::sync::RwLock::new(ModelSlot {
             model_name: cfg.model_name,
             engine: cfg.engine,
@@ -2029,6 +2057,7 @@ mod http_tests {
         let state = Arc::new(AppState {
             backend: test_backend(),
             fallback_mmproj: None,
+            mmproj_offload: None,
             slot: tokio::sync::RwLock::new(ModelSlot {
                 model_name: None,
                 engine: None,

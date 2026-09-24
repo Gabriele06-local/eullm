@@ -338,6 +338,12 @@ pub struct InferenceConfig {
     /// image / audio input. When `None` or the feature is off, the engine
     /// runs text-only exactly as before.
     pub mmproj_path: Option<PathBuf>,
+    /// Where the projector runs, when something has decided: `Some(true)` on
+    /// the GPU, `Some(false)` in system RAM. `None` keeps the rule that
+    /// predates the choice — the GPU whenever the text model offloads any
+    /// layer. Set by `fit::place_mmproj` when sizing is on, or by
+    /// `--mmproj-offload` / `--no-mmproj-offload`, which win over it.
+    pub mmproj_on_gpu: Option<bool>,
     /// Keep MoE expert tensors (`*.ffn_(up|down|gate)_exps`) on CPU RAM
     /// while everything else — attention, embeddings, shared/dense layers,
     /// and the KV cache — loads onto GPU as usual. Equivalent to llama.cpp's
@@ -410,6 +416,7 @@ impl Default for InferenceConfig {
             cache_type_k: KvCacheType::F16,
             cache_type_v: KvCacheType::F16,
             mmproj_path: None,
+            mmproj_on_gpu: None,
             cpu_moe: false,
             n_cpu_moe: 0,
             rs_seq: 0,
@@ -1701,7 +1708,10 @@ impl InferenceEngine {
         let mut params = MtmdContextParams {
             // Same rule as the text side: a binary with no GPU backend must
             // not ask for one, whatever the config says (`check_gpu_support`).
-            use_gpu: config.gpu_layers != 0 && has_gpu_backend(),
+            // Where sizing or the user put it; otherwise, beside the text
+            // model. `has_gpu_backend` applies either way: a decision to use
+            // a GPU the binary cannot reach is not one to honour.
+            use_gpu: config.mmproj_on_gpu.unwrap_or(config.gpu_layers != 0) && has_gpu_backend(),
             print_timings: false,
             n_threads: config.threads as i32,
             ..MtmdContextParams::default()

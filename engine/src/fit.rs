@@ -1211,6 +1211,201 @@ pub fn run_moe_fit(
     )
 }
 
+/// A multimodal projector's compute buffer, reserved alongside its weights
+/// whenever the projector is sized onto the GPU.
+///
+/// One measurement so far, and it is offered as one: the BF16 projector of a
+/// Qwen3.8 27B vision model reported a CUDA0 compute buffer of 248.10 MiB
+/// warming up at 1472×1472, on an RTX 5070 Ti. The buffer is sized from the
+/// largest image the projector accepts, so it moves with the model, not the
+/// card. 320 MiB matches `COMPUTE_BUFFER_RESERVE_BYTES`, the text side's own
+/// flat reserve, and covers that figure with about 30% to spare; it wants a
+/// second vision model measured before it is trusted further than that.
+pub(crate) const MMPROJ_COMPUTE_RESERVE_BYTES: u64 = 320 * 1024 * 1024;
+
+/// VRAM a multimodal projector occupies once loaded: its file, standing in
+/// for its weights, plus its compute buffer.
+///
+/// `0` for no projector, and for one whose file cannot be read — the load
+/// fails on that before any VRAM is spent, so there is nothing to reserve.
+pub fn mmproj_footprint_bytes(path: Option<&Path>) -> u64 {
+    path.and_then(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len().saturating_add(MMPROJ_COMPUTE_RESERVE_BYTES))
+        .unwrap_or(0)
+}
+
+/// Where a multimodal projector runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MmprojPlacement {
+    /// Beside the text model on the GPU: the whole text model still fits
+    /// with the projector's footprint taken out of free VRAM first.
+    Gpu,
+    /// In system RAM, so the VRAM it would have held goes to text layers.
+    Cpu,
+    /// VRAM or the model's header could not be read, so there is nothing to
+    /// decide with — keep the rule that predates the choice (the projector
+    /// follows the text model onto the GPU whenever any layer goes there).
+    FollowText,
+}
+
+impl MmprojPlacement {
+    /// What `--mmproj-offload` / `--no-mmproj-offload` asked for, before any
+    /// sizing: a forced placement, or `FollowText` when neither was given
+    /// (which sizing then replaces with a decision of its own).
+    pub fn from_flag(forced: Option<bool>) -> Self {
+        match forced {
+            Some(true) => Self::Gpu,
+            Some(false) => Self::Cpu,
+            None => Self::FollowText,
+        }
+    }
+
+    /// The `use_gpu` override the projector loader takes: `None` keeps its
+    /// own rule, which is what `FollowText` means.
+    pub fn on_gpu(self) -> Option<bool> {
+        match self {
+            Self::Gpu => Some(true),
+            Self::Cpu => Some(false),
+            Self::FollowText => None,
+        }
+    }
+
+    /// VRAM to hold back for the projector before the text model is sized.
+    ///
+    /// Everything except `Cpu`. `FollowText` puts the projector on the GPU
+    /// whenever a single text layer goes there, so counting it is the only
+    /// reading that cannot size the text model into the space the projector
+    /// is about to take — which is the failure this whole reservation fixes.
+    pub fn reserve(self, mmproj_bytes: u64) -> u64 {
+        match self {
+            Self::Cpu => 0,
+            Self::Gpu | Self::FollowText => mmproj_bytes,
+        }
+    }
+
+    /// One line for the load log. A projector moved to RAM makes images
+    /// slower than they were, and the reason has to be on screen where
+    /// someone will look for it.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Gpu => "projector on the GPU: the whole text model fits beside it",
+            Self::Cpu => {
+                "projector in system RAM, so its VRAM goes to the text model — images \
+                 are encoded on the CPU; --mmproj-offload keeps it on the GPU instead"
+            }
+            Self::FollowText => "projector follows the text model's offload",
+        }
+    }
+}
+
+/// Decide where a multimodal projector goes. Pure — see
+/// [`decide_mmproj_placement`] for the wrapper that reads VRAM and the file.
+///
+/// The two things competing for the card are not paid for the same way. A
+/// projector runs once per image, while the prompt is being read, and is idle
+/// for every token after that and for every request with no image at all. A
+/// text layer runs once per token, prefill and decode alike, and a layer left
+/// in RAM makes every one of those tokens cross the bus. So the projector
+/// gets the GPU only when that costs the text model nothing: if the whole
+/// text model still fits with the projector beside it, both go on the card;
+/// if it would not, the projector moves to RAM first and the text model gets
+/// every byte, and only then does sizing start cutting text layers.
+///
+/// Measured before this existed, on a 16 GiB card: a 27B left 17% of VRAM
+/// free by its own sizing, its projector then took 888 MiB of weights and a
+/// 248 MiB compute buffer out of that, and the context probe found 10% where
+/// it requires 12% — at every size down to its 512-token floor.
+#[allow(clippy::too_many_arguments)]
+pub fn place_mmproj(
+    vram: Option<(u64, u64)>,
+    info: Option<&GgufInfo>,
+    layout: Option<&MoeLayout>,
+    file_size: u64,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    mmproj_bytes: u64,
+) -> MmprojPlacement {
+    if mmproj_bytes == 0 {
+        return MmprojPlacement::FollowText;
+    }
+    let Some((free, total)) = vram else {
+        return MmprojPlacement::FollowText;
+    };
+    let with_projector = Some((free.saturating_sub(mmproj_bytes), total));
+
+    // A MoE that fits fully needs no expert offload at all; any other MoE
+    // decision is the text model already paying. A dense model is decided by
+    // the dense sizer, and one it cannot read is a model we cannot reason
+    // about — which is not the same as one that does not fit.
+    let text_fits_fully = match compute_moe_fit(
+        with_projector,
+        info,
+        layout,
+        ctx_size,
+        kv_bytes_per_elem_k,
+        kv_bytes_per_elem_v,
+    ) {
+        MoeFitDecision::Proceed { n_cpu_moe: 0 } => true,
+        MoeFitDecision::NotMoe => match compute_fit(
+            with_projector,
+            info,
+            file_size,
+            ctx_size,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+        ) {
+            FitDecision::FitsFully => true,
+            FitDecision::Partial { .. } => false,
+            FitDecision::Unknown { .. } => return MmprojPlacement::FollowText,
+        },
+        _ => false,
+    };
+
+    if text_fits_fully {
+        MmprojPlacement::Gpu
+    } else {
+        MmprojPlacement::Cpu
+    }
+}
+
+/// [`place_mmproj`] against the live card and the model on disk.
+///
+/// Reads exactly what [`run_moe_fit`] reads, so the two agree on what the
+/// model is. `reserve_bytes` is every other reservation already in force (a
+/// launch-time embedding companion), taken out of free VRAM before the
+/// projector is weighed against it; `mmproj_bytes` comes from
+/// [`mmproj_footprint_bytes`].
+pub fn decide_mmproj_placement(
+    model_path: &Path,
+    mmproj_bytes: u64,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    reserve_bytes: u64,
+) -> MmprojPlacement {
+    if mmproj_bytes == 0 {
+        return MmprojPlacement::FollowText;
+    }
+    let info = read_gguf_info(model_path);
+    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let layout = match (&info, file_size) {
+        (Some(i), size) if size > 0 => read_gguf_moe_layout(model_path, size, i.n_layers),
+        _ => None,
+    };
+    let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
+    place_mmproj(
+        vram,
+        info.as_ref(),
+        layout.as_ref(),
+        file_size,
+        ctx_size,
+        kv_bytes_per_elem_k,
+        kv_bytes_per_elem_v,
+        mmproj_bytes,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1291,6 +1486,186 @@ mod tests {
             full_attention_interval: None,
             architecture: None,
         }
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    /// The projector from the report that motivated `place_mmproj`: 888 MiB
+    /// of BF16 weights, plus the flat compute reserve.
+    const PROJECTOR: u64 = 888 * MIB + MMPROJ_COMPUTE_RESERVE_BYTES;
+
+    /// The least free VRAM, in 64 MiB steps, at which the dense sizer puts
+    /// this whole model on the GPU. Found rather than hard-coded, so the
+    /// placement tests below keep landing where they mean to whatever the
+    /// sizer's margins become.
+    fn fits_fully_threshold(info: &GgufInfo, file_size: u64, total: u64) -> u64 {
+        let mut free = 0;
+        loop {
+            let d = compute_fit(
+                Some((free, total)),
+                Some(info),
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+            );
+            if d == FitDecision::FitsFully {
+                return free;
+            }
+            free += 64 * MIB;
+            assert!(free <= total, "the fixture never fits fully on this card");
+        }
+    }
+
+    fn place(
+        free: u64,
+        total: u64,
+        info: &GgufInfo,
+        file_size: u64,
+        projector: u64,
+    ) -> MmprojPlacement {
+        place_mmproj(
+            Some((free, total)),
+            Some(info),
+            None,
+            file_size,
+            4096,
+            F16.0,
+            F16.1,
+            projector,
+        )
+    }
+
+    /// The case from the report, and the one that has to discriminate: enough
+    /// VRAM for the text model alone, not for the text model and its
+    /// projector. Half a projector past the threshold is inside that window by
+    /// construction, and the first assertion checks the window is real — the
+    /// text model on its own does fit there — so a pass cannot come from a
+    /// card too small for anything.
+    #[test]
+    fn the_projector_moves_to_ram_rather_than_cost_the_text_model_a_layer() {
+        let (total, file_size) = (16 * GIB, 12 * GIB);
+        let info = info_layers(62);
+        let t = fits_fully_threshold(&info, file_size, total);
+        let free = t + PROJECTOR / 2;
+
+        assert_eq!(
+            compute_fit(
+                Some((free, total)),
+                Some(&info),
+                file_size,
+                4096,
+                F16.0,
+                F16.1
+            ),
+            FitDecision::FitsFully,
+            "the text model alone must fit here, or this proves nothing"
+        );
+        assert_eq!(
+            place(free, total, &info, file_size, PROJECTOR),
+            MmprojPlacement::Cpu
+        );
+    }
+
+    #[test]
+    fn the_projector_stays_on_the_gpu_when_both_fit() {
+        let (total, file_size) = (16 * GIB, 12 * GIB);
+        let info = info_layers(62);
+        let free = fits_fully_threshold(&info, file_size, total) + PROJECTOR + 64 * MIB;
+        assert!(
+            free <= total,
+            "the fixture must leave room for both on this card"
+        );
+        assert_eq!(
+            place(free, total, &info, file_size, PROJECTOR),
+            MmprojPlacement::Gpu
+        );
+    }
+
+    /// Once text layers have to leave the GPU anyway, every byte is worth
+    /// more to them than to a projector that runs once per image.
+    #[test]
+    fn a_text_model_that_does_not_fit_alone_sends_the_projector_to_ram() {
+        let (total, file_size) = (16 * GIB, 12 * GIB);
+        let info = info_layers(62);
+        let free = fits_fully_threshold(&info, file_size, total) - 256 * MIB;
+        assert_eq!(
+            place(free, total, &info, file_size, PROJECTOR),
+            MmprojPlacement::Cpu
+        );
+    }
+
+    /// Nothing to decide with is not the same as a decision: without VRAM, a
+    /// projector or a readable header, the projector keeps following the text
+    /// model, as it did before there was a choice.
+    #[test]
+    fn without_vram_a_projector_or_a_header_nothing_is_decided() {
+        let info = info_layers(62);
+        let unknown = place_mmproj(
+            None,
+            Some(&info),
+            None,
+            12 * GIB,
+            4096,
+            F16.0,
+            F16.1,
+            PROJECTOR,
+        );
+        assert_eq!(unknown, MmprojPlacement::FollowText);
+        assert_eq!(
+            place(15 * GIB, 16 * GIB, &info, 12 * GIB, 0),
+            MmprojPlacement::FollowText
+        );
+        let headerless = place_mmproj(
+            Some((15 * GIB, 16 * GIB)),
+            None,
+            None,
+            12 * GIB,
+            4096,
+            F16.0,
+            F16.1,
+            PROJECTOR,
+        );
+        assert_eq!(headerless, MmprojPlacement::FollowText);
+
+        assert_eq!(MmprojPlacement::Gpu.on_gpu(), Some(true));
+        assert_eq!(MmprojPlacement::Cpu.on_gpu(), Some(false));
+        assert_eq!(MmprojPlacement::FollowText.on_gpu(), None);
+    }
+
+    /// The flags win over sizing, and only `Cpu` gives the projector's VRAM
+    /// back to the text model: `FollowText` still lands the projector on the
+    /// GPU as soon as one text layer does, so it has to be counted.
+    #[test]
+    fn a_forced_placement_and_the_reserve_it_implies() {
+        assert_eq!(MmprojPlacement::from_flag(Some(true)), MmprojPlacement::Gpu);
+        assert_eq!(
+            MmprojPlacement::from_flag(Some(false)),
+            MmprojPlacement::Cpu
+        );
+        assert_eq!(
+            MmprojPlacement::from_flag(None),
+            MmprojPlacement::FollowText
+        );
+
+        assert_eq!(MmprojPlacement::Gpu.reserve(PROJECTOR), PROJECTOR);
+        assert_eq!(MmprojPlacement::FollowText.reserve(PROJECTOR), PROJECTOR);
+        assert_eq!(MmprojPlacement::Cpu.reserve(PROJECTOR), 0);
+    }
+
+    #[test]
+    fn the_footprint_is_the_file_plus_its_compute_buffer() {
+        assert_eq!(mmproj_footprint_bytes(None), 0);
+        let missing =
+            std::env::temp_dir().join(format!("eullm-mmproj-missing-{}", uuid::Uuid::new_v4()));
+        assert_eq!(mmproj_footprint_bytes(Some(&missing)), 0);
+
+        let file = std::env::temp_dir().join(format!("eullm-mmproj-{}.gguf", uuid::Uuid::new_v4()));
+        std::fs::write(&file, vec![0u8; 4096]).unwrap();
+        let got = mmproj_footprint_bytes(Some(&file));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(got, 4096 + MMPROJ_COMPUTE_RESERVE_BYTES);
     }
 
     #[test]
