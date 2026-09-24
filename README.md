@@ -836,10 +836,16 @@ is content-addressed and auto-detects image vs audio from the file bytes.
 >   counts can vary with prompt phrasing. For exact occurrence counts,
 >   transcribe with the engine and count in your application layer (literal
 >   string search), not via the prompt.
-> - **Model coverage:** multimodal runs on any **scalar-position** `mtmd` model;
->   validated on **Gemma 4** (E4B + 12B), whose `mmproj` projector the catalog
->   auto-downloads alongside the model. M-RoPE models (Qwen2/2.5/3-VL) are not
->   yet supported — the engine refuses media input on them for now.
+> - **Model coverage:** multimodal runs on any `mtmd` model, validated on
+>   **Gemma 4** (E4B + 12B), whose `mmproj` projector the catalog
+>   auto-downloads alongside the model. Since 0.7.5 that includes M-RoPE
+>   models (the Qwen VL family), which earlier versions refused.
+> - **Attachments stay in the conversation.** A follow-up question still sees
+>   the picture it is about: the Chat UI re-sends it every turn, and
+>   `/api/chat` reads the `images` of every message, as Ollama does. When the
+>   context fills up, the oldest attachments give way first, each replaced by
+>   a note telling the model one was there; the current turn's never do. Each
+>   turn with a picture in it encodes the picture again.
 > - Multimodal models load in **sequential mode** (the continuous-batching
 >   scheduler is text-only); text-only models keep full batching.
 > - Web Chat UI accepts **both images and audio** as of v0.6.2 — 📎 attach or

@@ -118,7 +118,9 @@
       .replace(/<think>[\s\S]*$/, "")
       .trim();
 
-  const history = []; // {role, content}
+  // {role, content}, plus `media: {base64, kind}` on a user turn that carried
+  // an attachment (see toApiMessages for how it is re-sent).
+  const history = [];
   let currentModel = "";
   let abortController = null;
 
@@ -764,6 +766,60 @@
   }
 
   // ── Streaming chat ────────────────────────────────────────────────────
+
+  // Every turn re-sends the attachments still in the conversation — that is
+  // what lets a follow-up question see the photo it is about — and the
+  // engine refuses request bodies over 64 MiB (MAX_BODY_BYTES). Newest
+  // first, attachments spend this budget; each older one goes as the note
+  // below instead, so a long photo conversation runs short of pictures
+  // rather than failing every turn with 413 from then on. The context
+  // usually runs out long before this does, and then it is the engine that
+  // drops the oldest attachments, with the same note.
+  const MEDIA_RESEND_BUDGET = 48 * 1024 * 1024; // base64 characters
+
+  // Word for word the engine's DROPPED_IMAGE_NOTE / DROPPED_AUDIO_NOTE, so the
+  // model reads one kind of note whichever side dropped the attachment.
+  const DROPPED_NOTE = {
+    image:
+      "[An image was attached here. It is no longer part of this conversation, so it " +
+      "cannot be viewed; only what was said about it remains.]",
+    audio:
+      "[An audio clip was attached here. It is no longer part of this conversation, so it " +
+      "cannot be heard; only what was said about it remains.]",
+  };
+
+  // History → API messages: role and content only (history entries also carry
+  // UI-internal fields: the authoring model, model-switch metadata), plus
+  // `images` for each attachment that still fits the budget. Walks newest to
+  // oldest so the budget goes to what the conversation is about now: the
+  // newest attachment is always sent, and once one does not fit no older one
+  // is sent either — a conversation forgets from its start. An attachment
+  // whose own turn failed is never re-sent (see send()), and does not count.
+  function toApiMessages(entries) {
+    let budget = MEDIA_RESEND_BUDGET;
+    let newest = true;
+    let dropping = false;
+    const out = new Array(entries.length);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const { role, content, media } = entries[i];
+      let resend = false;
+      if (media && !media.failed && !dropping) {
+        resend = newest || media.base64.length <= budget;
+        dropping = !resend;
+        newest = false;
+      }
+      if (resend) {
+        budget -= media.base64.length;
+        out[i] = { role, content, images: [media.base64] };
+      } else if (media) {
+        out[i] = { role, content: `${DROPPED_NOTE[media.kind] || DROPPED_NOTE.image}\n${content}` };
+      } else {
+        out[i] = { role, content };
+      }
+    }
+    return out;
+  }
+
   async function send(userText) {
     if (!currentModel) {
       // Reached only when nothing is loaded and nothing is on disk either:
@@ -783,10 +839,23 @@
     const media = pendingMedia;
     clearAttachment();
 
-    // History only stores the text — re-sending old media would blow up
-    // the prompt and the multimodal MVP is one-shot anyway.
-    history.push({ role: "user", content: userText });
+    // The attachment stays with its turn, and every later turn re-sends it
+    // (see toApiMessages): a follow-up question about the photo still sees
+    // the photo. It used to be sent once and forgotten, and the next turn's
+    // answer came from the model's memory of its own description.
+    const userEntry = { role: "user", content: userText };
+    if (media) userEntry.media = { base64: media.base64, kind: media.kind };
+    history.push(userEntry);
     appendMessage("user", userText, media);
+
+    // An attachment whose own turn failed is not re-sent. When the failure
+    // was the attachment's — a file the engine cannot decode, an image past
+    // its token cap — sending it again would fail every turn after this one
+    // as well. The model reads the note in its place; attaching the file
+    // again sends it afresh.
+    const markAttachmentFailed = () => {
+      if (userEntry.media) userEntry.media.failed = true;
+    };
 
     const { msg, contentEl, metaEl } = appendMessage("assistant", "");
     msg.classList.add("streaming");
@@ -799,54 +868,33 @@
     let tokenCount = 0;
 
     try {
-      let resp;
-      if (media) {
-        // Multimodal branch: hit /api/chat (Ollama NDJSON) with the
-        // images:[base64] convention, NOT /v1/chat/completions. Image AND
-        // audio both ride this field — the backend's mtmd path auto-detects
-        // the media type from the bytes. History is intentionally omitted —
-        // the mtmd MVP is a one-shot probe.
-        const userMsg = { role: "user", content: userText, images: [media.base64] };
-        const messagesToSend = settings.system
-          ? [{ role: "system", content: settings.system }, userMsg]
-          : [userMsg];
-        resp = await fetch("/api/chat", withAuth({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: abortController.signal,
-          body: JSON.stringify({
-            model: currentModel,
-            messages: messagesToSend,
-            stream: true,
-            temperature: settings.temperature,
-            // 0 = unlimited: omit the cap and let the server generate until
-            // the model stops or the context window fills.
-            ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
-          }),
-        }));
-      } else {
-        const messagesToSend = [];
-        if (settings.system) messagesToSend.push({ role: "system", content: settings.system });
-        // Send only role/content — history entries also carry UI-internal
-        // fields (the authoring model, model-switch metadata).
-        messagesToSend.push(...history.map(({ role, content }) => ({ role, content })));
-        resp = await fetch("/v1/chat/completions", withAuth({
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: abortController.signal,
-          body: JSON.stringify({
-            model: currentModel,
-            messages: messagesToSend,
-            stream: true,
-            temperature: settings.temperature,
-            // 0 = unlimited: omit the cap and let the server generate until
-            // the model stops or the context window fills.
-            ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
-            // Pass-through field for Ollama-compatible backends that honour it.
-            think: settings.think,
-          }),
-        }));
-      }
+      const messagesToSend = [];
+      if (settings.system) messagesToSend.push({ role: "system", content: settings.system });
+      messagesToSend.push(...toApiMessages(history));
+      // A conversation still carrying attachments goes to /api/chat (Ollama
+      // NDJSON, `images: [base64]` on each message that has one — image and
+      // audio alike, the engine tells them apart by their bytes); a text-only
+      // one to /v1/chat/completions (OpenAI SSE). For the same text both
+      // render the same prompt.
+      const ndjson = messagesToSend.some((m) => m.images);
+      const resp = await fetch(ndjson ? "/api/chat" : "/v1/chat/completions", withAuth({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
+        body: JSON.stringify({
+          model: currentModel,
+          messages: messagesToSend,
+          stream: true,
+          temperature: settings.temperature,
+          // 0 = unlimited: omit the cap and let the server generate until
+          // the model stops or the context window fills.
+          ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
+          // Read by both endpoints. The attachment request used to leave it
+          // out, so switching thinking off did nothing on a turn with a
+          // picture in it.
+          think: settings.think,
+        }),
+      }));
 
       if (!resp.ok) {
         const errText = await resp.text();
@@ -868,12 +916,12 @@
           const line = rawLine.trim();
           if (!line) continue;
           // Two streaming formats live behind the same loop:
-          //   * Ollama NDJSON (multimodal /api/chat): one JSON object per line,
-          //     no `data:` prefix; delta = `message.content`.
+          //   * Ollama NDJSON (/api/chat, with attachments): one JSON object
+          //     per line, no `data:` prefix; delta = `message.content`.
           //   * OpenAI SSE (/v1/chat/completions): `data: {...}` lines + a
           //     trailing `[DONE]`; delta = `choices[0].delta.content`.
           let payload, delta;
-          if (media) {
+          if (ndjson) {
             payload = line;
           } else {
             if (!line.startsWith("data:")) continue;
@@ -892,9 +940,10 @@
               contentEl.innerHTML =
                 `<span style="color: var(--danger)">Error: ${escapeHtml(obj.error)}</span>`;
               metaEl.innerHTML = "";
+              markAttachmentFailed();
               return;
             }
-            delta = media
+            delta = ndjson
               ? (obj.message?.content || "")
               : (obj.choices?.[0]?.delta?.content || "");
             if (delta) {
@@ -925,6 +974,7 @@
         metaEl.innerHTML = `<span style="color: var(--danger)">Stopped</span>`;
       } else {
         contentEl.innerHTML = `<span style="color: var(--danger)">Error: ${escapeHtml(err.message)}</span>`;
+        markAttachmentFailed();
         console.error(err);
       }
     } finally {

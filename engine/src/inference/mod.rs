@@ -201,6 +201,116 @@ fn multimodal_batch_size() -> u32 {
     img_budget.max(512)
 }
 
+/// What the model reads where an image used to be, once the image is no
+/// longer in the prompt: dropped to make room in a long conversation (see
+/// [`media_to_drop`]), or unreadable by the model now loaded.
+///
+/// Each of its three parts is load-bearing. Something was attached, so the
+/// user's "what is this?" beside it still reads as a question about a
+/// picture. It cannot be viewed now, so the model does not describe it
+/// afresh from nothing — the failure this replaced was a follow-up turn sent
+/// without the photo, and a model that answered about the photo anyway. What
+/// was said about it remains, so an earlier description can still be used.
+///
+/// The web UI drops attachments of its own before sending a request that
+/// would outgrow the body limit, and writes this same sentence when it does.
+pub const DROPPED_IMAGE_NOTE: &str = "[An image was attached here. It is no longer part of \
+     this conversation, so it cannot be viewed; only what was said about it remains.]";
+
+/// [`DROPPED_IMAGE_NOTE`] for an audio clip.
+pub const DROPPED_AUDIO_NOTE: &str = "[An audio clip was attached here. It is no longer part \
+     of this conversation, so it cannot be heard; only what was said about it remains.]";
+
+/// The note that stands in for an attachment no longer in the prompt.
+pub fn dropped_media_note(is_audio: bool) -> &'static str {
+    if is_audio {
+        DROPPED_AUDIO_NOTE
+    } else {
+        DROPPED_IMAGE_NOTE
+    }
+}
+
+/// Whether attachment bytes look like audio rather than an image, by the
+/// magic numbers of the containers mtmd decodes audio from (miniaudio: RIFF
+/// for wav, ID3 or a bare frame sync for mp3, fLaC). A heuristic: mtmd is the
+/// authority once it has decoded the bytes, and this is for the decisions
+/// made before that, or without a projector at all.
+pub fn media_looks_like_audio(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"RIFF")
+        || bytes.starts_with(b"ID3")
+        || bytes.starts_with(b"fLaC")
+        || (bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0)
+}
+
+/// Room held back for the reply when deciding whether older attachments must
+/// give way: what the client asked for, capped at a quarter of the context.
+///
+/// A target, not a limit — the limit is the context itself, checked once it
+/// is built. Without a target, attachments would stay until the prompt alone
+/// filled the context and the reply got whatever was left over: a thinking
+/// model handed forty tokens stops inside its own reasoning.
+#[cfg(feature = "multimodal")]
+fn reply_reserve(max_tokens: u32, ctx: u32) -> u32 {
+    max_tokens.min(ctx / 4)
+}
+
+/// How many of the oldest attachments must give way for a prompt of `total`
+/// tokens to come within `budget`, when attachment `i` (oldest first) costs
+/// `costs[i]` tokens and the note that replaces it costs `note`.
+///
+/// Oldest first and without gaps, the way a conversation forgets. The newest
+/// `pinned` never go — the current turn is asking about them — so the result
+/// can fall short of the budget, and the caller's check against the context
+/// is what refuses a prompt that still does not fit.
+#[cfg(feature = "multimodal")]
+fn media_to_drop(
+    total: usize,
+    costs: &[usize],
+    note: usize,
+    budget: usize,
+    pinned: usize,
+) -> usize {
+    let droppable = costs.len().saturating_sub(pinned);
+    let mut total = total;
+    let mut dropped = 0;
+    while total > budget && dropped < droppable {
+        total = (total + note).saturating_sub(costs[dropped]);
+        dropped += 1;
+    }
+    dropped
+}
+
+/// What each attachment costs in `chunks`, for the attachments whose ids run
+/// from `first` to `first + n - 1` (the id is the attachment's index, set when
+/// its bitmap is decoded). mtmd copies a bitmap's id onto every chunk it makes
+/// from it, so an image a projector tiles, or audio split into windows, is
+/// counted whole. The few text tokens that frame each one (`<|vision_start|>`
+/// and the like) are not attributed: the figure is an estimate, and the
+/// caller re-tokenizes to check it.
+#[cfg(feature = "multimodal")]
+fn media_token_costs(
+    chunks: &llama_cpp_2::mtmd::MtmdInputChunks,
+    first: usize,
+    n: usize,
+) -> Vec<usize> {
+    use llama_cpp_2::mtmd::MtmdInputChunkType;
+    let mut costs = vec![0; n];
+    for chunk in (0..chunks.len()).filter_map(|i| chunks.get(i)) {
+        if matches!(chunk.chunk_type(), MtmdInputChunkType::Text) {
+            continue;
+        }
+        let slot = chunk
+            .id()
+            .and_then(|id| id.parse::<usize>().ok())
+            .and_then(|index| index.checked_sub(first))
+            .and_then(|offset| costs.get_mut(offset));
+        if let Some(cost) = slot {
+            *cost += chunk.n_tokens();
+        }
+    }
+    costs
+}
+
 /// GPU memory as `(free, total)` bytes, summed across every GPU-type backend
 /// device (`ggml_backend_dev_memory`) — skips CPU and accelerator devices,
 /// which aren't the resource a context's compute buffer and KV cache
@@ -1428,6 +1538,19 @@ impl InferenceEngine {
         self.config.context_size
     }
 
+    /// Whether a multimodal projector is loaded, i.e. whether
+    /// [`Self::generate_multimodal`] can read attachments.
+    #[cfg(feature = "multimodal")]
+    pub fn has_projector(&self) -> bool {
+        self.mtmd_ctx.is_some()
+    }
+
+    /// Always false: this build has no multimodal support.
+    #[cfg(not(feature = "multimodal"))]
+    pub fn has_projector(&self) -> bool {
+        false
+    }
+
     /// Render `messages` (role, content pairs) through this model's own chat
     /// template — the Jinja template embedded in its GGUF, applied with
     /// llama.cpp's own engine, the same way llama-server does by default —
@@ -1442,10 +1565,10 @@ impl InferenceEngine {
     /// treating it the same as "no template" keeps the caller simple and
     /// never worse off than before this existed.
     ///
-    /// Text-only: message content is a single string per message. Not used
-    /// for the multimodal path (`generate_multimodal` builds its own
-    /// mtmd-aware prompt; matching an image marker to whatever this template
-    /// happens to emit is separate, harder work — see backlog).
+    /// Message content is a single string per message. The multimodal path
+    /// renders through here too: its media markers travel inside a message's
+    /// content as plain text, which a template passes through untouched, and
+    /// mtmd finds them in the rendered prompt.
     pub fn apply_jinja_chat_template(
         &self,
         messages: &[(&str, &str)],
@@ -2303,8 +2426,15 @@ impl InferenceEngine {
     ///
     /// The text prompt MUST contain exactly one media marker (`<__media__>`,
     /// see [`llama_cpp_2::mtmd::mtmd_default_marker`]) for each entry in
-    /// `media`. `media[i]` is the raw bytes of an image (jpg/png/bmp/gif) or
-    /// audio file (wav/mp3/flac) — `MtmdBitmap::from_buffer` auto-detects.
+    /// `media`, in the same order. `media[i]` is the raw bytes of an image
+    /// (jpg/png/bmp/gif) or audio file (wav/mp3/flac) —
+    /// `MtmdBitmap::from_buffer` auto-detects.
+    ///
+    /// `media` is oldest first, and a conversation that outgrows the context
+    /// loses its oldest attachments first: each is replaced in the prompt by
+    /// [`DROPPED_IMAGE_NOTE`] (or the audio one). The newest `pinned` are
+    /// never dropped — the current turn's own attachments — and neither is
+    /// the most recent one, whatever `pinned` says.
     ///
     /// Returns immediately via `StreamEvent::Error` if multimodal is not
     /// configured for this engine, or the requested modality is not supported
@@ -2314,6 +2444,7 @@ impl InferenceEngine {
         &self,
         request: &GenerateRequest,
         media: &[Vec<u8>],
+        pinned: usize,
         tx: mpsc::Sender<StreamEvent>,
     ) {
         use llama_cpp_2::mtmd::{MtmdBitmap, MtmdInputChunkType, MtmdInputText};
@@ -2349,24 +2480,33 @@ impl InferenceEngine {
         //
         // Reject the request if the user supplied a modality the projector
         // does not support, to fail loudly rather than silently mis-decode.
-        let has_audio = media.iter().any(|b| {
-            // miniaudio magic bytes: RIFF (wav), ID3/MP3 sync (mp3), fLaC (flac).
-            // This is a cheap heuristic; mtmd would also error at from_buffer.
-            b.starts_with(b"RIFF")
-                || b.starts_with(b"ID3")
-                || b.starts_with(b"fLaC")
-                || (b.len() >= 2 && b[0] == 0xFF && (b[1] & 0xE0) == 0xE0)
-        });
+        // Both checks can apply at once: a conversation can hold a photo from
+        // one turn and a voice note from another.
+        let has_audio = media.iter().any(|b| media_looks_like_audio(b));
+        let has_image = media.iter().any(|b| !media_looks_like_audio(b));
         if has_audio && !mtmd_ctx.support_audio() {
             let _ = tx.blocking_send(StreamEvent::Error(
                 "This mmproj does not support audio input (vision-only projector)".into(),
             ));
             return;
         }
-        if !has_audio && !media.is_empty() && !mtmd_ctx.support_vision() {
+        if has_image && !mtmd_ctx.support_vision() {
             let _ = tx.blocking_send(StreamEvent::Error(
                 "This mmproj does not support image input".into(),
             ));
+            return;
+        }
+        // Markers pair with attachments by position, and step 3 relies on it
+        // to swap an attachment for its note. A mismatch is a caller bug, and
+        // mtmd would refuse it anyway with a count and no context.
+        let marker = llama_cpp_2::mtmd::mtmd_default_marker();
+        let markers = request.prompt.matches(marker).count();
+        if markers != media.len() {
+            let _ = tx.blocking_send(StreamEvent::Error(format!(
+                "The prompt carries {markers} media markers for {} attachments; \
+                 each attachment needs exactly one",
+                media.len()
+            )));
             return;
         }
 
@@ -2376,7 +2516,14 @@ impl InferenceEngine {
             // llama-cpp-2 0.1.151 added a `placeholder` flag to from_buffer:
             // false = decode and load the actual media (what we need for inference).
             match MtmdBitmap::from_buffer(mtmd_ctx, bytes, false) {
-                Ok(b) => bitmaps.push(b),
+                Ok(b) => {
+                    // The index as id: mtmd copies it onto every chunk made
+                    // from this bitmap, which is how step 3 learns what each
+                    // attachment costs. Digits never hold the NUL that is
+                    // the only way this can fail.
+                    let _ = b.set_id(&i.to_string());
+                    bitmaps.push(b);
+                }
                 Err(e) => {
                     // `NullResult` on its own tells the caller nothing, and the
                     // most common cause is simply an unsupported container: a
@@ -2393,8 +2540,6 @@ impl InferenceEngine {
                 }
             }
         }
-        let bitmap_refs: Vec<&MtmdBitmap> = bitmaps.iter().collect();
-
         // ── 3. Tokenize text + media → MtmdInputChunks ──────────────────
         // The prompt is hand-templated by the caller (turn markers + one
         // <__media__> marker per bitmap) but does NOT include <bos>.
@@ -2406,18 +2551,67 @@ impl InferenceEngine {
         // strong landscapes survived it, weaker subjects did not).
         // `parse_special = true` so the turn tokens (Gemma <start_of_turn>)
         // are recognised rather than tokenised literally.
-        let input_text = MtmdInputText {
-            text: request.prompt.clone(),
-            add_special: true,
-            parse_special: true,
-        };
-        let chunks = match mtmd_ctx.tokenize(input_text, &bitmap_refs) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ =
-                    tx.blocking_send(StreamEvent::Error(format!("mtmd tokenize failed: {e:?}")));
-                return;
+        //
+        // Every attachment in the conversation rides along on every turn —
+        // that is what lets a follow-up question still see the photo — so a
+        // long enough conversation outgrows the context. Rather than refuse
+        // it, the oldest attachments give way: each is swapped for a note
+        // saying one was there, and the prompt is tokenized again. How many
+        // must go is estimated in one step from what each one cost, so this
+        // is two tokenizations in practice rather than one per attachment,
+        // which matters because each preprocesses every image it is handed.
+        // The target leaves room for the reply; whether the prompt fits at
+        // all is checked against the real context in step 5.
+        let ctx_size =
+            NonZeroU32::new(self.config.context_size).unwrap_or(NonZeroU32::new(4096).unwrap());
+        // `ctx_size`, not the context's `n_ctx`: the context is built after
+        // this, sized to the images that stay, and llama.cpp only ever rounds
+        // `n_ctx` up — so this target errs toward keeping less, never more.
+        let target_ctx = request
+            .num_ctx
+            .map_or(ctx_size.get(), |n| n.min(ctx_size.get()));
+        let reserve = reply_reserve(request.max_tokens, target_ctx);
+        let budget = target_ctx.saturating_sub(reserve) as usize;
+        let pinned = pinned.max(1);
+        let mut prompt = request.prompt.clone();
+        let mut dropped = 0;
+        let chunks = loop {
+            let bitmap_refs: Vec<&MtmdBitmap> = bitmaps[dropped..].iter().collect();
+            let input_text = MtmdInputText {
+                text: prompt.clone(),
+                add_special: true,
+                parse_special: true,
+            };
+            let chunks = match mtmd_ctx.tokenize(input_text, &bitmap_refs) {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = tx
+                        .blocking_send(StreamEvent::Error(format!("mtmd tokenize failed: {e:?}")));
+                    return;
+                }
+            };
+            let total = chunks.total_tokens();
+            let kept = bitmaps.len() - dropped;
+            if total <= budget || kept <= pinned {
+                break chunks;
             }
+            let note_tokens = self
+                .model
+                .str_to_token(DROPPED_IMAGE_NOTE, AddBos::Never)
+                .map_or(0, |tokens| tokens.len());
+            let costs = media_token_costs(&chunks, dropped, kept);
+            // At least one: `kept > pinned` here, so one can always go, and
+            // an estimate that said none would otherwise loop forever.
+            let n = media_to_drop(total, &costs, note_tokens, budget, pinned).max(1);
+            tracing::info!(
+                "Dropping the {n} oldest of {kept} attachments from the prompt: with \
+                 them it is {total} tokens, past the {budget} that leave {reserve} of \
+                 the {target_ctx}-token context for the reply"
+            );
+            for bitmap in &bitmaps[dropped..dropped + n] {
+                prompt = prompt.replacen(marker, dropped_media_note(bitmap.is_audio()), 1);
+            }
+            dropped += n;
         };
 
         let tokens_prompt = chunks.total_tokens() as u32;
@@ -2475,8 +2669,6 @@ impl InferenceEngine {
         }
 
         // ── 5. Build context (same code path as generate_streaming) ─────
-        let ctx_size =
-            NonZeroU32::new(self.config.context_size).unwrap_or(NonZeroU32::new(4096).unwrap());
         let has_quantized_cache = self.config.cache_type_k != KvCacheType::F16
             || self.config.cache_type_v != KvCacheType::F16;
 
@@ -2558,9 +2750,14 @@ impl InferenceEngine {
         let n_len = (tokens_prompt + max_tokens) as i32;
 
         tracing::info!(
-            "Multimodal stream: media={} ({}), prompt_tokens={}, max_output={}, ctx={}",
-            media.len(),
-            if has_audio { "audio" } else { "image" },
+            "Multimodal stream: media={} ({}), dropped={}, prompt_tokens={}, max_output={}, ctx={}",
+            media.len() - dropped,
+            match (has_image, has_audio) {
+                (true, true) => "image+audio",
+                (false, true) => "audio",
+                _ => "image",
+            },
+            dropped,
             tokens_prompt,
             max_tokens,
             effective_ctx,
@@ -3255,5 +3452,83 @@ mod media_batch_tests {
                 assert!(got >= floor, "batch {got} must not fall below {floor}");
             }
         }
+    }
+
+    // ── Attachments across turns ─────────────────────────────────────────
+
+    // The Ollama default is "unbounded", and a quarter of the context is
+    // what that turns into; an explicit, smaller cap is taken as given.
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn the_reply_reserve_is_the_cap_asked_for_up_to_a_quarter_of_the_context() {
+        assert_eq!(reply_reserve(u32::MAX, 4096), 1024);
+        assert_eq!(reply_reserve(256, 4096), 256);
+        assert_eq!(reply_reserve(0, 4096), 0);
+    }
+
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn nothing_is_dropped_while_the_prompt_is_within_budget() {
+        assert_eq!(media_to_drop(3000, &[1000, 1000], 30, 3072, 1), 0);
+        assert_eq!(media_to_drop(3072, &[1000, 1000], 30, 3072, 1), 0);
+    }
+
+    // The case this exists for: a third photo arrives in a 4096-token
+    // conversation and only the oldest has to make room for it.
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn the_oldest_attachment_goes_first_and_only_as_many_as_needed() {
+        // 3500 tokens, target 3072: dropping the first (1000 → a 30-token
+        // note) leaves 2530, enough.
+        assert_eq!(media_to_drop(3500, &[1000, 1000, 1000], 30, 3072, 1), 1);
+        // Needing more than one takes them in order.
+        assert_eq!(media_to_drop(4000, &[500, 500, 500, 500], 30, 3072, 1), 2);
+    }
+
+    // The note is not free: dropping an attachment saves its cost minus the
+    // note's, which for a short clip is little, and the count must follow
+    // that rather than assume each drop frees its whole cost.
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn the_note_replacing_an_attachment_is_counted() {
+        // 3100 tokens, target 3072. Dropping a 40-token clip for a 30-token
+        // note saves 10: 3090, still over, so the next one goes too.
+        assert_eq!(media_to_drop(3100, &[40, 40, 1000], 30, 3072, 1), 2);
+    }
+
+    // The current turn's attachments are what the question is about: they
+    // stay even when the prompt is still over its target without them, and
+    // the context check that follows is what refuses it.
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn pinned_attachments_are_never_dropped() {
+        assert_eq!(media_to_drop(9000, &[1000, 1000, 1000], 30, 3072, 2), 1);
+        assert_eq!(media_to_drop(9000, &[1000, 1000], 30, 3072, 2), 0);
+        assert_eq!(media_to_drop(9000, &[1000], 30, 3072, 5), 0);
+        assert_eq!(media_to_drop(9000, &[], 30, 3072, 1), 0);
+    }
+
+    #[test]
+    fn audio_is_told_apart_from_images_by_its_container() {
+        assert!(media_looks_like_audio(b"RIFF\x24\x00\x00\x00WAVEfmt "));
+        assert!(media_looks_like_audio(b"ID3\x04\x00"));
+        assert!(media_looks_like_audio(b"fLaC\x00\x00"));
+        assert!(media_looks_like_audio(&[0xFF, 0xFB, 0x90, 0x00])); // bare MP3 frame
+        assert!(!media_looks_like_audio(&[0xFF, 0xD8, 0xFF, 0xE0])); // JPEG
+        assert!(!media_looks_like_audio(b"\x89PNG\r\n\x1a\n"));
+        assert!(!media_looks_like_audio(b"GIF89a"));
+        assert!(!media_looks_like_audio(b"BM"));
+        assert!(!media_looks_like_audio(&[]));
+    }
+
+    #[test]
+    fn a_dropped_attachment_is_named_for_what_it_was() {
+        assert_eq!(dropped_media_note(false), DROPPED_IMAGE_NOTE);
+        assert_eq!(dropped_media_note(true), DROPPED_AUDIO_NOTE);
+        // One line each: the note sits at the head of a message, in place of
+        // the marker, and a line break inside it would split that message's
+        // text around it.
+        assert!(!DROPPED_IMAGE_NOTE.contains('\n'));
+        assert!(!DROPPED_AUDIO_NOTE.contains('\n'));
     }
 }

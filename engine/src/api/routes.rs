@@ -428,50 +428,190 @@ fn parse_format_grammar(body: &Value) -> Option<String> {
     }
 }
 
-// ── Multimodal MVP helpers ─────────────────────────────────────────────
-// Scope: a single user turn whose last message carries `images: [<base64>]`
-// (Ollama convention). The history is ignored for now — vision turns are
-// treated as one-shot probes. Gemma 4 is the only vision family in our
-// catalog, so the chat template here is hard-coded; switch on
-// `template.family()` when more land.
+// ── Multimodal helpers ─────────────────────────────────────────────────
+// Attachments arrive the Ollama way, as `images: [<base64>]` on a message
+// (audio rides the same field; the engine tells the two apart by their
+// bytes). Every message's attachments count, not only the latest turn's: a
+// follow-up question about a photo sent two turns ago must still see the
+// photo. It used to be the latest turn's only, and the model — asked "and is
+// that the tongue?" one turn later — reasoned about a picture it no longer
+// had, from its own earlier description, without saying so. Ollama reads
+// images from every message it keeps too (`chatPrompt` in its
+// `server/prompt.go`), so a client that re-sends them is following the
+// contract, not relying on an extension. Where the two differ is what gives
+// way when the context runs short: Ollama drops whole messages from the
+// start, while here the oldest attachments go first and the text stays (see
+// `InferenceEngine::generate_multimodal`).
 
-/// Pull base64-encoded images from the LAST user message. Returns
-/// `(text, media)` with `media` non-empty only when the client attached
-/// images. Accepts both raw base64 and the `data:...;base64,...` prefix.
-#[cfg(feature = "multimodal")]
-fn extract_multimodal_payload(messages: &[Value]) -> Option<(String, Vec<Vec<u8>>)> {
+/// Every attachment in a chat conversation, in the order the prompt carries
+/// them.
+#[derive(Debug, Default, PartialEq)]
+struct ChatMedia {
+    /// The decoded bytes of each attachment, oldest first.
+    items: Vec<Vec<u8>>,
+    /// How many of `items` each message carries, indexed like the messages.
+    per_message: Vec<usize>,
+    /// How many of the newest `items` belong to the latest user message —
+    /// the attachments the current question is about.
+    current_turn: usize,
+}
+
+/// Decode the `images` of every message. Accepts raw base64 and the
+/// `data:...;base64,...` form, with line breaks or other whitespace inside
+/// it ignored, as Ollama's decoder does.
+///
+/// An attachment that does not decode is an error that names it. It used to
+/// make the request go through as text instead, and the model answered that
+/// it could see no image — true, and no help in finding the broken upload.
+fn collect_chat_media(messages: &[Value]) -> Result<ChatMedia, String> {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let last_user = messages
         .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))?;
-    let images_arr = last_user.get("images")?.as_array()?;
-    if images_arr.is_empty() {
-        return None;
+        .rposition(|m| m.get("role").and_then(Value::as_str) == Some("user"));
+    let mut media = ChatMedia::default();
+    for (i, message) in messages.iter().enumerate() {
+        let images = message
+            .get("images")
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice);
+        for (j, image) in images.iter().enumerate() {
+            let text = image
+                .as_str()
+                .ok_or_else(|| format!("messages[{i}].images[{j}] is not a string"))?;
+            // `data:image/jpeg;base64,XXX` → keep only the payload after the comma.
+            let payload: Vec<u8> = text
+                .rsplit(',')
+                .next()
+                .unwrap_or(text)
+                .bytes()
+                .filter(|b| !b.is_ascii_whitespace())
+                .collect();
+            let bytes = STANDARD
+                .decode(&payload)
+                .map_err(|e| format!("messages[{i}].images[{j}] is not valid base64 ({e})"))?;
+            if bytes.is_empty() {
+                return Err(format!("messages[{i}].images[{j}] is empty"));
+            }
+            media.items.push(bytes);
+        }
+        media.per_message.push(images.len());
+        if Some(i) == last_user {
+            media.current_turn = images.len();
+        }
     }
-    let mut media = Vec::with_capacity(images_arr.len());
-    for v in images_arr {
-        let s = v.as_str()?;
-        // `data:image/jpeg;base64,XXX` → keep only the payload after the comma.
-        let payload = s.rsplit(',').next().unwrap_or(s);
-        media.push(STANDARD.decode(payload).ok()?);
-    }
-    let text = last_user
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
-    Some((text, media))
+    Ok(media)
 }
 
-/// Build the prompt for a multimodal turn, preferring the model's own
+/// Replace every attachment with the note the engine writes for one it had
+/// to drop, and take the `images` off the messages.
+///
+/// For a conversation whose attachments are all in earlier turns, now running
+/// on a model that cannot read them — the user switched to a text model
+/// halfway through. Refusing would fail every turn from there on; dropping
+/// the attachments silently would leave "what is in this photo?" in the
+/// history with nothing next to it.
+fn media_as_notes(mut messages: Vec<Value>, media: &ChatMedia) -> Vec<Value> {
+    let mut items = media.items.iter();
+    for (message, &count) in messages.iter_mut().zip(&media.per_message) {
+        if count == 0 {
+            continue;
+        }
+        let mut content: String = items
+            .by_ref()
+            .take(count)
+            .map(|bytes| {
+                let note = crate::inference::dropped_media_note(
+                    crate::inference::media_looks_like_audio(bytes),
+                );
+                format!("{note}\n")
+            })
+            .collect();
+        content.push_str(message.get("content").and_then(Value::as_str).unwrap_or(""));
+        if let Some(fields) = message.as_object_mut() {
+            fields.remove("images");
+            fields.insert("content".to_string(), Value::String(content));
+        }
+    }
+    messages
+}
+
+/// The error for a turn whose own attachments the loaded model cannot read.
+fn cannot_read_media(model_name: &str) -> (StatusCode, Json<Value>) {
+    if cfg!(feature = "multimodal") {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": format!(
+                    "`{model_name}` has no multimodal projector, so it cannot read images or audio. \
+                     Either use a model that ships one — `eullm pull gemma-4-e4b` fetches \
+                     the weights and the projector together — or point at a projector you \
+                     already have with `--mmproj <path>`. A projector found next to the \
+                     weights as `mmproj*.gguf` is picked up on its own."
+                )
+            })),
+        )
+    } else {
+        // A build without the `multimodal` feature used to drop an `images`
+        // array on the floor and answer as text. The model, asked about a
+        // picture it never received, says it cannot see one — which reads as
+        // a limitation of the model rather than of the binary. Reported from
+        // a source build made with `--features vulkan` (issue #286), where the
+        // omission is easy: the published binaries all carry multimodal, a
+        // hand-built one need not.
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(json!({
+                "error": "This build has no multimodal support, so the attached media cannot be read. \
+                          The published binaries include it; a build from source needs \
+                          `--features multimodal` (combine it with a backend, e.g. \
+                          `--features \"vulkan,multimodal\"`)."
+            })),
+        )
+    }
+}
+
+/// The (role, content) pairs a template renders for a multimodal request:
+/// every message, with one `marker` per attachment at the head of the
+/// message that carried it.
+///
+/// A marker already in a message's text is removed first. The engine pairs
+/// markers with attachments by position, so one typed or pasted into a
+/// message would shift every attachment after it onto the wrong turn, or
+/// fail the request on a count mismatch.
+#[cfg(feature = "multimodal")]
+fn with_media_markers(
+    messages: &[Value],
+    per_message: &[usize],
+    marker: &str,
+) -> Vec<(String, String)> {
+    messages
+        .iter()
+        .zip(per_message)
+        .map(|(message, &count)| {
+            let role = message
+                .get("role")
+                .and_then(Value::as_str)
+                .unwrap_or("user");
+            let text = message
+                .get("content")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .replace(marker, "");
+            let content = format!("{}{text}", format!("{marker}\n").repeat(count));
+            (role.to_string(), content)
+        })
+        .collect()
+}
+
+/// Build the prompt for a multimodal conversation, preferring the model's own
 /// GGUF-embedded Jinja template — the same choice [`build_chat_prompt`] makes
 /// for text.
 ///
-/// The mtmd media marker goes inside the user message's **content**, before
-/// the template renders, so the model receives the turn markers it was
-/// actually trained on: `<|im_start|>user` for a Qwen VL, `<start_of_turn>user`
-/// for Gemma. This is also how llama-server does it.
+/// The mtmd media markers go inside the messages' **content** (see
+/// [`with_media_markers`]), before the template renders, so the model
+/// receives the turn markers it was actually trained on: `<|im_start|>user`
+/// for a Qwen VL, `<start_of_turn>user` for Gemma. This is also how
+/// llama-server does it.
 ///
 /// It was Gemma's markers in every case until now, and the reason is worth
 /// recording because it is the divergence `engine/CLAUDE.md` warns about. The
@@ -486,39 +626,213 @@ fn extract_multimodal_payload(messages: &[Value]) -> Option<(String, Vec<Vec<u8>
 /// none when the embedded template rendered (its EOG token ends generation,
 /// the contract `build_chat_prompt` already uses), Gemma's when we fell back.
 ///
-/// Only the latest user turn is rendered. That predates this change — the
-/// payload extractor returns one turn's text and its images — so multi-turn
-/// image conversations still lose their history here.
+/// The whole conversation is rendered. Only the latest user turn used to be,
+/// so every turn after the one carrying a picture reached the model without
+/// the picture and without anything said before it.
 #[cfg(feature = "multimodal")]
 fn multimodal_chat_prompt(
     engine: &InferenceEngine,
-    user_text: &str,
+    messages: &[(&str, &str)],
     think: bool,
 ) -> (String, Vec<String>) {
-    let marker = llama_cpp_2::mtmd::mtmd_default_marker();
-    let marked = format!("{marker}\n{user_text}");
-    let pairs: [(&str, &str); 1] = [("user", marked.as_str())];
-    if let Some(dynamic) = engine.apply_jinja_chat_template(&pairs, think) {
+    if let Some(dynamic) = engine.apply_jinja_chat_template(messages, think) {
         return (dynamic.prompt, Vec::new());
     }
-    (
-        format!("<start_of_turn>user\n{marked}<end_of_turn>\n<start_of_turn>model\n"),
-        crate::chat_template::ChatTemplate::Gemma.stop_sequences(),
-    )
+    let gemma = crate::chat_template::ChatTemplate::Gemma;
+    (gemma.build_prompt(messages, think), gemma.stop_sequences())
 }
 
 /// Background mtmd-aware generation, mirroring `sequential_to_channel`.
+/// `pinned` is how many of the newest `media` belong to the current turn —
+/// see [`InferenceEngine::generate_multimodal`].
 #[cfg(feature = "multimodal")]
 fn multimodal_to_channel(
     engine: Arc<InferenceEngine>,
     request: GenerateRequest,
     media: Vec<Vec<u8>>,
+    pinned: usize,
 ) -> mpsc::Receiver<StreamEvent> {
     let (tx, rx) = mpsc::channel::<StreamEvent>(64);
     tokio::task::spawn_blocking(move || {
-        engine.generate_multimodal(&request, &media, tx);
+        engine.generate_multimodal(&request, &media, pinned, tx);
     });
     rx
+}
+
+#[cfg(test)]
+mod chat_media_tests {
+    use super::*;
+    use crate::inference::{DROPPED_AUDIO_NOTE, DROPPED_IMAGE_NOTE};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3];
+    const WAV: &[u8] = b"RIFF\x24\x00\x00\x00WAVE";
+
+    fn b64(bytes: &[u8]) -> String {
+        STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn attachments_from_every_turn_are_collected_in_order() {
+        let messages = vec![
+            json!({ "role": "system", "content": "be brief" }),
+            json!({ "role": "user", "content": "what is this?", "images": [b64(JPEG)] }),
+            json!({ "role": "assistant", "content": "a dog" }),
+            json!({
+                "role": "user",
+                "content": "and this?",
+                "images": [b64(WAV), format!("data:image/jpeg;base64,{}", b64(JPEG))],
+            }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        assert_eq!(
+            media.items,
+            vec![JPEG.to_vec(), WAV.to_vec(), JPEG.to_vec()]
+        );
+        assert_eq!(media.per_message, vec![0, 1, 0, 2]);
+        assert_eq!(media.current_turn, 2);
+    }
+
+    // The turn this was written for: "and is that thread the tongue?" has no
+    // attachment of its own, and the photo it asks about came a turn earlier.
+    #[test]
+    fn a_follow_up_keeps_the_earlier_photo_and_pins_nothing_of_its_own() {
+        let messages = vec![
+            json!({ "role": "user", "content": "what is this?", "images": [b64(JPEG)] }),
+            json!({ "role": "assistant", "content": "a dog" }),
+            json!({ "role": "user", "content": "is that thread the tongue?" }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        assert_eq!(media.items, vec![JPEG.to_vec()]);
+        assert_eq!(media.current_turn, 0);
+    }
+
+    // A client continuing a reply it prefilled ends on an assistant message;
+    // the attachments the question is about are still the user's.
+    #[test]
+    fn the_current_turn_is_the_last_user_message_not_the_last_message() {
+        let messages = vec![
+            json!({ "role": "user", "content": "what is this?", "images": [b64(JPEG)] }),
+            json!({ "role": "assistant", "content": "It is" }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        assert_eq!(media.current_turn, 1);
+    }
+
+    #[test]
+    fn a_conversation_without_attachments_has_none() {
+        let messages = vec![
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "user", "content": "x", "images": [] }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        assert!(media.items.is_empty());
+        assert_eq!(media.per_message, vec![0, 0]);
+        assert_eq!(media.current_turn, 0);
+    }
+
+    // Line-wrapped base64 is what some clients send, and Ollama's decoder
+    // skips the line breaks.
+    #[test]
+    fn whitespace_inside_the_base64_is_ignored() {
+        let encoded = b64(&[7u8; 100]);
+        let wrapped = format!("{}\n{}\r\n", &encoded[..60], &encoded[60..]);
+        let messages = [json!({ "role": "user", "content": "", "images": [wrapped] })];
+        let media = collect_chat_media(&messages).unwrap();
+        assert_eq!(media.items, vec![vec![7u8; 100]]);
+    }
+
+    // It used to send the request on as text, and the model said it could
+    // see no image.
+    #[test]
+    fn an_attachment_that_does_not_decode_is_an_error_naming_it() {
+        let messages = vec![
+            json!({ "role": "user", "content": "a", "images": [b64(JPEG)] }),
+            json!({ "role": "user", "content": "b", "images": [b64(JPEG), "not base64!"] }),
+        ];
+        let err = collect_chat_media(&messages).unwrap_err();
+        assert!(
+            err.starts_with("messages[1].images[1] is not valid base64"),
+            "{err}"
+        );
+        let err = collect_chat_media(&[json!({ "role": "user", "images": [""] })]).unwrap_err();
+        assert_eq!(err, "messages[0].images[0] is empty");
+        let err = collect_chat_media(&[json!({ "role": "user", "images": [42] })]).unwrap_err();
+        assert_eq!(err, "messages[0].images[0] is not a string");
+    }
+
+    #[test]
+    fn a_model_that_cannot_read_them_gets_notes_in_their_place() {
+        let messages = vec![
+            json!({ "role": "user", "content": "what is this?", "images": [b64(JPEG), b64(WAV)] }),
+            json!({ "role": "assistant", "content": "a dog barking" }),
+            json!({ "role": "user", "content": "thanks" }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        let notes = media_as_notes(messages, &media);
+        assert_eq!(
+            notes,
+            vec![
+                json!({
+                    "role": "user",
+                    "content": format!("{DROPPED_IMAGE_NOTE}\n{DROPPED_AUDIO_NOTE}\nwhat is this?"),
+                }),
+                json!({ "role": "assistant", "content": "a dog barking" }),
+                json!({ "role": "user", "content": "thanks" }),
+            ]
+        );
+    }
+
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn every_message_is_rendered_with_one_marker_per_attachment() {
+        let messages = vec![
+            json!({ "role": "system", "content": "be brief" }),
+            json!({ "role": "user", "content": "what is this?", "images": [b64(JPEG)] }),
+            json!({ "role": "assistant", "content": "a dog" }),
+            json!({ "role": "user", "content": "compare", "images": [b64(JPEG), b64(JPEG)] }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        let marked = with_media_markers(&messages, &media.per_message, "<M>");
+        let expected: Vec<(String, String)> = [
+            ("system", "be brief"),
+            ("user", "<M>\nwhat is this?"),
+            ("assistant", "a dog"),
+            ("user", "<M>\n<M>\ncompare"),
+        ]
+        .iter()
+        .map(|(role, content)| (role.to_string(), content.to_string()))
+        .collect();
+        assert_eq!(marked, expected);
+    }
+
+    // The engine pairs markers with attachments by position: one arriving in
+    // a message's own text would hand the next attachment to the wrong turn.
+    #[cfg(feature = "multimodal")]
+    #[test]
+    fn a_marker_typed_into_a_message_cannot_claim_an_attachment() {
+        let messages = vec![
+            json!({ "role": "user", "content": "what does <M> mean?" }),
+            json!({ "role": "user", "content": "and this <M>", "images": [b64(JPEG)] }),
+        ];
+        let media = collect_chat_media(&messages).unwrap();
+        let marked = with_media_markers(&messages, &media.per_message, "<M>");
+        let markers: usize = marked.iter().map(|(_, c)| c.matches("<M>").count()).sum();
+        assert_eq!(markers, media.items.len());
+        assert_eq!(marked[0].1, "what does  mean?");
+        assert_eq!(marked[1].1, "<M>\nand this ");
+    }
+
+    // The fallback was a `format!` of exactly this until it had to render
+    // whole conversations; for one turn it must not change by a byte.
+    #[test]
+    fn the_gemma_fallback_for_a_single_turn_is_unchanged() {
+        let marked = "<__media__>\nwhat is this?";
+        assert_eq!(
+            crate::chat_template::ChatTemplate::Gemma.build_prompt(&[("user", marked)], true),
+            format!("<start_of_turn>user\n{marked}<end_of_turn>\n<start_of_turn>model\n")
+        );
+    }
 }
 
 /// Build the prompt and stop sequences for a chat request.
@@ -1292,64 +1606,49 @@ async fn chat(
     )
     .await;
 
-    // A build without the `multimodal` feature has no branch below at all, so
-    // an `images` array used to be dropped on the floor and the request went
-    // through as plain text. The model, asked about a picture it never
-    // received, answers that it cannot see one — which reads as a limitation
-    // of the model rather than of the binary. Reported from a source build
-    // made with `--features vulkan` (issue #286), where the omission is easy:
-    // the published binaries all carry multimodal, a hand-built one need not.
-    #[cfg(not(feature = "multimodal"))]
-    if messages
-        .iter()
-        .rev()
-        .find(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"))
-        .and_then(|m| m.get("images"))
-        .and_then(|v| v.as_array())
-        .is_some_and(|a| !a.is_empty())
-    {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            Json(json!({
-                "error": "This build has no multimodal support, so the attached media cannot be read. \
-                          The published binaries include it; a build from source needs \
-                          `--features multimodal` (combine it with a backend, e.g. \
-                          `--features \"vulkan,multimodal\"`)."
-            })),
-        ));
-    }
+    // ── Attachments ────────────────────────────────────────────────────
+    // A conversation carrying any goes through the sequential mtmd path,
+    // whole. `swap_model` forces sequential mode when the loaded model has an
+    // mmproj, so a model that can read them has `snap.engine` with a
+    // projector in it. One that cannot is refused when the current turn has
+    // its own attachments — the question is about them — and otherwise gets
+    // the conversation with each attachment replaced by a note.
+    let media = collect_chat_media(&messages)
+        .map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({ "error": e }))))?;
+    let projector = snap
+        .engine
+        .as_ref()
+        .filter(|engine| !media.items.is_empty() && engine.has_projector())
+        .map(Arc::clone);
+    let messages = if media.items.is_empty() || projector.is_some() {
+        messages
+    } else if media.current_turn > 0 {
+        return Err(cannot_read_media(&snap.model_name));
+    } else {
+        tracing::info!(
+            "`{}` cannot read attachments: {} from earlier turns become notes",
+            crate::audit::sanitize_for_log(&snap.model_name),
+            media.items.len()
+        );
+        media_as_notes(messages, &media)
+    };
 
-    // ── Multimodal MVP branch ──────────────────────────────────────────
-    // If the last user message carries `images`, route through the
-    // sequential mtmd path. `swap_model` forces sequential mode when the
-    // loaded model has an mmproj, so `snap.engine` is expected to be Some.
-    // If it isn't, the operator loaded a text-only model and the client is
-    // trying to send pictures anyway → 503 with an explicit message.
     #[cfg(feature = "multimodal")]
-    if let Some((user_text, media)) = extract_multimodal_payload(&messages) {
-        let engine = match snap.engine.as_ref() {
-            Some(e) => Arc::clone(e),
-            None => {
-                return Err((
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(json!({
-                        "error": format!(
-                            "`{}` has no multimodal projector, so it cannot read images or audio. \
-                             Either use a model that ships one — `eullm pull gemma-4-e4b` fetches \
-                             the weights and the projector together — or point at a projector you \
-                             already have with `--mmproj <path>`. A projector found next to the \
-                             weights as `mmproj*.gguf` is picked up on its own.",
-                            snap.model_name
-                        )
-                    })),
-                ));
-            }
-        };
+    if let Some(engine) = projector {
         let sp = parse_generate_params(&body);
         // Parsed here rather than reused from the text path below: the
         // multimodal branch returns before that code runs.
         let mm_think = body.get("think").and_then(|v| v.as_bool()).unwrap_or(true);
-        let (mm_prompt, mm_stops) = multimodal_chat_prompt(&engine, &user_text, mm_think);
+        let marked = with_media_markers(
+            &messages,
+            &media.per_message,
+            llama_cpp_2::mtmd::mtmd_default_marker(),
+        );
+        let pairs: Vec<(&str, &str)> = marked
+            .iter()
+            .map(|(role, content)| (role.as_str(), content.as_str()))
+            .collect();
+        let (mm_prompt, mm_stops) = multimodal_chat_prompt(&engine, &pairs, mm_think);
         let mm_request = GenerateRequest {
             prompt: mm_prompt,
             max_tokens: sp.max_tokens,
@@ -1361,7 +1660,7 @@ async fn chat(
             repeat_last_n: sp.repeat_last_n,
             seed: sp.seed,
             num_ctx: sp.num_ctx,
-            // The prompt is already templated, with the mtmd marker in place —
+            // The prompt is already templated, with the mtmd markers in place —
             // do NOT let generate() add its own BOS/template on top.
             raw: true,
             // Empty when the model's own template rendered: its EOG token ends
@@ -1373,7 +1672,7 @@ async fn chat(
             grammar: None,
         };
         if is_streaming(&body) {
-            let rx = multimodal_to_channel(engine, mm_request, media);
+            let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
             return Ok(ndjson_stream_response(
                 rx,
                 model,
@@ -1381,7 +1680,7 @@ async fn chat(
                 user_id,
             ));
         }
-        let rx = multimodal_to_channel(engine, mm_request, media);
+        let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
         let Collected {
             text,
             tokens_generated,
