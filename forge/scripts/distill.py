@@ -150,6 +150,9 @@ class DistillConfig:
     # kill throws away, and lowering it without bounding the directory turns
     # a 24 h chain into tens of gigabytes of optimizer state on $WORK.
     save_total_limit: int = 3
+    # Consecutive optimizer updates that may be skipped for non-finite loss
+    # or gradients before the run is declared diverged. See `train`.
+    max_skipped_updates: int = 25
     eval_steps: int = 1000
     # Validation batches scored per eval. Capped on purpose: see `evaluate`.
     eval_max_batches: int = 200
@@ -586,6 +589,82 @@ def load_checkpoint(ckpt_dir: Path, optimizer, scheduler, scaler) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Divergence guard
+# ---------------------------------------------------------------------------
+#
+# Why this exists, from the run it would have saved. On 2026-09-24 the control
+# arm's loss went from 0.6255 at step 36,600 to `nan` twenty steps later — no
+# climb, no spike, a single event just after a link resumed. Nothing stopped
+# it. The loop kept training a dead model for two more links and, worse, kept
+# SAVING it: four NaN checkpoints pushed the healthy ones out through
+# `save_total_limit: 3`, and when the NaN was found there was no checkpoint
+# left to resume from. A 36,600-step run was lost to what should have cost
+# one skipped update.
+#
+# Three separate protections, each for a different way of failing:
+#
+#   1. A non-finite update is SKIPPED, not applied. A NaN loss or gradient
+#      that reaches `optimizer.step()` writes NaN into the weights and every
+#      step after it is NaN; skipping the window leaves the weights as they
+#      were. One outlier batch — which is what an instant NaN with no warning
+#      climb looks like — then costs one update instead of the run.
+#   2. The weights are checked before every save, and a non-finite model is
+#      never written. This is the protection that keeps the healthy
+#      checkpoints alive whatever the cause, because rotation only deletes old
+#      checkpoints when a new one is saved.
+#   3. A run that keeps producing non-finite updates is genuinely diverged, so
+#      after `max_skipped_updates` in a row it writes a DIVERGED sentinel and
+#      exits. Every later link of the afterany chain then refuses to start
+#      in seconds, instead of loading a 61 GB teacher to train nothing.
+#
+# For a healthy run none of this changes anything: no finite update is ever
+# skipped, so trajectories stay comparable with runs made before it existed.
+
+DIVERGED_SENTINEL = "DIVERGED"
+
+
+def all_finite(tensors) -> bool:
+    """True when every tensor holds only finite values."""
+    for t in tensors:
+        if not torch.isfinite(t).all():
+            return False
+    return True
+
+
+def refuse_if_diverged(output_dir: Path) -> None:
+    """Stop before loading anything if an earlier link declared divergence.
+
+    Removing the sentinel is a human decision — after deleting the bad
+    checkpoints, or deciding to stop the arm — so it is never cleared here.
+    """
+    sentinel = Path(output_dir) / DIVERGED_SENTINEL
+    if sentinel.exists():
+        print(f"[guard] {sentinel} exists — this run was declared diverged:",
+              file=sys.stderr)
+        print(sentinel.read_text(encoding="utf-8").rstrip(), file=sys.stderr)
+        print("[guard] refusing to start. Remove the non-finite checkpoints and "
+              "the sentinel to resume, or leave both to keep this arm stopped.",
+              file=sys.stderr)
+        raise SystemExit(3)
+
+
+def declare_divergence(output_dir: Path, step: int, reason: str) -> None:
+    """Write the sentinel and stop, WITHOUT saving a checkpoint."""
+    sentinel = Path(output_dir) / DIVERGED_SENTINEL
+    record = {
+        "step": step,
+        "reason": reason,
+        "when": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "job": os.environ.get("SLURM_JOB_ID"),
+    }
+    sentinel.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    print(f"[guard] DIVERGED at step {step}: {reason}", file=sys.stderr)
+    print(f"[guard] wrote {sentinel}; no checkpoint saved, so the healthy "
+          f"ones on disk are untouched.", file=sys.stderr)
+    raise SystemExit(3)
+
+
+# ---------------------------------------------------------------------------
 # Train loop
 # ---------------------------------------------------------------------------
 
@@ -625,6 +704,9 @@ def train(cfg: DistillConfig) -> None:
 
     output_dir = Path(cfg.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # Before anything heavy: a link of a diverged chain should cost seconds,
+    # not the teacher load.
+    refuse_if_diverged(output_dir)
 
     # --- tokenizer (shared between teacher and student) ---
     tokenizer = AutoTokenizer.from_pretrained(cfg.student_model)
@@ -671,6 +753,16 @@ def train(cfg: DistillConfig) -> None:
     if resume_dir:
         start_step = load_checkpoint(resume_dir, optimizer, scheduler, scaler)
         print(f"[resume] continuing from step {start_step}", file=sys.stderr)
+        # A checkpoint written non-finite — before this guard existed, or by
+        # a link killed mid-write — would make every step NaN. Catching it
+        # here costs one model load; not catching it costs the whole link.
+        if not all_finite(p for p in student.parameters() if p.requires_grad):
+            declare_divergence(
+                output_dir, start_step,
+                f"the checkpoint it resumed from ({resume_dir.name}) already "
+                f"holds non-finite weights — delete it so the previous one is "
+                f"used, if a healthy one survives",
+            )
 
     # --- log ---
     print(f"[info] total optim steps: {total_optim_steps:,}",
@@ -696,6 +788,10 @@ def train(cfg: DistillConfig) -> None:
     log_kl_acc = 0.0
     log_ce_acc = 0.0
     log_n = 0
+    # Divergence guard state; see the section above `train`.
+    window_poisoned = False
+    skipped_in_a_row = 0
+    skipped_total = 0
 
     for epoch in range(cfg.num_train_epochs):
         for batch in train_loader:
@@ -710,17 +806,44 @@ def train(cfg: DistillConfig) -> None:
                 s_out.logits, t_logits, batch["labels"],
                 kl_alpha=cfg.kl_alpha, kl_temperature=cfg.kl_temperature,
             )
-            (loss / cfg.gradient_accumulation_steps).backward()
-            log_loss_acc += parts["loss"]
-            log_kl_acc += parts["kl"]
-            log_ce_acc += parts["ce"]
-            log_n += 1
+            if torch.isfinite(loss):
+                (loss / cfg.gradient_accumulation_steps).backward()
+                log_loss_acc += parts["loss"]
+                log_kl_acc += parts["kl"]
+                log_ce_acc += parts["ce"]
+                log_n += 1
+            else:
+                # No backward: a non-finite loss puts nan into every gradient
+                # it reaches. The whole window is dropped at the boundary.
+                window_poisoned = True
             micro += 1
             micro_window += 1
             if micro % cfg.gradient_accumulation_steps == 0:
-                torch.nn.utils.clip_grad_norm_(
+                grad_norm = torch.nn.utils.clip_grad_norm_(
                     student.parameters(), cfg.max_grad_norm,
                 )
+                # A finite loss can still overflow on the way back, and a
+                # non-finite norm turns the clip coefficient into nan. Either
+                # way, applying this update is what kills a run.
+                if window_poisoned or not torch.isfinite(grad_norm):
+                    optimizer.zero_grad()
+                    skipped_in_a_row += 1
+                    skipped_total += 1
+                    why = ("non-finite loss" if window_poisoned
+                           else f"grad norm {grad_norm.item()}")
+                    print(f"[guard] skipped an update after step {optim_step} "
+                          f"({why}) — {skipped_in_a_row} in a row, "
+                          f"{skipped_total} in this job", file=sys.stderr)
+                    window_poisoned = False
+                    if skipped_in_a_row >= cfg.max_skipped_updates:
+                        declare_divergence(
+                            output_dir, optim_step,
+                            f"{skipped_in_a_row} consecutive non-finite "
+                            f"updates — not one bad batch but a run that "
+                            f"no longer produces finite gradients",
+                        )
+                    continue
+                skipped_in_a_row = 0
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
@@ -763,6 +886,18 @@ def train(cfg: DistillConfig) -> None:
                     micro_window = 0
 
                 if optim_step % cfg.save_steps == 0:
+                    # The protection that keeps healthy checkpoints alive
+                    # whatever the cause: rotation deletes an old checkpoint
+                    # only when a new one is written, so never writing a
+                    # non-finite one is what leaves the good ones on disk.
+                    if not all_finite(p for p in student.parameters()
+                                      if p.requires_grad):
+                        declare_divergence(
+                            output_dir, optim_step,
+                            "non-finite weights at save time — refusing to "
+                            "write a checkpoint that would rotate a healthy "
+                            "one out",
+                        )
                     save_checkpoint(student, optimizer, scheduler, scaler,
                                     optim_step, output_dir, cfg)
                     prune_checkpoints(output_dir, cfg.save_total_limit)
@@ -773,7 +908,13 @@ def train(cfg: DistillConfig) -> None:
         if cfg.max_steps > 0 and optim_step >= cfg.max_steps:
             break
 
-    # Final save.
+    # Final save — through the same gate as every other one.
+    if not all_finite(p for p in student.parameters() if p.requires_grad):
+        declare_divergence(output_dir, optim_step,
+                           "non-finite weights at the final save")
+    if skipped_total:
+        print(f"[guard] {skipped_total} non-finite update(s) skipped in this "
+              f"job", file=sys.stderr)
     save_checkpoint(student, optimizer, scheduler, scaler, optim_step,
                     output_dir, cfg)
     # Save tokenizer too — needed for inference / GGUF export later.
