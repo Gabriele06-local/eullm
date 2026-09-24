@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.8 — 2026-09-24
 
 ### Fixed
 - **A vision model that sizing said would fit refused to load, all the way
@@ -25,7 +25,13 @@ something changed, less so for understanding what it means.
   the projector then loaded into that margin — 888 MiB of weights and a
   248 MiB compute buffer for a 27B on a 16 GB card — and the check found 10%.
   The advice printed with it, to lower `--ctx-size` or quantize the KV cache,
-  could not have helped: the context was already at its floor.
+  could not have helped: the context was already at its floor, and
+  quantizing a 512-token cache gives back about 60 MiB of the 328 that were
+  missing. When the smallest context still does not fit, the message now
+  says so in those terms — how many MiB short, that `--ctx-size` cannot help
+  — and names only what can: fewer layers on the GPU, with how many are there
+  now; the projector, if it is on the GPU; and KV quantization only when
+  what it frees would actually close the gap.
 
   Sizing now counts the projector, and decides where it goes. It stays on
   the GPU when the whole text model still fits beside it. When it would not,
@@ -42,6 +48,22 @@ something changed, less so for understanding what it means.
   llama.cpp's. Text-only models are unaffected, and so is any build that
   cannot measure its VRAM, where the projector follows the text model as it
   always did.
+
+- **A download could be written with the wrong bytes and accepted.** Large
+  files are fetched in parallel ranges, and each range was written at its
+  own offset whatever the server sent back — including a `200` carrying the
+  whole file, which a server is allowed to send when it decides to ignore
+  the range. The first byte of the file then landed where the middle of it
+  belonged. Pulls from the catalog would have caught it at the digest check;
+  pulls by `hf.co/owner/repo` carry no digest, so the file was renamed into
+  place and used. Only a `206` is accepted now, anything else is retried
+  like any other failed range, and a server that keeps refusing fails the
+  download with an error instead of corrupting it. A server that never
+  honours ranges is unaffected: it fails the first probe and gets the
+  single-stream path, as before. `EULLM_DOWNLOAD_CONNECTIONS=1` forces that
+  path for one that honours the probe and stops partway.
+  Fixed by [@Gabriele06-local](https://github.com/Gabriele06-local) in
+  [#508](https://github.com/eullm/eullm/pull/508).
 
 - **Importing a model whose file sets its own tensor alignment produced a
   copy that would not load.** GGUF files say where their tensor data begins
