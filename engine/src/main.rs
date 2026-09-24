@@ -3964,7 +3964,8 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
     let request_for_task = request.clone();
     let media_for_task = vec![media_bytes];
     let join = tokio::task::spawn_blocking(move || {
-        eng_for_task.generate_multimodal(&request_for_task, &media_for_task, tx);
+        // One turn, one attachment, and it is what the prompt asks about.
+        eng_for_task.generate_multimodal(&request_for_task, &media_for_task, 1, tx);
     });
 
     use std::io::Write;

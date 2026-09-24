@@ -15,7 +15,43 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Added
+- **Gated and private Hugging Face repositories, with `HF_TOKEN`.** Set it
+  to an access token and `eullm pull` / `eullm run hf.co/<owner>/<repo>`,
+  and the model catalog in the Chat UI, authenticate to Hugging Face: the
+  API calls and every download request, parallel ranges, shards and
+  projector included. The token goes to `https://huggingface.co` only — not
+  to any other address, not to the CDN a download is redirected to — and is
+  never logged or written to a manifest or the audit trail. Without it,
+  every request is exactly what it was. A refusal now says what it means
+  instead of `HTTP 401 Unauthorized`: a gated repository whose terms need
+  accepting, a private or missing one, a token that was not accepted, or an
+  account not yet granted access, with Hugging Face's own explanation
+  quoted.
+
 ### Fixed
+- **A picture was forgotten one turn after it was sent.** A follow-up
+  question about a photo — "is that thread the tongue?" — reached the model
+  without the photo, and it answered from its memory of its own earlier
+  description without saying so. Attachments now stay in the conversation:
+  the web UI re-sends them every turn, and `/api/chat` reads the `images` of
+  every message, not only the latest user turn's, as Ollama does. When the
+  conversation outgrows the context, the oldest attachments give way first,
+  each replaced by a note telling the model one was there and can no longer
+  be viewed; the current turn's own attachments never do. Every turn with a
+  picture still in it encodes the picture again, so a follow-up takes as
+  long to start answering as the turn that sent the picture did.
+- **A conversation that had a picture in it kept working after switching to
+  a text-only model.** The picture becomes the same note, rather than every
+  turn from then on being refused because the new model has no projector.
+- **An attachment that is not valid base64 is refused with a 400 naming it**
+  (`messages[1].images[0] is not valid base64`). It used to send the request
+  on as text, and the model said it could see no image. Line breaks inside
+  the base64 are now ignored, as Ollama ignores them.
+- **Two images in one message failed to tokenize**: the prompt carried one
+  media marker for the whole message instead of one per image.
+- **Switching thinking off in the web UI had no effect on a turn with a
+  picture**, because that request did not send the setting.
 - **The Linux CPU, CUDA and ROCm binaries could not say which commit they
   were built from.** `eullm -V` and the startup banner print the commit
   hash, so a bug report pins the exact build; those six binaries printed
