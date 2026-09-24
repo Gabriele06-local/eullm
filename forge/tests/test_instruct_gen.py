@@ -161,3 +161,57 @@ def test_a_qa_generation_without_a_question_is_rejected():
 def test_italian_prose_clears_the_ratio_by_a_margin():
     assert italian_ratio(GOOD_ANSWER) > GenConfig().min_italian_ratio * 1.5
     assert italian_ratio("") == 0.0
+
+
+# --- findings of the 24 September pilot ----------------------------------------
+
+@pytest.mark.parametrize("question", [
+    "Il ricorso contro la sentenza della Corte d'Appello di Bari del 15 gennaio "
+    "2024 è stato dichiarato ammissibile?",
+    "Con la sentenza n. 1234 il TAR ha accolto la domanda?",
+    "Il ricorso n. 2019/4455 è stato respinto?",
+])
+def test_a_question_about_one_case_is_rejected(question):
+    """Its answer can only be invented; training on it teaches inventing outcomes."""
+    with pytest.raises(Rejected) as exc:
+        parse_generation(gen(domanda=question, risposta=GOOD_ANSWER), qa_job())
+    assert exc.value.reason == "case_specific"
+
+
+@pytest.mark.parametrize("question", [
+    "Cosa prevede la legge 7 agosto 1990, n. 241 sul silenzio assenso?",
+    "Il d.lgs. 30 giugno 2003, n. 196 si applica ancora dopo il GDPR?",
+    "Cosa stabilisce il d.P.R. 6 giugno 2001, n. 380 sulla SCIA?",
+])
+def test_a_statute_named_by_its_date_is_not_a_case(question):
+    pair = parse_generation(gen(domanda=question, risposta=GOOD_ANSWER), qa_job())
+    assert pair["instruction"] == question
+
+
+def test_the_surname_in_a_case_citation_is_dropped_and_the_citation_kept():
+    answer = (GOOD_ANSWER + " Così Cass. pen., Sez. 6, n. 25273 del 23 maggio 2018, "
+              "Zidane, Rv. 273392; e n. 1111 del 02/03/2019, De Luca Rossi, Rv. 275000-01.")
+    out = parse_generation(gen(risposta=answer), ctx_job())["output"]
+    assert "Zidane" not in out and "De Luca" not in out
+    assert "n. 25273 del 23 maggio 2018, Rv. 273392" in out
+    assert "02/03/2019, Rv. 275000-01" in out
+
+
+def test_a_chunk_that_starts_mid_sentence_is_trimmed_to_a_whole_one():
+    chunk = ("oggetto dello scorporo catastale. 2.2 Con il quarto motivo la società si "
+             "duole della violazione dell'art. 1. " + "Il motivo è fondato. " * 40
+             + "Resta da stabilire se la")
+    w = passage_window(chunk, 5000, random.Random(0))
+    assert w.startswith("2.2 Con il quarto motivo")
+    assert w.endswith("Il motivo è fondato.")
+
+
+def test_a_text_that_starts_properly_is_left_alone():
+    text = "Art. 2043. " + "Qualunque fatto doloso cagiona un danno. " * 20
+    assert passage_window(text, 5000, random.Random(0)).startswith("Art. 2043.")
+
+
+def test_the_source_falls_back_to_the_corpus_own_keys():
+    rec = {"text": ARTICLE, "kind": "cassazione_penale"}
+    (job,) = make_jobs([rec], 1)
+    assert job.source == "cassazione_penale"
