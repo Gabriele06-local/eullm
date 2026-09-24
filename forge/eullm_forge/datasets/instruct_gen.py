@@ -127,7 +127,9 @@ _CONTEXT_INSTRUCTIONS = {
 }
 
 # Anonymiser output: [PERSONA_1], [CODICE_FISCALE], [RICORRENTE_2], …
-RE_PLACEHOLDER = re.compile(r"\[[A-Z][A-Z_]*(?:_\d+)?\]")
+# Case-insensitive on purpose: the generator varies capitalisation
+# ([persona_1]), and a missed placeholder lands verbatim in training.
+RE_PLACEHOLDER = re.compile(r"\[[A-Z][A-Z_]*(?:_\d+)?\]", re.IGNORECASE)
 # A closed-book answer that points at a text the user never gave. Not
 # "documento" (il documento informatico, di identità…) and not "testo unico",
 # which is the name of half of Italian administrative law.

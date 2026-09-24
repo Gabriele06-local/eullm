@@ -129,6 +129,10 @@ def test_a_context_task_puts_the_passage_in_the_instruction():
      "not_italian"),
     (gen(risposta=GOOD_ANSWER + " Il ricorrente [PERSONA_1] ha proposto appello."),
      "placeholder"),
+    (gen(risposta=GOOD_ANSWER + " Il ricorrente [persona_1] ha proposto appello."),
+     "placeholder"),
+    (gen(risposta=GOOD_ANSWER + " Il ricorrente [Persona_1] ha proposto appello."),
+     "placeholder"),
     (gen(risposta=GOOD_ANSWER + " Contatti: mario.rossi@example.it"), "personal_data"),
     ("<think>ragiono</think>" + gen(risposta=GOOD_ANSWER), "thinking"),
 ])
