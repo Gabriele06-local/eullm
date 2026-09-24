@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.8 — 2026-09-24
 
 ### Fixed
 - **A vision model that sizing said would fit refused to load, all the way
