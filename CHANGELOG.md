@@ -49,6 +49,22 @@ something changed, less so for understanding what it means.
   cannot measure its VRAM, where the projector follows the text model as it
   always did.
 
+- **A download could be written with the wrong bytes and accepted.** Large
+  files are fetched in parallel ranges, and each range was written at its
+  own offset whatever the server sent back — including a `200` carrying the
+  whole file, which a server is allowed to send when it decides to ignore
+  the range. The first byte of the file then landed where the middle of it
+  belonged. Pulls from the catalog would have caught it at the digest check;
+  pulls by `hf.co/owner/repo` carry no digest, so the file was renamed into
+  place and used. Only a `206` is accepted now, anything else is retried
+  like any other failed range, and a server that keeps refusing fails the
+  download with an error instead of corrupting it. A server that never
+  honours ranges is unaffected: it fails the first probe and gets the
+  single-stream path, as before. `EULLM_DOWNLOAD_CONNECTIONS=1` forces that
+  path for one that honours the probe and stops partway.
+  Fixed by [@Gabriele06-local](https://github.com/Gabriele06-local) in
+  [#508](https://github.com/eullm/eullm/pull/508).
+
 - **Importing a model whose file sets its own tensor alignment produced a
   copy that would not load.** GGUF files say where their tensor data begins
   by declaring `general.alignment`; almost every file leaves it at the
