@@ -19,6 +19,7 @@ parameters and needs four GPUs.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -228,3 +229,189 @@ def test_a_zero_cap_scores_nothing_and_does_not_hang():
     assert distill.evaluate(student, teacher, list(batches(5)), cfg(), "cpu",
                             max_batches=0) == {}
     assert student.calls == 0
+
+
+# ── divergence guard ─────────────────────────────────────────────────────
+# On 2026-09-24 the control arm went from loss 0.6255 to nan in twenty steps
+# and nothing stopped it: two more links trained a dead model and saved it
+# four times, and save_total_limit rotated every healthy checkpoint away. A
+# 36,600-step run was lost to what should have cost one skipped update.
+#
+# The helpers are tested directly, and then `train()` itself is run end to
+# end on CPU with stand-in models, because a guard that exists as a helper
+# but is not wired into the loop is the failure mode worth ruling out.
+
+
+def test_all_finite_accepts_ordinary_tensors():
+    assert distill.all_finite([torch.zeros(3), torch.ones(2, 2)])
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
+def test_all_finite_rejects_any_non_finite_value(bad):
+    t = torch.zeros(4)
+    t[2] = bad
+    assert not distill.all_finite([torch.zeros(3), t])
+
+
+def test_all_finite_of_nothing_is_true():
+    assert distill.all_finite([])
+
+
+def test_no_sentinel_lets_a_run_start(tmp_path):
+    assert distill.refuse_if_diverged(tmp_path) is None
+
+
+def test_a_sentinel_stops_a_run_before_it_starts(tmp_path):
+    (tmp_path / distill.DIVERGED_SENTINEL).write_text("{}\n")
+    with pytest.raises(SystemExit) as exc:
+        distill.refuse_if_diverged(tmp_path)
+    assert exc.value.code == 3
+
+
+def test_declaring_divergence_records_why_and_saves_nothing(tmp_path):
+    with pytest.raises(SystemExit) as exc:
+        distill.declare_divergence(tmp_path, 36620, "loss went to nan")
+    assert exc.value.code == 3
+    record = json.loads((tmp_path / distill.DIVERGED_SENTINEL).read_text())
+    assert record["step"] == 36620
+    assert "nan" in record["reason"]
+    assert not list(tmp_path.glob("checkpoint-*"))
+
+
+class TinyStudent(torch.nn.Module):
+    """One trainable vector, so there is a real backward and a real update."""
+
+    def __init__(self, fill: float = 0.0):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.full((VOCAB,), fill))
+
+    def forward(self, **batch):
+        n = batch["labels"].shape[0]
+        return FakeOut(self.w.expand(n, SEQ, VOCAB))
+
+    def save_pretrained(self, path, safe_serialization=True):
+        torch.save(self.state_dict(), Path(path) / "student.pt")
+
+
+class PoisonTeacher:
+    """Uniform logits, except nan on the calls listed in `poison`."""
+
+    def __init__(self, poison=()):
+        self.poison = set(poison)
+        self.calls = 0
+
+    def __call__(self, **batch):
+        i = self.calls
+        self.calls += 1
+        n = batch["labels"].shape[0]
+        fill = float("nan") if i in self.poison else 0.1
+        return FakeOut(torch.full((n, SEQ, VOCAB), fill))
+
+
+class StubTokenizer:
+    pad_token_id = 0
+    eos_token = "</s>"
+
+    @classmethod
+    def from_pretrained(cls, *a, **k):
+        return cls()
+
+    def save_pretrained(self, *a, **k):
+        pass
+
+
+def run_train(monkeypatch, tmp_path, *, n_batches=12, poison=(),
+              max_skipped=3, student=None):
+    """Run the real `train()` on CPU with stand-ins for everything heavy."""
+    teacher = PoisonTeacher(poison)
+    student = student if student is not None else TinyStudent()
+    loaded = {"teacher": False}
+
+    def fake_teacher(*a, **k):
+        loaded["teacher"] = True
+        return teacher
+
+    monkeypatch.setattr(distill.torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(distill, "AutoTokenizer", StubTokenizer)
+    monkeypatch.setattr(distill, "build_dataloaders",
+                        lambda cfg, tok: (list(batches(n_batches)), []))
+    monkeypatch.setattr(distill, "load_teacher", fake_teacher)
+    monkeypatch.setattr(distill, "load_student", lambda *a, **k: student)
+
+    c = distill.DistillConfig(
+        output_dir=str(tmp_path), student_device="cpu", bf16=False,
+        gradient_checkpointing=False, gradient_accumulation_steps=2,
+        logging_steps=1, eval_steps=0, save_steps=2, save_total_limit=3,
+        warmup_steps=0, num_train_epochs=1, max_skipped_updates=max_skipped,
+    )
+    distill.train(c)
+    return student, teacher, loaded
+
+
+def steps_on_disk(tmp_path):
+    return sorted(int(p.name.split("-")[1]) for p in tmp_path.glob("checkpoint-*"))
+
+
+def test_a_clean_run_skips_nothing(monkeypatch, tmp_path, capsys):
+    """For a healthy run the guard must change nothing."""
+    student, _, _ = run_train(monkeypatch, tmp_path)
+    assert "[guard]" not in capsys.readouterr().err
+    assert steps_on_disk(tmp_path) == [2, 4, 6]       # 12 batches / 2 = 6
+    assert not (tmp_path / distill.DIVERGED_SENTINEL).exists()
+    assert distill.all_finite(student.parameters())
+
+
+def test_one_poisoned_batch_costs_one_update_not_the_run(monkeypatch, tmp_path,
+                                                         capsys):
+    """The case that killed the control arm: a single bad batch."""
+    student, _, _ = run_train(monkeypatch, tmp_path, poison={5})
+    err = capsys.readouterr().err
+    assert "skipped an update" in err
+    # Window 3 (batches 4 and 5) is dropped: five updates instead of six.
+    assert steps_on_disk(tmp_path)[-1] == 5
+    assert distill.all_finite(student.parameters())
+    assert not (tmp_path / distill.DIVERGED_SENTINEL).exists()
+
+
+def test_a_run_that_stays_nan_stops_and_keeps_the_healthy_checkpoints(
+        monkeypatch, tmp_path):
+    """The other half: a real divergence is stopped, and stopped WITHOUT
+    saving — so the checkpoint written before it survives the rotation that
+    destroyed the control arm's."""
+    with pytest.raises(SystemExit) as exc:
+        run_train(monkeypatch, tmp_path, poison=set(range(4, 100)),
+                  max_skipped=3)
+    assert exc.value.code == 3
+    record = json.loads((tmp_path / distill.DIVERGED_SENTINEL).read_text())
+    assert record["step"] == 2
+    assert steps_on_disk(tmp_path) == [2]
+    saved = torch.load(tmp_path / "checkpoint-2" / "student.pt")
+    assert distill.all_finite(saved.values())
+
+
+def test_a_diverged_chain_refuses_before_loading_the_teacher(monkeypatch,
+                                                             tmp_path):
+    """Every later link of the afterany chain must cost seconds, not a
+    61 GB teacher load."""
+    (tmp_path / distill.DIVERGED_SENTINEL).write_text('{"step": 36620}\n')
+    loaded = {}
+    with pytest.raises(SystemExit) as exc:
+        _, _, loaded = run_train(monkeypatch, tmp_path)
+    assert exc.value.code == 3
+    assert loaded == {}          # run_train never returned: nothing loaded
+
+
+def test_resuming_from_a_non_finite_checkpoint_is_caught_at_load(monkeypatch,
+                                                                 tmp_path):
+    """A checkpoint already holding nan would make every step nan; catching
+    it at load costs one model load instead of the whole link."""
+    (tmp_path / "checkpoint-4").mkdir()
+    monkeypatch.setattr(distill, "_reload_student_from_checkpoint",
+                        lambda *a, **k: TinyStudent(float("nan")))
+    monkeypatch.setattr(distill, "load_checkpoint", lambda *a, **k: 4)
+    with pytest.raises(SystemExit) as exc:
+        run_train(monkeypatch, tmp_path)
+    assert exc.value.code == 3
+    record = json.loads((tmp_path / distill.DIVERGED_SENTINEL).read_text())
+    assert record["step"] == 4
+    assert "checkpoint-4" in record["reason"]
