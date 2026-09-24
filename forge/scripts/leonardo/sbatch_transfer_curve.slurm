@@ -91,15 +91,41 @@ echo "[curve] corpus  $CORPUS"
 # Check every input before doing an hour of work on a missing one — the same
 # lesson as the quantizer pre-flight in sbatch_export_gguf.slurm, which was
 # added after a ten-minute merge died at conversion for want of a binary.
+#
+# The checkpoint is required ONLY when the GGUF still has to be built. A
+# point whose Q4 is already on disk needs nothing but the Q4, the corpus and
+# the base — and it is the common case, not the exception: the training
+# configs keep `save_total_limit: 3`, so by the time anyone measures step
+# 7,000 the trainer has long since rotated `checkpoint-7000` away. Checking
+# for it unconditionally killed five measurements on 2026-09-24 in their
+# pre-flight, each for a directory it had no use for, while the GGUFs they
+# were meant to measure sat on disk next to them.
+#
+# Each binary is asked for by the path that uses it: llama-quantize only when
+# building, llama-perplexity always, since measuring is the one thing every
+# run of this job does.
+LCPP_BIN="${LCPP_DIR:-$WORK/llama.cpp}/build/bin"
 fail=0
-[ -d "$CKPT" ]    || { echo "[curve] no checkpoint at $CKPT" >&2; fail=1; }
-[ -f "$CORPUS" ]  || { echo "[curve] no corpus at $CORPUS" >&2; fail=1; }
-[ -f "$BASE" ]    || { echo "[curve] no base GGUF at $BASE" >&2; fail=1; }
-[ -x "${LCPP_DIR:-$WORK/llama.cpp}/build/bin/llama-quantize" ] || {
-    echo "[curve] llama.cpp not built at ${LCPP_DIR:-$WORK/llama.cpp} —" >&2
-    echo "[curve] build it from a LOGIN node (it needs network)" >&2
+if [ ! -f "$Q4" ]; then
+    [ -d "$CKPT" ] || {
+        echo "[curve] no checkpoint at $CKPT, and no GGUF at $Q4 to measure" >&2
+        echo "[curve] instead — the trainer keeps only the last few checkpoints," >&2
+        echo "[curve] so a step this old can only be measured if it was packaged" >&2
+        echo "[curve] while its checkpoint still existed" >&2
+        fail=1
+    }
+    [ -x "$LCPP_BIN/llama-quantize" ] || {
+        echo "[curve] llama-quantize not built in $LCPP_BIN —" >&2
+        echo "[curve] build llama.cpp from a LOGIN node (it needs network)" >&2
+        fail=1
+    }
+fi
+[ -x "$LCPP_BIN/llama-perplexity" ] || {
+    echo "[curve] llama-perplexity not built in $LCPP_BIN" >&2
     fail=1
 }
+[ -f "$CORPUS" ]  || { echo "[curve] no corpus at $CORPUS" >&2; fail=1; }
+[ -f "$BASE" ]    || { echo "[curve] no base GGUF at $BASE" >&2; fail=1; }
 [ "$fail" -eq 0 ] || exit 1
 
 # Resume rather than redo: a rerun after a walltime kill should cost only
