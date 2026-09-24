@@ -214,6 +214,24 @@ eullm serve --daemon --logfile /var/log/eullm.log    # custom log file location
 > `ExecStart=/usr/local/bin/eullm serve` unit; graceful SIGTERM handling is
 > built in, so `docker stop` / `systemctl stop` shut the engine down cleanly.
 
+### Gated and private Hugging Face models (`HF_TOKEN`)
+
+Set `HF_TOKEN` to a Hugging Face access token and `eullm pull` / `eullm run
+hf.co/<owner>/<repo>[:<quant>]` — and the model catalog in the Chat UI — fetch
+gated and private repositories too, shards and projector included:
+
+```bash
+export HF_TOKEN=hf_...   # made at https://huggingface.co/settings/tokens
+eullm run hf.co/google/gemma-3-1b-it-qat-q4_0-gguf
+```
+
+For a gated repository, accept its terms on its Hugging Face page with the
+same account first. The token is sent to `https://huggingface.co` and nowhere
+else — not even to the CDN a download is redirected to — and it is never
+written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
+changes. There is no command-line flag for it on purpose: a token on the
+command line is visible to every local user in `ps`.
+
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)
 
 Both the API and the chat UI bind `0.0.0.0` — the engine often runs on a

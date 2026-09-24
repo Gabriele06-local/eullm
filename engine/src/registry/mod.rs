@@ -13,6 +13,9 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+mod hf_auth;
+use hf_auth::RegistryClient;
+
 /// Progress callback: (bytes_downloaded, total_bytes).
 /// `total_bytes` is 0 if the server didn't send Content-Length.
 pub type ProgressCallback = Box<dyn Fn(u64, u64) + Send>;
@@ -153,10 +156,15 @@ async fn download_file_smart(
     expected_sha256: Option<&str>,
     on_progress: Option<ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(15))
-        .build()?;
+    // Every request below goes through this client, so every one of them —
+    // the probe, each range, the single-stream fallback — carries `HF_TOKEN`
+    // when the URL is Hugging Face's, and none does when it is not.
+    let client = RegistryClient::new(
+        reqwest::Client::builder()
+            .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(15))
+            .build()?,
+    );
 
     // Probe: a one-byte ranged GET tells us, in a single round-trip, both
     // whether ranges are supported (206 Partial Content) and the total size
@@ -218,9 +226,13 @@ fn split_ranges(total: u64, chunk: u64) -> Vec<(u64, u64)> {
 
 /// Send a `bytes=0-0` ranged GET. Returns `(supports_range, total_bytes)`.
 /// `supports_range` is true only on a 206 with a parseable `Content-Range`.
-async fn probe_range(client: &reqwest::Client, url: &str) -> (bool, u64) {
-    let resp = match client
-        .get(url)
+async fn probe_range(client: &RegistryClient, url: &str) -> (bool, u64) {
+    // A request that cannot be built (an unusable `HF_TOKEN`) is left to the
+    // single-stream path, which reports why.
+    let Ok(request) = client.get(url) else {
+        return (false, 0);
+    };
+    let resp = match request
         .header(reqwest::header::RANGE, "bytes=0-0")
         .timeout(CHUNK_REQUEST_TIMEOUT)
         .send()
@@ -247,7 +259,7 @@ async fn probe_range(client: &reqwest::Client, url: &str) -> (bool, u64) {
 /// added to `downloaded` exactly once (a failed attempt adds nothing, so the
 /// progress counter never overshoots).
 async fn fetch_chunk(
-    client: &reqwest::Client,
+    client: &RegistryClient,
     url: &str,
     tmp_path: &Path,
     start: u64,
@@ -287,14 +299,14 @@ fn is_range_response(status: reqwest::StatusCode) -> bool {
 
 /// One attempt at fetching a byte range and writing it at its file offset.
 async fn fetch_chunk_once(
-    client: &reqwest::Client,
+    client: &RegistryClient,
     url: &str,
     tmp_path: &Path,
     start: u64,
     end: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let resp = client
-        .get(url)
+        .get(url)?
         .header(reqwest::header::RANGE, format!("bytes={start}-{end}"))
         .timeout(CHUNK_REQUEST_TIMEOUT)
         .send()
@@ -302,7 +314,10 @@ async fn fetch_chunk_once(
 
     let status = resp.status();
     if !is_range_response(status) {
-        return Err(format!("expected 206 for range {start}-{end}, got HTTP {status}").into());
+        return Err(client
+            .refusal(url, &resp)
+            .unwrap_or_else(|| format!("expected 206 for range {start}-{end}, got HTTP {status}"))
+            .into());
     }
 
     // Each worker opens its own handle and seeks to the chunk's offset; within
@@ -323,17 +338,20 @@ async fn fetch_chunk_once(
 /// Single-connection streaming download (the fallback when Range isn't
 /// supported, the size is unknown, or `EULLM_DOWNLOAD_CONNECTIONS=1`).
 async fn download_stream(
-    client: &reqwest::Client,
+    client: &RegistryClient,
     url: &str,
     tmp_path: &Path,
     dest: &Path,
     expected_sha256: Option<&str>,
     on_progress: Option<ProgressCallback>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let response = client.get(url).send().await?;
+    let response = client.get(url)?.send().await?;
 
     if !response.status().is_success() {
-        return Err(format!("Download failed: HTTP {} from {}", response.status(), url).into());
+        return Err(client
+            .refusal(url, &response)
+            .unwrap_or_else(|| format!("Download failed: HTTP {} from {}", response.status(), url))
+            .into());
     }
 
     let total = response.content_length().unwrap_or(0);
@@ -364,7 +382,9 @@ async fn download_stream(
 
 /// Download a GGUF from HuggingFace Hub.
 ///
-/// Uses the HuggingFace CDN: `https://huggingface.co/{repo}/resolve/main/{filename}`
+/// Uses the HuggingFace CDN: `https://huggingface.co/{repo}/resolve/main/{filename}`.
+/// With `HF_TOKEN` set the requests carry it, which is what a gated or
+/// private repository needs (see [`hf_auth`]).
 pub async fn download_from_huggingface(
     repo: &str,
     filename: &str,
@@ -671,21 +691,10 @@ pub async fn list_hf_ggufs(
     repo: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://huggingface.co/api/models/{repo}");
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-
-    let response = client.get(&url).send().await?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "HuggingFace API returned HTTP {} for {repo}",
-            response.status()
-        )
-        .into());
-    }
-
-    let body: serde_json::Value = response.json().await?;
+    let body = fetch_hf_json(&url, Duration::from_secs(15), |status| {
+        format!("HuggingFace API returned HTTP {status} for {repo}")
+    })
+    .await?;
     let mut ggufs = Vec::new();
     if let Some(siblings) = body.get("siblings").and_then(|s| s.as_array()) {
         for sib in siblings {
@@ -750,22 +759,39 @@ pub async fn hf_model_facts(
     repo: &str,
 ) -> Result<HubFacts, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://huggingface.co/api/models/{repo}");
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-
-    let response = client.get(&url).send().await?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "HuggingFace API returned HTTP {} for {repo}",
-            response.status()
-        )
-        .into());
-    }
-
-    let body: serde_json::Value = response.json().await?;
+    let body = fetch_hf_json(&url, Duration::from_secs(15), |status| {
+        format!("HuggingFace API returned HTTP {status} for {repo}")
+    })
+    .await?;
     Ok(facts_from_model_info(&body, repo))
+}
+
+/// GET a Hugging Face API document and parse it as JSON — through a
+/// [`RegistryClient`], so it carries `HF_TOKEN` when one is set: a private
+/// repository's model info and file tree are 401 without it.
+///
+/// A refusal (401/403) comes back as the explanation
+/// [`hf_auth::refusal_message`] gives; any other failure status as
+/// `fallback` words it.
+async fn fetch_hf_json(
+    url: &str,
+    timeout: Duration,
+    fallback: impl FnOnce(reqwest::StatusCode) -> String,
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    let client = RegistryClient::new(
+        reqwest::Client::builder()
+            .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
+            .timeout(timeout)
+            .build()?,
+    );
+    let response = client.get(url)?.send().await?;
+    if !response.status().is_success() {
+        return Err(client
+            .refusal(url, &response)
+            .unwrap_or_else(|| fallback(response.status()))
+            .into());
+    }
+    Ok(response.json().await?)
 }
 
 /// Pull the facts out of a Hub model document.
@@ -1277,9 +1303,10 @@ pub struct HfModelSummary {
     pub likes: u64,
     /// ISO-8601 last-modified timestamp, as the Hub reports it.
     pub updated: Option<String>,
-    /// Gated repos need an accepted licence agreement and a token, neither of
-    /// which the engine has, so a pull will fail. Surfaced rather than hidden:
-    /// "you must accept the terms" is a better answer than an empty list.
+    /// Gated repos need an accepted licence agreement and a token: a pull
+    /// fails unless `HF_TOKEN` holds a token of an account that has accepted
+    /// it. Surfaced rather than hidden: "you must accept the terms" is a
+    /// better answer than an empty list.
     pub gated: bool,
 }
 
@@ -1303,15 +1330,10 @@ pub async fn search_hf_models(
          &expand%5B%5D=lastModified&expand%5B%5D=downloads&expand%5B%5D=likes&expand%5B%5D=gated",
         urlencode(query),
     );
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-    let response = client.get(&url).send().await?;
-    if !response.status().is_success() {
-        return Err(format!("HuggingFace search returned HTTP {}", response.status()).into());
-    }
-    let body: serde_json::Value = response.json().await?;
+    let body = fetch_hf_json(&url, Duration::from_secs(15), |status| {
+        format!("HuggingFace search returned HTTP {status}")
+    })
+    .await?;
     let rows = body.as_array().map(Vec::as_slice).unwrap_or(&[]);
     Ok(rows
         .iter()
@@ -1407,19 +1429,10 @@ pub async fn list_hf_repo_contents(
     repo: &str,
 ) -> Result<RepoContents, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("https://huggingface.co/api/models/{repo}/tree/main?recursive=1");
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("eullm/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(20))
-        .build()?;
-    let response = client.get(&url).send().await?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "HuggingFace API returned HTTP {} for {repo}",
-            response.status()
-        )
-        .into());
-    }
-    let body: serde_json::Value = response.json().await?;
+    let body = fetch_hf_json(&url, Duration::from_secs(20), |status| {
+        format!("HuggingFace API returned HTTP {status} for {repo}")
+    })
+    .await?;
     let entries = body.as_array().map(Vec::as_slice).unwrap_or(&[]);
 
     let mut sizes: Vec<(String, u64)> = Vec::new();

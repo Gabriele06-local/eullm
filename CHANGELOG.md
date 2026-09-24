@@ -15,6 +15,20 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Added
+- **Gated and private Hugging Face repositories, with `HF_TOKEN`.** Set it
+  to an access token and `eullm pull` / `eullm run hf.co/<owner>/<repo>`,
+  and the model catalog in the Chat UI, authenticate to Hugging Face: the
+  API calls and every download request, parallel ranges, shards and
+  projector included. The token goes to `https://huggingface.co` only — not
+  to any other address, not to the CDN a download is redirected to — and is
+  never logged or written to a manifest or the audit trail. Without it,
+  every request is exactly what it was. A refusal now says what it means
+  instead of `HTTP 401 Unauthorized`: a gated repository whose terms need
+  accepting, a private or missing one, a token that was not accepted, or an
+  account not yet granted access, with Hugging Face's own explanation
+  quoted.
+
 ### Fixed
 - **A picture was forgotten one turn after it was sent.** A follow-up
   question about a photo — "is that thread the tongue?" — reached the model

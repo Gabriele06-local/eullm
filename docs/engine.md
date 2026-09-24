@@ -157,6 +157,12 @@ eullm pull eullm/legal-it-4b     # Full name works too
 
 The model is stored in `~/.eullm/models/<model>/` with a GGUF file and manifest.
 
+Gated and private Hugging Face repositories need an access token: set
+`HF_TOKEN` in the environment (for a gated one, after accepting its terms with
+the same account). It is sent only to `https://huggingface.co`, for the API
+calls and every download request alike. See the README section "Gated and
+private Hugging Face models".
+
 ### `eullm list`
 
 Show locally downloaded models. If none are available, displays the EU catalog.
