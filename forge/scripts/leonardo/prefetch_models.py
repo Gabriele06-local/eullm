@@ -40,6 +40,8 @@ DEFAULT_MODELS = [
     "Qwen/Qwen3-4B-Base",       # Phase-2 student (~8 GB)
     "Qwen/Qwen3-8B-Base",       # Phase-2 larger student (~16 GB)
     "Qwen/Qwen3-30B-A3B-Base",  # Phase-1/2 teacher, MoE 128e/8a (~60 GB)
+    # Stage-3 data generator (~61 GB), Apache 2.0 — sbatch_gen_instruct.slurm
+    "Qwen/Qwen3-30B-A3B-Instruct-2507",
 ]
 
 
