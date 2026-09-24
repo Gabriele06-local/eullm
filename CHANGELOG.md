@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.9 — 2026-09-24
 
 ### Added
 - **Gated and private Hugging Face repositories, with `HF_TOKEN`.** Set it
