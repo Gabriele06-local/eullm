@@ -7,9 +7,25 @@ use std::process::Command;
 /// from an unreleased branch (like this one) can be anywhere on that branch's
 /// history. Falls back to "unknown" rather than failing the build: a source
 /// tarball or a shallow clone with no `.git` directory must still build.
+///
+/// Both calls pass `-c safe.directory=*`. Without it, git refuses to read a
+/// checkout owned by another user ("detected dubious ownership"), which is
+/// every release build that runs in a container: the workspace is mounted
+/// from the host, owned by the runner, and the build runs as root.
+/// `actions/checkout` does add the exception, but only to a temporary global
+/// config under a temporary HOME that is gone before `cargo build` starts, so
+/// six of the release binaries — the Linux CPU, CUDA and ROCm ones — shipped
+/// answering `unknown` to `-V`, which is exactly the question this exists to
+/// answer. Found on 0.7.8's `eullm-linux-x64-cuda-13.1`.
+///
+/// There is nothing to protect here. `safe.directory` guards against running
+/// git inside a repository whose own config you have not agreed to trust, and
+/// whoever runs this build script is already running this repository's code.
+/// The command-line scope is one git honours for this key, unlike the
+/// repository's own config.
 fn main() {
     let hash = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
+        .args(["-c", "safe.directory=*", "rev-parse", "--short=12", "HEAD"])
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -19,7 +35,7 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_string());
 
     let dirty = Command::new("git")
-        .args(["status", "--porcelain"])
+        .args(["-c", "safe.directory=*", "status", "--porcelain"])
         .output()
         .ok()
         .filter(|o| o.status.success())
