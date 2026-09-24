@@ -144,7 +144,8 @@ def main() -> int:
     args = ap.parse_args()
 
     start = time.time()
-    if "val" in args.corpus.name or "cds" in args.corpus.name.lower():
+    corpus_name = args.corpus.name.lower()
+    if "val" in corpus_name or "cds" in corpus_name:
         # The evaluation sets. Generating from them puts the exam's answers
         # into the training data, and nothing downstream would notice.
         print(f"[gen] refusing {args.corpus}: that is an evaluation set", file=sys.stderr)
