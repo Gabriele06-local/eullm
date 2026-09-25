@@ -414,3 +414,96 @@ def test_resuming_from_a_non_finite_checkpoint_is_caught_at_load(monkeypatch,
     record = json.loads((tmp_path / distill.DIVERGED_SENTINEL).read_text())
     assert record["step"] == 4
     assert "checkpoint-4" in record["reason"]
+
+
+# --- a resumed run continues the data where it stopped ---------------------------
+#
+# Regression for the split arm, 25 September: every resume started the data
+# from the top, so a chain of 2-hour links retrained the same ~650 steps of
+# corpus a dozen times and held-out perplexity went 5.11 -> 5.92.
+
+class RecordingTeacher:
+    """Uniform logits; remembers which batch (by its id) it was shown."""
+
+    def __init__(self):
+        self.seen = []
+
+    def __call__(self, **batch):
+        self.seen.append(int(batch["input_ids"][0, 0]))
+        n = batch["labels"].shape[0]
+        return FakeOut(torch.full((n, SEQ, VOCAB), 0.1))
+
+
+def numbered_batches(n: int):
+    return [{"labels": torch.zeros(1, SEQ, dtype=torch.long),
+             "input_ids": torch.full((1, SEQ), i, dtype=torch.long)}
+            for i in range(n)]
+
+
+def run_link(monkeypatch, tmp_path, *, n_batches=12, max_steps=-1):
+    """One link of a chain: train() on CPU, resuming from tmp_path if it can."""
+    teacher = RecordingTeacher()
+
+    def reload(ckpt_dir, cfg, dtype, device):
+        student = TinyStudent()
+        student.load_state_dict(torch.load(Path(ckpt_dir) / "student.pt"))
+        return student
+
+    monkeypatch.setattr(distill, "AutoTokenizer", StubTokenizer)
+    monkeypatch.setattr(distill, "build_dataloaders",
+                        lambda cfg, tok: (numbered_batches(n_batches), []))
+    monkeypatch.setattr(distill, "load_teacher", lambda *a, **k: teacher)
+    monkeypatch.setattr(distill, "load_student", lambda *a, **k: TinyStudent())
+    monkeypatch.setattr(distill, "_reload_student_from_checkpoint", reload)
+
+    distill.train(distill.DistillConfig(
+        output_dir=str(tmp_path), student_device="cpu", bf16=False,
+        gradient_checkpointing=False, gradient_accumulation_steps=2,
+        logging_steps=1, eval_steps=0, save_steps=1, save_total_limit=10,
+        warmup_steps=0, num_train_epochs=1, max_steps=max_steps,
+    ))
+    return teacher.seen
+
+
+def test_a_resumed_link_continues_the_data_instead_of_restarting_it(monkeypatch, tmp_path):
+    # First link stops after 2 optimizer steps = 4 micro-batches (0-3).
+    first = run_link(monkeypatch, tmp_path, max_steps=2)
+    assert first == [0, 1, 2, 3]
+
+    # The next link resumes at step 2 and must go on from batch 4. Before the
+    # fix it saw [0, 1, 2, …] again — the same data as the link before it.
+    second = run_link(monkeypatch, tmp_path)
+    assert second == list(range(4, 12))
+
+
+def test_a_resumed_run_stops_at_its_schedule_not_after_another_epoch(monkeypatch, tmp_path):
+    run_link(monkeypatch, tmp_path, max_steps=2)
+    run_link(monkeypatch, tmp_path)
+    # 12 batches / 2 per step = 6 steps in the epoch, and not one more.
+    assert max(steps_on_disk(tmp_path)) == 6
+
+    # A link submitted after the run is complete trains on nothing.
+    assert run_link(monkeypatch, tmp_path) == []
+
+
+def test_data_position_counts_micro_batches_across_epochs():
+    assert distill.data_position(0, 8, 100) == (0, 0)
+    assert distill.data_position(10, 8, 100) == (0, 80)
+    assert distill.data_position(25, 8, 100) == (2, 0)
+    assert distill.data_position(26, 8, 100) == (2, 8)
+
+
+def test_a_real_loader_has_one_fixed_order_per_epoch_and_skips_by_batch():
+    """The permutation depends on (seed, epoch) only, so every link agrees on it."""
+    loader = torch.utils.data.DataLoader(list(range(20)), batch_size=4, shuffle=True)
+    a = [b.tolist() for b in distill.epoch_batches(loader, epoch=0, skip=0, seed=7)]
+    torch.manual_seed(12345)          # whatever else consumed the global RNG
+    b = [b.tolist() for b in distill.epoch_batches(loader, epoch=0, skip=0, seed=7)]
+    assert a == b
+    assert sorted(x for batch in a for x in batch) == list(range(20))
+
+    rest = [b.tolist() for b in distill.epoch_batches(loader, epoch=0, skip=2, seed=7)]
+    assert rest == a[2:]
+
+    other = [b.tolist() for b in distill.epoch_batches(loader, epoch=1, skip=0, seed=7)]
+    assert other != a
