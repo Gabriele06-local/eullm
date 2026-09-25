@@ -89,7 +89,10 @@ from typing import Any, Callable, Optional
 # very specific shape — costs the model one meaningless string. On a PII path
 # recall wins, so the shape alone is enough.
 RE_CF = re.compile(
-    r"[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]"
+    r"[A-Z]{6}\d{2}[A-Z]\d{2}[A-Z]\d{3}[A-Z]",
+    # Case-insensitive like the neighbouring patterns: the generator varies
+    # capitalisation, and on a PII path recall wins over precision.
+    re.IGNORECASE,
 )
 
 # Italian partita IVA: 11 digits. To avoid matching every 11-digit number we
