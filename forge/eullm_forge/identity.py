@@ -33,6 +33,21 @@ class IdentityConfig:
         dataset_path: Path to custom identity training data (optional).
         max_length: Longest example, in tokens, kept for training; longer
             ones are dropped rather than truncated.
+        instruction_path: Domain instruction/answer pairs (JSONL, or a JSON
+            list) trained on together with the identity examples. This is
+            what turns a continuation model into an assistant; the identity
+            pairs alone only teach it a name.
+        identity_repeat: How many times the identity examples are repeated
+            in the mix. Nine of them among thousands of domain pairs would
+            be noise; repeated, they hold a few percent of the data.
+        output_dir: Where checkpoints and the adapter go (default: an
+            ``identity-lora`` directory next to the model).
+        batch_size / gradient_accumulation_steps: per-device batch and
+            accumulation; the effective batch is their product.
+        gradient_checkpointing: Trade compute for activation memory.
+        save_steps: Checkpoint every N steps (0: once per epoch). A run
+            that finds a checkpoint in ``output_dir`` resumes from it, so a
+            walltime kill costs at most this many steps.
     """
 
     model_path: str = ""
@@ -45,6 +60,13 @@ class IdentityConfig:
     learning_rate: float = 2e-4
     dataset_path: str = ""
     max_length: int = 512
+    instruction_path: str = ""
+    identity_repeat: int = 1
+    output_dir: str = ""
+    batch_size: int = 1
+    gradient_accumulation_steps: int = 4
+    gradient_checkpointing: bool = False
+    save_steps: int = 0
 
 
 def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
@@ -250,6 +272,33 @@ def ensure_chat_template(tokenizer: object) -> bool:
     return True
 
 
+def load_pairs(path: str) -> list[dict[str, str]]:
+    """Instruction/answer pairs from JSONL or a JSON list.
+
+    Only ``instruction`` and ``output`` are kept; provenance fields written by
+    the generator (task, source, key) are not training data. A line cut by a
+    walltime kill is skipped, not fatal.
+    """
+    text = Path(path).read_text(encoding="utf-8")
+    if text.lstrip().startswith("["):
+        rows = json.loads(text)
+    else:
+        rows = []
+        for line in text.splitlines():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    pairs = [
+        {"instruction": r["instruction"], "output": r["output"]}
+        for r in rows
+        if isinstance(r, dict) and r.get("instruction") and r.get("output")
+    ]
+    if not pairs:
+        raise ValueError(f"no instruction/output pairs in {path}")
+    return pairs
+
+
 def build_sft_features(
     examples: list[dict[str, str]],
     tokenizer: object,
@@ -384,6 +433,8 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     # nowhere must be an error, not a silent switch to synthetic examples.
     if config.dataset_path and not Path(config.dataset_path).exists():
         raise FileNotFoundError(f"identity dataset not found: {config.dataset_path}")
+    if config.instruction_path and not Path(config.instruction_path).exists():
+        raise FileNotFoundError(f"instruction data not found: {config.instruction_path}")
 
     import torch
     from peft import LoraConfig, TaskType, get_peft_model
@@ -406,6 +457,14 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     else:
         examples = generate_identity_dataset(config)
         logger.info("Generated %d identity training examples", len(examples))
+    examples = examples * max(1, config.identity_repeat)
+    if config.instruction_path:
+        domain = load_pairs(config.instruction_path)
+        logger.info(
+            "Loaded %d instruction pairs from %s; identity examples x%d = %d",
+            len(domain), config.instruction_path, config.identity_repeat, len(examples),
+        )
+        examples = examples + domain
 
     # Load tokenizer and model
     tokenizer = AutoTokenizer.from_pretrained(config.model_path, trust_remote_code=True)
@@ -440,6 +499,11 @@ def fine_tune_identity(config: IdentityConfig) -> str:
             "gate_proj", "up_proj", "down_proj",
         ],
     )
+    if config.gradient_checkpointing:
+        model.gradient_checkpointing_enable()
+        # With a frozen base the embeddings output needs grad, or
+        # checkpointed blocks have nothing to backpropagate into the LoRA.
+        model.enable_input_require_grads()
     model = get_peft_model(model, lora_config)
 
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -469,20 +533,21 @@ def fine_tune_identity(config: IdentityConfig) -> str:
 
     dataset = IdentityDataset(features)
 
-    # Output directory
-    output_dir = str(Path(config.model_path).parent / "identity-lora")
+    output_dir = config.output_dir or str(Path(config.model_path).parent / "identity-lora")
 
     # Training arguments
     training_args = TrainingArguments(
         output_dir=output_dir,
         num_train_epochs=config.num_epochs,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=config.batch_size,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
         learning_rate=config.learning_rate,
         bf16=bf16,
         fp16=fp16,
         logging_steps=10,
-        save_strategy="epoch",
+        save_strategy="steps" if config.save_steps else "epoch",
+        save_steps=config.save_steps or 500,
+        save_total_limit=2,
         report_to="none",
     )
 
@@ -494,8 +559,13 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         data_collator=lambda batch: collate_sft(batch, tokenizer.pad_token_id),
     )
 
+    from transformers.trainer_utils import get_last_checkpoint
+
+    last = get_last_checkpoint(output_dir) if Path(output_dir).is_dir() else None
+    if last:
+        logger.info("Resuming from %s", last)
     logger.info("Starting LoRA training...")
-    trainer.train()
+    trainer.train(resume_from_checkpoint=last)
 
     # Save adapter
     adapter_path = str(Path(output_dir) / "adapter")
