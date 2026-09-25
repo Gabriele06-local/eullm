@@ -389,7 +389,10 @@ def parse_generation(raw: str, job: Job, cfg: GenConfig | None = None) -> dict:
     _check_clean(answer, "answer", cfg)
 
     if job.task == "qa":
-        question = str(obj.get("domanda", "")).strip()
+        # Same strip as the answer: a citation surname in the question is
+        # personal data the NER-off anonymiser cannot see, and the citation
+        # without it still identifies the ruling.
+        question = strip_citation_names(str(obj.get("domanda", "")).strip())
         if not cfg.min_question_chars <= len(question) <= cfg.max_question_chars:
             raise Rejected("question_length", str(len(question)))
         if RE_TEXT_REFERENCE.search(question) or RE_TEXT_REFERENCE.search(answer):

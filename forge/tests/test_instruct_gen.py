@@ -201,6 +201,20 @@ def test_the_surname_in_a_case_citation_is_dropped_and_the_citation_kept():
     assert "02/03/2019, Rv. 275000-01" in out
 
 
+def test_the_surname_in_a_question_citation_is_dropped_and_the_citation_kept():
+    """The answer-side strip has a question-side twin: a numeric-date
+    citation dodges case_specific (no month name, no ricorso/sentenza word),
+    and the NER-off anonymiser cannot see a Title-Case surname — so without
+    the strip the PII lands in the instruction unnoticed."""
+    pair = parse_generation(
+        gen(domanda="Cosa prevede Cass., n. 25273 del 02/03/2019, Zidane, Rv. 273392?",
+            risposta=GOOD_ANSWER),
+        qa_job(),
+    )
+    assert "Zidane" not in pair["instruction"]
+    assert "02/03/2019, Rv. 273392" in pair["instruction"]
+
+
 def test_a_chunk_that_starts_mid_sentence_is_trimmed_to_a_whole_one():
     chunk = ("oggetto dello scorporo catastale. 2.2 Con il quarto motivo la società si "
              "duole della violazione dell'art. 1. " + "Il motivo è fondato. " * 40
