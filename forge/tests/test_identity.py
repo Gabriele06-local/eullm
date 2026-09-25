@@ -344,3 +344,48 @@ def test_stage3_script_trains_resumes_and_merges_on_cpu(tmp_path, monkeypatch):
     merged = merge_identity_adapter(str(base), str(out / "adapter"), str(out / "merged"))
     assert (Path(merged) / "config.json").exists()
     assert AutoTokenizer.from_pretrained(merged).chat_template == CHATML_TEMPLATE
+
+    # The rows of the end-of-turn token were trained and survived the merge,
+    # in the embedding AND in the separate output head of this untied model:
+    # the head is what decides whether the turn ends.
+    before = Qwen3ForCausalLM.from_pretrained(base)
+    after = Qwen3ForCausalLM.from_pretrained(merged)
+    end = tok.convert_tokens_to_ids("<|im_end|>")
+    other = tok.convert_tokens_to_ids("Sono")
+    for get in ("get_input_embeddings", "get_output_embeddings"):
+        w0, w1 = getattr(before, get)().weight, getattr(after, get)().weight
+        assert not torch.equal(w0[end], w1[end]), f"{get}: <|im_end|> row untouched"
+        assert torch.equal(w0[other], w1[other]), f"{get}: an ordinary row changed"
+
+
+# --- the chat-format token rows are trained (v0.1 never ended its turn) --------
+
+def test_format_tokens_are_the_added_tokens_the_template_writes():
+    from eullm_forge.identity import ensure_chat_template, format_token_ids
+
+    tok = make_tokenizer(all_text(PAIRS))
+    ensure_chat_template(tok)
+    ids = format_token_ids(tok)
+    assert tok.convert_ids_to_tokens(ids) == ["<|im_start|>", "<|im_end|>"]
+
+
+def test_the_trainable_rows_reach_the_output_head_tied_or_not():
+    pytest.importorskip("transformers")
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from eullm_forge.identity import trainable_token_target
+
+    def tiny(tied):
+        return Qwen3ForCausalLM(Qwen3Config(
+            vocab_size=32, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+            num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+            tie_word_embeddings=tied,
+        ))
+
+    # Shared tensor (Qwen3-4B): PEFT follows the tie from a plain list.
+    assert trainable_token_target(tiny(True), [30, 31]) == [30, 31]
+    # Separate head (Qwen3-8B): both modules must be named, or the rows of
+    # the embedding change how the token is read and not whether it is written.
+    assert trainable_token_target(tiny(False), [30, 31]) == {
+        "embed_tokens": [30, 31], "lm_head": [30, 31],
+    }

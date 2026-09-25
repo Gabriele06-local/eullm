@@ -48,6 +48,9 @@ class IdentityConfig:
         save_steps: Checkpoint every N steps (0: once per epoch). A run
             that finds a checkpoint in ``output_dir`` resumes from it, so a
             walltime kill costs at most this many steps.
+        train_format_tokens: Also train the embedding rows of the special
+            tokens the chat format uses (see `format_token_ids`). Without it
+            a base model cannot learn to end its turn.
     """
 
     model_path: str = ""
@@ -67,6 +70,7 @@ class IdentityConfig:
     gradient_accumulation_steps: int = 4
     gradient_checkpointing: bool = False
     save_steps: int = 0
+    train_format_tokens: bool = True
 
 
 def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
@@ -299,6 +303,53 @@ def load_pairs(path: str) -> list[dict[str, str]]:
     return pairs
 
 
+def format_token_ids(tokenizer: object) -> list[int]:
+    """Ids of the added special tokens the chat format puts in a conversation.
+
+    WHY THIS EXISTS. legal-it-4b v0.1 answered "Mi chiamo EULLM Legal IT."
+    and then, instead of ending its turn, wrote "Intialized" — and after the
+    next paragraph "bakeca", "промышленн", never stopping. The loss had
+    trained it on <|im_end|> after every answer; LoRA alone could not make it
+    produce it. In a BASE model the chat tokens are all but untrained: their
+    embedding rows sit among the other rows pretraining never used, and a
+    LoRA on the attention and MLP projections cannot move a row of the
+    embedding or of the output head. So the model learnt to point at that
+    neighbourhood and, greedily, landed on whichever rare token in it scored
+    highest. Measured on a toy model: LoRA alone lifts the target token to
+    p=0.026; with its rows trainable, to p=0.999.
+
+    The rows to train are those of the tokens the template actually writes —
+    <|im_start|> and <|im_end|> for ChatML, plus <think> and </think> for
+    Qwen3's own template — found by rendering a conversation rather than
+    listed by hand, so a different template brings its own tokens.
+    """
+    rendered = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "x"}, {"role": "assistant", "content": "y"}],
+        tokenize=False,
+    )
+    ids = tokenizer(rendered, add_special_tokens=False)["input_ids"]
+    # The unknown token is "added" too, and a tokenizer that does not know
+    # the placeholder words maps them to it; it is not part of any format.
+    added = set(tokenizer.get_added_vocab().values()) - {tokenizer.unk_token_id}
+    return sorted({i for i in ids if i in added})
+
+
+def trainable_token_target(model: object, token_ids: list[int]):
+    """The `trainable_token_indices` value that reaches the OUTPUT head too.
+
+    Where the embedding and the output head share one tensor (Qwen3-4B), a
+    list of ids is enough: PEFT follows the tie. Where they are separate
+    (Qwen3-8B), training the embedding rows alone changes how the token is
+    read, not whether it is written — both modules must be named.
+    """
+    emb = model.get_input_embeddings()
+    head = model.get_output_embeddings()
+    if head is None or head.weight is emb.weight:
+        return list(token_ids)
+    names = {id(m): n.rsplit(".", 1)[-1] for n, m in model.named_modules()}
+    return {names[id(emb)]: list(token_ids), names[id(head)]: list(token_ids)}
+
+
 def build_sft_features(
     examples: list[dict[str, str]],
     tokenizer: object,
@@ -488,6 +539,22 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         trust_remote_code=True,
     )
 
+    extra = {}
+    if config.train_format_tokens:
+        import peft
+
+        if tuple(int(x) for x in peft.__version__.split(".")[:2]) < (0, 15):
+            raise RuntimeError(
+                f"peft {peft.__version__} cannot train token rows; 0.15 or newer "
+                "is needed for train_format_tokens"
+            )
+        token_ids = format_token_ids(tokenizer)
+        if token_ids:
+            extra["trainable_token_indices"] = trainable_token_target(model, token_ids)
+            logger.info(
+                "  Training the rows of the chat-format tokens %s",
+                tokenizer.convert_ids_to_tokens(token_ids),
+            )
     # Configure LoRA
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
@@ -498,6 +565,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
             "q_proj", "k_proj", "v_proj", "o_proj",
             "gate_proj", "up_proj", "down_proj",
         ],
+        **extra,
     )
     if config.gradient_checkpointing:
         model.gradient_checkpointing_enable()
