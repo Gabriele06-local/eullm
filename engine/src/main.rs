@@ -1764,6 +1764,45 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// Valid launch values for `--batch-size`.
+///
+/// 0 is sequential mode (also forced for multimodal models); 1..=64 are the
+/// scheduler slots, the same ceiling request overrides already enforce.
+/// Anything past that truncates through `as u32` into values that panic
+/// divisions (`ctx_size / batch_size`) or size absurd queues, so refuse up
+/// front instead of crashing after the model loaded.
+fn validate_launch_batch_size(n: usize) -> Result<usize, String> {
+    const MAX_LAUNCH_BATCH_SIZE: usize = 64;
+    if n <= MAX_LAUNCH_BATCH_SIZE {
+        Ok(n)
+    } else {
+        Err(format!(
+            "--batch-size must be between 0 and {MAX_LAUNCH_BATCH_SIZE} (0 = sequential), got {n}"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod launch_batch_size_tests {
+    use super::validate_launch_batch_size;
+
+    #[test]
+    fn sequential_and_normal_sizes_pass() {
+        for n in [0, 1, 8, 64] {
+            assert_eq!(validate_launch_batch_size(n), Ok(n));
+        }
+    }
+
+    #[test]
+    fn absurd_sizes_fail_including_u32_truncation() {
+        // 2^32 is the sharp one: `as u32` turns it into zero slots, which
+        // panics the per-sequence division at startup.
+        for n in [65, 1_000_000, 4_294_967_296usize, usize::MAX] {
+            assert!(validate_launch_batch_size(n).is_err(), "accepted {n}");
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn cmd_run(
     store: &ModelStore,
@@ -1798,6 +1837,10 @@ async fn cmd_run(
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
 ) {
+    let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     // `--image` is a one-shot multimodal probe: load, send the bytes + prompt,
     // print the output, exit. Forces sequential mode (the scheduler does not
     // yet route media) and skips port binding because we won't serve an API.
@@ -2508,6 +2551,10 @@ async fn cmd_serve(
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
 ) {
+    let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    });
     ensure_port_available(port, replace).await;
     if let Some(p) = ui_port {
         ensure_port_available(p, replace).await;
