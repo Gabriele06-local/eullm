@@ -33,16 +33,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
-    // Storage root from env or default
-    let storage_root = std::env::var("EULLM_HUB_STORAGE")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-            PathBuf::from(home)
-                .join(".eullm")
-                .join("hub")
-                .join("models")
-        });
+    // Storage root from env or default. A blank value counts as unset, the
+    // same rule the engine's audit trail uses: an empty `EULLM_HUB_STORAGE`
+    // (a bare `EULLM_HUB_STORAGE:` line in compose) would otherwise become
+    // `PathBuf("")`, and every download would 500 on unresolvable storage
+    // while listing kept working.
+    let storage_root = resolve_storage_root(
+        std::env::var("EULLM_HUB_STORAGE").ok().as_deref(),
+        &std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+    );
 
     std::fs::create_dir_all(&storage_root)?;
     tracing::info!("Model storage: {}", storage_root.display());
@@ -403,6 +402,22 @@ async fn health() -> Json<Value> {
 
 // -- Helpers --
 
+/// Resolve the model storage root: an explicitly set, non-blank
+/// `EULLM_HUB_STORAGE` wins, anything else falls back to the default.
+///
+/// Pure so the precedence rule is testable without mutating process
+/// environment variables (which would race every other test in the binary) —
+/// the same split the engine's audit trail uses for `EULLM_AUDIT_DIR`.
+fn resolve_storage_root(env: Option<&str>, home: &str) -> PathBuf {
+    match env.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(dir) => PathBuf::from(dir),
+        None => PathBuf::from(home)
+            .join(".eullm")
+            .join("hub")
+            .join("models"),
+    }
+}
+
 /// Whether `slug` is safe to join onto `storage_root` as a single path
 /// component: lowercase alphanumerics, `.`, `_`, `-` only, starting with an
 /// alphanumeric. Rejects `/`, `\`, `..`, and anything else that could step
@@ -530,6 +545,25 @@ mod tests {
         assert!(!is_valid_model_slug("-leading-dash"));
         assert!(!is_valid_model_slug("UPPER-case"));
         assert!(!is_valid_model_slug("has space"));
+    }
+
+    #[test]
+    fn blank_storage_env_falls_back_to_the_default() {
+        let home = "/home/tester";
+        let default = PathBuf::from(home)
+            .join(".eullm")
+            .join("hub")
+            .join("models");
+        // Unset, empty, and whitespace-only all mean "not configured" — the
+        // same rule the engine's audit trail uses. An empty value must never
+        // become PathBuf(""), which unresolvable storage 500s every download.
+        assert_eq!(resolve_storage_root(None, home), default);
+        assert_eq!(resolve_storage_root(Some(""), home), default);
+        assert_eq!(resolve_storage_root(Some("   "), home), default);
+        assert_eq!(
+            resolve_storage_root(Some("/data/models"), home),
+            PathBuf::from("/data/models")
+        );
     }
 
     #[test]
