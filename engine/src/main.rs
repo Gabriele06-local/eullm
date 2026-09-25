@@ -1764,7 +1764,6 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Valid launch values for `--batch-size`.
 ///
 /// 0 is sequential mode (also forced for multimodal models); 1..=64 are the
