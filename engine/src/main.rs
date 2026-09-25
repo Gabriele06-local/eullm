@@ -1803,6 +1803,7 @@ mod launch_batch_size_tests {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_run(
     store: &ModelStore,
     model: &str,
