@@ -8,6 +8,85 @@ Questo documento distingue le leve reali da quelle che sembrano leve. La
 distinzione conta perché il tempo speso su una leva finta è tempo in cui
 l'allocazione continua a scorrere.
 
+## La ricetta, come funziona oggi (aggiornata al 25 settembre)
+
+Quello che segue il 22 settembre era un'indagine; questa sezione è il
+risultato, raccolto in un posto solo perché fino a oggi stava sparso fra i
+commenti dei lanciatori e le conversazioni. Il consumo giornaliero, misurato
+con lo stesso metodo (`sacct`, billing/32):
+
+| giorno | node-hour |
+|---|---|
+| 23/09 | 25,0 |
+| 24/09 | 38,9 |
+| 25/09 | 36,7 alle 16:25, proiezione ~50 |
+
+contro una media storica di 12,3 con giornate a zero.
+
+### 1. Una fetta di nodo, non un nodo: 3 GPU, 24 core, 340 GB
+
+Due probe inviati nello stesso secondo, identici tranne `--gres`: `probe-g3`
+parte in **87 s**, `probe-g4` resta pending (vedi l'intestazione di
+`forge/scripts/leonardo/sbatch_phase2_split.slurm`). Uno snapshot `sinfo` del
+22/09 contava **1 nodo idle contro 364 mixed**: un nodo con una GPU libera è
+normale, un nodo intero libero no.
+
+Core e memoria fanno parte della stessa richiesta. Un nodo Booster ha 32 core:
+`--cpus-per-task=32` rende il job esclusivo qualunque sia il numero di GPU, e
+450 GB su ~494 lasciano troppo poco a chiunque altro. Per questo **24 core e
+340 GB**. Il numero di GPU dichiarato allo `--expect-gpus` del pre-flight deve
+cambiare insieme a `--gres`, o ogni anello muore nel pre-flight.
+
+### 2. Anelli da due ore
+
+Probe da 30 minuti e da 1 ora collocati in 50 s; 2 ore collocato; 3, 4 e 6
+ore **mai** collocati dopo oltre 22 ore. La soglia sta fra 2 e 3 ore. Con ~14
+minuti di avvio (22 per l'8B a freddo) un anello da 2 ore rende ~80 % delle
+node-hour che spende (tabella più sotto). Gli anelli finiscono in TIMEOUT per
+progetto: il successore riprende dall'ultimo checkpoint.
+
+### 3. `save_steps` sotto la lunghezza dell'anello
+
+A ~380 step/ora un anello da 2 ore fa ~670 step. `save_steps` deve stare ben
+sotto (100 per r32, 300 per lo split), altrimenti un anello finisce senza aver
+salvato e il successivo riparte dallo stesso punto: tempo speso, zero
+avanzamento, nessun errore visibile.
+
+### 4. Catene concorrenti, una per esperimento
+
+Ogni catena `afterany` ha **un solo job eleggibile**, il capo; gli altri
+anelli aspettano in `Dependency` e non contano nemmeno per
+`bf_max_job_user_part`. Tre catene indipendenti (split, r32, 8B) sono tre job
+che corrono in parallelo. Una catena va allungata quando le restano meno di
+~24 ore di anelli in coda.
+
+### 5. Condizione indispensabile: la ripresa deve continuare i DATI
+
+**Senza questa, tutto quello sopra peggiora il modello invece di
+addestrarlo.** Fino alla PR #529 una ripresa ricaricava pesi, ottimizzatore e
+step ma ripartiva dall'inizio dei dati: con anelli da 2 ore ogni anello
+riaddestrava gli stessi ~650 step di corpus. Lo split lo ha misurato — PPL sul
+CdS 5,11 allo step 12.600, 5,29 al 18.200, 5,92 al 22.000. Dopo la correzione
+il log di ogni anello deve mostrare
+`[resume] data: epoch 0, skipping the … batches of it already trained on`.
+Qualunque nuovo script di training che lavori ad anelli deve avere la stessa
+garanzia prima di essere messo in catena.
+
+### 6. Tutto il lavoro CPU sulla seriale
+
+Export GGUF, curva di transfer, impacchettamento dello stadio 3, prove sui
+modelli: `lrd_all_serial`, che parte subito e non tocca le GPU. Il lavoro che
+dipende da un altro job va accodato con `--dependency`, non lanciato a mano
+quando "sembra finito".
+
+### Correzione alla lettura della priorità
+
+La tabella qui sotto confronta la nostra priorità (141.963) con il **massimo**
+fra i pending, ed è corretto che siamo due ordini di grandezza sotto. Ma
+rispetto alla **mediana** (138.373 su 3.688 job pending, dallo snapshot in
+`docs/paper/measurements/priority_20260922.json`) eravamo **sopra**. Il
+problema non era la priorità: era la forma della richiesta (punti 1 e 2).
+
 ## Il quadro, in numeri misurati
 
 Dagli snapshot in `docs/paper/measurements/`, che esistono proprio perché
