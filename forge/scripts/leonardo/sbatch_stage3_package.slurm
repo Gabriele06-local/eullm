@@ -10,6 +10,11 @@
 # legal-it-4b-v0.1), measured against the untouched base on the Consiglio di
 # Stato held-out corpus, like every point of the transfer curve.
 #
+# It also runs forge/scripts/chat_smoke.py on the merged weights: three
+# questions, greedy, and whether each answer ENDS its turn. The verdict is the
+# last "[smoke]" line of the log and a row of $WORK/eullm_runs/stage3/
+# chat-smoke.csv, so "is it usable" no longer waits for someone to open a chat.
+#
 # That number answers one question: did instruction tuning DAMAGE what
 # distillation taught? Perplexity on raw rulings is expected to move a little,
 # since the model is now shaped to answer rather than continue; a large loss
@@ -88,5 +93,16 @@ bash "$REPO/forge/scripts/perplexity_compare.sh" \
     --base "$EVAL_BASE" --student "$Q4" --corpus "$CORPUS" \
     --chunks "$CHUNKS" --base-ppl-cache "$WORK/eval/.base_ppl_cds.cache" \
     --csv "$CSV" --label "$NAME-cds" || echo "[s3p] measurement failed — the GGUF is still good" >&2
+
+# Perplexity cannot tell whether the model ends its turn — v0.1 scored like
+# the checkpoint under it and never stopped. Ask the model itself, on the
+# merged weights, and keep the answers in this log for a human to read.
+if [ -f "$MERGED/config.json" ]; then
+    echo "[s3p] === chat smoke test: does it answer, and does it stop? ==="
+    PYTHONPATH="$REPO/forge:${PYTHONPATH:-}" \
+        python "$REPO/forge/scripts/chat_smoke.py" "$MERGED" \
+            --csv "$WORK/eullm_runs/stage3/chat-smoke.csv" --label "$NAME" ||
+        echo "[s3p] smoke test failed to run — the GGUF is still good" >&2
+fi
 
 echo "[s3p] done: $Q4"
