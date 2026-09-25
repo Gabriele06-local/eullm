@@ -325,6 +325,54 @@ quality, throughput, node-hours, VRAM, stability, or student size.
 - Phase 4 identity LoRA: which persona / branding text? Pick after the
   Phase 3 GGUF is smoke-tested.
 
+## 11b. Next generation: Qwen3.5 (decided 2026-09-25)
+
+**Decision.** legal-it-4b v0.x ships on Qwen3, as planned. Once the first
+vertical is out, the next generation moves to the Qwen3.5 family. Not
+before: the defects found in September (data order on resume, untrained
+chat-token rows) were pipeline defects that would have hit any model, and
+changing the model at the same time as fixing them would leave no way to
+tell which change did what.
+
+**What exists, checked on the Hub on 2026-09-25** (the version numbers move
+faster than memory, so re-check before acting):
+
+| Family | Released | Licence | Small **Base** models (students) |
+|---|---|---|---|
+| Qwen3 (current) | 2025 | Apache 2.0 | 1.7 B, 4 B, 8 B; teacher 30B-A3B-Base |
+| **Qwen3.5** | Feb 2026 | Apache 2.0 | **0.8 B, 2 B, 4 B, 9 B**; teacher **35B-A3B-Base** |
+| Qwen3.6 | Apr 2026 | Apache 2.0 | none — 27 B and 35B-A3B only |
+| Qwen3.8 | Aug 2026 | Apache 2.0 (Flash-Next: other) | none — 27 B and larger only |
+
+Qwen3.5 is the newest family with the full set a distillation needs — a
+MoE base teacher and small base students sharing one tokenizer.
+
+**What changes, and has to be checked before committing budget to it:**
+
+1. **Architecture.** Hybrid attention: `layer_types` mixes `full_attention`
+   and `linear_attention` layers. The LoRA target list (`q_proj` … `down_proj`)
+   does not name the linear-attention projections, so those layers would get
+   an MLP adapter only unless the list is extended.
+2. **Kernels.** Linear attention trains at a usable speed only with its
+   dedicated kernels; they must build on Leonardo, and their licences must be
+   checked against the no-copyleft rule.
+3. **Loading.** The checkpoints are `Qwen3_5ForConditionalGeneration` /
+   `…MoeForConditionalGeneration` — multimodal wrappers. Distillation needs
+   the text model only.
+4. **Tokenizer.** Vocabulary 248,320 against Qwen3's 151,646: teacher and
+   student change together, Phase 1 (teacher continued pre-training) is
+   redone, and the chat-token rows are trained in stage 3 exactly as for
+   Qwen3 (`train_format_tokens`, see `forge/eullm_forge/identity.py`).
+5. **Inference.** llama.cpp conversion and the EULLM Engine must support the
+   architecture before a GGUF is worth producing — an engine question, owned
+   there.
+
+A short feasibility job — load, one LoRA step through a linear-attention
+layer, throughput, GGUF conversion — answers 1-3 and 5 for a few node-hours
+and should run before the switch is scheduled. The April objections in the
+table above (§2) were about toolchain maturity; they are exactly what that
+job re-tests.
+
 ## 12. Change log
 
 | Date | Author | Change |
@@ -332,3 +380,4 @@ quality, throughput, node-hours, VRAM, stability, or student size.
 | 2026-04-26 | primoco | Initial strategy committed. |
 | 2026-04-26 | primoco | Add Qwen3.5/3.6 to alternatives evaluated; clarify tokenizer incompatibility between Qwen3 and Qwen3.5/3.6 families. |
 | 2026-04-27 | primoco | Phase 2 memory budget rewritten — full FT student does not fit a single 96 GB GPU; default switched to LoRA r=128 student (with `student_finetune: full` documented as the H200/multi-GPU upgrade path). |
+| 2026-09-25 | primoco | §11b: next generation on Qwen3.5 after the first vertical ships; Hub survey of Qwen3.5/3.6/3.8 and the checks the switch needs. |
