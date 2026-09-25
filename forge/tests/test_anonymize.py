@@ -20,6 +20,15 @@ def test_redacts_codice_fiscale():
     assert stats.codice_fiscale == 1
 
 
+def test_redacts_lowercase_codice_fiscale():
+    """The generator varies capitalisation; a lowercase fiscal code is the
+    same PII and must not pass because of its case."""
+    text = "dell'avvocato costanzo giulio (cstgli71p23f839d) che rappresenta"
+    out, stats = anonymize_text(text)
+    assert "cstgli71p23f839d" not in out
+    assert stats.codice_fiscale == 1
+
+
 @pytest.mark.parametrize(
     "text",
     [
