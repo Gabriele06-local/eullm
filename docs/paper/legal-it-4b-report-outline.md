@@ -256,6 +256,23 @@ Absolute perplexities are not comparable across the two corpora and should
 not be tabulated as if they were. Only the ratios within a corpus mean
 anything.
 
+> **Correction, 2026-09-25 — the curve below does not measure what this
+> section says it does.** Until PR #529, `distill.py` resumed weights,
+> optimizer, scheduler and step count but restarted the *data* from the top:
+> the loader's shuffle was drawn from a global RNG seeded identically on every
+> start, so every link walked the same order from its first batch. After its
+> first link, therefore, the control arm was re-reading the opening stretch of
+> the epoch rather than advancing through it, and each later point measures
+> repeated exposure to that stretch, not progress over 40 % of the corpus.
+> The flattening analysed below — "flatter than logarithmic", "four-fifths of
+> the gain present at 7,000" — is at least partly that artefact and must not
+> be cited as diminishing returns. The split arm, on 2-hour links (~650 steps
+> of data each, re-read about a dozen times), showed the same mechanism
+> sharply: held-out PPL 5.11 at 12,600, 5.29 at 18,200, 5.92 at 22,000. The
+> design-B comparison further down is confounded the same way (the two arms
+> ran different link lengths). Only the 7,000 point, reached inside a first
+> link, is clean. The curve has to be re-measured on a run made after the fix.
+
 **The transfer curve**, measured on 2026-09-24 on the same corpus, the same
 120 chunks and the same base. The GGUFs had been packaged earlier; by the
 time they were scored their checkpoints were gone, because the trainer keeps
