@@ -65,7 +65,7 @@ import torch.nn.functional as F
 import yaml
 from datasets import load_dataset
 from peft import PeftModel
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -589,6 +589,58 @@ def load_checkpoint(ckpt_dir: Path, optimizer, scheduler, scaler) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Where in the data a resumed run continues
+# ---------------------------------------------------------------------------
+# A resume restored the weights, the optimizer, the scheduler and the step —
+# and then started the data from the top. The loader was a plain
+# `shuffle=True` DataLoader drawn from a global RNG that `train()` seeds with
+# the same value on every start, so every job walked the SAME order from its
+# first batch. A chain of links therefore trained over and over on the first
+# stretch of the epoch and never reached the rest.
+#
+# With 24-hour links that was ~9,000 steps of data per link, seen again by
+# every later link; with the 2-hour links of the grazing chains it was ~650
+# steps, seen a dozen times. The split arm measured it: held-out perplexity
+# on Consiglio di Stato went 5.11 at step 12,600 -> 5.29 at 18,200 -> 5.92 at
+# 22,000, a student over-fitting a sliver of its corpus. The flattening of
+# the control arm's transfer curve past its first link is the same effect,
+# not diminishing returns.
+#
+# Now each epoch has a fixed order derived from (seed, epoch), independent of
+# any other use of the RNG, and a resumed run skips the batches its step
+# count says it has already trained on. The optimizer steps are the ledger:
+# `start_step x gradient_accumulation_steps` micro-batches have been consumed.
+
+def data_position(start_step: int, grad_accum: int,
+                  batches_per_epoch: int) -> tuple[int, int]:
+    """(epoch, batches into that epoch) where a run resumed at `start_step` goes on."""
+    if batches_per_epoch <= 0:
+        return 0, 0
+    return divmod(start_step * grad_accum, batches_per_epoch)
+
+
+def epoch_batches(train_loader, epoch: int, skip: int, seed: int):
+    """One epoch of batches in a fixed order, from the `skip`-th batch on.
+
+    A DataLoader is re-issued over a seeded permutation of its dataset, the
+    skipped part cut off before anything is loaded. Anything else is taken
+    to be batches already (the tests) and is sliced in the order given.
+    """
+    if not isinstance(train_loader, DataLoader):
+        return list(train_loader)[skip:]
+    dataset = train_loader.dataset
+    order = torch.randperm(
+        len(dataset), generator=torch.Generator().manual_seed(seed + epoch),
+    ).tolist()
+    return DataLoader(
+        Subset(dataset, order[skip * train_loader.batch_size:]),
+        batch_size=train_loader.batch_size, shuffle=False,
+        collate_fn=train_loader.collate_fn,
+        num_workers=train_loader.num_workers, pin_memory=train_loader.pin_memory,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Divergence guard
 # ---------------------------------------------------------------------------
 #
@@ -768,6 +820,14 @@ def train(cfg: DistillConfig) -> None:
                 f"used, if a healthy one survives",
             )
 
+    start_epoch, skip_batches = data_position(
+        start_step, cfg.gradient_accumulation_steps, len(train_loader),
+    )
+    if start_step:
+        print(f"[resume] data: epoch {start_epoch}, skipping the "
+              f"{skip_batches:,} batches of it already trained on",
+              file=sys.stderr)
+
     # --- log ---
     print(f"[info] total optim steps: {total_optim_steps:,}",
           file=sys.stderr)
@@ -797,8 +857,9 @@ def train(cfg: DistillConfig) -> None:
     skipped_in_a_row = 0
     skipped_total = 0
 
-    for epoch in range(cfg.num_train_epochs):
-        for batch in train_loader:
+    for epoch in range(start_epoch, cfg.num_train_epochs):
+        skip = skip_batches if epoch == start_epoch else 0
+        for batch in epoch_batches(train_loader, epoch, skip, cfg.seed):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.no_grad():
                 t_out = teacher(**batch)
@@ -906,10 +967,10 @@ def train(cfg: DistillConfig) -> None:
                                     optim_step, output_dir, cfg)
                     prune_checkpoints(output_dir, cfg.save_total_limit)
 
-                if cfg.max_steps > 0 and optim_step >= cfg.max_steps:
+                if optim_step >= total_optim_steps:
                     break
 
-        if cfg.max_steps > 0 and optim_step >= cfg.max_steps:
+        if optim_step >= total_optim_steps:
             break
 
     # Final save — through the same gate as every other one.
