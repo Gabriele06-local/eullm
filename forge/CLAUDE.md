@@ -122,6 +122,35 @@ reintroduce:**
 - **Single-GPU budget**: 94-96 GB VRAM hosts (H100 NVL, RTX PRO 6000 Blackwell) — fits LoRA distillation pipeline up to 32B teacher + 7B student
 - **Key constraint**: distillation needs teacher + student in VRAM simultaneously; consumer GPUs (≤24 GB) handle only LoRA fine-tuning and quantization
 
+## A change for Leonardo is done when it is ON Leonardo, not when it is merged
+
+The user merges every PR and runs every command on Leonardo; nothing reaches
+the cluster by itself. A fix merged on GitHub but not pulled there changes
+nothing — and on 2026-09-25 that cost real runs: stage-3 jobs were submitted
+before the chat-token fix had been pulled and had to be held and re-released,
+and the user had to ask, more than once, why the pull was never mentioned.
+
+So whenever a change that affects Leonardo is pushed, the to-do given to the
+user always carries BOTH steps, together, in the same message:
+
+1. merge the PR on GitHub;
+2. the exact pull on the exact checkout(s) that run it, with a one-line check
+   that the change arrived (e.g. `grep -c "<new function>" <file>` → `1`).
+
+Which checkout runs what — find it rather than assume it:
+`squeue --me -h -o "%j %o" | sort -u` prints each job's script path.
+As of 2026-09-25: `$WORK/eullm` (main) runs export, generation, queue stats and
+stage 3; the distillation chains run from pinned trees (`$WORK/eullm-v12` for
+split and r32, `$WORK/eullm-8b` for 8B), updated file by file with
+`git -C <tree> checkout origin/main -- <file>`, never a blanket pull.
+
+Two traps worth stating each time they apply:
+* `sbatch` stores a copy of the batch SCRIPT at submission. A pull changes the
+  Python a queued job will import, but not its `.slurm` — a job queued before
+  a `.slurm` change runs the old one.
+* Never tell the user to submit jobs that depend on a change until the check
+  above has printed the expected value.
+
 ## Base Models
 
 Only fully permissive licenses:
