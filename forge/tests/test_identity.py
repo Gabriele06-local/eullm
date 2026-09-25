@@ -248,3 +248,99 @@ def test_fine_tune_identity_runs_end_to_end_on_cpu(tmp_path, monkeypatch):
     saved = AutoTokenizer.from_pretrained(adapter)
     assert saved.chat_template == CHATML_TEMPLATE
     assert (tmp_path / "identity-lora" / "adapter" / "adapter_config.json").exists()
+
+
+# --- stage 3 on Leonardo: domain pairs + identity, resumable -------------------
+
+DOMAIN_PAIRS = [
+    {"instruction": "Chi risponde del danno ingiusto?",
+     "output": "Chi lo ha causato con dolo o colpa deve risarcirlo.",
+     "task": "qa", "source": "codice_civile", "key": "a1"},
+    {"instruction": "Riassumi il seguente testo:\n\nIl ricorso è respinto.",
+     "output": "Il giudice ha respinto il ricorso.",
+     "task": "riassunto", "source": "cds", "key": "a2"},
+]
+
+
+def test_load_pairs_reads_jsonl_keeps_only_the_pair_and_skips_a_cut_line(tmp_path):
+    import json
+
+    from eullm_forge.identity import load_pairs
+
+    path = tmp_path / "pairs.jsonl"
+    path.write_text("\n".join(json.dumps(p, ensure_ascii=False) for p in DOMAIN_PAIRS)
+                    + '\n{"instruction": "tagliata a metà', encoding="utf-8")
+    pairs = load_pairs(str(path))
+    assert pairs == [{"instruction": p["instruction"], "output": p["output"]}
+                     for p in DOMAIN_PAIRS]
+
+
+def test_load_pairs_refuses_a_file_with_no_pairs(tmp_path):
+    from eullm_forge.identity import load_pairs
+
+    path = tmp_path / "empty.jsonl"
+    path.write_text('{"foo": 1}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="no instruction/output pairs"):
+        load_pairs(str(path))
+
+
+def test_a_missing_instruction_file_fails_before_any_heavy_work(tmp_path):
+    from eullm_forge.identity import fine_tune_identity
+
+    config = IdentityConfig(model_path="dummy",
+                            instruction_path=str(tmp_path / "missing-pairs.jsonl"))
+    with pytest.raises(FileNotFoundError, match="missing-pairs.jsonl"):
+        fine_tune_identity(config)
+
+
+def test_stage3_script_trains_resumes_and_merges_on_cpu(tmp_path, monkeypatch):
+    """The Leonardo path end to end on a tiny Qwen3: stage3_sft.py → adapter,
+    a second submission resumes instead of starting over, and the package
+    job's merge produces a model directory with the template in it."""
+    pytest.importorskip("peft")
+    import importlib.util
+    import json
+    import sys
+    from pathlib import Path
+
+    import torch
+    from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+
+    from eullm_forge.identity import CHATML_TEMPLATE, merge_identity_adapter
+
+    identity = generate_identity_dataset(IdentityConfig(identity_name="EULLM Legal IT",
+                                                        languages=["it", "en"]))
+    tok = make_tokenizer(all_text(identity) + all_text(DOMAIN_PAIRS))
+    base = tmp_path / "merged-step"
+    tok.save_pretrained(base)
+    Qwen3ForCausalLM(Qwen3Config(
+        vocab_size=len(tok), hidden_size=16, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        head_dim=8, max_position_embeddings=256,
+    )).save_pretrained(base)
+    pairs = tmp_path / "pairs.jsonl"
+    pairs.write_text("\n".join(json.dumps(p, ensure_ascii=False) for p in DOMAIN_PAIRS),
+                     encoding="utf-8")
+    out = tmp_path / "sft"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "stage3_sft.py"
+    spec = importlib.util.spec_from_file_location("stage3_sft", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    argv = ["stage3_sft.py", "--model", str(base), "--pairs", str(pairs), "--out", str(out),
+            "--epochs", "1", "--rank", "4", "--max-length", "256", "--batch-size", "2",
+            "--grad-accum", "1", "--identity-repeat", "2", "--save-steps", "3"]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert mod.main() == 0
+    assert (out / "adapter" / "adapter_config.json").exists()
+    ckpts = sorted(out.glob("checkpoint-*"))
+    assert ckpts, "no checkpoint written, so nothing to resume from"
+
+    # A second submission finds the checkpoint and resumes rather than failing.
+    assert mod.main() == 0
+
+    merged = merge_identity_adapter(str(base), str(out / "adapter"), str(out / "merged"))
+    assert (Path(merged) / "config.json").exists()
+    assert AutoTokenizer.from_pretrained(merged).chat_template == CHATML_TEMPLATE
