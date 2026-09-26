@@ -27,7 +27,16 @@ from __future__ import annotations
 
 from .dataset import EvalItem, filter_items, load_eval_set, load_seed, save_eval_set
 from .harness import collect_answers, compare_models, evaluate_qa
-from .judge import ABOutcome, Judge, Judgement, LLMJudge, MockJudge, blind_pairwise
+from .judge import (
+    ABOutcome,
+    Grade,
+    Judge,
+    Judgement,
+    LLMJudge,
+    MockJudge,
+    ReferenceGrader,
+    blind_pairwise,
+)
 from .metrics import (
     aggregate,
     exact_match,
@@ -37,14 +46,18 @@ from .metrics import (
     score_item,
 )
 from .report import build_report, spotcheck_markdown, to_markdown
+from .retrieval import NormIndex, open_book_prompt
 
 __all__ = [
     "ABOutcome",
     "EvalItem",
+    "Grade",
     "Judge",
     "Judgement",
     "LLMJudge",
     "MockJudge",
+    "NormIndex",
+    "ReferenceGrader",
     "aggregate",
     "blind_pairwise",
     "build_report",
@@ -57,6 +70,7 @@ __all__ = [
     "load_eval_set",
     "load_seed",
     "normalize_text",
+    "open_book_prompt",
     "perplexity_from_nll",
     "save_eval_set",
     "score_item",

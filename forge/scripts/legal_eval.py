@@ -25,6 +25,20 @@ Run it on every candidate AND on a reference, so a number means something:
 Qwen/Qwen3-4B-Instruct-2507 is the reference: same size, Qwen's own
 instruction tuning. A vertical that does not beat it on its own domain is not
 worth shipping. Exit status is 0 whatever the scores; this reports.
+
+OPEN BOOK. With ``--norms`` every question is asked with the text of the
+norms `NormIndex` retrieves for it placed in front (the named article when
+the question names one, BM25 otherwise). Same model, same questions, the
+text in hand: the difference between the two runs is how much of the error
+is memory rather than understanding. The retrieved records are written into
+the answers file, so a wrong answer can be told apart from a wrong retrieval.
+
+    python forge/scripts/legal_eval.py <model> --label NAME-open \
+        --norms "$CORPUS_DIR"/legislazione_*.chunks.jsonl ...
+
+The keyword score is a first sort. `judge_answers.py` grades the answers
+files against the references with a large model, which is the number to
+decide on.
 """
 
 from __future__ import annotations
@@ -38,7 +52,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.eval import evaluate_qa, load_eval_set, load_seed  # noqa: E402
+from eullm_forge.eval import (  # noqa: E402
+    NormIndex,
+    evaluate_qa,
+    load_eval_set,
+    load_seed,
+    open_book_prompt,
+)
+from eullm_forge.eval.retrieval import label as norm_label  # noqa: E402
 
 
 def summary_row(label: str, model: str, report: dict, ended: int) -> list:
@@ -62,22 +83,36 @@ def main() -> int:
     ap.add_argument("--max-new-tokens", type=int, default=400)
     ap.add_argument("--csv", help="append the summary row here")
     ap.add_argument("--answers", help="write every answer, with its score, here")
+    ap.add_argument("--norms", nargs="+",
+                    help="legislazione_*.chunks.jsonl files: ask OPEN BOOK, "
+                         "with the retrieved norms in the prompt")
+    ap.add_argument("--k", type=int, default=3, help="norms retrieved per question")
     args = ap.parse_args()
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     items = load_eval_set(args.items) if args.items else load_seed()
+    index = NormIndex.from_files(args.norms) if args.norms else None
+    if index:
+        print(f"[eval] open book: {len(index.records):,} legislation records, "
+              f"{args.k} per question", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
     model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
 
-    answers, ended = {}, 0
+    answers, contexts, ended = {}, {}, 0
     for it in items:
+        content = it.question
+        if index:
+            found = index.search(it.question, args.k)
+            contexts[it.id] = [norm_label(r) for r in found]
+            content = open_book_prompt(it.question, found)
+            print(f"\n[eval] {it.id} reads: {'; '.join(contexts[it.id]) or 'nothing found'}")
         prompt = tok.apply_chat_template(
-            [{"role": "user", "content": it.question}],
+            [{"role": "user", "content": content}],
             tokenize=False, add_generation_prompt=True,
         )
         ids = tok(prompt, return_tensors="pt", add_special_tokens=False)
@@ -102,7 +137,9 @@ def main() -> int:
             for it, r in zip(items, report["per_item"]):
                 f.write(json.dumps({"id": it.id, "question": it.question,
                                     "answer": answers[it.id], "reference": it.reference,
-                                    "keyword_coverage": r["keyword_coverage"]},
+                                    "rubric": it.rubric,
+                                    "keyword_coverage": r["keyword_coverage"],
+                                    "context": contexts.get(it.id)},
                                    ensure_ascii=False) + "\n")
     if args.csv:
         path = Path(args.csv)

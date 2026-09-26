@@ -168,3 +168,70 @@ def blind_pairwise(
         else:
             outcome.b_wins += 1
     return outcome
+
+
+_GRADE_TEMPLATE = """You are a strict expert in Italian law grading an answer against a reference.
+Judge only legal correctness against the reference: a wrong deadline, a wrong
+article, or a rule stated backwards makes the answer wrong however well it is
+written. Extra correct detail is fine; ignore length and style.
+
+Question:
+{question}
+
+Reference answer:
+{reference}
+
+{rubric_block}Answer to grade:
+{answer}
+
+Respond with exactly one line: "Grade: correct", "Grade: partial", or "Grade: wrong".
+Then, on a new line, a one-sentence justification.
+"""
+
+_GRADE_RE = re.compile(r"grade\s*[:=]?\s*(correct|partial|wrong)", re.IGNORECASE)
+GRADE_SCORES = {"correct": 1.0, "partial": 0.5, "wrong": 0.0}
+
+
+@dataclass
+class Grade:
+    """An answer graded against its reference."""
+
+    label: str  # "correct" | "partial" | "wrong" | "unparsed"
+    rationale: str = ""
+
+    @property
+    def score(self) -> float:
+        """1 correct, 0.5 partial, 0 wrong or unparseable."""
+        return GRADE_SCORES.get(self.label, 0.0)
+
+
+class ReferenceGrader:
+    """Grade one answer against the item's reference, with an LLM.
+
+    Keyword coverage cannot tell "entro trenta giorni" from "entro centoventi
+    giorni" when the keyword is "giorni" — v0.2 scored 0.67 on the ricorso
+    straordinario with the deadline wrong by a factor of four. A grader that
+    reads the reference can. Like `LLMJudge` it takes any
+    ``chat_fn: (prompt) -> text``; nothing here loads a model.
+    """
+
+    def __init__(self, chat_fn: Callable[[str], str]) -> None:
+        self.chat_fn = chat_fn
+
+    def prompt(self, question: str, reference: str, answer: str, rubric: str = "") -> str:
+        """The grading prompt, exposed so a caller can batch it."""
+        rubric_block = f"Grading rubric:\n{rubric}\n\n" if rubric else ""
+        return _GRADE_TEMPLATE.format(question=question, reference=reference,
+                                      rubric_block=rubric_block, answer=answer)
+
+    @staticmethod
+    def parse(raw: str) -> Grade:
+        """Read a grade out of the grader's reply."""
+        match = _GRADE_RE.search(raw or "")
+        if not match:
+            return Grade("unparsed", (raw or "").strip())
+        return Grade(match.group(1).lower(), (raw or "").strip())
+
+    def grade(self, question: str, reference: str, answer: str, rubric: str = "") -> Grade:
+        """Grade one answer."""
+        return self.parse(self.chat_fn(self.prompt(question, reference, answer, rubric)))
