@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.10 — 2026-09-26
 
 ### Added
 - **One-line install on every platform.** `curl -fsSL https://raw.githubusercontent.com/eullm/eullm/main/installer/install.sh | sh` on Linux and macOS, `irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex` in Windows PowerShell. Both scripts pick the build that fits the machine: CUDA when an NVIDIA GPU with a recent enough driver is present, the A100/H100 build on those cards, the CPU build otherwise, and Metal on Apple Silicon. They refuse to install a download whose checksum does not match the release, and they need no root or administrator rights. On Windows the install goes to `%LOCALAPPDATA%\Programs\EuLLM` and is added to your PATH; `$env:EULLM_UNINSTALL=1` removes it again. The scripts are independent of the engine version, so they already install the current 0.7.9 (older releases used different file names for some builds).
