@@ -1741,6 +1741,24 @@ jobs:
             Write-Host "Bundle is self-contained. NVIDIA imports: $($needed -join ', ')"
           }
 
+          # The CUDA DLLs are NVIDIA redistributables (CUDA Toolkit EULA,
+          # Attachment A), not AGPL code of ours. Say so inside the ZIP,
+          # next to the files it is about, so whoever unpacks it knows
+          # which terms cover which file.
+          @(
+            'EuLLM Engine - third-party components in this archive'
+            ''
+            'eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
+            '  https://github.com/eullm/eullm/blob/main/LICENSE'
+            ''
+            'The following files are NVIDIA CUDA Toolkit redistributable components,'
+            'copyright NVIDIA Corporation, distributed unmodified under the'
+            'NVIDIA CUDA Toolkit End User License Agreement:'
+            '  https://docs.nvidia.com/cuda/eula/index.html'
+            ''
+          ) + ((Get-ChildItem $bundle -Filter *.dll).Name | ForEach-Object { "  $_" }) |
+            Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
+
           Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
         env:
           CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
