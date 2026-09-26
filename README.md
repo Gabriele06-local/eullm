@@ -69,6 +69,20 @@ curl http://localhost:11434/v1/chat/completions \
   -d '{"model": "qwen3", "messages": [{"role": "user", "content": "Ciao!"}]}'
 ```
 
+**One-line install** — detects the OS and an NVIDIA GPU, picks the matching binary, verifies it against the release checksums and installs it for the current user (no root/admin):
+
+```bash
+# Linux / macOS — installs to ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/eullm/eullm/main/installer/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell) — installs to %LOCALAPPDATA%\Programs\EuLLM and adds it to PATH
+irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex
+```
+
+Then run any GGUF straight from Hugging Face: `eullm run hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M`. `EULLM_VERSION`, `EULLM_VARIANT` and `EULLM_INSTALL_DIR` override the defaults; `$env:EULLM_UNINSTALL=1` removes it on Windows. The scripts are in [`installer/`](installer/).
+
 **All prebuilt binaries** — pick yours from the [latest release](https://github.com/eullm/eullm/releases/latest):
 
 | Platform | File | Status | Notes |
@@ -91,7 +105,7 @@ curl http://localhost:11434/v1/chat/completions \
 >
 > **SmartScreen note (Windows):** the binaries are not yet code-signed, so first launch may show *"Windows protected your PC"*. Click **More info → Run anyway**. CUDA bundles ship the required CUDA DLLs alongside — no separate CUDA toolkit install needed (an up-to-date NVIDIA driver is enough).
 >
-> **One-click installer paused.** v0.5.6 shipped an Inno Setup `.exe` installer; we pulled it from v0.5.8 onwards because the SmartScreen warning, the launcher script edge cases, and the install-time PATH handling all need a redesign before re-shipping. The standalone binaries above are the supported Windows distribution.
+> **One-click installer paused.** v0.5.6 shipped an Inno Setup `.exe` installer; we pulled it from v0.5.8 onwards because the SmartScreen warning, the launcher script edge cases, and the install-time PATH handling all need a redesign before re-shipping. The standalone binaries above, or `install.ps1`, are the supported Windows distribution. SmartScreen only checks files carrying the "downloaded from the internet" mark; `install.ps1` verifies the checksum and then clears that mark (`Unblock-File`), so the *"Windows protected your PC"* prompt should not appear on first launch.
 
 ### 🧪 Platform status / help us test
 
