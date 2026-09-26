@@ -86,6 +86,35 @@ NORMATTIVA_LAWS: list[NormaSource] = [
     ),
 ]
 
+# Administrative law, for the legal-it administrative vertical (Consiglio di
+# Stato rulings plus the norms they apply). Kept OUT of NORMATTIVA_LAWS on
+# purpose: that list is the default of every civil/criminal corpus build, and
+# a vertical is only as focused as its corpus. Named explicitly with
+# `prepare_legislation.py --sources` (ZIP mode) or `--source-id` (one XML).
+NORMATTIVA_LAWS_AMMINISTRATIVO: list[NormaSource] = [
+    NormaSource(
+        id="codice_processo_amministrativo",
+        name="Codice del processo amministrativo",
+        urn="urn:nir:stato:decreto.legislativo:2010-07-02;104",
+        description="D.Lgs. 104/2010, allegato 1 (c.p.a.)",
+    ),
+    NormaSource(
+        id="legge_procedimento_amministrativo",
+        name="Legge sul procedimento amministrativo",
+        urn="urn:nir:stato:legge:1990-08-07;241",
+        description="L. 241/1990",
+    ),
+    NormaSource(
+        id="ricorsi_amministrativi",
+        name="Semplificazione dei procedimenti in materia di ricorsi amministrativi",
+        urn="urn:nir:stato:decreto.del.presidente.della.repubblica:1971-11-24;1199",
+        description="D.P.R. 1199/1971 (ricorso gerarchico e straordinario)",
+    ),
+]
+
+# Every Normattiva source the parsers can recognise, whatever vertical it is for.
+ALL_NORMATTIVA_LAWS: list[NormaSource] = NORMATTIVA_LAWS + NORMATTIVA_LAWS_AMMINISTRATIVO
+
 # EU regulations from EUR-Lex (Italian version)
 EURLEX_REGULATIONS: list[EurlexSource] = [
     EurlexSource(
@@ -324,7 +353,7 @@ def parse_normattiva_opendata_zip(
 
 
 def _detect_source_from_akn(xml_text: str) -> Optional[str]:
-    """Identify which NORMATTIVA_LAWS entry this AKN document belongs to.
+    """Identify which ALL_NORMATTIVA_LAWS entry this AKN document belongs to.
 
     Reads the <FRBRthis value="urn:nir:..."/> element from the AKN metadata
     section and matches it against the URNs declared in NORMATTIVA_LAWS.
@@ -335,7 +364,7 @@ def _detect_source_from_akn(xml_text: str) -> Optional[str]:
     m = re.search(r'<FRBRthis\b[^>]+\bvalue="([^"]+)"', xml_text)
     frbrthis = m.group(1).lower() if m else ""
 
-    for law in NORMATTIVA_LAWS:
+    for law in ALL_NORMATTIVA_LAWS:
         urn_lower = law.urn.lower()
         if urn_lower in frbrthis or frbrthis in urn_lower:
             return law.id
@@ -346,7 +375,7 @@ def _detect_source_from_akn(xml_text: str) -> Optional[str]:
 
     # Broader fallback: scan the first 4 KB of the file for any known URN fragment
     header = xml_text[:4096].lower()
-    for law in NORMATTIVA_LAWS:
+    for law in ALL_NORMATTIVA_LAWS:
         tail = re.search(r":(\d{4}-\d{2}-\d{2};\d+)$", law.urn.lower())
         if tail and tail.group(1) in header:
             return law.id

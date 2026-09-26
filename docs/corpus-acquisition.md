@@ -68,6 +68,54 @@ held out.
 3. **Chunking and formatting** (`forge/scripts/format_pretraining.py`) into
    `train.jsonl` / `val.jsonl`, split **by document** via `sentence_id`.
 
+## The administrative vertical
+
+legal-it is two 4B models, not one: **civile e penale** (Cassazione plus the
+codes, the corpus above) and **amministrativo**. The civil/criminal model,
+asked about TAR and ricorso straordinario deadlines it had never studied,
+answered 30 days for both; they are 60 and 120. A 4B does one domain well, so
+the administrative one gets its own corpus and its own training run
+(`distill_qwen3_30b_a3b_to_4b_amm.yaml`, `sbatch_phase2_amm.slurm`):
+
+* Consiglio di Stato **2017-2024** rulings, never 2025-2026;
+* the norms they apply: *codice del processo amministrativo* (d.lgs.
+  104/2010), L. 241/1990, D.P.R. 1199/1971, and the Costituzione.
+
+The administrative norms are listed in `NORMATTIVA_LAWS_AMMINISTRATIVO` and
+enter a build only when named, so the civil/criminal corpus stays as it is.
+
+Built on the workstation, because the rulings carry personal data until they
+are anonymised, in a directory of its own so nothing from the Cassazione
+corpus is swept in:
+
+```bash
+C=~/work/corpus_amm; D=~/work/datasets/legal_it_amm; mkdir -p $C
+# The rulings, named so the pipeline reads kind=cds from the file name.
+cp ~/work/cds/cds-train.jsonl $C/italgiure_cds_2017-2024.jsonl
+python forge/scripts/anonymize_italgiure.py $C --sample 20 --dry-run   # look first
+python forge/scripts/anonymize_italgiure.py $C
+python forge/scripts/sweep_structured_pii.py $C/italgiure_cds_*.anon.jsonl  # must exit 0
+python forge/scripts/chunk_corpus.py $C
+python forge/scripts/dedup_corpus.py $C
+# The norms. The c.p.a. from the Normattiva codes ZIP if it is in it,
+# otherwise like the other two, as a single AKN XML from normattiva.it.
+python forge/scripts/prepare_legislation.py Codici_AKN_VIGENTE_*.zip --output $C \
+    --sources codice_processo_amministrativo
+python forge/scripts/prepare_legislation.py <l-241-1990>.xml --output $C \
+    --source-id legge_procedimento_amministrativo
+python forge/scripts/prepare_legislation.py <dpr-1199-1971>.xml --output $C \
+    --source-id ricorsi_amministrativi
+python forge/scripts/prepare_legislation.py <costituzione>.xml --output $C \
+    --source-id costituzione
+python forge/scripts/format_pretraining.py $C --output $D
+python forge/scripts/check_corpus_holdout.py $D --files train.jsonl val.jsonl \
+    --require-source cds                                                   # must exit 0
+rsync -av $D/ <user>@login.leonardo.cineca.it:/leonardo_work/<project>/datasets/legal_it_amm/
+```
+
+The same `legislazione_*.chunks.jsonl` files are what the open-book
+evaluation (`legal_eval.py --norms`) retrieves from.
+
 ## Known limitations
 
 **The 2026-09 Cassazione split is chunk-level.** `format_pretraining.py`

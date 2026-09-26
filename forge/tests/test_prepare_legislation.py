@@ -92,3 +92,36 @@ def test_keyless_records_do_straddle_the_split():
     for seed in range(20):
         train_idx, val_idx = split_indices(2, 0.5, seed, [None, None])
         assert len(train_idx) == 1 and len(val_idx) == 1
+
+
+# --- the administrative norms: recognised, but never in a default build -----
+
+def _akn(urn):
+    return (f'<akomaNtoso><meta><FRBRWork><FRBRthis value="{urn}/!main"/>'
+            f'</FRBRWork></meta></akomaNtoso>')
+
+
+def test_the_administrative_norms_are_recognised_in_an_opendata_zip():
+    from eullm_forge.datasets.legal_it import _detect_source_from_akn
+
+    assert _detect_source_from_akn(
+        _akn("urn:nir:stato:decreto.legislativo:2010-07-02;104")
+    ) == "codice_processo_amministrativo"
+    assert _detect_source_from_akn(
+        _akn("urn:nir:stato:legge:1990-08-07;241")
+    ) == "legge_procedimento_amministrativo"
+
+
+def test_a_default_build_stays_civil_and_criminal():
+    """A vertical is only as focused as its corpus: the administrative norms
+    enter a build only when named."""
+    from eullm_forge.datasets.legal_it import (
+        ALL_NORMATTIVA_LAWS,
+        NORMATTIVA_LAWS,
+        NORMATTIVA_LAWS_AMMINISTRATIVO,
+    )
+
+    default_ids = {law.id for law in NORMATTIVA_LAWS}
+    assert not default_ids & {law.id for law in NORMATTIVA_LAWS_AMMINISTRATIVO}
+    assert {law.id for law in ALL_NORMATTIVA_LAWS} >= default_ids | {
+        "codice_processo_amministrativo", "ricorsi_amministrativi"}
