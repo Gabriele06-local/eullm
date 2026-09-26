@@ -95,8 +95,9 @@ Then run any GGUF straight from Hugging Face: `eullm run hf.co/Qwen/Qwen3-8B-GGU
 | 🐧 Linux ARM64 (NVIDIA) | `eullm-linux-arm64-cuda-13.1` | ✅ Tested | ARM host + discrete NVIDIA GPU (sm_86/89/120); validated on a Radxa Orion O6 (CIX P1) with an RTX 3060 12GB in its PCIe slot, qwen3-14b Q4 at 33 tok/s — the same board does 3.0 tok/s on the same model CPU-only |
 | 🍎 macOS Apple Silicon (Metal) | `eullm-macos-arm64` | ✅ Tested (community) | Validated on M2 Pro (Metal); M1/M2/M3/M4 |
 | 🍎 macOS Intel | `eullm-macos-x64` | ✅ Tested (community) | Validated on a 2018 Mac mini (i7-8700B, 54 tok/s) and a 2018 MacBook Pro 15" (i9-8950HK, 41 tok/s), qwen3-0.6b Q4. CPU only: Metal is deliberately not built for Intel Macs, see below |
-| 🪟 Windows 11 x64 (CPU) | `eullm-windows-x64.exe` | ✅ Tested | Standalone binary, CLI/server |
-| 🪟 Windows 11 x64 (NVIDIA) | `eullm-windows-x64-cuda-13.1.zip` | ✅ Tested | ZIP bundles CUDA DLLs — extract, run |
+| 🪟 Windows 11 x64 (CPU) | `eullm-windows-x64.zip` | 🆕 New | eullm.exe + the Visual C++ runtime DLLs — extract, run. Runs on a clean Windows |
+| 🪟 Windows 11 x64 (CPU) | `eullm-windows-x64.exe` | ✅ Tested | Standalone binary, CLI/server. Needs the [Visual C++ Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist) already installed, otherwise it stops with *"MSVCP140.dll was not found"* — take the ZIP above then |
+| 🪟 Windows 11 x64 (NVIDIA) | `eullm-windows-x64-cuda-13.1.zip` | ✅ Tested | ZIP bundles the CUDA and Visual C++ runtime DLLs — extract, run |
 | 🐧 Linux x64 (Vulkan, AMD/Intel) | `eullm-linux-x64-vulkan` | ✅ Tested (community) | Any GPU with a Vulkan driver — AMD, Intel, and NVIDIA alike. Needs `libvulkan.so.1` and a driver on the machine (mesa RADV, amdvlk, NVIDIA, Intel ANV); nothing is bundled. Validated on a Ryzen AI 9 HX 470 with Radeon 890M integrated graphics (96 GB unified memory, openSUSE Tumbleweed): all 29 layers offloaded, qwen3-0.6b Q4 at ~135 tok/s |
 
 > **Embedded chat UI — cross-platform.** Every `eullm` binary (Linux, macOS, Windows — CPU, CUDA, Metal) ships with a built-in browser chat. Run `eullm run model.gguf` and open **`http://localhost:11435/`** — same OpenAI/Ollama API on `:11434`, separate chat UI port `:11435` so it never collides with RAG / OpenAI-client routes on `/`. Turn it off with `--no-ui` for headless deployments.

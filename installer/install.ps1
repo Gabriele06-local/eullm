@@ -57,9 +57,13 @@ function Install-EuLLM {
 
     $variant = $env:EULLM_VARIANT
     if (-not $variant) { $variant = Get-EuLLMVariant }
+    # Candidates in order of preference; the first one the release lists
+    # in checksums.txt is installed. The CPU ZIP carries the Visual C++
+    # runtime next to the exe, so it runs on a Windows without the VC++
+    # Redistributable; releases up to 0.7.9 only have the bare exe.
     switch ($variant) {
-        'cpu'  { $asset = 'eullm-windows-x64.exe' }
-        'cuda' { $asset = 'eullm-windows-x64-cuda-13.1.zip' }
+        'cpu'  { $candidates = @('eullm-windows-x64.zip', 'eullm-windows-x64.exe') }
+        'cuda' { $candidates = @('eullm-windows-x64-cuda-13.1.zip') }
         default { throw "Unknown EULLM_VARIANT '$variant' (expected cpu or cuda)." }
     }
 
@@ -72,22 +76,25 @@ function Install-EuLLM {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("eullm-install-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
-        Write-Host "Installing $asset (variant: $variant) into $installDir"
-        if ($variant -eq 'cuda') { Write-Host 'The CUDA build is about 500 MB, this can take a while.' }
-
         $sums = Join-Path $tmp 'checksums.txt'
-        $file = Join-Path $tmp $asset
         Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $sums
-        Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $file
 
         # checksums.txt lines look like "<hash>  <artifact-dir>/<file>", so
         # match on the file name at the end of the path.
-        $expected = $null
+        $listed = @{}
         foreach ($line in Get-Content $sums) {
             $parts = $line -split '\s+', 2
-            if ($parts.Count -eq 2 -and ($parts[1] -split '/')[-1] -eq $asset) { $expected = $parts[0]; break }
+            if ($parts.Count -eq 2) { $listed[($parts[1] -split '/')[-1]] = $parts[0] }
         }
-        if (-not $expected) { throw "$asset is not listed in checksums.txt, refusing to install an unverified binary." }
+        $asset = $candidates | Where-Object { $listed.ContainsKey($_) } | Select-Object -First 1
+        if (-not $asset) { throw "None of $($candidates -join ', ') is listed in checksums.txt, refusing to install an unverified binary." }
+        $expected = $listed[$asset]
+
+        Write-Host "Installing $asset (variant: $variant) into $installDir"
+        if ($variant -eq 'cuda') { Write-Host 'The CUDA build is about 500 MB, this can take a while.' }
+        $file = Join-Path $tmp $asset
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/$asset" -OutFile $file
+
         $actual = (Get-FileHash -Algorithm SHA256 -Path $file).Hash
         if ($actual -ne $expected) { throw "Checksum mismatch for $asset (expected $expected, got $actual)." }
         Write-Host 'Checksum OK'
@@ -98,12 +105,12 @@ function Install-EuLLM {
 
         New-Item -ItemType Directory -Path $installDir -Force | Out-Null
         # Remove what a previous install left behind, so switching from the
-        # CUDA build to the CPU one does not leave stale CUDA DLLs around.
+        # CUDA build to the CPU one does not leave stale DLLs around.
         Get-ChildItem -Path $installDir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -eq 'eullm.exe' -or $_.Name -like 'cu*.dll' -or $_.Name -like 'THIRD-PARTY-NOTICES*' } |
+            Where-Object { $_.Name -eq 'eullm.exe' -or $_.Extension -eq '.dll' -or $_.Name -like 'THIRD-PARTY-NOTICES*' } |
             Remove-Item -Force
 
-        if ($variant -eq 'cuda') {
+        if ($asset -like '*.zip') {
             $unzip = Join-Path $tmp 'unzipped'
             Expand-Archive -Path $file -DestinationPath $unzip
             Get-ChildItem -Path $unzip -File | Copy-Item -Destination $installDir

@@ -1408,16 +1408,48 @@ jobs:
             Write-Host "sccache not on PATH (an earlier step failed) — no stats to show"
           }
 
-      - name: Package binary
+      # Two assets from one build. The bare .exe stays for every link already
+      # pointing at it, and runs wherever the Visual C++ runtime is already
+      # installed. The ZIP adds that runtime next to the exe, so it also runs
+      # on a clean Windows; install.ps1 and the MSIX use the ZIP.
+      - name: Package binary + bundle MSVC runtime DLLs
         shell: pwsh
         run: |
           Copy-Item "target\x86_64-pc-windows-msvc\release\eullm.exe" -Destination "eullm-windows-x64.exe"
+
+          $bundle = "eullm-windows-x64"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\eullm.exe" -Destination "$bundle\eullm.exe"
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bundle\eullm.exe" -Destination $bundle
+          @(
+            'EuLLM Engine - third-party components in this archive'
+            ''
+            'eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
+            '  https://github.com/eullm/eullm/blob/main/LICENSE'
+            ''
+            'The following files are the Microsoft Visual C++ runtime, copyright'
+            'Microsoft Corporation, distributed unmodified as Visual Studio'
+            'Distributable Code:'
+            ''
+          ) + ((Get-ChildItem $bundle -Filter *.dll).Name | ForEach-Object { "  $_" }) |
+            Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
+          Get-ChildItem $bundle | Format-Table Name, Length
+          Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
         with:
           name: eullm-windows-x64
           path: eullm-windows-x64.exe
+
+      # A separate artifact, not a second file in the one above: the release
+      # job publishes `artifacts/*/*` and relies on one file per build
+      # artifact directory.
+      - name: Upload artifact (ZIP with MSVC runtime)
+        uses: actions/upload-artifact@v6
+        with:
+          name: eullm-windows-x64-zip
+          path: eullm-windows-x64.zip
 
   build-windows-cuda:
     if: ${{ github.event_name == 'push' }}
@@ -1741,6 +1773,12 @@ jobs:
             Write-Host "Bundle is self-contained. NVIDIA imports: $($needed -join ', ')"
           }
 
+          # The MSVC runtime, which eullm.exe also imports and Windows does
+          # not ship; see the script for why and for the import check.
+          $nvidiaDlls = (Get-ChildItem $bundle -Filter *.dll).Name
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bundle\eullm.exe" -Destination $bundle
+          $msvcDlls = (Get-ChildItem $bundle -Filter *.dll).Name | Where-Object { $nvidiaDlls -notcontains $_ }
+
           # The CUDA DLLs are NVIDIA redistributables (CUDA Toolkit EULA,
           # Attachment A), not AGPL code of ours. Say so inside the ZIP,
           # next to the files it is about, so whoever unpacks it knows
@@ -1756,7 +1794,13 @@ jobs:
             'NVIDIA CUDA Toolkit End User License Agreement:'
             '  https://docs.nvidia.com/cuda/eula/index.html'
             ''
-          ) + ((Get-ChildItem $bundle -Filter *.dll).Name | ForEach-Object { "  $_" }) |
+          ) + ($nvidiaDlls | ForEach-Object { "  $_" }) + @(
+            ''
+            'The following files are the Microsoft Visual C++ runtime, copyright'
+            'Microsoft Corporation, distributed unmodified as Visual Studio'
+            'Distributable Code:'
+            ''
+          ) + ($msvcDlls | ForEach-Object { "  $_" }) |
             Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
 
           Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
@@ -1906,11 +1950,17 @@ jobs:
             ```
 
             ```powershell
-            # Windows x64 (CPU only) — PowerShell
-            Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64.exe -OutFile eullm.exe
+            # Windows — one line, picks CPU or CUDA, adds eullm to PATH
+            irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex
+
+            # Windows x64 (CPU only) — ZIP: eullm.exe + the Visual C++ runtime,
+            # so it also runs on a Windows without the VC++ Redistributable
+            Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64.zip -OutFile eullm.zip
+            Expand-Archive eullm.zip -DestinationPath eullm
+            .\eullm\eullm.exe run model.gguf
 
             # Windows x64 with NVIDIA GPU (CUDA 13.1 — supports RTX 3000/4000/5000)
-            # This is a ZIP: eullm.exe + the CUDA runtime DLLs it needs.
+            # This is a ZIP: eullm.exe + the CUDA and Visual C++ runtime DLLs it needs.
             Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64-cuda-13.1.zip -OutFile eullm-cuda.zip
             Expand-Archive eullm-cuda.zip -DestinationPath eullm-cuda
             # Run eullm.exe from inside the extracted folder (the DLLs must
@@ -1933,8 +1983,9 @@ jobs:
             | `eullm-linux-arm64-cix-p1` | CPU only | **Armv9.2-A with SVE2, BF16, I8MM and DotProd only** — a tuned CPU profile for the CIX P1 (Radxa Orion O6). These instructions are compiled in, so it crashes with SIGILL on any ARM64 host without them, Raspberry Pi included. If you are not on a CIX P1, take `eullm-linux-arm64` |
             | `eullm-macos-x64` | CPU only | macOS Intel |
             | `eullm-macos-arm64` | Metal (Apple GPU) | macOS Apple Silicon |
-            | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 |
-            | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA DLLs — run from the extracted folder |
+            | `eullm-windows-x64.zip` | CPU only | Windows 10/11 x64. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
+            | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 with the Visual C++ Redistributable already installed (otherwise it fails with "MSVCP140.dll was not found" — take the ZIP) |
+            | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA and Visual C++ runtime DLLs — run from the extracted folder |
 
             ### Pick a model interactively
 
