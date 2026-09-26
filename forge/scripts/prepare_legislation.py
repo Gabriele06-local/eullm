@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.datasets.chunk import ChunkConfig, chunk_text  # noqa: E402
 from eullm_forge.datasets.legal_it import (  # noqa: E402
+    ALL_NORMATTIVA_LAWS,
     NORMATTIVA_LAWS,
     _parse_akn_xml,
     parse_normattiva_opendata_zip,
@@ -137,8 +138,9 @@ def main(argv: list[str] | None = None) -> int:
         "--sources",
         nargs="+",
         default=None,
-        help="ZIP mode only — subset of code IDs to extract (default: all known). "
-        f"Choices: {', '.join(law.id for law in NORMATTIVA_LAWS)}.",
+        help="ZIP mode only — subset of code IDs to extract (default: the "
+        "civil/criminal set, NORMATTIVA_LAWS; the administrative norms only when "
+        f"named). Choices: {', '.join(law.id for law in ALL_NORMATTIVA_LAWS)}.",
     )
     parser.add_argument(
         "--source-id",
@@ -172,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if suffix == ".zip":
         # --- ZIP mode: bulk parse via the OpenData parser -------------------
-        catalogue = {law.id: law for law in NORMATTIVA_LAWS}
+        catalogue = {law.id: law for law in ALL_NORMATTIVA_LAWS}
         if args.sources:
             unknown = [s for s in args.sources if s not in catalogue]
             if unknown:
@@ -182,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             wanted_ids = list(args.sources)
         else:
-            wanted_ids = list(catalogue)
+            wanted_ids = [law.id for law in NORMATTIVA_LAWS]
 
         print(
             f"Reading {args.input_path.name} "

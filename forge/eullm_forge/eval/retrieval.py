@@ -47,6 +47,13 @@ art artt articolo articoli comma
 # Longest names first, so "codice di procedura civile" is not read as
 # "codice civile".
 CODE_NAMES: list[tuple[str, str]] = [
+    ("codice del processo amministrativo", "codice_processo_amministrativo"),
+    ("processo amministrativo", "codice_processo_amministrativo"),
+    ("c p a", "codice_processo_amministrativo"),
+    ("104 2010", "codice_processo_amministrativo"),
+    ("241 1990", "legge_procedimento_amministrativo"),
+    ("legge sul procedimento amministrativo", "legge_procedimento_amministrativo"),
+    ("1199 1971", "ricorsi_amministrativi"),
     ("codice di procedura civile", "codice_procedura_civile"),
     ("codice di procedura penale", "codice_procedura_penale"),
     ("procedura civile", "codice_procedura_civile"),

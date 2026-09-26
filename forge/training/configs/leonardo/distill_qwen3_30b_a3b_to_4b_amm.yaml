@@ -1,0 +1,91 @@
+# Phase 2 — the ADMINISTRATIVE vertical (legal-it amministrativo, 4B).
+#
+# Consiglio di Stato rulings 2017-2024 plus the norms they apply (codice del
+# processo amministrativo, L. 241/1990, D.P.R. 1199/1971, Costituzione), and
+# nothing else. The civil/criminal 4B (the split arm) was asked about TAR and
+# ricorso straordinario deadlines it had never studied and invented them —
+# 30 days for both, against 60 and 120. A 4B does one thing well; this is
+# that one thing, with its own corpus, instead of one model thinly spread.
+#
+# The model side is the split arm's, verbatim: same teacher and Phase-1
+# adapter, same student, LoRA, objective, schedule and seed. Only the corpus
+# and the output directory differ.
+#
+# THE YEARS ARE NOT NEGOTIABLE. Consiglio di Stato 2025-2026 is the held-out
+# evaluation set of every legal-it model; only 2017-2024 may enter this
+# corpus. sbatch_phase2_amm.slurm refuses to start otherwise.
+#
+#   export EULLM_RUN_DIR=$WORK/eullm_runs/legal_it_amm
+#   sbatch "$EULLM_REPO/forge/scripts/leonardo/sbatch_phase2_amm.slurm"
+
+### models
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+# Phase-1 LoRA adapter, relative to the job's working directory. The SAME
+# adapter the control arm uses — the pipeline is the variable under test, so
+# the teacher must not be.
+teacher_adapter: ./checkpoints/qwen3_30b_a3b_legal_it_continued_pt
+student_model: Qwen/Qwen3-4B-Base
+# BF16. This is the difference the split pays for; turning either of these on
+# would spend a whole node layout to arrive back where v1.0 already is.
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+
+### teacher placement — design B
+teacher_device_map: split
+teacher_gpus: [0, 1]
+teacher_gib_per_gpu: 58
+student_device: cuda:2
+
+### student fine-tuning method
+# Identical to the control arm, so the A/B isolates the node layout.
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+
+### data
+# Overridden by the data-dir argument distill.sh passes on the CLI.
+dataset_dir: ~/datasets/legal_it_amm
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+
+### training
+# Its own directory — see the header.
+output_dir: ./checkpoints/qwen3_4b_legal_it_amm_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 1000
+# 300 and a bounded directory, for the reasons measured on the control arm:
+# at ~333 steps/hour a 1000-step interval hands the next link of the chain up
+# to three hours of work to redo.
+save_steps: 300
+save_total_limit: 3
+eval_steps: 1000
+eval_max_batches: 200
+logging_steps: 20
+
+### distillation
+# Same objective as the control arm. Changing these would make the A/B
+# measure two things at once.
+kl_temperature: 2.0
+kl_alpha: 0.7
+
+### hardware
+bf16: true
+gradient_checkpointing: true
+seed: 42

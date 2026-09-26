@@ -132,3 +132,14 @@ def test_grade_file_writes_the_graded_copy(tmp_path):
     assert [g.label for g in grades] == ["partial"]
     line = json.loads((tmp_path / "answers-x.graded.jsonl").read_text())
     assert line["grade"] == "partial" and line["why"].startswith("Grade: partial")
+
+
+@pytest.mark.parametrize("question, code", [
+    ("Cosa prevede l'art. 29 del codice del processo amministrativo?",
+     "codice_processo_amministrativo"),
+    ("Cosa dice l'art. 29 c.p.a.?", "codice_processo_amministrativo"),
+    ("Cosa prevede l'art. 10-bis della legge 241/1990?", "legge_procedimento_amministrativo"),
+    ("Cosa dice l'art. 9 del d.P.R. 1199/1971?", "ricorsi_amministrativi"),
+])
+def test_administrative_norms_are_named_too(question, code):
+    assert named_code(question) == code
