@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest for the Microsoft Store package of EuLLM Engine.
+
+  Identity/Name, Identity/Publisher and PublisherDisplayName are the values
+  Partner Center assigned to the reserved "EuLLM" product (Product
+  management > Product identity). The Store rejects a package whose values
+  differ, so do not change them unless Partner Center does.
+
+  Version is filled in by the release workflow from the tag: engine 0.7.9
+  becomes 0.7.9.0 (the Store requires the fourth part to be 0).
+
+  The package carries both Windows builds, each with its own terminal
+  command (execution alias):
+    eullm       CPU build, runs on every x64 Windows
+    eullm-cuda  CUDA build, for NVIDIA RTX 3000/4000/5000 with driver 580+
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 desktop4 rescap">
+
+  <Identity
+    Name="I3KTechnologies.EuLLM"
+    Publisher="CN=5FB2EAD6-A516-4F4B-A336-3E816A215B99"
+    Version="0.0.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>EuLLM</DisplayName>
+    <PublisherDisplayName>I3K Technologies</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Local LLM inference engine: runs GGUF models on your own machine with Ollama- and OpenAI-compatible APIs, no telemetry.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Applications>
+    <!-- Console apps: Subsystem="console" makes the alias run inside the
+         terminal it was typed in, instead of opening a new window, and
+         SupportsMultipleInstances lets `eullm serve` and `eullm run` run
+         side by side. -->
+    <Application
+      Id="EuLLM"
+      Executable="cpu\eullm.exe"
+      EntryPoint="Windows.FullTrustApplication"
+      desktop4:Subsystem="console"
+      desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements
+        DisplayName="EuLLM"
+        Description="EuLLM Engine - local LLM inference"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias desktop4:Subsystem="console">
+            <uap5:ExecutionAlias Alias="eullm.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+
+    <Application
+      Id="EuLLMCuda"
+      Executable="cuda\eullm.exe"
+      EntryPoint="Windows.FullTrustApplication"
+      desktop4:Subsystem="console"
+      desktop4:SupportsMultipleInstances="true">
+      <uap:VisualElements
+        DisplayName="EuLLM (NVIDIA GPU)"
+        Description="EuLLM Engine - local LLM inference on NVIDIA GPUs"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+      </uap:VisualElements>
+      <Extensions>
+        <uap5:Extension Category="windows.appExecutionAlias">
+          <uap5:AppExecutionAlias desktop4:Subsystem="console">
+            <uap5:ExecutionAlias Alias="eullm-cuda.exe" />
+          </uap5:AppExecutionAlias>
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Required for a classic desktop (Win32) exe in an MSIX. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

@@ -459,15 +459,17 @@ jobs:
           pip-audit --desc --skip-editable --ignore-vuln CVE-2026-69112
 
   # ── Windows packaging (runs where it can fail: on Windows) ──────────
-  # Two things that only run on Windows and would otherwise be exercised
+  # Three things that only run on Windows and would otherwise be exercised
   # for the first time by a release or by a user:
   #  - .github/scripts/bundle-vc-runtime.ps1, which release-engine.yml
   #    uses to put the MSVC runtime next to eullm.exe. It is tried here on
   #    a small C++ program that imports the same DLLs (C++ runtime, OpenMP),
   #    which is then run from its folder with the runtime present.
+  #  - .github/scripts/pack-msix.ps1 and installer/msix/AppxManifest.xml,
+  #    the Microsoft Store package.
   #  - installer/install.ps1, run for real against a published release.
   windows_packaging:
-    name: Windows packaging (runtime bundle + install.ps1)
+    name: Windows packaging (runtime bundle + MSIX + install.ps1)
     needs: changes
     if: needs.changes.outputs.windows_packaging == 'true' || github.event_name == 'push'
     runs-on: windows-2022
@@ -496,6 +498,22 @@ jobs:
           }
           & "$out\probe.exe"
           if ($LASTEXITCODE -ne 0) { throw "probe.exe failed with exit code $LASTEXITCODE" }
+
+      # MakeAppx validates AppxManifest.xml against the schema while it
+      # packs, so this catches a broken manifest on the push that breaks it
+      # instead of at the next release or at Store certification. The probe
+      # from the step above stands in for eullm.exe; the files are not run.
+      - name: pack-msix.ps1 with the Store manifest
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'bundle'
+          foreach ($d in 'cpu', 'cuda') {
+            $dir = Join-Path $env:RUNNER_TEMP "msix-$d"
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            Copy-Item "$probe\*.dll" $dir
+            Copy-Item "$probe\probe.exe" "$dir\eullm.exe"
+          }
+          & .github\scripts\pack-msix.ps1 -CpuDir "$env:RUNNER_TEMP\msix-cpu" -CudaDir "$env:RUNNER_TEMP\msix-cuda" -Version 0.0.1.0 -Out "$env:RUNNER_TEMP\eullm-test.msix"
 
       - name: install.ps1 against a published release
         shell: pwsh

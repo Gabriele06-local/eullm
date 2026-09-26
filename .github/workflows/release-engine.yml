@@ -1813,6 +1813,47 @@ jobs:
           name: eullm-windows-x64-cuda-13.1
           path: eullm-windows-x64-cuda-13.1.zip
 
+  # Microsoft Store package: both Windows builds in one MSIX, each with its
+  # own terminal command (`eullm` = CPU, `eullm-cuda` = NVIDIA). Built from
+  # the two ZIPs the jobs above published, so it holds exactly the files
+  # users download. Unsigned on purpose: the Store signs it after
+  # certification, and uploading it to Partner Center is a manual step
+  # (installer/msix/README.md). Only for stable tags: a pre-release suffix
+  # has no place in the four numeric parts of an MSIX version, and a release
+  # candidate is not something to submit to the Store anyway.
+  build-windows-msix:
+    needs:
+      - build-windows
+      - build-windows-cuda
+    if: >-
+      ${{ github.event_name == 'push'
+          && !contains(github.ref_name, '-')
+          && needs.build-windows.result == 'success'
+          && needs.build-windows-cuda.result == 'success' }}
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download the Windows builds
+        uses: actions/download-artifact@v8
+        with:
+          pattern: eullm-windows-x64-*
+          path: builds
+
+      - name: Pack MSIX
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^EuLLM-v', ''
+          Expand-Archive builds\eullm-windows-x64-zip\eullm-windows-x64.zip -DestinationPath cpu
+          Expand-Archive builds\eullm-windows-x64-cuda-13.1\eullm-windows-x64-cuda-13.1.zip -DestinationPath cuda
+          & .github\scripts\pack-msix.ps1 -CpuDir cpu -CudaDir cuda -Version "$version.0" -Out eullm-windows-x64-store.msix
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: eullm-windows-x64-store-msix
+          path: eullm-windows-x64-store.msix
+
   release:
     needs:
       - require_green_ci
@@ -1826,6 +1867,7 @@ jobs:
       - build-arm-cix-p1
       - build-windows
       - build-windows-cuda
+      - build-windows-msix
     # Run as long as at least one upstream job built something. We never
     # want a single failing build to nuke a release after CI on the others.
     # Also never run on a manual workflow_dispatch (that's only for testing
@@ -1986,6 +2028,7 @@ jobs:
             | `eullm-windows-x64.zip` | CPU only | Windows 10/11 x64. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
             | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 with the Visual C++ Redistributable already installed (otherwise it fails with "MSVCP140.dll was not found" — take the ZIP) |
             | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA and Visual C++ runtime DLLs — run from the extracted folder |
+            | `eullm-windows-x64-store.msix` | CPU + NVIDIA GPU | **Not for direct install**: the unsigned package submitted to the Microsoft Store, which signs it. Use the ZIPs or `install.ps1` instead |
 
             ### Pick a model interactively
 
