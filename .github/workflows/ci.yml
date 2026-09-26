@@ -143,6 +143,7 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       hub: ${{ steps.filter.outputs.hub }}
       forge: ${{ steps.filter.outputs.forge }}
+      windows_packaging: ${{ steps.filter.outputs.windows_packaging }}
     steps:
       - uses: actions/checkout@v5
       - uses: dorny/paths-filter@v4
@@ -171,6 +172,10 @@ jobs:
               - '.github/workflows/ci.yml'
             forge:
               - 'forge/**'
+              - '.github/workflows/ci.yml'
+            windows_packaging:
+              - 'installer/**'
+              - '.github/scripts/**'
               - '.github/workflows/ci.yml'
 
   # ── Dependency, licence and advisory policy ──────────────────────────
@@ -452,6 +457,83 @@ jobs:
         run: |
           pip install pip-audit==2.10.1
           pip-audit --desc --skip-editable --ignore-vuln CVE-2026-69112
+
+  # ── Windows packaging (runs where it can fail: on Windows) ──────────
+  # Three things that only run on Windows and would otherwise be exercised
+  # for the first time by a release or by a user:
+  #  - .github/scripts/bundle-vc-runtime.ps1, which release-engine.yml
+  #    uses to put the MSVC runtime next to eullm.exe. It is tried here on
+  #    a small C++ program that imports the same DLLs (C++ runtime, OpenMP),
+  #    which is then run from its folder with the runtime present.
+  #  - .github/scripts/pack-msix.ps1 and installer/msix/AppxManifest.xml,
+  #    the Microsoft Store package.
+  #  - installer/install.ps1, run for real against a published release.
+  windows_packaging:
+    name: Windows packaging (runtime bundle + MSIX + install.ps1)
+    needs: changes
+    if: needs.changes.outputs.windows_packaging == 'true' || github.event_name == 'push'
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: bundle-vc-runtime.ps1 on an exe importing the C++ runtime and OpenMP
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -products * -property installationPath
+          $out = Join-Path $env:RUNNER_TEMP 'bundle'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          @(
+            '#include <iostream>'
+            '#include <omp.h>'
+            'int main() { std::cout << "threads " << omp_get_max_threads() << std::endl; return 0; }'
+          ) | Set-Content -Path "$out\probe.cpp"
+          cmd /c "`"$vs\VC\Auxiliary\Build\vcvars64.bat`" >NUL && cd /d `"$out`" && cl /nologo /EHsc /MD /openmp probe.cpp"
+          if ($LASTEXITCODE -ne 0) { throw "cl failed with exit code $LASTEXITCODE" }
+          Remove-Item "$out\probe.cpp", "$out\probe.obj"
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$out\probe.exe" -Destination $out
+          Get-ChildItem $out | Format-Table Name, Length
+          foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'vcomp140.dll') {
+            if (-not (Test-Path "$out\$dll")) { throw "$dll was not bundled" }
+          }
+          & "$out\probe.exe"
+          if ($LASTEXITCODE -ne 0) { throw "probe.exe failed with exit code $LASTEXITCODE" }
+
+      # MakeAppx validates AppxManifest.xml against the schema while it
+      # packs, so this catches a broken manifest on the push that breaks it
+      # instead of at the next release or at Store certification. The probe
+      # from the step above stands in for eullm.exe; the files are not run.
+      - name: pack-msix.ps1 with the Store manifest
+        shell: pwsh
+        run: |
+          $probe = Join-Path $env:RUNNER_TEMP 'bundle'
+          foreach ($d in 'cpu', 'cuda') {
+            $dir = Join-Path $env:RUNNER_TEMP "msix-$d"
+            New-Item -ItemType Directory -Path $dir | Out-Null
+            Copy-Item "$probe\*.dll" $dir
+            Copy-Item "$probe\probe.exe" "$dir\eullm.exe"
+          }
+          & .github\scripts\pack-msix.ps1 -CpuDir "$env:RUNNER_TEMP\msix-cpu" -CudaDir "$env:RUNNER_TEMP\msix-cuda" -Version 0.0.1.0 -Out "$env:RUNNER_TEMP\eullm-test.msix"
+
+      - name: install.ps1 against a published release
+        shell: pwsh
+        env:
+          # Pinned, so this checks the installer rather than whatever the
+          # latest release happens to contain.
+          EULLM_VERSION: 0.7.9
+          EULLM_VARIANT: cpu
+        run: |
+          $env:EULLM_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'eullm'
+          Get-Content installer\install.ps1 -Raw | Invoke-Expression
+          $exe = Join-Path $env:EULLM_INSTALL_DIR 'eullm.exe'
+          if (-not (Test-Path $exe)) { throw "install.ps1 did not install $exe" }
+          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+          if (@($userPath -split ';') -notcontains $env:EULLM_INSTALL_DIR) { throw 'install.ps1 did not add the install dir to the user PATH' }
+          & eullm --version
+          if ($LASTEXITCODE -ne 0) { throw "eullm --version failed with exit code $LASTEXITCODE" }
+          $env:EULLM_UNINSTALL = '1'
+          Get-Content installer\install.ps1 -Raw | Invoke-Expression
+          if (Test-Path $env:EULLM_INSTALL_DIR) { throw 'uninstall left the install dir behind' }
 
   # ── Windows installer pre-flight (FAST, <2 min, runs on every push) ──
   # Installer preflight removed in v0.5.7 alongside the installer build

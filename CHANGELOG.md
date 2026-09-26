@@ -18,6 +18,11 @@ something changed, less so for understanding what it means.
 ### Added
 - **One-line install on every platform.** `curl -fsSL https://raw.githubusercontent.com/eullm/eullm/main/installer/install.sh | sh` on Linux and macOS, `irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex` in Windows PowerShell. Both scripts pick the build that fits the machine: CUDA when an NVIDIA GPU with a recent enough driver is present, the A100/H100 build on those cards, the CPU build otherwise, and Metal on Apple Silicon. They refuse to install a download whose checksum does not match the release, and they need no root or administrator rights. On Windows the install goes to `%LOCALAPPDATA%\Programs\EuLLM` and is added to your PATH; `$env:EULLM_UNINSTALL=1` removes it again. The scripts are independent of the engine version, so they already install the current 0.7.9 (older releases used different file names for some builds).
 - The Windows CUDA ZIP now contains a `THIRD-PARTY-NOTICES.txt` that names the bundled NVIDIA DLLs and the licence they are distributed under.
+- Releases now also publish `eullm-windows-x64-store.msix`, the package for the Microsoft Store. It holds the CPU and CUDA builds, runnable as `eullm` and `eullm-cuda` from any terminal. It is unsigned until the Store signs it, so it is not for installing directly: EuLLM is not in the Store yet.
+- **`eullm-windows-x64.zip`**, a new CPU download for Windows: `eullm.exe` together with the Visual C++ runtime it needs. `install.ps1` installs this one. The bare `eullm-windows-x64.exe` is still published for existing links.
+
+### Fixed
+- **EuLLM now starts on a Windows without the Visual C++ Redistributable.** Every Windows build needs the Microsoft C++ runtime (`MSVCP140.dll`, `VCRUNTIME140.dll`, `VCRUNTIME140_1.dll`, `VCOMP140.dll`), and none of the downloads included it. Most PCs already have it from some other program; on one that does not, such as a fresh install or Windows Sandbox, `eullm.exe` refused to start with *"MSVCP140.dll was not found"*. The CPU ZIP and the CUDA ZIP now carry those DLLs next to `eullm.exe`. The bare `eullm-windows-x64.exe` still needs the [Visual C++ Redistributable](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist) installed.
 
 ## 0.7.9 — 2026-09-24
 
