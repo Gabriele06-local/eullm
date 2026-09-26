@@ -52,6 +52,23 @@ def test_procedura_civile_is_not_read_as_codice_civile():
     assert named_code("art. 327 del codice di procedura civile") == "codice_procedura_civile"
 
 
+def test_initials_prefix_of_a_longer_abbreviation_names_nothing():
+    # "c.p.a." (amministrativo, no entry) must not resolve to penale: a
+    # wrong-code lookup poisons the open-book prompt with the wrong law.
+    assert named_code("Cosa prevede l'art. 29 c.p.a.?") is None
+    assert named_code("art. 29 c.p.a.") is None
+
+
+def test_trailing_words_after_initials_still_match():
+    assert named_code("art. 27 c.p.") == "codice_penale"
+    assert named_code("art. 27 c.p. e seguenti norme") == "codice_penale"
+    assert named_code("Cosa dice l'art. 1 c.p.p.?") == "codice_procedura_penale"
+
+
+def test_cpa_question_has_no_authoritative_wrong_answer(index):
+    assert index.by_article("Cosa prevede l'art. 29 c.p.a.?") == []
+
+
 def test_a_named_article_is_looked_up_in_the_named_code_only(index):
     found = index.search("Cosa stabilisce l'art. 27 della Costituzione?", k=1)
     assert found[0]["code"] == "costituzione"

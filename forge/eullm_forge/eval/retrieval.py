@@ -77,8 +77,26 @@ def tokens(text: str) -> list[str]:
 def named_code(text: str) -> str | None:
     """The code a question names, if it names one."""
     norm = f" {normalize_text(text)} "
+    toks = norm.split()
     for name, code in CODE_NAMES:
-        if f" {name} " in norm:
+        parts = name.split()
+        for i in range(len(toks) - len(parts) + 1):
+            if toks[i : i + len(parts)] != parts:
+                continue
+            if all(len(p) == 1 for p in parts):
+                # An all-initials abbreviation must not match as the prefix
+                # of a longer initial run: "c p" in "c p a" names nothing
+                # (there is no amministrativa entry to fall back to, so the
+                # lookup refuses and search falls back to honest BM25).
+                # One trailing initial is not enough to tell "c p a" from
+                # "c p e seguenti", so it still matches.
+                following = toks[i + len(parts) : i + len(parts) + 2]
+                if (
+                    following
+                    and len(following[0]) == 1
+                    and (len(following) == 1 or len(following[1]) == 1)
+                ):
+                    continue
             return code
     return None
 
