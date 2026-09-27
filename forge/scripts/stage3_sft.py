@@ -37,7 +37,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="merged HF directory of the distilled student")
-    ap.add_argument("--pairs", required=True, help="instruction pairs, JSONL")
+    ap.add_argument("--pairs", required=True, nargs="+",
+                    help="instruction pairs, JSONL; several files are trained on together")
     ap.add_argument("--out", required=True, help="checkpoints and adapter go here")
     ap.add_argument("--identity-name", default="EULLM Legal IT")
     ap.add_argument("--languages", default="it,en")
@@ -52,7 +53,23 @@ def main() -> int:
     ap.add_argument("--grad-accum", type=int, default=4)
     ap.add_argument("--identity-repeat", type=int, default=20)
     ap.add_argument("--save-steps", type=int, default=100)
+    # On an instruct model the chat-format rows are trained already; training
+    # them again only moves what already works. On a base model they are not,
+    # and without them it never learns to stop (legal-it v0.1).
+    ap.add_argument("--no-format-tokens", action="store_true",
+                    help="do not train the chat-format token rows (instruct bases)")
     args = ap.parse_args()
+
+    pairs = args.pairs[0]
+    if len(args.pairs) > 1:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        pairs = str(Path(args.out) / "pairs-combined.jsonl")
+        with open(pairs, "w", encoding="utf-8") as out:
+            for src in args.pairs:
+                with open(src, encoding="utf-8") as f:
+                    for line in f:
+                        if line.strip():
+                            out.write(line.rstrip("\n") + "\n")
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
     config = IdentityConfig(
@@ -64,13 +81,14 @@ def main() -> int:
         num_epochs=args.epochs,
         learning_rate=args.lr,
         max_length=args.max_length,
-        instruction_path=args.pairs,
+        instruction_path=pairs,
         identity_repeat=args.identity_repeat,
         output_dir=args.out,
         batch_size=args.batch_size,
         gradient_accumulation_steps=args.grad_accum,
         gradient_checkpointing=True,
         save_steps=args.save_steps,
+        train_format_tokens=not args.no_format_tokens,
     )
     adapter = fine_tune_identity(config)
     print(f"[stage3] adapter {adapter}", flush=True)

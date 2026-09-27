@@ -202,6 +202,25 @@ class NormIndex:
         scores.sort(reverse=True)
         return [self.records[i] for _, i in scores[:k]]
 
+    def missing_article_note(self, question: str) -> str:
+        """What to tell the model when the question names an article the
+        collection does not hold, or "" when it names none or holds it.
+
+        Without this, retrieval quietly fills the prompt with other articles
+        of the same code, and a model asked about a nonexistent article
+        describes one of those as if it were the one asked: on the held-out
+        exam of 2026-09-27 every legal-it model did so on 18 questions out
+        of 18. Saying so in the prompt gives the right answer somewhere to
+        come from.
+        """
+        code = named_code(question)
+        nums = named_articles(question)
+        if not code or not nums or self.by_article(question):
+            return ""
+        what = ", ".join(f"art. {n}" for n in nums)
+        return (f"Nota: nella raccolta normativa non è presente {what} "
+                f"({code.replace('_', ' ')}).")
+
     def search(self, question: str, k: int = 3) -> list[dict]:
         """Named article first, then BM25 to fill up to k, without repeats."""
         found = self.by_article(question)[:k]
@@ -226,7 +245,8 @@ def label(record: dict) -> str:
     return code
 
 
-def open_book_prompt(question: str, records: list[dict], max_chars: int = 3000) -> str:
+def open_book_prompt(question: str, records: list[dict], max_chars: int = 3000,
+                     note: str = "") -> str:
     """The question with the retrieved texts in front of it.
 
     Worded like the context tasks of stage 3 — a text, then what to do with
@@ -237,7 +257,7 @@ def open_book_prompt(question: str, records: list[dict], max_chars: int = 3000) 
     that does not fit is marked as cut: a block that simply stops mid-word
     reads as the end of the article, and the answer gets graded on it.
     """
-    if not records:
+    if not records and not note:
         return question
     blocks = []
     for i, r in enumerate(records, 1):
@@ -246,6 +266,9 @@ def open_book_prompt(question: str, records: list[dict], max_chars: int = 3000) 
         if len(text) > max_chars:
             body += " […]"
         blocks.append(f"[{i}] {label(r)}\n{body}")
-    return ("Testi normativi di riferimento:\n\n" + "\n\n".join(blocks)
+    if not blocks:
+        blocks = ["(nessun testo pertinente trovato)"]
+    head = (note + "\n\n") if note else ""
+    return (head + "Testi normativi di riferimento:\n\n" + "\n\n".join(blocks)
             + "\n\nRispondi alla domanda basandoti sui testi sopra, se sono "
               "pertinenti.\n\nDomanda: " + question)

@@ -253,3 +253,12 @@ def test_bm25_stays_inside_the_code_the_question_names(real):
     found = real.bm25("termine di decadenza di sessanta giorni codice del processo "
                       "amministrativo", k=5, code="codice_processo_amministrativo")
     assert found and {r["code"] for r in found} == {"codice_processo_amministrativo"}
+
+
+def test_a_named_article_that_is_not_there_is_said_so(real):
+    note = real.missing_article_note("Che cosa prevede l'art. 3500 del codice civile?")
+    assert "art. 3500" in note and "non è presente" in note
+    assert real.missing_article_note("Che cosa prevede l'art. 2043 del codice civile?") == ""
+    assert real.missing_article_note("Che cos'è il danno ingiusto?") == ""
+    prompt = open_book_prompt("Q?", [], note=note)
+    assert prompt.startswith(note) and "nessun testo pertinente" in prompt
