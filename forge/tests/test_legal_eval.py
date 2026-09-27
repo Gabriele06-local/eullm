@@ -43,7 +43,10 @@ def test_the_summary_row_counts_full_marks_and_endings():
                                  "legal-it-amm-002": "Non lo so."})
     row = legal_eval.summary_row("x", "m", report, ended=2)
     assert dict(zip(legal_eval.CSV_HEADER, row))["fully_covered"] == 1
-    assert row[3] == 2 and row[4] == "0.500" and row[-1] == 2
+    # By name, not by position: row[-1] is not ended_turn any more.
+    fields = dict(zip(legal_eval.CSV_HEADER, row))
+    assert fields["items"] == 2 and fields["keyword_coverage"] == "0.500"
+    assert fields["ended_turn"] == 2 and fields["keyword_items"] == 2
 
 
 def test_quiet_grading_prints_no_item(tmp_path, capsys):

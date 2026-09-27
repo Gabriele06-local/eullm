@@ -65,13 +65,19 @@ from eullm_forge.eval.retrieval import label as norm_label  # noqa: E402
 def summary_row(label: str, model: str, report: dict, ended: int) -> list:
     """One CSV row per model: the numbers that rank candidates."""
     s = report["summary"]
+    # None for an item the keyword metric does not measure, so it is not
+    # counted here either.
     full = sum(1 for r in report["per_item"] if r["keyword_coverage"] == 1.0)
     return [time.strftime("%Y-%m-%dT%H:%M:%S"), label, model, s["n"],
-            f"{s['keyword_coverage']:.3f}", full, ended]
+            f"{s['keyword_coverage']:.3f}", full, ended,
+            s.get("keyword_items", s["n"])]
 
 
+# keyword_items is last so the columns before it keep their position: it says
+# how many of `items` keyword_coverage and fully_covered were measured over,
+# which is not all of them once an exam carries judge-graded items.
 CSV_HEADER = ["timestamp", "label", "model", "items", "keyword_coverage",
-              "fully_covered", "ended_turn"]
+              "fully_covered", "ended_turn", "keyword_items"]
 
 
 def append_csv_row(path: Path, row: list[str]) -> None:
@@ -187,10 +193,13 @@ def main() -> int:
     report = evaluate_qa(items, answers)
     if not args.quiet:
         for r in report["per_item"]:
-            print(f"[eval] {r['id']:<20} keywords {r['keyword_coverage']:.2f}")
+            cov = r["keyword_coverage"]
+            shown = "not scored" if cov is None else f"{cov:.2f}"
+            print(f"[eval] {r['id']:<20} keywords {shown}")
     s = report["summary"]
     print(f"\n[eval] {args.label or args.model}: keyword coverage "
-          f"{s['keyword_coverage']:.3f} over {s['n']} items, "
+          f"{s['keyword_coverage']:.3f} over {s.get('keyword_items', s['n'])} of "
+          f"{s['n']} items, "
           f"{ended}/{s['n']} ended their turn", flush=True)
 
     if args.answers:
