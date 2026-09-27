@@ -211,12 +211,25 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
         last = max(int(re.match(r"\d+", a.number).group()) for a in pool)
         for _ in range(max(1, per_code // 5)):
             fake = last + rng.randint(50, 900)
-            items.append(item(
+            it = item(
                 "inesistente", str(fake), f"Che cosa prevede l'art. {fake} {of}?",
-                f"L'art. {fake} non esiste: la numerazione {of} arriva all'art. {last}.",
-                ["non esiste|inesistente|non è previsto|non contiene|non prevede un"],
+                f"Non esiste l'art. {fake} {of}.",
+                # Only ways of saying the article is not there. "non contiene"
+                # and "non prevede un" are satisfied by an answer that invents
+                # the article's content and then hedges, which the rubric calls
+                # wrong.
+                ["non esiste|inesistente|non è previsto"],
                 "Corretto solo se dice che l'articolo non esiste; sbagliato se ne "
-                "descrive un contenuto."))
+                "descrive un contenuto.")
+            # What the draw assumed, kept in the metadata so the assumption is
+            # auditable: `last` is the end of the corpus this exam was built
+            # from, which is the end of the code only if the corpus is whole.
+            # The reference does not state it, because the builder cannot know
+            # it -- a corpus that stops at art. 120 once produced "l'art. 969
+            # non esiste: la numerazione arriva all'art. 120", and art. 969
+            # exists.
+            it.metadata["last_article"] = last
+            items.append(it)
     unique: dict[str, EvalItem] = {}
     for it in items:
         unique.setdefault(it.id, it)
