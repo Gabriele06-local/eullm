@@ -127,6 +127,36 @@ def test_retrieval_hits_find_named_articles(exam):
     assert "inesistente" not in hits
 
 
+def test_no_answer_can_still_score_on_the_exam(exam):
+    """`contenuto` items have no keywords — the reference is the whole
+    article, so only the judge can score them. Left in the mean they are a
+    free point each, which puts a floor under the number the gate reports:
+    an empty answer, a shrug and a wrong essay used to score the same."""
+    from eullm_forge.eval import evaluate_qa
+
+    blank = evaluate_qa(exam, {it.id: "" for it in exam})
+    shrug = evaluate_qa(exam, {it.id: "Non lo so, non mi risulta." for it in exam})
+    essay = evaluate_qa(exam, {it.id: "La materia e regolata dalla legge." for it in exam})
+    for report in (blank, shrug, essay):
+        assert report["summary"]["keyword_coverage"] == 0.0
+        assert report["summary"]["keyword_items"] == sum(1 for it in exam if it.keywords)
+    # The judge-graded family is reported as not measured, not as covered.
+    unmeasured = [r for r in blank["per_item"] if r["keyword_coverage"] is None]
+    assert len(unmeasured) == sum(1 for it in exam if not it.keywords) > 0
+    assert not [r for r in unmeasured if r["keyword_coverage"] == 1.0]
+
+
+def test_the_coverage_mean_ignores_only_the_keyword_less_items(exam):
+    from eullm_forge.eval import evaluate_qa
+
+    it = next(i for i in of_kind(exam, "termine"))
+    answers = {i.id: "" for i in exam}
+    answers[it.id] = "Entro 60 giorni dalla notifica."      # the one right answer
+    report = evaluate_qa(exam, answers)
+    assert report["summary"]["keyword_coverage"] > 0.0
+    assert report["summary"]["keyword_items"] < report["summary"]["n"]
+
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "make_norm_exam.py"
 
 
