@@ -43,7 +43,7 @@ use sha2::{Digest, Sha256};
 use super::{AppState, KeepAlive};
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
-    self, DecideOptions, Decision, DecisionError, EvalMode, EvalStats, Question,
+    self, DecideOptions, Decision, DecisionError, EvalMode, EvalStats, Question, ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -197,16 +197,101 @@ impl Serialize for OrderedJson {
 
 impl OrderedJson {
     /// The text the model reads for a description: a string as it is,
-    /// nothing for `null`, anything else as compact JSON in its original
+    /// nothing for `null`, anything else as one line of JSON in its original
     /// key order (a structured description such as
     /// `{"what": …, "not_for": …, "examples": […]}` reads best whole).
     fn as_description(&self) -> String {
         match self {
             Self::Null => String::new(),
             Self::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
+            other => other.python_json(),
         }
     }
+
+    /// One line of JSON as Python's `json.dumps(value, ensure_ascii=False)`
+    /// writes it — `", "` and `": "` between items, non-ASCII as it is,
+    /// floats as `repr` spells them — which is how Jev-Style models saw
+    /// structured states and descriptions in training.
+    fn python_json(&self) -> String {
+        let mut out = String::new();
+        self.write_python_json(&mut out);
+        out
+    }
+
+    fn write_python_json(&self, out: &mut String) {
+        match self {
+            Self::Null => out.push_str("null"),
+            Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+            Self::Number(n) => out.push_str(&python_number(n)),
+            // Escaped as Python escapes with `ensure_ascii=False`: quotes,
+            // backslashes and control characters only.
+            Self::String(s) => out.push_str(&serde_json::to_string(s).unwrap_or_default()),
+            Self::Array(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    item.write_python_json(out);
+                }
+                out.push(']');
+            }
+            Self::Object(map) => {
+                out.push('{');
+                for (i, (key, value)) in map.0.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(&serde_json::to_string(key).unwrap_or_default());
+                    out.push_str(": ");
+                    value.write_python_json(out);
+                }
+                out.push('}');
+            }
+        }
+    }
+}
+
+/// A JSON number as Python writes it: integers as they are, floats as
+/// `repr` — positional from 1e-4 to 1e16 with at least one decimal, else
+/// `d.ddde±XX`, always the shortest digits that read back exactly.
+fn python_number(n: &serde_json::Number) -> String {
+    if !n.is_f64() {
+        return n.to_string();
+    }
+    let x = n.as_f64().unwrap_or_default();
+    // `{:e}` gives the shortest round-trip digits: "-1.25e1", "1e16".
+    let scientific = format!("{x:e}");
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let (sign, mantissa) = match mantissa.strip_prefix('-') {
+        Some(m) => ("-", m),
+        None => ("", mantissa),
+    };
+    let digits = mantissa.replace('.', "");
+    let body = if (-4..16).contains(&exponent) {
+        let point = exponent + 1;
+        if point <= 0 {
+            format!("0.{}{digits}", "0".repeat(point.unsigned_abs() as usize))
+        } else if point as usize >= digits.len() {
+            format!("{digits}{}.0", "0".repeat(point as usize - digits.len()))
+        } else {
+            format!(
+                "{}.{}",
+                &digits[..point as usize],
+                &digits[point as usize..]
+            )
+        }
+    } else {
+        let mantissa = if digits.len() == 1 {
+            digits
+        } else {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        };
+        let exp_sign = if exponent < 0 { '-' } else { '+' };
+        format!("{mantissa}e{exp_sign}{:02}", exponent.unsigned_abs())
+    };
+    format!("{sign}{body}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -269,12 +354,17 @@ impl Calibration {
 struct ParsedRequest {
     /// `None`: use the decision model already loaded.
     model: Option<String>,
-    /// The state as the model reads it.
+    /// The state as a code-readout model reads it: a string as it is,
+    /// structured state as indented JSON.
     state: String,
+    /// The state as a verdict model reads it: structured state as the one
+    /// line of JSON it was trained on.
+    state_line: String,
     ids: Vec<String>,
     questions: Vec<Question>,
     calibration: Calibration,
-    temperature: f64,
+    /// `None`: the model's own default (`DecisionModel::default_temperature`).
+    temperature: Option<f64>,
     mode: EvalMode,
     keep_alive: KeepAlive,
 }
@@ -285,10 +375,13 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty() && !m.to_ascii_lowercase().starts_with("jev"));
 
-    let state = match request.state {
+    let (state, state_line) = match request.state {
         None => return Err("\"state\" is required".to_string()),
-        Some(OrderedJson::String(s)) => s,
-        Some(other) => serde_json::to_string_pretty(&other).map_err(|e| e.to_string())?,
+        Some(OrderedJson::String(s)) => (s.clone(), s),
+        Some(other) => (
+            serde_json::to_string_pretty(&other).map_err(|e| e.to_string())?,
+            other.python_json(),
+        ),
     };
 
     let specs = request.questions.0;
@@ -326,8 +419,8 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
             ));
         }
     };
-    let temperature = options.temperature.unwrap_or(1.0);
-    if !(temperature.is_finite() && temperature > 0.0 && temperature <= MAX_TEMPERATURE) {
+    let temperature = options.temperature;
+    if temperature.is_some_and(|t| !(t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE)) {
         return Err(format!(
             "\"temperature\" must be greater than 0 and at most {MAX_TEMPERATURE}"
         ));
@@ -346,6 +439,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
     Ok(ParsedRequest {
         model,
         state,
+        state_line,
         ids,
         questions,
         calibration,
@@ -360,7 +454,36 @@ fn parse_question(spec: QuestionSpec) -> Result<Question, String> {
         .instructions
         .ok_or_else(|| "\"instructions\" is required".to_string())?;
     let question = match spec.kind.as_str() {
-        "noul" => Question::Noul { instructions },
+        "noul" => {
+            let (mut true_means, mut false_means) = (String::new(), String::new());
+            match spec.criteria {
+                None | Some(OrderedJson::Null) => {}
+                Some(OrderedJson::Object(outcomes)) => {
+                    for (outcome, description) in outcomes.0 {
+                        match outcome.as_str() {
+                            "true" => true_means = description.as_description(),
+                            "false" => false_means = description.as_description(),
+                            other => {
+                                return Err(format!(
+                                    "a noul question's \"criteria\" says what \"true\" and \
+                                     \"false\" mean, not \"{other}\""
+                                ));
+                            }
+                        }
+                    }
+                }
+                Some(_) => {
+                    return Err("a noul question's \"criteria\", when given, is an object \
+                         {\"true\": …, \"false\": …}"
+                        .to_string());
+                }
+            }
+            Question::Noul {
+                instructions,
+                true_means,
+                false_means,
+            }
+        }
         "choice" => match spec.criteria {
             Some(OrderedJson::Object(options)) => Question::Choice {
                 instructions,
@@ -446,14 +569,22 @@ enum Answer {
 /// What an answer was derived from.
 #[derive(Debug, Serialize)]
 struct AnswerExtension {
-    /// Full-vocabulary log-probability of each answer's code.
-    logprobs: OrderedMap<f64>,
-    /// Renormalized over the answers, before any calibration.
+    /// Code readout: full-vocabulary log-probability of each answer's code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    logprobs: Option<OrderedMap<f64>>,
+    /// Verdict readout: `logit(" yes") - logit(" no")` at each answer's
+    /// slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scores: Option<OrderedMap<f64>>,
+    /// Renormalized over the answers (a softmax of the scores), before any
+    /// calibration or temperature.
     raw_probabilities: OrderedMap<f64>,
-    /// Share of the model's probability on a valid answer code. Low means
-    /// the model did not answer in the format asked for, and the
-    /// probabilities describe a minority of what it would have said.
-    coverage: f64,
+    /// Code readout: share of the model's probability on a valid answer
+    /// code. Low means the model did not answer in the format asked for,
+    /// and the probabilities describe a minority of what it would have
+    /// said. A verdict model answers every option by construction.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    coverage: Option<f64>,
     /// The content-free prior that was divided out (`content_free` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     prior_logprobs: Option<OrderedMap<f64>>,
@@ -469,8 +600,12 @@ struct Usage {
 
 #[derive(Debug, Serialize)]
 struct ResponseExtension {
+    /// `codes` or `verdict`: how the model's answers were read.
+    readout: &'static str,
     mode: &'static str,
     calibration: &'static str,
+    /// Applied to every answer: the request's, or the model's default —
+    /// a verdict model's own calibration, 1 otherwise.
     temperature: f64,
     confidence_method: &'static str,
     /// `auto` or `off` (`--no-flash-attn`): which attention kernels the
@@ -527,6 +662,8 @@ struct ContentFreeInfo {
 fn build_answers(
     parsed: &ParsedRequest,
     decision: &Decision,
+    readout: ReadoutKind,
+    temperature: f64,
 ) -> (OrderedMap<Answer>, Vec<DecisionAnswerRecord>) {
     let mut answers = Vec::with_capacity(parsed.questions.len());
     let mut records = Vec::with_capacity(parsed.questions.len());
@@ -543,10 +680,18 @@ fn build_answers(
             Calibration::None => None,
         };
         let probabilities =
-            decision::calibrated_probabilities(&outcome.logprobs, prior, parsed.temperature);
-        let coverage = decision::coverage(&outcome.logprobs);
+            decision::calibrated_probabilities(&outcome.logprobs, prior, temperature);
+        let codes = readout == ReadoutKind::Codes;
+        let coverage = codes.then(|| decision::coverage(&outcome.logprobs));
+        let values = OrderedMap::zip(&labels, &outcome.logprobs);
+        let (logprobs, scores) = if codes {
+            (Some(values), None)
+        } else {
+            (None, Some(values))
+        };
         let extension = AnswerExtension {
-            logprobs: OrderedMap::zip(&labels, &outcome.logprobs),
+            logprobs,
+            scores,
             raw_probabilities: OrderedMap::zip(&labels, &raw),
             coverage,
             prior_logprobs: prior.map(|p| OrderedMap::zip(&labels, p)),
@@ -601,11 +746,17 @@ fn build_answers(
                 )
             }
         };
+        let (logprobs, scores) = if codes {
+            (Some(outcome.logprobs.clone()), None)
+        } else {
+            (None, Some(outcome.logprobs.clone()))
+        };
         records.push(DecisionAnswerRecord {
             id: id.clone(),
             kind: question.kind().as_str().to_string(),
             labels: labels.clone(),
-            logprobs: outcome.logprobs.clone(),
+            logprobs,
+            scores,
             raw_probabilities: raw,
             probabilities,
             coverage,
@@ -680,8 +831,16 @@ pub(super) async fn systemone(
         content_free: parsed.calibration == Calibration::ContentFree,
     };
     let flash_attn = if model.flash_attn() { "auto" } else { "off" };
+    let readout = model.readout();
+    let temperature = parsed
+        .temperature
+        .unwrap_or_else(|| model.default_temperature());
     let (parsed, decision) = tokio::task::spawn_blocking(move || {
-        let decision = model.decide(&parsed.state, &parsed.questions, options);
+        let state = match readout {
+            ReadoutKind::Codes => &parsed.state,
+            ReadoutKind::Verdict => &parsed.state_line,
+        };
+        let decision = model.decide(state, &parsed.questions, options);
         (parsed, decision)
     })
     .await
@@ -693,7 +852,7 @@ pub(super) async fn systemone(
     })?;
     let decision = decision.map_err(decision_error)?;
 
-    let (answers, records) = build_answers(&parsed, &decision);
+    let (answers, records) = build_answers(&parsed, &decision, readout, temperature);
     let prior_tokens = decision
         .prior_stats
         .as_ref()
@@ -706,10 +865,14 @@ pub(super) async fn systemone(
     audit.duration_ms = request_ms as u64;
     audit.user_id = identity.key_id().map(str::to_string);
     audit.decision = Some(DecisionRecord {
-        state_sha256: sha256_hex(&parsed.state),
-        mode: parsed.mode.as_str().to_string(),
+        state_sha256: sha256_hex(match readout {
+            ReadoutKind::Codes => &parsed.state,
+            ReadoutKind::Verdict => &parsed.state_line,
+        }),
+        readout: readout.as_str().to_string(),
+        mode: decision.stats.mode.as_str().to_string(),
         calibration: parsed.calibration.as_str().to_string(),
-        temperature: parsed.temperature,
+        temperature,
         answers: records,
     });
     AuditLogger::new().log(&audit);
@@ -722,9 +885,10 @@ pub(super) async fn systemone(
             output_tokens: 0,
         },
         eullm: ResponseExtension {
+            readout: readout.as_str(),
             mode: decision.stats.mode.as_str(),
             calibration: parsed.calibration.as_str(),
-            temperature: parsed.temperature,
+            temperature,
             confidence_method: decision::CONFIDENCE_METHOD,
             flash_attn,
             prompt_tokens: decision.stats.prompt_tokens,
@@ -842,7 +1006,7 @@ mod tests {
         let parsed = parse(body()).unwrap();
         assert_eq!(parsed.calibration, Calibration::None);
         assert_eq!(parsed.mode, EvalMode::SharedPrefix);
-        assert_eq!(parsed.temperature, 1.0);
+        assert_eq!(parsed.temperature, None);
         assert_eq!(parsed.questions.len(), 3);
     }
 
@@ -873,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_option_descriptions_become_compact_json() {
+    fn structured_option_descriptions_become_one_line_of_json() {
         let text = r#"{ "state": "x", "questions": { "q": { "type": "choice", "instructions": "Which?",
             "criteria": { "billing": {"what": "payments", "not_for": "bugs"}, "tech": "bugs" } } } }"#;
         let request: SystemOneRequest = serde_json::from_str(text).unwrap();
@@ -881,7 +1045,60 @@ mod tests {
         let Question::Choice { options, .. } = &parsed.questions[0] else {
             panic!("not a choice");
         };
-        assert_eq!(options[0].1, r#"{"what":"payments","not_for":"bugs"}"#);
+        assert_eq!(options[0].1, r#"{"what": "payments", "not_for": "bugs"}"#);
+    }
+
+    /// The exact text Python's `json.dumps(value, ensure_ascii=False)`
+    /// gives, which is what a Jev-Style model read in training.
+    #[test]
+    fn structured_values_are_written_as_python_writes_them() {
+        let value: OrderedJson = serde_json::from_str(
+            r#"{"b": [1, 2.5, 12.0, true, null], "a": {"é": "x\ny\"z", "t": "\u001b"},
+                "big": 1e16, "small": 0.00001, "neg": -0.0, "int": -7, "mid": 1e15, "tiny": 0.0001}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            value.python_json(),
+            r#"{"b": [1, 2.5, 12.0, true, null], "a": {"é": "x\ny\"z", "t": "\u001b"}, "big": 1e+16, "small": 1e-05, "neg": -0.0, "int": -7, "mid": 1000000000000000.0, "tiny": 0.0001}"#
+        );
+    }
+
+    #[test]
+    fn a_structured_state_has_a_form_for_each_readout() {
+        let text = r#"{ "state": {"subject": "Refund", "amount": 12.5},
+                        "questions": { "q": { "type": "noul", "instructions": "Refund?" } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        assert!(parsed.state.contains("\n  \"subject\""), "{}", parsed.state);
+        assert_eq!(
+            parsed.state_line,
+            r#"{"subject": "Refund", "amount": 12.5}"#
+        );
+        let plain = parse_text("{}");
+        assert_eq!(plain.state, plain.state_line);
+    }
+
+    #[test]
+    fn a_noul_question_may_say_what_true_and_false_mean() {
+        let text = r#"{ "state": "x", "questions": { "q": { "type": "noul", "instructions": "Happy?",
+            "criteria": { "true": "says so", "false": {"else": "anything"} } } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let Question::Noul {
+            true_means,
+            false_means,
+            ..
+        } = &parsed.questions[0]
+        else {
+            panic!("not a noul");
+        };
+        assert_eq!(true_means, "says so");
+        assert_eq!(false_means, r#"{"else": "anything"}"#);
+        for bad in [r#"{"maybe": "x"}"#, r#"["x"]"#] {
+            let text = format!(
+                r#"{{ "state": "x", "questions": {{ "q": {{ "type": "noul", "instructions": "?", "criteria": {bad} }} }} }}"#
+            );
+            let err = parse_request(serde_json::from_str(&text).unwrap()).unwrap_err();
+            assert!(err.contains("criteria"), "{err}");
+        }
     }
 
     #[test]
@@ -1010,7 +1227,7 @@ mod tests {
             outcome(&[0.1, 0.8, 0.1], None),
             outcome(&[0.0001, 0.57, 0.4299], None),
         ]);
-        let (answers, records) = build_answers(&parsed, &decision);
+        let (answers, records) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
         let json = serde_json::to_value(&answers).unwrap();
 
         let urgent = &json["is_urgent"];
@@ -1049,7 +1266,7 @@ mod tests {
             outcome(&[0.1, 0.8, 0.1], Some(&[0.2, 0.6, 0.2])),
             outcome(&[0.2, 0.5, 0.3], Some(&[1.0 / 3.0; 3])),
         ]);
-        let (answers, records) = build_answers(&parsed, &decision);
+        let (answers, records) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
         let json = serde_json::to_value(&answers).unwrap();
         assert!((json["is_urgent"]["noul"].as_f64().unwrap() - 0.5).abs() < 1e-9);
         assert!(
@@ -1072,7 +1289,7 @@ mod tests {
             "alpha": { "type": "noul", "instructions": "?" } } }"#;
         let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
         let decision = fake_decision(vec![outcome(&[0.6, 0.4], None), outcome(&[0.3, 0.7], None)]);
-        let (answers, _) = build_answers(&parsed, &decision);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
         let text = serde_json::to_string(&answers).unwrap();
         assert!(
             text.find("zeta").unwrap() < text.find("alpha").unwrap(),

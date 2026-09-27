@@ -71,7 +71,11 @@ impl AuditEntry {
 pub struct DecisionRecord {
     /// SHA-256 (hex) of the state exactly as the model read it.
     pub state_sha256: String,
-    /// `shared_prefix` or `separate`.
+    /// `codes` or `verdict`: how the answers were read.
+    #[serde(default = "codes_readout")]
+    pub readout: String,
+    /// `shared_prefix`, `batched` or `separate`: the mode the answers were
+    /// computed in.
     pub mode: String,
     /// `none` or `content_free`.
     pub calibration: String,
@@ -90,20 +94,32 @@ pub struct DecisionAnswerRecord {
     pub kind: String,
     /// `yes`/`no`, the option names, or the level numbers.
     pub labels: Vec<String>,
-    /// Full-vocabulary log-probability of each label's answer code.
-    pub logprobs: Vec<f64>,
+    /// Code readout: full-vocabulary log-probability of each label's answer
+    /// code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logprobs: Option<Vec<f64>>,
+    /// Verdict readout: `logit(" yes") - logit(" no")` at each label's slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scores: Option<Vec<f64>>,
     /// Renormalized over the labels, before any calibration.
     pub raw_probabilities: Vec<f64>,
     /// After calibration: what the answer was taken from.
     pub probabilities: Vec<f64>,
-    /// Share of the model's probability that went to a valid answer code.
-    pub coverage: f64,
+    /// Code readout: share of the model's probability that went to a valid
+    /// answer code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<f64>,
     /// The answer as returned: the option name, the expected level, or
     /// P(yes).
     pub answer: serde_json::Value,
     /// Absent for `noul`, which reports no confidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confidence: Option<f64>,
+}
+
+/// `readout` of a decision record written before verdict models existed.
+fn codes_readout() -> String {
+    "codes".to_string()
 }
 
 /// Strip ASCII control characters (newlines included) from client-controlled
@@ -383,6 +399,7 @@ mod tests {
         let mut entry = AuditEntry::new("qwen3-4b".into(), "systemone".into());
         entry.decision = Some(DecisionRecord {
             state_sha256: "ab".repeat(32),
+            readout: "codes".into(),
             mode: "shared_prefix".into(),
             calibration: "none".into(),
             temperature: 1.0,
@@ -390,10 +407,11 @@ mod tests {
                 id: "area".into(),
                 kind: "choice".into(),
                 labels: vec!["civile".into(), "penale".into()],
-                logprobs: vec![-0.1, -2.4],
+                logprobs: Some(vec![-0.1, -2.4]),
+                scores: None,
                 raw_probabilities: vec![0.91, 0.09],
                 probabilities: vec![0.91, 0.09],
-                coverage: 0.99,
+                coverage: Some(0.99),
                 answer: serde_json::json!("civile"),
                 confidence: Some(0.56),
             }],

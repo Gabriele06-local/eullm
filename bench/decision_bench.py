@@ -183,9 +183,18 @@ def decode_ms(response):
     return t["prefix"] + t["questions"]
 
 
+def raw_values(answer):
+    """What an answer was read from: the log-probability of each code (an
+    instruction-tuned model), or each option's verdict score (a Jev-Style
+    model)."""
+    extension = answer["eullm"]
+    return extension["logprobs"] if "logprobs" in extension else extension["scores"]
+
+
 def compare(first, second):
-    """Largest raw-probability and log-probability difference between two
-    responses' answers to the questions both asked, and whether every argmax
+    """Largest raw-probability difference between two responses' answers to
+    the questions both asked, the largest difference in what they were read
+    from (log-probabilities, or verdict scores), and whether every argmax
     agrees."""
     max_dp = 0.0
     max_dlp = 0.0
@@ -193,10 +202,12 @@ def compare(first, second):
     for qid, b in second["answers"].items():
         a = first["answers"][qid]
         pa, pb = a["eullm"]["raw_probabilities"], b["eullm"]["raw_probabilities"]
-        la, lb = a["eullm"]["logprobs"], b["eullm"]["logprobs"]
+        la, lb = raw_values(a), raw_values(b)
+        logprobs = "logprobs" in a["eullm"]
         for label in pa:
             max_dp = max(max_dp, abs(pa[label] - pb[label]))
-            if max(la[label], lb[label]) > -15.0:
+            # A code no one would answer carries only noise in its tail.
+            if not logprobs or max(la[label], lb[label]) > -15.0:
                 max_dlp = max(max_dlp, abs(la[label] - lb[label]))
         if max(pa, key=pa.get) != max(pb, key=pb.get):
             agree = False
@@ -226,10 +237,13 @@ def show_worst(mode, response, separate):
     def fmt(p):
         return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in p.items()) + "}"
 
-    print(
-        f"{'':>11}{mode}: worst {qid} ({a['type']}), dP {dp:.4f}, coverage "
-        f"{a['eullm']['coverage']:.4f} / {b['eullm']['coverage']:.4f} separate"
+    # A verdict model reads every option at a slot of its own: no coverage.
+    coverage = (
+        f", coverage {a['eullm']['coverage']:.4f} / {b['eullm']['coverage']:.4f} separate"
+        if "coverage" in a["eullm"]
+        else ""
     )
+    print(f"{'':>11}{mode}: worst {qid} ({a['type']}), dP {dp:.4f}{coverage}")
     print(f"{'':>13}{mode:<14}{fmt(a['eullm']['raw_probabilities'])}")
     print(f"{'':>13}{'separate':<14}{fmt(b['eullm']['raw_probabilities'])}")
 
@@ -274,9 +288,10 @@ def median(values):
 
 def identical(first, second):
     """Whether every question `second` answered got bit-for-bit the same
-    log-probabilities in `first` (JSON carries every f64 exactly)."""
+    log-probabilities (or verdict scores) in `first` (JSON carries every f64
+    exactly)."""
     return all(
-        first["answers"][qid]["eullm"]["logprobs"] == b["eullm"]["logprobs"]
+        raw_values(first["answers"][qid]) == raw_values(b)
         for qid, b in second["answers"].items()
     )
 
@@ -428,7 +443,8 @@ def main():
     # below depend on it, and a comparison of two runs means nothing if
     # both turn out to have used the same setting.
     flash_attn = warm["eullm"].get("flash_attn", "unknown")
-    print(f"model {warm['model']}, flash attention {flash_attn}")
+    readout = warm["eullm"].get("readout", "codes")
+    print(f"model {warm['model']} ({readout} readout), flash attention {flash_attn}")
     print(
         "tokens: decoded with the state shared / without; speedup: separate over "
         "shared_prefix;\ndP: largest probability difference from separate, "

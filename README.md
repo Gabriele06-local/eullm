@@ -273,9 +273,23 @@ reads the state only once, and each answer depends on its own question only —
 asked alone or among others, in any order, it comes back the same. Every
 answer comes with the raw log-probabilities it was taken from and a
 `coverage` that shows whether the model answered in the format asked for;
-every decision is recorded in the audit trail. How well the probabilities are
-calibrated has not been measured yet, so treat them as scores to be validated
-on your own data before automating on a threshold.
+every decision is recorded in the audit trail. How well an instruction-tuned
+model's probabilities are calibrated has not been measured yet, so treat
+them as scores to be validated on your own data before automating on a
+threshold.
+
+The decision model can also be one trained for exactly this: the
+[Jev-Style](https://github.com/lawrence3699/jev-style) models (Apache-2.0,
+0.8B and 2B), recognized when they load. They read every option as a
+yes/no verdict of its own, so a question can list up to 255 options. Each
+model ships with a calibration temperature fitted on held-out data, which is
+applied by default:
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+```
+
 Details, calibration options and the numbers: [docs/engine.md](docs/engine.md#decisions-v1systemone-and-the-decision-slot).
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)

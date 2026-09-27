@@ -455,6 +455,50 @@ impl LlamaModel {
         Ok(buffer)
     }
 
+    /// EuLLM addition: [`Self::str_to_token`] with special-token text left
+    /// as text. `str_to_token` parses special tokens, so `"<|im_end|>"`
+    /// inside the string becomes the control token; here it is split into
+    /// ordinary tokens like any other text — what text a user wrote must be
+    /// tokenized as, and what HF `tokenizers` does with
+    /// `encode_special_tokens = true`.
+    ///
+    /// # Errors
+    ///
+    /// - if [`str`] contains a null byte.
+    pub fn str_to_token_plain(
+        &self,
+        str: &str,
+        add_bos: AddBos,
+    ) -> Result<Vec<LlamaToken>, StringToTokenError> {
+        let add_bos = matches!(add_bos, AddBos::Always);
+        let c_string = CString::new(str)?;
+        let len = c_int::try_from(c_string.as_bytes().len())?;
+        let mut buffer: Vec<LlamaToken> =
+            Vec::with_capacity(std::cmp::max(8, (str.len() / 2) + usize::from(add_bos)));
+        let mut capacity = buffer.capacity();
+        loop {
+            let size = unsafe {
+                llama_cpp_sys_2::llama_tokenize(
+                    self.vocab_ptr(),
+                    c_string.as_ptr(),
+                    len,
+                    buffer.as_mut_ptr().cast::<llama_cpp_sys_2::llama_token>(),
+                    c_int::try_from(capacity).expect("buffer capacity should fit into a c_int"),
+                    add_bos,
+                    false,
+                )
+            };
+            if let Ok(size) = usize::try_from(size) {
+                // Safety: llama.cpp initialized `size` <= capacity elements.
+                unsafe { buffer.set_len(size) }
+                return Ok(buffer);
+            }
+            // A negative size is the capacity it needs.
+            capacity = usize::try_from(-i64::from(size)).expect("needed capacity fits a usize");
+            buffer.reserve_exact(capacity);
+        }
+    }
+
     /// Get the type of a token.
     ///
     /// # Panics

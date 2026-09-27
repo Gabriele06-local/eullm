@@ -48,10 +48,17 @@ pub(super) struct Protocol {
     pub batch: u32,
     /// llama.cpp's micro-batch: the unit the model's arithmetic is done in.
     pub ubatch: u32,
+    /// Block-causal attention: a non-causal context fed one renderer block
+    /// per decode call, so each block sees the cache (every earlier block)
+    /// and all of itself.
+    pub blocks: bool,
     /// Most questions one `batched` decode round holds, one sequence each.
     /// A recurrent layer keeps a state per sequence, so a hybrid model's
     /// rounds are kept small.
     pub group: usize,
+    /// Flash attention off on the CPU whatever `--no-flash-attn` says: the
+    /// model's published scores were validated that way.
+    pub cpu_flash_attn_off: bool,
 }
 
 impl Protocol {
@@ -59,7 +66,9 @@ impl Protocol {
     pub const CODES: Self = Self {
         batch: 2048,
         ubatch: 512,
+        blocks: false,
         group: super::MAX_QUESTIONS,
+        cpu_flash_attn_off: false,
     };
 }
 
@@ -68,6 +77,8 @@ pub(super) enum Readout {
     /// The full-vocabulary log-probability of each class, `classes[prompt]`
     /// listing every class's tokens.
     Classes(Vec<Vec<Vec<LlamaToken>>>),
+    /// `logit(yes) - logit(no)`.
+    Verdict { yes: LlamaToken, no: LlamaToken },
 }
 
 /// One request's evaluation.
@@ -79,13 +90,17 @@ pub(super) struct Job {
     /// Tokens at the start of `prompts[0]` that every prompt shares and that
     /// are decoded once, in sequence 0.
     pub shared: usize,
+    /// Block-causal protocols: per prompt, the renderer blocks `[a, b)` that
+    /// tile it, those of the shared part first. Empty otherwise.
+    pub blocks: Vec<Spans>,
     pub readout: Readout,
     pub mode: EvalMode,
     /// F32 KV cache and no flash attention (`DecisionModel::exact`).
     pub exact: bool,
 }
 
-/// Per prompt: the class log-probabilities.
+/// Per prompt: the class log-probabilities (`Readout::Classes`) or one
+/// score per read position (`Readout::Verdict`).
 pub(super) type JobResult = Result<(Vec<Vec<f64>>, EvalStats), DecisionError>;
 
 pub(super) struct EngineConfig {
@@ -94,6 +109,8 @@ pub(super) struct EngineConfig {
     pub flash_attn: bool,
     /// Most cells one request may use (`--decision-ctx`).
     pub max_ctx: u32,
+    /// The model runs on a GPU.
+    pub on_gpu: bool,
     pub protocol: Protocol,
 }
 
@@ -180,14 +197,19 @@ struct Cached<'m> {
     cells: usize,
     n_seq: u32,
     n_outputs: u32,
-    /// What sequence 0 holds from position 0, decoded by `prefix`; `None`
-    /// when it holds anything else.
-    prefix: Option<Vec<LlamaToken>>,
+    /// What sequence 0 holds from position 0 and the blocks it was decoded
+    /// in (none for a causal protocol), by `prefix`; `None` when it holds
+    /// anything else.
+    prefix: Option<(Vec<LlamaToken>, Spans)>,
 }
+
+/// Token ranges `[a, b)`, each decoded in a call of its own.
+pub(super) type Spans = Vec<(usize, usize)>;
 
 /// What one read position produced.
 enum Read {
     Row(Vec<f32>),
+    Score(f64),
 }
 
 struct Worker<'m> {
@@ -237,7 +259,13 @@ impl<'m> Worker<'m> {
     }
 
     fn evaluate(&mut self, job: &Job) -> JobResult {
+        let blocks = self.config.protocol.blocks;
         match job.mode {
+            EvalMode::Separate if blocks => self.separate_blocks(job),
+            // Block attention decodes one block per call, so questions
+            // cannot share one: `batched` is answered as `shared_prefix`,
+            // and reported as such.
+            _ if blocks => self.isolated_blocks(job),
             EvalMode::SharedPrefix => self.isolated(job),
             EvalMode::Batched if job.prompts.len() > 1 => self.batched(job),
             // One prompt has nothing to batch with.
@@ -291,9 +319,16 @@ impl<'m> Worker<'m> {
             ),
             _ => (cells, n_seq, n_outputs),
         };
-        let cells = cells.max(MIN_CELLS).next_multiple_of(step);
         let protocol = self.config.protocol;
-        let flash_attn = self.config.flash_attn && !exact;
+        // At least one decode call's worth, so llama.cpp never caps the
+        // batch below the size prompts are cut into.
+        let cells = cells
+            .max(MIN_CELLS)
+            .max(protocol.batch as usize)
+            .next_multiple_of(step);
+        let flash_attn = self.config.flash_attn
+            && !exact
+            && (self.config.on_gpu || !protocol.cpu_flash_attn_off);
         let threads = self.config.threads as i32;
         let params = LlamaContextParams::default()
             .with_n_ctx(NonZeroU32::new(u32::try_from(cells).unwrap_or(u32::MAX)))
@@ -305,6 +340,7 @@ impl<'m> Worker<'m> {
             // llama.cpp gives each sequence its own slice and copying the
             // prefix would copy the data.
             .with_kv_unified(true)
+            .with_non_causal_attention(protocol.blocks)
             .with_n_threads(threads)
             .with_n_threads_batch(threads)
             // Set either way, as `build_ctx_params_with_cache` does: left
@@ -337,14 +373,23 @@ impl<'m> Worker<'m> {
             .expect("context() creates the context before it is used")
     }
 
-    /// Make sequence 0 hold exactly `prefix`, decoded in batch-sized calls,
-    /// and nothing else in the cache. Kept as it is when it already does.
-    /// Returns the milliseconds spent and whether it was kept.
-    fn prefix(&mut self, prefix: &[LlamaToken]) -> Result<(f64, bool), DecisionError> {
+    /// Make sequence 0 hold exactly `prefix` — decoded in `blocks` for a
+    /// block protocol, in batch-sized calls otherwise — and nothing else in
+    /// the cache. Kept as it is when it already does. Returns the
+    /// milliseconds spent and whether it was kept.
+    fn prefix(
+        &mut self,
+        prefix: &[LlamaToken],
+        blocks: &[(usize, usize)],
+    ) -> Result<(f64, bool), DecisionError> {
         let started = Instant::now();
         let batch_size = self.config.protocol.batch as usize;
         let c = self.cached();
-        if !prefix.is_empty() && c.prefix.as_deref() == Some(prefix) {
+        if !prefix.is_empty()
+            && c.prefix
+                .as_ref()
+                .is_some_and(|(tokens, b)| tokens == prefix && b == blocks)
+        {
             return Ok((0.0, true));
         }
         c.prefix = None;
@@ -352,9 +397,16 @@ impl<'m> Worker<'m> {
         if prefix.is_empty() {
             return Ok((ms_since(started), false));
         }
+        let spans: Spans = if blocks.is_empty() {
+            (0..prefix.len())
+                .step_by(batch_size)
+                .map(|a| (a, (a + batch_size).min(prefix.len())))
+                .collect()
+        } else {
+            blocks.to_vec()
+        };
         let mut batch = LlamaBatch::new(batch_size, 1);
-        for a in (0..prefix.len()).step_by(batch_size) {
-            let b = (a + batch_size).min(prefix.len());
+        for (a, b) in spans {
             batch.clear();
             for (pos, &token) in prefix.iter().enumerate().take(b).skip(a) {
                 batch
@@ -366,7 +418,7 @@ impl<'m> Worker<'m> {
                 .map_err(|e| runtime("Prefix decode failed", e))?;
         }
         c.ctx.synchronize();
-        c.prefix = Some(prefix.to_vec());
+        c.prefix = Some((prefix.to_vec(), blocks.to_vec()));
         Ok((ms_since(started), false))
     }
 
@@ -442,7 +494,12 @@ impl<'m> Worker<'m> {
         )?;
 
         let prefix = &job.prompts[0][..shared];
-        let kept = !prefix.is_empty() && self.cached().prefix.as_deref() == Some(prefix);
+        let kept = !prefix.is_empty()
+            && self
+                .cached()
+                .prefix
+                .as_ref()
+                .is_some_and(|(tokens, _)| tokens == prefix);
         let ubatch = self.config.protocol.ubatch as usize;
         let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
         let mut outputs: Vec<Vec<Read>> = Vec::with_capacity(n);
@@ -462,7 +519,7 @@ impl<'m> Worker<'m> {
             clear(&mut self.cached().ctx)?;
         } else {
             fused = false;
-            (prefix_ms, prefix_reused) = self.prefix(prefix)?;
+            (prefix_ms, prefix_reused) = self.prefix(prefix, &[])?;
             questions_started = Instant::now();
             for i in 0..n {
                 if shared > 0 {
@@ -475,10 +532,7 @@ impl<'m> Worker<'m> {
                 let len = job.prompts[i].len();
                 self.decode_span(&mut batch, job, i, (shared, len), 1, &mut out)?;
                 outputs.push(out);
-                self.cached()
-                    .ctx
-                    .clear_kv_cache_seq(Some(1), None, None)
-                    .map_err(|e| runtime("Failed to drop a question's cells", e))?;
+                drop_sequence(&mut self.cached().ctx, 1)?;
             }
         }
         let questions_ms = ms_since(questions_started);
@@ -550,7 +604,7 @@ impl<'m> Worker<'m> {
             u32::try_from(group + 1).unwrap_or(u32::MAX),
             u32::try_from(n_outputs).unwrap_or(u32::MAX),
         )?;
-        let (prefix_ms, prefix_reused) = self.prefix(&job.prompts[0][..shared])?;
+        let (prefix_ms, prefix_reused) = self.prefix(&job.prompts[0][..shared], &[])?;
 
         let questions_started = Instant::now();
         let batch_size = self.config.protocol.batch as usize;
@@ -589,10 +643,7 @@ impl<'m> Worker<'m> {
                 self.flush(&mut batch, &mut pending, &job.readout, &mut outputs)?;
             }
             for k in 1..=round.len() {
-                self.cached()
-                    .ctx
-                    .clear_kv_cache_seq(Some(k as u32), None, None)
-                    .map_err(|e| runtime("Failed to drop a question's cells", e))?;
+                drop_sequence(&mut self.cached().ctx, k as u32)?;
             }
         }
         let questions_ms = ms_since(questions_started);
@@ -688,14 +739,146 @@ impl<'m> Worker<'m> {
             },
         )
     }
+
+    /// Block attention, `SharedPrefix` (and `Batched`): the shared blocks
+    /// once on sequence 0, then each prompt's own blocks on sequence 1, one
+    /// decode call per block. Nothing after a block can change it, so this
+    /// is also exactly what decoding every prompt from scratch computes.
+    fn isolated_blocks(&mut self, job: &Job) -> JobResult {
+        let n = job.prompts.len();
+        let shared = job.shared;
+        let longest = job.prompts.iter().map(Vec::len).max().unwrap_or(0);
+        self.check_fits(longest)?;
+        let context_ms = self.context(job.exact, longest, 2, most_reads_per_block(job))?;
+        let shared_blocks: Spans = job.blocks[0]
+            .iter()
+            .copied()
+            .filter(|&(_, b)| b <= shared)
+            .collect();
+        let (prefix_ms, prefix_reused) = self.prefix(&job.prompts[0][..shared], &shared_blocks)?;
+
+        let questions_started = Instant::now();
+        let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
+        let mut outputs = Vec::with_capacity(n);
+        for i in 0..n {
+            if shared > 0 {
+                self.cached()
+                    .ctx
+                    .copy_kv_cache_seq(0, 1, None, None)
+                    .map_err(|e| runtime("Failed to share the prefix", e))?;
+            }
+            let mut out = Vec::with_capacity(job.reads[i].len());
+            for &(a, b) in job.blocks[i].iter().filter(|&&(a, _)| a >= shared) {
+                self.decode_span(&mut batch, job, i, (a, b), 1, &mut out)?;
+            }
+            outputs.push(out);
+            drop_sequence(&mut self.cached().ctx, 1)?;
+        }
+        let questions_ms = ms_since(questions_started);
+
+        let prompt_tokens: usize = job.prompts.iter().map(Vec::len).sum();
+        let own: usize = job.prompts.iter().map(|p| p.len() - shared).sum();
+        let cells = self.cached().cells;
+        finish(
+            job,
+            outputs,
+            self.config.threads,
+            EvalStats {
+                mode: EvalMode::SharedPrefix,
+                prompts: n,
+                shared_prefix_tokens: shared,
+                evaluated_tokens: if prefix_reused { own } else { own + shared },
+                prompt_tokens,
+                context_cells: cells,
+                context_ms,
+                prefix_ms,
+                prefix_reused,
+                questions_ms,
+                readout_ms: 0.0,
+            },
+        )
+    }
+
+    /// Block attention, `Separate`: every prompt's blocks from an empty
+    /// cache.
+    fn separate_blocks(&mut self, job: &Job) -> JobResult {
+        let longest = job.prompts.iter().map(Vec::len).max().unwrap_or(0);
+        self.check_fits(longest)?;
+        let context_ms = self.context(job.exact, longest, 1, most_reads_per_block(job))?;
+        self.cached().prefix = None;
+
+        let questions_started = Instant::now();
+        let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
+        let mut outputs = Vec::with_capacity(job.prompts.len());
+        for i in 0..job.prompts.len() {
+            clear(&mut self.cached().ctx)?;
+            let mut out = Vec::with_capacity(job.reads[i].len());
+            for &(a, b) in &job.blocks[i] {
+                self.decode_span(&mut batch, job, i, (a, b), 0, &mut out)?;
+            }
+            outputs.push(out);
+        }
+        clear(&mut self.cached().ctx)?;
+        let questions_ms = ms_since(questions_started);
+
+        let prompt_tokens: usize = job.prompts.iter().map(Vec::len).sum();
+        let cells = self.cached().cells;
+        finish(
+            job,
+            outputs,
+            self.config.threads,
+            EvalStats {
+                mode: EvalMode::Separate,
+                prompts: job.prompts.len(),
+                shared_prefix_tokens: 0,
+                evaluated_tokens: prompt_tokens,
+                prompt_tokens,
+                context_cells: cells,
+                context_ms,
+                prefix_ms: 0.0,
+                prefix_reused: false,
+                questions_ms,
+                readout_ms: 0.0,
+            },
+        )
+    }
 }
 
-/// Empty the cache — metadata only: a free cell's stale contents are
-/// masked out of every attention sum, so zeroing them buys nothing.
+/// Most read positions any one block holds.
+fn most_reads_per_block(job: &Job) -> u32 {
+    let most = job
+        .reads
+        .iter()
+        .zip(&job.blocks)
+        .flat_map(|(reads, blocks)| {
+            blocks
+                .iter()
+                .map(|&(a, b)| reads.iter().filter(|&&r| r >= a && r < b).count())
+        })
+        .max()
+        .unwrap_or(1);
+    u32::try_from(most.max(1)).unwrap_or(u32::MAX)
+}
+
+/// Empty the cache — cells only: a free cell's stale contents are masked
+/// out of every attention sum, so zeroing them buys nothing. Not
+/// `clear_kv_cache_seq(None, ..)`: a recurrent memory refuses to remove
+/// "every sequence" and then removes nothing.
 fn clear(ctx: &mut LlamaContext<'_>) -> Result<(), DecisionError> {
-    ctx.clear_kv_cache_seq(None, None, None)
-        .map(|_| ())
-        .map_err(|e| runtime("Failed to clear the decision context", e))
+    ctx.clear_kv_cache_cells();
+    Ok(())
+}
+
+/// Remove sequence `seq` from the cache, failing loudly if llama.cpp
+/// refuses: a question's cells left behind would sit in the next one's way.
+fn drop_sequence(ctx: &mut LlamaContext<'_>, seq: u32) -> Result<(), DecisionError> {
+    match ctx.clear_kv_cache_seq(Some(seq), None, None) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(DecisionError::Runtime(format!(
+            "llama.cpp refused to remove sequence {seq} from the decision context"
+        ))),
+        Err(e) => Err(runtime("Failed to drop a question's cells", e)),
+    }
 }
 
 /// Copy out what `readout` needs of the output at batch index `index`:
@@ -704,6 +887,15 @@ fn read_output(ctx: &LlamaContext<'_>, index: i32, readout: &Readout) -> Read {
     let logits = ctx.get_logits_ith(index);
     match readout {
         Readout::Classes(_) => Read::Row(logits.to_vec()),
+        Readout::Verdict { yes, no } => {
+            let at = |t: &LlamaToken| {
+                usize::try_from(t.0)
+                    .ok()
+                    .and_then(|i| logits.get(i))
+                    .map_or(f64::NAN, |&l| f64::from(l))
+            };
+            Read::Score(at(yes) - at(no))
+        }
     }
 }
 
@@ -729,6 +921,26 @@ fn finish(job: &Job, outputs: Vec<Vec<Read>>, threads: u32, mut stats: EvalStats
             }
             results
         }
+        Readout::Verdict { .. } => outputs
+            .into_iter()
+            .zip(&job.reads)
+            .map(|(reads, wanted)| {
+                if reads.len() != wanted.len() {
+                    return Err(DecisionError::Runtime(
+                        "a question produced fewer scores than it has options".into(),
+                    ));
+                }
+                reads
+                    .into_iter()
+                    .map(|r| match r {
+                        Read::Score(s) if s.is_finite() => Ok(s),
+                        _ => Err(DecisionError::Runtime(
+                            "the model produced a non-finite score".into(),
+                        )),
+                    })
+                    .collect()
+            })
+            .collect::<Result<_, _>>()?,
     };
     stats.readout_ms = ms_since(readout_started);
     Ok((results, stats))

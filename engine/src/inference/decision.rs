@@ -37,6 +37,7 @@
 //! a small decision model can stay resident next to the chat model.
 
 mod engine;
+mod verdict;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -56,10 +57,15 @@ use llama_cpp_2::token::LlamaToken;
 /// measures.
 pub const MAX_QUESTIONS: usize = 64;
 
-/// Most options a `choice` question may have: one letter each, `A`…`Z`.
-/// The System One API accepts up to 255; going past 26 needs multi-token
-/// codes or elimination rounds, which this first version does not do.
-pub const MAX_CHOICE_OPTIONS: usize = 26;
+/// Most options a `choice` question may have: the System One API's 255. A
+/// code-readout model answers at most [`LETTER_CODES`] of them; a verdict
+/// model reads every option at its own slot and has only its token budget.
+pub const MAX_CHOICE_OPTIONS: usize = 255;
+
+/// Options a code-readout model can answer: one letter each, `A`…`Z`.
+/// Going past 26 needs multi-token codes or elimination rounds, which this
+/// version does not do.
+pub const LETTER_CODES: usize = 26;
 
 /// Fewest options a `choice` question, or levels a `score` question, may
 /// have.
@@ -91,6 +97,9 @@ pub const CONFIDENCE_METHOD: &str = "normalized_entropy";
 /// Most questions one `batched` decode round holds on a recurrent or
 /// hybrid model, which keeps a recurrent state per sequence.
 const RECURRENT_BATCH_GROUP: usize = 16;
+
+/// The micro-batch Jev-Style's render-v1 scores were validated with.
+const VERDICT_V1_UBATCH: usize = 1024;
 
 /// llama.cpp attends over the cache's used cells rounded up to a multiple
 /// of this, so the attention's shape moves in steps of it.
@@ -150,6 +159,10 @@ impl QuestionKind {
 pub enum Question {
     Noul {
         instructions: String,
+        /// What an answer of true, and of false, means — empty when the
+        /// question does not say (System One `criteria: {"true", "false"}`).
+        true_means: String,
+        false_means: String,
     },
     Choice {
         instructions: String,
@@ -172,9 +185,18 @@ impl Question {
         }
     }
 
+    /// A yes/no question with nothing said about what either answer means.
+    pub fn noul(instructions: impl Into<String>) -> Self {
+        Self::Noul {
+            instructions: instructions.into(),
+            true_means: String::new(),
+            false_means: String::new(),
+        }
+    }
+
     pub fn instructions(&self) -> &str {
         match self {
-            Self::Noul { instructions }
+            Self::Noul { instructions, .. }
             | Self::Choice { instructions, .. }
             | Self::Score { instructions, .. } => instructions,
         }
@@ -199,7 +221,16 @@ impl Question {
             return Err("\"instructions\" must not contain NUL characters".to_string());
         }
         match self {
-            Self::Noul { .. } => Ok(()),
+            Self::Noul {
+                true_means,
+                false_means,
+                ..
+            } => {
+                if true_means.contains('\0') || false_means.contains('\0') {
+                    return Err("criteria must not contain NUL characters".to_string());
+                }
+                Ok(())
+            }
             Self::Choice { options, .. } => {
                 if !(MIN_OPTIONS..=MAX_CHOICE_OPTIONS).contains(&options.len()) {
                     return Err(format!(
@@ -263,7 +294,19 @@ fn question_text(question: &Question) -> String {
 
     let mut msg = format!(" {}\n", question.instructions().trim());
     match question {
-        Question::Noul { .. } => msg.push_str("Answer Yes or No."),
+        Question::Noul {
+            true_means,
+            false_means,
+            ..
+        } => {
+            if !true_means.trim().is_empty() {
+                let _ = writeln!(msg, "Yes means: {}", true_means.trim());
+            }
+            if !false_means.trim().is_empty() {
+                let _ = writeln!(msg, "No means: {}", false_means.trim());
+            }
+            msg.push_str("Answer Yes or No.");
+        }
         Question::Choice { options, .. } => {
             msg.push_str("Options:\n");
             for (i, (name, description)) in options.iter().enumerate() {
@@ -452,7 +495,7 @@ impl CodeSet {
     fn len(self) -> usize {
         match self {
             Self::YesNo => 2,
-            Self::Letters => MAX_CHOICE_OPTIONS,
+            Self::Letters => LETTER_CODES,
             Self::Digits => MAX_SCORE_LEVELS,
         }
     }
@@ -590,7 +633,16 @@ impl CodeTable {
     /// answer it.
     fn classes(&self, kind: QuestionKind, n: usize) -> Result<&[Vec<LlamaToken>], String> {
         let set = kind.code_set();
-        let classes = &self.sets[set.index()][..n.min(set.len())];
+        if n > set.len() {
+            return Err(format!(
+                "this decision model answers {} questions with at most {} classes, one {} code \
+                 each; got {n}",
+                kind.as_str(),
+                set.len(),
+                set.name()
+            ));
+        }
+        let classes = &self.sets[set.index()][..n];
         if let Some(i) = classes.iter().position(Vec::is_empty) {
             return Err(format!(
                 "this decision model cannot answer {} questions with {n} classes: the {} code \
@@ -750,19 +802,50 @@ fn runtime(what: &str, e: impl std::fmt::Display) -> DecisionError {
     DecisionError::Runtime(format!("{what}: {e}"))
 }
 
+/// How a decision model's answers are read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadoutKind {
+    /// The next-token distribution after a chat prompt, restricted to
+    /// single-token answer codes: any instruction-tuned model.
+    Codes,
+    /// `logit(" yes") - logit(" no")` at a slot after every option: a
+    /// Jev-Style model, trained for it (`decision::verdict`).
+    Verdict,
+}
+
+impl ReadoutKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codes => "codes",
+            Self::Verdict => "verdict",
+        }
+    }
+}
+
+/// What a code-readout model's prompts are built with.
+struct CodeReadout {
+    uses_template: bool,
+    layout: PromptLayout,
+    codes: CodeTable,
+}
+
+enum ModelReadout {
+    Codes(CodeReadout),
+    Verdict(verdict::VerdictModel),
+}
+
 /// A loaded decision model: a `LlamaModel` on the process-wide shared
-/// backend (see `EmbeddingModel::load` for why it must be shared), the code
-/// table resolved against its tokenizer, the worker that evaluates its
-/// prompts (`engine`), and a cache of content-free priors.
+/// backend (see `EmbeddingModel::load` for why it must be shared), how its
+/// answers are read — the code table resolved against its tokenizer, or a
+/// verdict model's protocol — the worker that evaluates its prompts
+/// (`engine`), and a cache of content-free priors.
 pub struct DecisionModel {
     model: Arc<LlamaModel>,
     /// `--no-flash-attn` turned off, as for the generation model: llama.cpp
     /// then decides per device (its AUTO policy); on, flash attention is
     /// never used.
     flash_attn: bool,
-    uses_template: bool,
-    layout: PromptLayout,
-    codes: CodeTable,
+    readout: ModelReadout,
     /// Held for a whole request, so the priors and the answers of one
     /// request reach the worker back to back and the state it keeps is the
     /// request's own.
@@ -809,36 +892,73 @@ impl DecisionModel {
         let model = LlamaModel::load_from_file(&backend, path, &model_params)
             .map_err(|e| format!("Failed to load decision model: {e}"))?;
 
-        let uses_template = super::render_jinja_chat_template(
-            &model,
-            &[("system", SYSTEM_PROMPT), ("user", "x")],
-            false,
-        )
-        .is_some();
-        if !uses_template {
-            tracing::warn!(
-                "Decision model has no usable chat template — using a plain-text prompt, \
-                 which instruction-tuned models follow less reliably"
-            );
-        }
-        let codes = CodeTable::resolve(&model, uses_template)?;
-        let layout = PromptLayout::resolve(&model, uses_template);
-        tracing::info!(
-            "Decision model loaded — codes: {}; prompts: {}; flash attention {}; up to {max_ctx} \
-             tokens of context per request",
-            codes.summary(),
-            layout.describe(),
-            if flash_attn { "auto" } else { "off" }
-        );
+        let flash = if flash_attn { "auto" } else { "off" };
+        let (readout, protocol) = match verdict::VerdictModel::detect(&model, path)? {
+            Some(v) => {
+                tracing::info!(
+                    "Decision model loaded — {}; flash attention {flash}; up to {max_ctx} tokens \
+                     of context per request",
+                    v.describe()
+                );
+                let protocol = match v.render {
+                    // The ubatch its scores were validated with; whole
+                    // ubatches of the state are what can be shared exactly.
+                    verdict::Render::V1 => engine::Protocol {
+                        batch: 4096,
+                        ubatch: VERDICT_V1_UBATCH as u32,
+                        blocks: false,
+                        group: RECURRENT_BATCH_GROUP,
+                        cpu_flash_attn_off: false,
+                    },
+                    verdict::Render::V2 => engine::Protocol {
+                        batch: verdict::BLOCK_V2 as u32,
+                        ubatch: verdict::BLOCK_V2 as u32,
+                        blocks: true,
+                        group: 1,
+                        cpu_flash_attn_off: true,
+                    },
+                };
+                (ModelReadout::Verdict(v), protocol)
+            }
+            None => {
+                let uses_template = super::render_jinja_chat_template(
+                    &model,
+                    &[("system", SYSTEM_PROMPT), ("user", "x")],
+                    false,
+                )
+                .is_some();
+                if !uses_template {
+                    tracing::warn!(
+                        "Decision model has no usable chat template — using a plain-text \
+                         prompt, which instruction-tuned models follow less reliably"
+                    );
+                }
+                let codes = CodeTable::resolve(&model, uses_template)?;
+                let layout = PromptLayout::resolve(&model, uses_template);
+                tracing::info!(
+                    "Decision model loaded — codes: {}; prompts: {}; flash attention {flash}; up \
+                     to {max_ctx} tokens of context per request",
+                    codes.summary(),
+                    layout.describe(),
+                );
+                let mut protocol = engine::Protocol::CODES;
+                if model.is_recurrent() || model.is_hybrid() {
+                    // A recurrent layer keeps a state per sequence: 64 of
+                    // them for one `batched` round would cost more than the
+                    // round saves.
+                    protocol.group = RECURRENT_BATCH_GROUP;
+                }
+                let code = CodeReadout {
+                    uses_template,
+                    layout,
+                    codes,
+                };
+                (ModelReadout::Codes(code), protocol)
+            }
+        };
 
         let threads = threads.max(1);
         let model = Arc::new(model);
-        let mut protocol = engine::Protocol::CODES;
-        if model.is_recurrent() || model.is_hybrid() {
-            // A recurrent layer keeps a state per sequence: 64 of them for
-            // one `batched` round would cost more than the round saves.
-            protocol.group = RECURRENT_BATCH_GROUP;
-        }
         let engine = engine::Engine::start(
             Arc::clone(&model),
             backend,
@@ -846,6 +966,7 @@ impl DecisionModel {
                 threads,
                 flash_attn,
                 max_ctx,
+                on_gpu: gpu_layers != 0,
                 protocol,
             },
         )
@@ -854,9 +975,7 @@ impl DecisionModel {
         Ok(Self {
             model,
             flash_attn,
-            uses_template,
-            layout,
-            codes,
+            readout,
             eval_lock: Mutex::new(()),
             prior_cache: Mutex::new(HashMap::new()),
             exact: false,
@@ -864,9 +983,10 @@ impl DecisionModel {
         })
     }
 
-    /// Answer every question about `state`: one full-vocabulary
-    /// log-probability per class per question, and optionally the same
-    /// measured on [`CONTENT_FREE_STATE`].
+    /// Answer every question about `state`: per class per question, the
+    /// full-vocabulary log-probability of its code — and optionally the same
+    /// measured on [`CONTENT_FREE_STATE`] — or, for a verdict model, its
+    /// option's score.
     pub fn decide(
         &self,
         state: &str,
@@ -889,16 +1009,22 @@ impl DecisionModel {
                 "\"state\" must not contain NUL characters".to_string(),
             ));
         }
-        let mut classes = Vec::with_capacity(questions.len());
         for question in questions {
             question.validate().map_err(DecisionError::Invalid)?;
+        }
+        let code = match &self.readout {
+            ModelReadout::Codes(code) => code,
+            ModelReadout::Verdict(v) => return self.decide_verdict(v, state, questions, options),
+        };
+        let mut classes = Vec::with_capacity(questions.len());
+        for question in questions {
             classes.push(
-                self.codes
+                code.codes
                     .classes(question.kind(), question.n_classes())
                     .map_err(DecisionError::Invalid)?,
             );
         }
-        let (prompts, state_prefix) = self.prompts(state, questions)?;
+        let (prompts, state_prefix) = self.prompts(code, state, questions)?;
 
         let _running = self
             .eval_lock
@@ -912,7 +1038,7 @@ impl DecisionModel {
         let mut prior_stats = None;
         let mut priors_cached = 0;
         if options.content_free {
-            let (cf_prompts, cf_prefix) = self.prompts(CONTENT_FREE_STATE, questions)?;
+            let (cf_prompts, cf_prefix) = self.prompts(code, CONTENT_FREE_STATE, questions)?;
             let mut found: Vec<Option<Vec<f64>>> = {
                 let cache = self
                     .prior_cache
@@ -966,9 +1092,102 @@ impl DecisionModel {
         })
     }
 
+    /// A verdict model's questions, all in one job.
+    fn decide_verdict(
+        &self,
+        v: &verdict::VerdictModel,
+        state: &str,
+        questions: &[Question],
+        options: DecideOptions,
+    ) -> Result<Decision, DecisionError> {
+        if options.content_free {
+            return Err(DecisionError::Invalid(format!(
+                "content_free calibration is for code-readout models; {} was released with a \
+                 calibration temperature of its own, applied by default (\"temperature\" \
+                 overrides it, 1 turns it off)",
+                v.name
+            )));
+        }
+        let encode = |text: &str| {
+            self.model
+                .str_to_token_plain(text, AddBos::Never)
+                .map_err(|e| DecisionError::Invalid(format!("Tokenization failed: {e}")))
+        };
+        let prefix = verdict::prefix(&encode, state)?;
+        let rendered = questions
+            .iter()
+            .map(|q| verdict::render(v, &encode, &prefix, q))
+            .collect::<Result<Vec<_>, _>>()?;
+        let p = prefix.len();
+        let shared = match (options.mode, v.render) {
+            // Only whole micro-batches of the state can be shared and still
+            // give every question what decoding it alone gives: llama.cpp's
+            // kernels, and the recurrent layers' chunking, depend on where
+            // a micro-batch starts.
+            (EvalMode::SharedPrefix, verdict::Render::V1) => {
+                (p / VERDICT_V1_UBATCH) * VERDICT_V1_UBATCH
+            }
+            (EvalMode::Separate, _) => 0,
+            _ => p,
+        };
+        let _running = self
+            .eval_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let (scores, stats) = self.engine.evaluate(engine::Job {
+            reads: rendered.iter().map(|r| r.slots.clone()).collect(),
+            blocks: rendered.iter().map(|r| r.blocks.clone()).collect(),
+            prompts: rendered.into_iter().map(|r| r.ids).collect(),
+            shared,
+            readout: engine::Readout::Verdict {
+                yes: v.yes,
+                no: v.no,
+            },
+            mode: options.mode,
+            exact: self.exact,
+        })?;
+        let outcomes = scores
+            .into_iter()
+            .zip(questions)
+            .map(|(mut scores, question)| {
+                // The model reads false before true; the classes are yes, no.
+                if question.kind() == QuestionKind::Noul {
+                    scores.reverse();
+                }
+                QuestionOutcome {
+                    logprobs: scores,
+                    prior_logprobs: None,
+                }
+            })
+            .collect();
+        Ok(Decision {
+            outcomes,
+            stats,
+            prior_stats: None,
+            priors_cached: 0,
+        })
+    }
+
     /// Whether flash attention may be used (`--no-flash-attn` not given).
     pub fn flash_attn(&self) -> bool {
         self.flash_attn
+    }
+
+    /// How this model's answers are read.
+    pub fn readout(&self) -> ReadoutKind {
+        match self.readout {
+            ModelReadout::Codes(_) => ReadoutKind::Codes,
+            ModelReadout::Verdict(_) => ReadoutKind::Verdict,
+        }
+    }
+
+    /// The temperature probabilities are scaled with unless a request says
+    /// otherwise: a verdict model's own calibration, 1 (none) otherwise.
+    pub fn default_temperature(&self) -> f64 {
+        match &self.readout {
+            ModelReadout::Codes(_) => 1.0,
+            ModelReadout::Verdict(v) => v.temperature,
+        }
     }
 
     /// Free the context the worker keeps between requests until the next
@@ -986,6 +1205,7 @@ impl DecisionModel {
     /// questions asked.
     fn prompts(
         &self,
+        code: &CodeReadout,
         state: &str,
         questions: &[Question],
     ) -> Result<(Vec<Vec<LlamaToken>>, usize), DecisionError> {
@@ -994,8 +1214,8 @@ impl DecisionModel {
                 .str_to_token(text, add_bos)
                 .map_err(|e| DecisionError::Invalid(format!("Tokenization failed: {e}")))
         };
-        let (prompts, common) = match &self.layout.wrapper {
-            Some((head, tail)) if self.layout.split_tokens => {
+        let (prompts, common) = match &code.layout.wrapper {
+            Some((head, tail)) if code.layout.split_tokens => {
                 let common = tokenize(
                     &format!("{head}{STATE_LABEL}{state}{QUESTION_LABEL}"),
                     AddBos::Always,
@@ -1042,7 +1262,7 @@ impl DecisionModel {
             None => {
                 let render = |q: &Question| {
                     tokenize(
-                        &render_prompt(&self.model, self.uses_template, &user_message(state, q)),
+                        &render_prompt(&self.model, code.uses_template, &user_message(state, q)),
                         AddBos::Always,
                     )
                 };
@@ -1052,12 +1272,8 @@ impl DecisionModel {
                     .collect::<Result<Vec<_>, _>>()?;
                 // Without the template's head and tail as text, the state's
                 // part is what two unrelated questions about it share.
-                let a = render(&Question::Noul {
-                    instructions: "Alpha?".into(),
-                })?;
-                let b = render(&Question::Noul {
-                    instructions: "7?".into(),
-                })?;
+                let a = render(&Question::noul("Alpha?"))?;
+                let b = render(&Question::noul("7?"))?;
                 let common = a[..common_prefix(&a, &b)].to_vec();
                 (prompts, common)
             }
@@ -1110,6 +1326,7 @@ impl DecisionModel {
             prompts,
             reads,
             shared,
+            blocks: Vec::new(),
             readout: engine::Readout::Classes(classes.iter().map(|c| c.to_vec()).collect()),
             mode,
             exact: self.exact,
@@ -1546,9 +1763,7 @@ mod tests {
 
     #[test]
     fn the_state_comes_before_the_question_in_every_prompt() {
-        let q1 = Question::Noul {
-            instructions: "Is it urgent?".into(),
-        };
+        let q1 = Question::noul("Is it urgent?");
         let q2 = Question::Choice {
             instructions: "Which team?".into(),
             options: vec![
@@ -1646,8 +1861,9 @@ mod tests {
         };
         assert!(choice(1).validate().is_err());
         assert!(choice(2).validate().is_ok());
-        assert!(choice(26).validate().is_ok());
-        assert!(choice(27).validate().is_err());
+        // The API's own limit; a code-readout model's is the letters'.
+        assert!(choice(MAX_CHOICE_OPTIONS).validate().is_ok());
+        assert!(choice(MAX_CHOICE_OPTIONS + 1).validate().is_err());
 
         let score = |n: usize| Question::Score {
             instructions: "How much?".into(),
@@ -1662,13 +1878,9 @@ mod tests {
             options: vec![("a".into(), String::new()), ("a".into(), String::new())],
         };
         assert!(dup.validate().unwrap_err().contains("duplicate"));
-        let empty = Question::Noul {
-            instructions: "  ".into(),
-        };
+        let empty = Question::noul("  ");
         assert!(empty.validate().is_err());
-        let nul = Question::Noul {
-            instructions: "a\0b".into(),
-        };
+        let nul = Question::noul("a\0b");
         assert!(nul.validate().is_err());
     }
 
@@ -1715,9 +1927,7 @@ mod tests {
             "Read the story again, slowly, and think about who did what and when. ".repeat(12)
         );
         let all = vec![
-            Question::Noul {
-                instructions: "Did Lily give the ball back?".into(),
-            },
+            Question::noul("Did Lily give the ball back?"),
             Question::Choice {
                 instructions: "Who found the ball?".into(),
                 options: vec![
@@ -1753,7 +1963,10 @@ mod tests {
         ];
         let questions: Vec<Question> = all
             .into_iter()
-            .filter(|q| model.codes.classes(q.kind(), q.n_classes()).is_ok())
+            .filter(|q| match &model.readout {
+                ModelReadout::Codes(code) => code.codes.classes(q.kind(), q.n_classes()).is_ok(),
+                ModelReadout::Verdict(_) => true,
+            })
             .collect();
         assert!(
             questions.len() >= 2,
@@ -1985,5 +2198,178 @@ mod tests {
             logprobs(&fresh),
             "a bigger context moved an answer"
         );
+    }
+
+    /// A Jev-Style model must read what its release's own runtime reads and
+    /// score what it scores. The reference is written by that runtime —
+    /// `jev_style_decision_gguf.py` driving `jev-score`, built against the
+    /// same llama.cpp — for states short and long (whole micro-batches of
+    /// it shared), structured, and full of special-token text, and for every
+    /// question type: every case's token ids must match exactly, and its
+    /// scores, asked alone and all together, to `EULLM_JEV_TOLERANCE`
+    /// (default 1e-4).
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf \
+    /// EULLM_JEV_REFERENCE=/path/to/reference_08.json \
+    ///     cargo test --bin eullm decision::tests::real_jev -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a Jev-Style GGUF and its reference scores"]
+    fn real_jev_style_model_reads_and_scores_as_its_own_runtime() {
+        use serde_json::Value;
+
+        let reference: Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                std::env::var("EULLM_JEV_REFERENCE").expect("set EULLM_JEV_REFERENCE"),
+            )
+            .expect("read the reference"),
+        )
+        .expect("parse the reference");
+        let tolerance: f64 = std::env::var("EULLM_JEV_TOLERANCE")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(1e-4);
+        let model = load_test_model();
+        let ModelReadout::Verdict(v) = &model.readout else {
+            panic!("the model was not recognized as a Jev-Style verdict model");
+        };
+        eprintln!("{}", v.describe());
+        let text = |c: &Value, key: &str| c[key].as_str().unwrap_or_default().to_string();
+        let question = |c: &Value| match c["qtype"].as_str().unwrap() {
+            "choice" => Question::Choice {
+                instructions: text(c, "ins"),
+                options: c["options"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| {
+                        (
+                            o[0].as_str().unwrap().to_string(),
+                            o[1].as_str().unwrap().to_string(),
+                        )
+                    })
+                    .collect(),
+            },
+            "score" => Question::Score {
+                instructions: text(c, "ins"),
+                levels: c["levels"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|l| l.as_str().unwrap().to_string())
+                    .collect(),
+            },
+            _ => Question::Noul {
+                instructions: text(c, "ins"),
+                true_means: text(c, "true_means"),
+                false_means: text(c, "false_means"),
+            },
+        };
+        let ids = |value: &Value| -> Vec<usize> {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_u64().unwrap() as usize)
+                .collect()
+        };
+        // The reference lists a yes/no question's scores false first.
+        let in_class_order = |q: &Question, mut scores: Vec<f64>| {
+            if q.kind() == QuestionKind::Noul {
+                scores.reverse();
+            }
+            scores
+        };
+        let encode = |t: &str| {
+            model
+                .model
+                .str_to_token_plain(t, AddBos::Never)
+                .map_err(|e| DecisionError::Invalid(e.to_string()))
+        };
+        let options = DecideOptions {
+            mode: EvalMode::SharedPrefix,
+            content_free: false,
+        };
+
+        let cases = reference["cases"].as_array().unwrap();
+        let mut worst: f64 = 0.0;
+        // Per state, its questions and the scores asking all of them gives.
+        type ByState = Vec<(String, Vec<(Question, Vec<f64>)>)>;
+        let mut by_state: ByState = Vec::new();
+        for c in cases {
+            let state = text(c, "state_text");
+            let q = question(c);
+            let prefix = verdict::prefix(&encode, &state).unwrap();
+            let r = verdict::render(v, &encode, &prefix, &q).unwrap();
+            let want_ids: Vec<i32> = ids(&c["ids"]).into_iter().map(|t| t as i32).collect();
+            let got_ids: Vec<i32> = r.ids.iter().map(|t| t.0).collect();
+            assert_eq!(
+                got_ids, want_ids,
+                "{} q{}: token ids differ",
+                c["state"], c["question"]
+            );
+            assert_eq!(
+                r.slots,
+                ids(&c["slots"]),
+                "{} q{}: slots differ",
+                c["state"],
+                c["question"]
+            );
+            if let Some(blocks) = c.get("blocks").and_then(Value::as_array) {
+                let want: Vec<(usize, usize)> = blocks
+                    .iter()
+                    .map(|b| {
+                        (
+                            b[0].as_u64().unwrap() as usize,
+                            b[1].as_u64().unwrap() as usize,
+                        )
+                    })
+                    .collect();
+                assert_eq!(
+                    r.blocks, want,
+                    "{} q{}: blocks differ",
+                    c["state"], c["question"]
+                );
+            }
+            let Some(decide) = c["decide_scores"].as_array() else {
+                continue;
+            };
+            let want: Vec<f64> = decide.iter().map(|x| x.as_f64().unwrap()).collect();
+            let got = model
+                .decide(&state, std::slice::from_ref(&q), options)
+                .unwrap_or_else(|e| panic!("{} q{}: {e}", c["state"], c["question"]));
+            let want = in_class_order(&q, want);
+            for (a, b) in got.outcomes[0].logprobs.iter().zip(&want) {
+                worst = worst.max((a - b).abs());
+            }
+            let many: Vec<f64> = c["many_scores"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect();
+            let many = in_class_order(&q, many);
+            match by_state.iter_mut().find(|(s, _)| *s == state) {
+                Some((_, list)) => list.push((q, many)),
+                None => by_state.push((state, vec![(q, many)])),
+            }
+        }
+        eprintln!("one question at a time: largest score difference {worst:.2e}");
+        assert!(worst <= tolerance, "scores differ by {worst}");
+
+        let mut worst_many: f64 = 0.0;
+        for (state, list) in &by_state {
+            let questions: Vec<Question> = list.iter().map(|(q, _)| q.clone()).collect();
+            let got = model.decide(state, &questions, options).unwrap();
+            eprintln!("{} questions together: {:?}", questions.len(), got.stats);
+            for (outcome, (_, want)) in got.outcomes.iter().zip(list) {
+                for (a, b) in outcome.logprobs.iter().zip(want) {
+                    worst_many = worst_many.max((a - b).abs());
+                }
+            }
+        }
+        eprintln!("all questions of a state together: largest score difference {worst_many:.2e}");
+        assert!(worst_many <= tolerance, "scores differ by {worst_many}");
     }
 }

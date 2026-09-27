@@ -517,8 +517,8 @@ question types:
 
 | Type | Question | Answer |
 |---|---|---|
-| `noul` | Is this statement true of the state? | `noul`: P(yes) |
-| `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options) | `choice`, `probabilities`, `confidence` |
+| `noul` | Is this statement true of the state? (`criteria`, optional: `{"true": "…", "false": "…"}`, what each answer means) | `noul`: P(yes) |
+| `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options; up to 255 with a [Jev-Style model](#jev-style-decision-models)) | `choice`, `probabilities`, `confidence` |
 | `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
 
 ```bash
@@ -556,13 +556,17 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
 
-**How an answer is computed.** Each question becomes one chat prompt (the
-model's own template, reasoning switched off) ending where the answer would
-begin, with the options coded `A`…`Z`, the levels `0`…`9`, or `Yes`/`No`.
-The logits at that position are read once — nothing is generated — and
-restricted to the codes. When the model loads, the server checks that every
-code is a single token for its tokenizer right after its prompt, and refuses
-a question whose codes are not; the load log lists what it found.
+**How an answer is computed.** With an instruction-tuned model — the *code
+readout* — each question becomes one chat prompt (the model's own template,
+reasoning switched off) ending where the answer would begin, with the
+options coded `A`…`Z`, the levels `0`…`9`, or `Yes`/`No`. The logits at
+that position are read once — nothing is generated — and restricted to the
+codes. When the model loads, the server checks that every code is a single
+token for its tokenizer right after its prompt, and refuses a question whose
+codes are not; the load log lists what it found. A model trained for this
+endpoint reads its answers differently — see
+[Jev-Style decision models](#jev-style-decision-models) — and the response
+says which readout was used in `eullm.readout` (`codes` or `verdict`).
 
 Next to the System One fields, every answer carries an `eullm` object with
 what it was derived from, so a stored response can be re-examined or
@@ -570,9 +574,10 @@ re-calibrated later:
 
 | Field | Meaning |
 |---|---|
-| `logprobs` | Full-vocabulary log-probability of each answer's code |
-| `raw_probabilities` | The same, renormalized over the answers, before calibration |
-| `coverage` | Share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
+| `logprobs` | Code readout: full-vocabulary log-probability of each answer's code |
+| `scores` | Verdict readout: each option's score, `logit(" yes") − logit(" no")` at its slot |
+| `raw_probabilities` | The same, renormalized over the answers (a softmax of the scores), before calibration and temperature |
+| `coverage` | Code readout: share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
 | `prior_logprobs` | The content-free prior that was divided out (with `content_free` calibration only) |
 
 `confidence` is `1 − H(p) / ln K` — 1 when all probability is on one answer,
@@ -585,8 +590,8 @@ the options can be compared on labelled data before one is trusted:
 
 | `eullm` option | Values | Default |
 |---|---|---|
-| `calibration` | `none`; `content_free`: divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
-| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1` |
+| `calibration` | `none`; `content_free` (code readout): divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
+| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1`; a Jev-Style model's own calibrated temperature |
 | `mode` | `shared_prefix`; `batched`; `separate` (see below) | `shared_prefix` |
 
 The content-free prior is not always noise to remove: when the options
@@ -645,16 +650,17 @@ still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
 `batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
 will serve.
 
-**Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
-`score`, and `--decision-ctx` tokens of context per request (default 8192).
-A request over the context limit is refused with a 400 that says how many
-tokens it needed.
+**Limits:** 64 questions per request, 26 options per `choice` (255 with a
+Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
+context per request (default 8192). A request over the context limit is
+refused with a 400 that says how many tokens it needed.
 
-**Which model.** A small instruction-tuned model: Qwen3 0.6B–4B from the
-catalog are the intended size. The decision model must be able to answer
-without reasoning first; a model that always opens a reasoning block (the
-DeepSeek-R1 family) spends its first token on the tag, and every answer's
-`coverage` shows it.
+**Which model.** A model trained for this endpoint — a
+[Jev-Style model](#jev-style-decision-models) — or a small
+instruction-tuned one: Qwen3 0.6B–4B from the catalog are the intended size.
+An instruction-tuned decision model must be able to answer without reasoning
+first; a model that always opens a reasoning block (the DeepSeek-R1 family)
+spends its first token on the tag, and every answer's `coverage` shows it.
 
 **The decision slot.** The model lives in a third slot, next to the
 generation and embedding models, with the same residency rules as the
@@ -692,6 +698,73 @@ Every request is written to the audit trail with `request_type: "systemone"`
 and a `decision` record: each answer with its log-probabilities and its
 probabilities before and after calibration. The state itself is not stored,
 only its SHA-256.
+
+### Jev-Style decision models
+
+[Jev-Style](https://github.com/lawrence3699/jev-style) (Apache-2.0)
+publishes Qwen3.5 fine-tunes trained for the three question types of this
+endpoint, and they read an answer differently — the *verdict readout*. Every
+option is followed by a ` ->` slot, and the option's score is
+`logit(" yes") − logit(" no")` at its slot. The options are all read in the
+same pass, not as competing codes, so a `choice` can have up to 255 of them.
+The probabilities are `softmax(scores / T)`, with the temperature `T` fitted
+on held-out data and released with the model. It is applied by default; a
+request's `temperature` overrides it, and `1` gives the probabilities of the
+raw scores.
+
+| Model | Input | Get it |
+|---|---|---|
+| Jev-Style-0.8B-Decision-v3 (0.53 GB in Q4_K_M) | Causal attention; question, options and slots within 2,048 tokens | `eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M` |
+| Jev-Style-2B-Decision-v3 (1.3 GB in Q4_K_M) | Block-causal attention over 2,048-token blocks; options that do not fit one block become a numbered catalogue | `eullm pull hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q4_K_M` |
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m --decision-ctx 25600
+```
+
+The server recognizes such a model when it loads, in one of two ways:
+
+- from the `readout_config.json` released with the model, when that file
+  sits next to the GGUF;
+- otherwise from the model's name (`general.name`) — the case of a GGUF
+  pulled on its own.
+
+The load log says which and prints the temperature.
+
+**The input is the one the model was trained on.** It is not a chat
+prompt. The input is rebuilt token for token: each segment tokenized on
+its own, with text never parsed for special tokens, and a structured
+state serialized the way the release's runtime writes JSON. It is
+computed the way that runtime computes it: the same micro-batches, flash
+attention off on the CPU for the 2B, and one block per decode call for
+the block-causal attention.
+
+This was checked against that runtime, Q4_K_M on the CPU, on 24 cases for
+the 0.8B and 28 for the 2B:
+
+- short, JSON, long, and special-token-laden states;
+- every question type, up to 30 options — and 70 in the 2B's numbered
+  catalogue form.
+
+The token ids were identical and the scores agreed to 4e-16, asked one at a
+time and all together.
+
+**Differences from the code readout:**
+
+- `content_free` calibration is refused, since the model brings its own.
+- `eullm.scores` replaces `eullm.logprobs`, and there is no `coverage`:
+  every option is read at a slot of its own.
+- Input over 25,600 tokens, or options that do not fit the model's
+  budget, is refused rather than truncated. Raise `--decision-ctx` to
+  25600 to allow the longest input the models accept.
+- Only the release's global temperature is applied, as its own runtime
+  does when it is not given a category.
+
+`shared_prefix` shares the state in whole micro-batches: 1,024 tokens for
+the 0.8B, whose runtime computes those identically whether they are shared
+or not, and 2,048-token blocks for the 2B. The 2B decodes one block per
+call, so its `batched` requests are answered, and reported, as
+`shared_prefix`.
 
 ## API Reference
 
