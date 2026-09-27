@@ -13,6 +13,12 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Added
+- **Decisions without generation: `POST /v1/systemone`.** Ask a small model typed questions about a state — a ticket, a document, a JSON object — and get probabilities back instead of text: `noul` (is this true? → P(yes)), `choice` (which of these options? → the option, the distribution, a confidence) and `score` (which level of this scale? → the expected level). The request and response follow the System One API (TypeSafe's Jev), so a client written for it works by changing its base URL; a Jev model name such as `jev-latest` means the decision model the server has loaded. Nothing is generated: each answer is read from the model's next-token probabilities over single-token answer codes, which the server checks for every model when it loads. Up to 64 questions about the same state are answered in one pass that decodes the state only once; the response reports the tokens that saved. Each answer also carries the raw log-probabilities, the probabilities before calibration and a `coverage` that drops when the model did not answer in the format asked for. Calibration is opt-in and not yet validated: `content_free` (the model's answer about an empty state divided out) and temperature scaling, to be measured on labelled data before relying on either. Every decision goes to the audit trail with its probabilities; the state is recorded only as a SHA-256.
+- **`--decision-model` and `--decision-ctx`** on `eullm run` and `eullm serve`. The decision model runs in its own slot next to the chat and embedding models. `--decision-model qwen3-1.7b` loads one at startup and keeps the VRAM a request needs free when the chat model is sized, like `--embedding-model`; without it, the first request that names a model loads it. `--decision-ctx` (default 8192) is the most context one request may use — a 4k-token state with about fifty questions — and sets how much VRAM is kept free for it: 896 MiB of KV cache for Qwen3-0.6B at the default.
+
 ## 0.7.11 — 2026-09-26
 
 The engine binaries are the same code as 0.7.10; upgrading changes nothing about how EuLLM runs.

@@ -427,6 +427,40 @@ struct RuntimeOpts {
     /// makes gracefully everywhere else.
     #[arg(long, value_name = "PATH_OR_NAME")]
     embedding_model: Option<String>,
+
+    /// Load a decision model for `POST /v1/systemone` at startup.
+    ///
+    /// `/v1/systemone` answers typed questions about a state — yes/no,
+    /// one-of-N, a level on a scale — from the model's next-token
+    /// probabilities instead of generated text (see `docs/engine.md`). It
+    /// runs on its own model slot, like embeddings, and this flag gives that
+    /// slot the same reserved-companion treatment as `--embedding-model`:
+    /// the model loads first, `--fit` keeps free the VRAM a request's
+    /// context needs (its KV cache at `--decision-ctx` plus a compute
+    /// buffer), and a later chat-model swap does not evict it. Without the
+    /// flag, the first request that names a model loads it on demand.
+    ///
+    /// A small instruction-tuned model is the intended shape — Qwen3 0.6B
+    /// to 4B from the catalog. Accepts a GGUF path or a store name, like
+    /// `--embedding-model`.
+    #[arg(long, value_name = "PATH_OR_NAME")]
+    decision_model: Option<String>,
+
+    /// Most tokens of context one `/v1/systemone` request may use: the state
+    /// once, plus each question's own tokens.
+    ///
+    /// Every request gets a context sized to it, so this is a ceiling, not
+    /// memory held all the time — but it is what the decision slot keeps
+    /// free in VRAM (for Qwen3-0.6B, 112 KiB per token: 896 MiB at the
+    /// default). 8192 fits a 4k-token state with about fifty short
+    /// questions, or a 1k-token state with all 64 a request may ask.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = inference::decision::DEFAULT_DECISION_CTX,
+        value_parser = clap::value_parser!(u32).range(512..=131_072)
+    )]
+    decision_ctx: u32,
 }
 
 #[derive(Subcommand)]
@@ -718,6 +752,8 @@ async fn main() {
                 no_mmproj_offload,
                 keep_alive,
                 embedding_model,
+                decision_model,
+                decision_ctx,
             } = opts;
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
@@ -834,6 +870,8 @@ async fn main() {
                 mmproj_offload,
                 keep_alive,
                 embedding_model,
+                decision_model,
+                decision_ctx,
             )
             .await;
         }
@@ -875,6 +913,8 @@ async fn main() {
                 no_mmproj_offload,
                 keep_alive,
                 embedding_model,
+                decision_model,
+                decision_ctx,
             } = opts;
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
@@ -947,6 +987,8 @@ async fn main() {
                 mmproj_offload,
                 keep_alive,
                 embedding_model,
+                decision_model,
+                decision_ctx,
             )
             .await;
         }
@@ -1836,6 +1878,8 @@ async fn cmd_run(
     mmproj_offload: Option<bool>,
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
+    decision_model: Option<String>,
+    decision_ctx: u32,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -1977,6 +2021,42 @@ async fn cmd_run(
             }
         }
     }
+
+    // --decision-model: the same treatment for the /v1/systemone slot. What
+    // it reserves is a request's whole context (KV cache at --decision-ctx
+    // plus a compute buffer), which never shows up as used VRAM between
+    // requests — see `fit::decision_reserve_bytes`.
+    let mut launch_decision: Option<api::DecisionSlot> = None;
+    let mut decision_reserve_bytes: u64 = 0;
+    if let Some(ref arg) = decision_model {
+        let slot =
+            load_launch_decision(arg, store, resolved_threads, decision_ctx, backend.clone());
+        decision_reserve_bytes = slot.reserve_bytes;
+        launch_decision = Some(slot);
+        // Same fallback as the embedding companion above, counting both.
+        if let Some((free, total)) = fit::vram_bytes() {
+            let floor = (total as f64 * fit::MIN_FREE_TOTAL_RATIO) as u64;
+            let usable_before_reserve = free.saturating_sub(floor);
+            if embedding_reserve_bytes.saturating_add(decision_reserve_bytes)
+                >= usable_before_reserve
+            {
+                println!(
+                    "[EULLM] Warning: reserving {} MiB for the decision model would leave the \
+                     generation model no VRAM headroom. Proceeding without the reservation — \
+                     the decision model stays loaded but will be evicted like any on-demand \
+                     one when the generation model is sized.",
+                    decision_reserve_bytes / (1024 * 1024)
+                );
+                if let Some(ref mut slot) = launch_decision {
+                    slot.is_reserved_companion = false;
+                }
+                decision_reserve_bytes = 0;
+            }
+        }
+    }
+    // Everything a companion model needs kept free when the generation
+    // model is sized below.
+    let companion_reserve_bytes = embedding_reserve_bytes.saturating_add(decision_reserve_bytes);
 
     // Canonical, addressable name shown in the banner and the API model slot —
     // the same string the user types into `eullm run` and sees in `eullm list`
@@ -2134,14 +2214,14 @@ async fn cmd_run(
                     ctx_size,
                     kv_bpe_k,
                     kv_bpe_v,
-                    embedding_reserve_bytes,
+                    companion_reserve_bytes,
                 );
             }
             // Everything already spoken for before the text model is sized:
-            // a reserved embedding companion, and the projector unless it is
-            // going to RAM.
+            // reserved embedding and decision companions, and the projector
+            // unless it is going to RAM.
             let sizing_reserve =
-                embedding_reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
+                companion_reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
             let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
                 fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
             } else {
@@ -2485,6 +2565,8 @@ async fn cmd_run(
             launch_model: api_launch_model,
             keep_alive,
             launch_embedding,
+            launch_decision,
+            decision_ctx,
             backend,
         })
         .await
@@ -2550,6 +2632,8 @@ async fn cmd_serve(
     mmproj_offload: Option<bool>,
     keep_alive: Option<std::time::Duration>,
     embedding_model: Option<String>,
+    decision_model: Option<String>,
+    decision_ctx: u32,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -2608,6 +2692,11 @@ async fn cmd_serve(
             is_reserved_companion: true,
         }
     });
+    // --decision-model: same as above; `swap_model` protects its reserve
+    // through `AppState::reserved_decision_bytes` once a generation model
+    // is loaded.
+    let launch_decision = decision_model
+        .map(|arg| load_launch_decision(&arg, &store, threads, decision_ctx, backend.clone()));
 
     println!("eullm ready (no model loaded — send a request with a \"model\" field to load one).");
     println!("  API (EULLM):   http://localhost:{port}/api");
@@ -2651,12 +2740,58 @@ async fn cmd_serve(
         launch_model: None,
         keep_alive,
         launch_embedding,
+        launch_decision,
+        decision_ctx,
         backend,
     })
     .await
     {
         eprintln!("Server error: {e}");
         std::process::exit(1);
+    }
+}
+
+/// Load `--decision-model` at launch as a reserved companion — see the
+/// flag's doc comment on `RuntimeOpts`. Exits when the model cannot be found
+/// or loaded: it was asked for by name, and starting without it would only
+/// move the error to the first `/v1/systemone` request.
+fn load_launch_decision(
+    arg: &str,
+    store: &ModelStore,
+    threads: u32,
+    decision_ctx: u32,
+    backend: Arc<llama_cpp_2::llama_backend::LlamaBackend>,
+) -> api::DecisionSlot {
+    let path = resolve_model_path(arg, store).unwrap_or_else(|| {
+        eprintln!("Error: decision model '{arg}' not found.");
+        std::process::exit(1);
+    });
+    let model = inference::decision::DecisionModel::load(&path, threads, decision_ctx, backend)
+        .unwrap_or_else(|e| {
+            eprintln!("Error loading decision model: {e}");
+            std::process::exit(1);
+        });
+    let reserve_bytes = fit::decision_reserve_bytes(&path, decision_ctx);
+    // The name a request would use to ask for it: what was typed for a
+    // store name, the file name for a path.
+    let model_name = if arg.ends_with(".gguf") || arg.contains(['/', '\\']) {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| arg.to_string())
+    } else {
+        arg.to_string()
+    };
+    println!(
+        "Decision model loaded: {} (up to {decision_ctx} tokens per request, {} MiB kept free \
+         for a request's context)",
+        path.display(),
+        reserve_bytes / (1024 * 1024)
+    );
+    api::DecisionSlot {
+        model_name,
+        model: Arc::new(model),
+        is_reserved_companion: true,
+        reserve_bytes,
     }
 }
 

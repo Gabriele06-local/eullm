@@ -725,6 +725,50 @@ const COMPUTE_BUFFER_RESERVE_BYTES: f64 = 320.0 * 1024.0 * 1024.0;
 /// before the generation model's own sizing ever sees the VRAM it needs.
 pub(crate) const EMBEDDING_COMPUTE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 
+/// The flat compute-buffer part of a decision request's footprint
+/// (`inference::decision`), on top of its KV cache (see
+/// [`decision_reserve_bytes`]). Twice the embedder's: the micro-batch is the
+/// same 512, but the context is sized to a state plus up to 64 questions,
+/// and the output holds one vocabulary-sized logits row per question
+/// (~39 MiB for 64 questions on a 150k vocabulary). Not yet measured on
+/// hardware the way `COMPUTE_BUFFER_RESERVE_BYTES` was; re-measure with the
+/// context's memory breakdown before lowering it.
+pub(crate) const DECISION_COMPUTE_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Bytes of KV cache `ctx` tokens take in the model `info` describes, at
+/// the given per-element sizes — every layer that pays for KV (see
+/// `GgufInfo::kv_paying_layers`), with the same coarse fallback as
+/// [`compute_fit`] when the header has no attention dims. `0` when the
+/// layer count is missing or not believable.
+pub(crate) fn kv_cache_bytes(
+    info: Option<&GgufInfo>,
+    ctx: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+) -> u64 {
+    let Some(info) = info.filter(|i| i.n_layers > 0 && i.n_layers <= MAX_LAYERS) else {
+        return 0;
+    };
+    let per_token_per_layer = match info.kv_elems_per_token_per_layer() {
+        Some((k_elems, v_elems)) => k_elems * kv_bytes_per_elem_k + v_elems * kv_bytes_per_elem_v,
+        None => FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER,
+    };
+    let paying = info.kv_paying_layers(u64::from(info.n_layers)) as f64;
+    (per_token_per_layer * paying * f64::from(ctx)) as u64
+}
+
+/// What one decision request can take on top of the decision model's
+/// weights: an F16 KV cache of `max_ctx` tokens (the most a request may
+/// ask for, `--decision-ctx`) plus [`DECISION_COMPUTE_RESERVE_BYTES`]. The
+/// context only exists while a request runs, so unlike the weights it never
+/// shows up in the free-VRAM figure between requests — this is what the
+/// decision slot asks to be kept free, when it loads and when a generation
+/// model is sized next to it.
+pub(crate) fn decision_reserve_bytes(path: &Path, max_ctx: u32) -> u64 {
+    let info = read_gguf_info(path);
+    kv_cache_bytes(info.as_ref(), max_ctx, 2.0, 2.0).saturating_add(DECISION_COMPUTE_RESERVE_BYTES)
+}
+
 /// Coarse KV reserve used only when the GGUF header doesn't expose the
 /// attention dims: ~128 B per token per layer (a rough F16 ballpark for
 /// 7-8B-class models). The exact path below supersedes this whenever the
@@ -1490,6 +1534,27 @@ mod tests {
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
+
+    #[test]
+    fn kv_cache_bytes_counts_every_paying_layer() {
+        // Qwen3-0.6B: 28 layers, 8 KV heads of 128 → 2 × 1024 elements per
+        // token per layer, 2 bytes each in F16: 112 KiB per token.
+        let info = GgufInfo {
+            n_head_kv: Some(8),
+            key_length: Some(128),
+            value_length: Some(128),
+            ..info_layers(28)
+        };
+        assert_eq!(kv_cache_bytes(Some(&info), 1, F16.0, F16.1), 112 * 1024);
+        assert_eq!(kv_cache_bytes(Some(&info), 8192, F16.0, F16.1), 896 * MIB);
+        // A hybrid model pays on one layer in four.
+        let hybrid = GgufInfo {
+            full_attention_interval: Some(4),
+            ..info.clone()
+        };
+        assert_eq!(kv_cache_bytes(Some(&hybrid), 8192, F16.0, F16.1), 224 * MIB);
+        assert_eq!(kv_cache_bytes(None, 8192, F16.0, F16.1), 0);
+    }
 
     /// The projector from the report that motivated `place_mmproj`: 888 MiB
     /// of BF16 weights, plus the flat compute reserve.

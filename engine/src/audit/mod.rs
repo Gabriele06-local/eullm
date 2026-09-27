@@ -34,6 +34,11 @@ pub struct AuditEntry {
     pub duration_ms: u64,
     /// Optional user identifier
     pub user_id: Option<String>,
+    /// What a `/v1/systemone` request decided. Absent on every other request
+    /// type, and on lines written before decisions existed — both of which
+    /// still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<DecisionRecord>,
 }
 
 impl AuditEntry {
@@ -48,8 +53,57 @@ impl AuditEntry {
             output_tokens: 0,
             duration_ms: 0,
             user_id: None,
+            decision: None,
         }
     }
+}
+
+/// The record of one `/v1/systemone` request: every answer with the
+/// probabilities it was taken from, before and after calibration, so an
+/// automated decision can be reconstructed and re-examined later — including
+/// under a calibration chosen after the fact, since the raw log-probabilities
+/// are kept too.
+///
+/// The state is not stored, only its SHA-256: it is the part most likely to
+/// carry personal data, and the hash is enough to prove which state a
+/// decision was made on by anyone who still holds it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionRecord {
+    /// SHA-256 (hex) of the state exactly as the model read it.
+    pub state_sha256: String,
+    /// `shared_prefix` or `separate`.
+    pub mode: String,
+    /// `none` or `content_free`.
+    pub calibration: String,
+    pub temperature: f64,
+    pub answers: Vec<DecisionAnswerRecord>,
+}
+
+/// One answered question inside a [`DecisionRecord`]. The vectors are in
+/// the order of `labels`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DecisionAnswerRecord {
+    /// The question's id in the request.
+    pub id: String,
+    /// `noul`, `choice` or `score`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// `yes`/`no`, the option names, or the level numbers.
+    pub labels: Vec<String>,
+    /// Full-vocabulary log-probability of each label's answer code.
+    pub logprobs: Vec<f64>,
+    /// Renormalized over the labels, before any calibration.
+    pub raw_probabilities: Vec<f64>,
+    /// After calibration: what the answer was taken from.
+    pub probabilities: Vec<f64>,
+    /// Share of the model's probability that went to a valid answer code.
+    pub coverage: f64,
+    /// The answer as returned: the option name, the expected level, or
+    /// P(yes).
+    pub answer: serde_json::Value,
+    /// Absent for `noul`, which reports no confidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
 }
 
 /// Strip ASCII control characters (newlines included) from client-controlled
@@ -313,6 +367,43 @@ mod tests {
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.model, "eullm/legal-it-7b");
         assert_eq!(parsed.request_type, "chat");
+        // No decision, no key: every non-decision line stays as it was.
+        assert!(!json.contains("decision"));
+    }
+
+    #[test]
+    fn lines_written_before_decisions_existed_still_parse() {
+        let old = r#"{"id":"67e55044-10b1-426f-9247-bb680e5fe0c8","timestamp":"2026-09-01T10:00:00Z","model":"qwen3-8b","request_type":"chat","input_tokens":12,"output_tokens":40,"duration_ms":900,"user_id":null}"#;
+        let parsed: AuditEntry = serde_json::from_str(old).unwrap();
+        assert!(parsed.decision.is_none());
+    }
+
+    #[test]
+    fn a_decision_record_round_trips() {
+        let mut entry = AuditEntry::new("qwen3-4b".into(), "systemone".into());
+        entry.decision = Some(DecisionRecord {
+            state_sha256: "ab".repeat(32),
+            mode: "shared_prefix".into(),
+            calibration: "none".into(),
+            temperature: 1.0,
+            answers: vec![DecisionAnswerRecord {
+                id: "area".into(),
+                kind: "choice".into(),
+                labels: vec!["civile".into(), "penale".into()],
+                logprobs: vec![-0.1, -2.4],
+                raw_probabilities: vec![0.91, 0.09],
+                probabilities: vec![0.91, 0.09],
+                coverage: 0.99,
+                answer: serde_json::json!("civile"),
+                confidence: Some(0.56),
+            }],
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""type":"choice""#), "{json}");
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        let answer = &parsed.decision.unwrap().answers[0];
+        assert_eq!(answer.labels, ["civile", "penale"]);
+        assert_eq!(answer.answer, "civile");
     }
 
     #[test]

@@ -8,6 +8,7 @@
 //!   decoded in parallel on a single context. Good for API server / RAG
 //!   workloads with many parallel requests.
 
+pub mod decision;
 pub mod embedding;
 pub(crate) mod output;
 pub(crate) mod sampling;

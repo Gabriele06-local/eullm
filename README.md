@@ -247,6 +247,35 @@ written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
 changes. There is no command-line flag for it on purpose: a token on the
 command line is visible to every local user in `ps`.
 
+### Decisions without generation (`/v1/systemone`, not yet released)
+
+Routing, triage, "does this need a human?": questions whose answer is a
+choice, not a text. `POST /v1/systemone` asks a small model typed questions
+about a state — yes/no, one of N options, a level on a scale — and returns
+probabilities read straight from its next-token distribution, with nothing
+generated. The API follows System One (TypeSafe's Jev), so a client written
+for it works against a local EuLLM:
+
+```bash
+eullm serve --decision-model qwen3-1.7b
+curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "Help! My payouts have been failing for 3 days.",
+  "questions": {
+    "is_urgent": { "type": "noul", "instructions": "Does this convey urgency?" },
+    "team": { "type": "choice", "instructions": "Which team handles it?",
+              "criteria": { "billing": "Payments, payouts", "tech": "Bugs", "other": "Anything else" } }
+  }
+}'
+```
+
+Up to 64 questions about the same state are answered in one pass that reads
+the state only once. Every answer comes with the raw log-probabilities it was
+taken from and a `coverage` that shows whether the model answered in the
+format asked for; every decision is recorded in the audit trail. How well
+the probabilities are calibrated has not been measured yet, so treat them as
+scores to be validated on your own data before automating on a threshold.
+Details, calibration options and the numbers: [docs/engine.md](docs/engine.md#decisions-v1systemone-and-the-decision-slot).
+
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)
 
 Both the API and the chat UI bind `0.0.0.0` — the engine often runs on a

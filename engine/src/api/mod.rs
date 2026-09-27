@@ -19,6 +19,7 @@ mod origin;
 // (multimodal forces `batch_size = 0`) streams through exactly the same code
 // path as an HTTP request instead of a second, divergent one.
 pub(crate) mod routes;
+mod systemone;
 
 pub use auth::Identity;
 
@@ -32,6 +33,7 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use llama_cpp_2::llama_backend::LlamaBackend;
 
+use crate::inference::decision::DecisionModel;
 use crate::inference::embedding::EmbeddingModel;
 use crate::inference::{
     BatchScheduler, InferenceConfig, InferenceEngine, SchedulerConfig, SchedulerHandle,
@@ -64,6 +66,24 @@ pub struct EmbeddingSlot {
     /// hoc embedder has no such guarantee and is evicted on any generation
     /// swap that needs the room back (`evict_embedding_if_present_for_generation_load`).
     pub is_reserved_companion: bool,
+}
+
+/// The decision slot behind `/v1/systemone` — a third slot, handled like the
+/// embedding one and for the same reason: a small decision model can stay
+/// resident next to the chat model instead of taking turns with it. See
+/// `AppState::ensure_decision_model`.
+pub struct DecisionSlot {
+    pub model_name: String,
+    pub model: Arc<DecisionModel>,
+    /// Same meaning as `EmbeddingSlot::is_reserved_companion`, for
+    /// `--decision-model`.
+    pub is_reserved_companion: bool,
+    /// VRAM a request can take on top of the weights: its KV cache at the
+    /// per-request ceiling plus a compute buffer
+    /// (`fit::decision_reserve_bytes`). The weights show up as used VRAM
+    /// once loaded; the context does not, because it only exists while a
+    /// request runs.
+    pub reserve_bytes: u64,
 }
 
 /// Shared state for API handlers.
@@ -193,9 +213,16 @@ pub struct AppState {
     /// `/api/embed` request names a model.
     pub embedding: tokio::sync::RwLock<Option<EmbeddingSlot>>,
 
-    /// How many times a model was evicted to make VRAM room for the *other*
-    /// slot (generation displacing the embedder, or the embedder displacing
-    /// generation), in either direction. Not itself a problem — an
+    /// Third model slot, for `/v1/systemone` — see `ensure_decision_model`.
+    /// `None` until `--decision-model` or the first request naming a model.
+    pub decision: tokio::sync::RwLock<Option<DecisionSlot>>,
+    /// Most tokens of context one decision request may use
+    /// (`--decision-ctx`). Every model loaded into the decision slot gets it.
+    pub decision_ctx: u32,
+
+    /// How many times a model was evicted to make VRAM room for another
+    /// slot (generation displacing the embedder or the decision model, or
+    /// either of those displacing generation). Not itself a problem — an
     /// ingestion run that evicts the LLM once and restores it once is
     /// exactly the intended use — but a steady-state rate of one eviction
     /// per request means a caller on a card too small for both is
@@ -211,6 +238,8 @@ pub struct AppState {
     main_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     /// Same as `main_deadline`, for the embedding slot.
     embedding_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
+    /// Same as `main_deadline`, for the decision slot.
+    decision_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     /// Applied when a request does not set its own `keep_alive` field —
     /// see `RuntimeOpts`/`ServeConfig::keep_alive`. `None` disables the
     /// idle-unload timer by default (a request can still opt in with an
@@ -338,6 +367,7 @@ impl AppState {
         // embedder itself is later evicted by `ensure_embedding_model`. See
         // `evict_embedding_if_present_for_generation_load`.
         self.evict_embedding_if_present_for_generation_load().await;
+        self.evict_decision_if_present_for_generation_load().await;
 
         // ── 2. Load the new model ───────────────────────────────────
         // Gemma 4 requires f16 KV cache regardless of the server's configured
@@ -377,7 +407,10 @@ impl AppState {
         if self.fit {
             let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
             let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
-            let mut reserve_bytes = self.reserved_embedding_bytes().await;
+            let mut reserve_bytes = self
+                .reserved_embedding_bytes()
+                .await
+                .saturating_add(self.reserved_decision_bytes().await);
             if self.mmproj_offload.is_none() {
                 mmproj_placement = crate::fit::decide_mmproj_placement(
                     &gguf_path,
@@ -673,7 +706,9 @@ impl AppState {
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
 
         let main_loaded = self.slot.read().await.model_name.is_some();
-        let fits_alongside = fits_in_free_vram(weights_bytes).unwrap_or(true);
+        let fits_alongside =
+            fits_in_free_vram(weights_bytes, crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES)
+                .unwrap_or(true);
         if main_loaded && !fits_alongside {
             tracing::info!(
                 "Embedding model {} does not fit alongside the loaded generation model — \
@@ -788,6 +823,121 @@ impl AppState {
             .unwrap_or(0)
     }
 
+    /// Ensure the named decision model is loaded into the decision slot and
+    /// return it. The same residency rules as `ensure_embedding_model` —
+    /// already loaded: reuse it; fits next to the generation model: load it
+    /// alongside; does not: evict the generation model first — with the VRAM
+    /// a request's context needs (`fit::decision_reserve_bytes`) counted in,
+    /// not only the weights.
+    ///
+    /// A different decision model already in the slot is dropped before the
+    /// new one loads, so the free-VRAM check sees the room it leaves. A
+    /// request still running on it keeps it alive until it finishes.
+    pub async fn ensure_decision_model(
+        &self,
+        name: &str,
+    ) -> Result<Arc<DecisionModel>, ModelError> {
+        let _swap_guard = self.swap_lock.lock().await;
+
+        let normalized = normalize_model_name(name);
+        {
+            let slot = self.decision.read().await;
+            if let Some(ref loaded) = *slot
+                && model_identity_key(&loaded.model_name) == model_identity_key(&normalized)
+            {
+                return Ok(loaded.model.clone());
+            }
+        }
+
+        let gguf_path = self.resolve_model(&normalized)?;
+        *self.decision.write().await = None;
+        let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
+        let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
+
+        let main_loaded = self.slot.read().await.model_name.is_some();
+        let fits_alongside =
+            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0).unwrap_or(true);
+        if main_loaded && !fits_alongside {
+            tracing::info!(
+                "Decision model {} does not fit alongside the loaded generation model — \
+                 evicting it to make room (will reload on the next generation request)",
+                crate::audit::sanitize_for_log(&normalized)
+            );
+            self.unload_current().await?;
+            self.cross_slot_evictions
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        tracing::info!(
+            "Loading decision model {} ({})",
+            crate::audit::sanitize_for_log(&normalized),
+            gguf_path.display()
+        );
+        let threads = self.threads;
+        let max_ctx = self.decision_ctx;
+        let backend_for_load = self.backend.clone();
+        let model = tokio::task::spawn_blocking(move || {
+            DecisionModel::load(&gguf_path, threads, max_ctx, backend_for_load)
+        })
+        .await
+        .map_err(|e| ModelError::LoadFailed(format!("Task join error: {e}")))?
+        .map_err(|e| ModelError::LoadFailed(format!("Failed to load decision model: {e}")))?;
+        let model = Arc::new(model);
+
+        *self.decision.write().await = Some(DecisionSlot {
+            model_name: normalized.clone(),
+            model: model.clone(),
+            // Loaded by a request, so no launch-time guarantee behind it —
+            // see `EmbeddingSlot::is_reserved_companion`.
+            is_reserved_companion: false,
+            reserve_bytes,
+        });
+        tracing::info!(
+            "Decision model ready → {}",
+            crate::audit::sanitize_for_log(&normalized)
+        );
+        Ok(model)
+    }
+
+    /// The decision slot's counterpart of
+    /// `evict_embedding_if_present_for_generation_load`, with the same
+    /// conditions: only under `--fit`, never a reserved companion.
+    async fn evict_decision_if_present_for_generation_load(&self) {
+        if !self.fit {
+            return;
+        }
+        let evictable = self
+            .decision
+            .read()
+            .await
+            .as_ref()
+            .is_some_and(|s| !s.is_reserved_companion);
+        if !evictable {
+            return;
+        }
+        tracing::info!(
+            "Generation request — evicting the resident decision model to free VRAM for sizing \
+             (reload it with a later /v1/systemone request)"
+        );
+        *self.decision.write().await = None;
+        self.cross_slot_evictions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The decision slot's counterpart of `reserved_embedding_bytes`: a
+    /// reserved companion's per-request context, which never shows up in
+    /// the free-VRAM figure between requests. Its weights do, so they are
+    /// not counted again.
+    async fn reserved_decision_bytes(&self) -> u64 {
+        self.decision
+            .read()
+            .await
+            .as_ref()
+            .filter(|s| s.is_reserved_companion)
+            .map(|s| s.reserve_bytes)
+            .unwrap_or(0)
+    }
+
     /// Reset the main slot's idle-unload deadline. Called on every request
     /// that uses the main slot (after `ensure_model` in `routes.rs`), so an
     /// active conversation is never unloaded out from under it. `Immediate`
@@ -812,12 +962,20 @@ impl AppState {
         }
     }
 
+    /// Same as `touch_main_slot`, for the decision slot.
+    pub async fn touch_decision_slot(&self, keep_alive: KeepAlive) {
+        touch_deadline(&self.decision_deadline, keep_alive, self.default_keep_alive);
+        if keep_alive == KeepAlive::Immediate {
+            *self.decision.write().await = None;
+        }
+    }
+
     /// Background loop spawned once from `serve()`: every 30 seconds, unload
-    /// either slot whose idle deadline has passed. 30s is coarse on purpose
+    /// any slot whose idle deadline has passed. 30s is coarse on purpose
     /// — this is a power-saving idle timer, not a latency-sensitive path,
-    /// and checking every request would mean taking both slot locks on
-    /// every single generation/embedding call for a comparison that is
-    /// false almost all the time.
+    /// and checking every request would mean taking the slot locks on
+    /// every single generation/embedding/decision call for a comparison
+    /// that is false almost all the time.
     async fn run_idle_unload_loop(self: Arc<Self>) {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
@@ -848,6 +1006,19 @@ impl AppState {
             if embedding_expired {
                 tracing::info!("keep_alive expired — unloading idle embedding model");
                 *self.embedding.write().await = None;
+            }
+
+            let decision_expired = {
+                let mut deadline = self.decision_deadline.lock().await;
+                let expired = deadline.is_some_and(|d| now >= d);
+                if expired {
+                    *deadline = None;
+                }
+                expired
+            };
+            if decision_expired {
+                tracing::info!("keep_alive expired — unloading idle decision model");
+                *self.decision.write().await = None;
             }
         }
     }
@@ -962,9 +1133,12 @@ fn find_gguf_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
 
 /// Whether `additional_bytes` fits in currently free VRAM, applying the same
 /// floor `fit.rs` reserves for a normal model load
-/// (`fit::MIN_FREE_TOTAL_RATIO`) plus a flat reserve for the embedder's own
-/// small compute buffer — 256 MiB rather than `fit.rs`'s 640 MiB, since an
-/// embedding model's context and micro-batch are both a fraction of an LLM's.
+/// (`fit::MIN_FREE_TOTAL_RATIO`) plus `compute_reserve_bytes` for the
+/// model's own compute buffer — `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an
+/// embedder, 256 MiB rather than `fit.rs`'s 640 MiB, since an embedding
+/// model's context and micro-batch are both a fraction of an LLM's. A
+/// decision model passes 0 and counts its whole per-request context in
+/// `additional_bytes` instead (`fit::decision_reserve_bytes`).
 ///
 /// Deliberately not the layer-by-layer machinery in `fit.rs`: an embedding
 /// model loads fully onto the GPU or not at all (see `EmbeddingModel::load`),
@@ -974,12 +1148,12 @@ fn find_gguf_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
 /// decides what "unknown" means for it; `ensure_embedding_model` treats it as
 /// "assume yes" so a build that cannot measure VRAM behaves as it always has,
 /// letting a real allocation failure surface as a normal load error.
-fn fits_in_free_vram(additional_bytes: u64) -> Option<bool> {
+fn fits_in_free_vram(additional_bytes: u64, compute_reserve_bytes: u64) -> Option<bool> {
     let (free, total) = crate::fit::vram_bytes()?;
     let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
     let usable = free
         .saturating_sub(floor)
-        .saturating_sub(crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES);
+        .saturating_sub(compute_reserve_bytes);
     Some(additional_bytes <= usable)
 }
 
@@ -1460,6 +1634,10 @@ pub struct ServeConfig {
     /// too. `None` when `--embedding-model` was not given — the ordinary
     /// case, unaffected by any of this.
     pub launch_embedding: Option<EmbeddingSlot>,
+    /// The `--decision-model` counterpart of `launch_embedding`.
+    pub launch_decision: Option<DecisionSlot>,
+    /// `--decision-ctx`: see `AppState::decision_ctx`.
+    pub decision_ctx: u32,
 }
 
 /// Start the API server on the given port with graceful shutdown support.
@@ -1608,9 +1786,12 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         allow_model_paths,
         launch_model: cfg.launch_model,
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
+        decision: tokio::sync::RwLock::new(cfg.launch_decision),
+        decision_ctx: cfg.decision_ctx,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
         main_deadline: tokio::sync::Mutex::new(None),
         embedding_deadline: tokio::sync::Mutex::new(None),
+        decision_deadline: tokio::sync::Mutex::new(None),
         default_keep_alive: cfg.keep_alive,
     });
     let idle_unload_state = state.clone();
@@ -2090,9 +2271,12 @@ mod http_tests {
             allow_model_paths: false,
             launch_model: None,
             embedding: tokio::sync::RwLock::new(None),
+            decision: tokio::sync::RwLock::new(None),
+            decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
             cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
             main_deadline: tokio::sync::Mutex::new(None),
             embedding_deadline: tokio::sync::Mutex::new(None),
+            decision_deadline: tokio::sync::Mutex::new(None),
             default_keep_alive: None,
         });
 
@@ -2313,6 +2497,48 @@ mod http_tests {
         )
         .await;
         assert_eq!(status, 400);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `/v1/systemone` on a server with no decision model: the three ways a
+    /// request can fail before any model runs must each read as the
+    /// client's mistake it is, with a JSON body naming it.
+    #[tokio::test]
+    async fn systemone_refuses_what_it_cannot_answer_as_client_errors() {
+        let tmp = std::env::temp_dir().join(format!("eullm-systemone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        let url = format!("{base}/v1/systemone");
+        let question = serde_json::json!({ "q": { "type": "noul", "instructions": "Urgent?" } });
+
+        // `jev-latest` means "the loaded decision model", and there is none.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "model": "jev-latest", "state": "x", "questions": question }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("--decision-model"), "{body}");
+
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({
+                "model": "this-model-does-not-exist", "state": "x", "questions": question
+            }),
+        )
+        .await;
+        assert_eq!(status, 404, "{body}");
+        assert!(body.contains("this-model-does-not-exist"), "{body}");
+
+        // Malformed: refused before any model resolution, not with a 500.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "model": "a-pulled-model", "state": "x", "questions": {} }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body.contains("at least one question"), "{body}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

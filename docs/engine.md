@@ -98,8 +98,10 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--daemon` | false | Run as a background daemon |
 | `--pidfile` | `/tmp/eullm.pid` | PID file path (with `--daemon`) |
 | `--logfile` | `~/.eullm/logs/eullm.log` | Daemon log file (with `--daemon`). Set `--pidfile` alone and the log stays beside it |
-| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation model and the embedding model independently |
+| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
+| `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
+| `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use (state + every question's own tokens). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
 
@@ -505,6 +507,151 @@ falls back to mean-pooling its per-token embeddings. Output vectors are
 L2-normalized. Rerankers (RANK-pooling models) are out of scope for this
 endpoint — normalizing a single relevance score would collapse it.
 
+## Decisions: `/v1/systemone` and the Decision Slot
+
+`POST /v1/systemone` answers typed questions about a *state* — a ticket, a
+document, a conversation, a JSON object — without generating any text. It
+takes the request and response shape of the System One API (TypeSafe's
+Jev), so a client written for it can point its base URL at EuLLM. Three
+question types:
+
+| Type | Question | Answer |
+|---|---|---|
+| `noul` | Is this statement true of the state? | `noul`: P(yes) |
+| `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options) | `choice`, `probabilities`, `confidence` |
+| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
+
+```bash
+curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "Help! My payouts have been failing for 3 days.",
+  "questions": {
+    "is_urgent": { "type": "noul", "instructions": "Does this convey urgency?" },
+    "team": { "type": "choice", "instructions": "Which team should handle it?",
+              "criteria": { "billing": "Payments and payouts", "tech": "Bugs", "other": "Anything else" } },
+    "severity": { "type": "score", "instructions": "How severe is it?",
+                  "criteria": ["Cosmetic", "Degraded, with a workaround", "Blocking"] }
+  }
+}'
+```
+
+```json
+{
+  "model": "qwen3-4b",
+  "answers": {
+    "is_urgent": { "type": "noul", "noul": 0.95, "eullm": { ... } },
+    "team": { "type": "choice", "choice": "billing",
+              "probabilities": { "billing": 0.91, "tech": 0.07, "other": 0.02 },
+              "confidence": 0.71, "eullm": { ... } },
+    "severity": { "type": "score", "score": 1.43,
+                  "legend": { "0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking" },
+                  "probabilities": { "0": 0.0, "1": 0.57, "2": 0.43 },
+                  "confidence": 0.32, "eullm": { ... } }
+  },
+  "usage": { "input_tokens": 312, "output_tokens": 0 },
+  "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
+             "evaluated_tokens": 312, "timings_ms": { ... }, ... }
+}
+```
+
+Answers and options come back in the order the request listed them; options
+are shown to the model lettered in that order.
+
+**How an answer is computed.** Each question becomes one chat prompt (the
+model's own template, reasoning switched off) ending where the answer would
+begin, with the options coded `A`…`Z`, the levels `0`…`9`, or `Yes`/`No`.
+The logits at that position are read once — nothing is generated — and
+restricted to the codes. When the model loads, the server checks that every
+code is a single token for its tokenizer right after its prompt, and refuses
+a question whose codes are not; the load log lists what it found.
+
+Next to the System One fields, every answer carries an `eullm` object with
+what it was derived from, so a stored response can be re-examined or
+re-calibrated later:
+
+| Field | Meaning |
+|---|---|
+| `logprobs` | Full-vocabulary log-probability of each answer's code |
+| `raw_probabilities` | The same, renormalized over the answers, before calibration |
+| `coverage` | Share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
+| `prior_logprobs` | The content-free prior that was divided out (with `content_free` calibration only) |
+
+`confidence` is `1 − H(p) / ln K` — 1 when all probability is on one answer,
+0 when it is spread evenly — and named in `eullm.confidence_method`.
+
+**Calibration is not a solved problem here, and nothing is claimed about
+it yet.** The mechanism reproduces with any model; calibrated probabilities
+do not come with it. The request's `eullm` object picks what is applied, so
+the options can be compared on labelled data before one is trusted:
+
+| `eullm` option | Values | Default |
+|---|---|---|
+| `calibration` | `none`; `content_free`: divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
+| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1` |
+| `mode` | `shared_prefix`; `separate` (see below) | `shared_prefix` |
+
+The content-free prior is not always noise to remove: when the options
+themselves imply a base rate, dividing it out moves probability towards
+options that are rarely right. Measure before choosing.
+
+**Many questions, one pass.** Every question's prompt starts with the same
+tokens — system prompt, template, the state — and differs only at the end.
+`shared_prefix` decodes that common prefix once, shares its KV cells with
+one sequence per question (no copy: on a unified cache the cells are only
+tagged with the extra sequences), and decodes the rest of every question in
+one batch: about `S + Q·q` tokens for `Q` questions of `q` tokens on a state
+of `S`, instead of the `Q·(S + q)` of asking one at a time. `separate` does
+exactly that, one at a time; it exists as the baseline. The response reports
+both counts (`prompt_tokens` against `evaluated_tokens`) and the timings of
+each phase. `bench/decision_bench.py` measures the saving for 1–64 questions
+on states of several sizes.
+
+The two modes read the same tokens, and on an F32 model they agree to about
+1e-6. On quantized weights they do not agree exactly: a question whose KV
+cells sit at other positions of the cache sums its attention in another
+order, and the 8-bit activation quantization of a Q8_0 model amplifies that
+rounding. Measured on Qwen3-0.6B: up to 0.01 in log-probability with F16
+weights, and up to ~0.2–0.7 on some codes with Q8_0, which moved an
+undecided answer from 0.46 to 0.57; confident answers barely move. It is the
+same amount the model moves when one prompt is decoded in batches of another
+size, so it is a property of the model, not of the shared prefix — but
+calibration should be measured in the mode that will serve.
+
+**Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
+`score`, and `--decision-ctx` tokens of context per request (default 8192).
+A request over the context limit is refused with a 400 that says how many
+tokens it needed.
+
+**Which model.** A small instruction-tuned model: Qwen3 0.6B–4B from the
+catalog are the intended size. The decision model must be able to answer
+without reasoning first; a model that always opens a reasoning block (the
+DeepSeek-R1 family) spends its first token on the tag, and every answer's
+`coverage` shows it.
+
+**The decision slot.** The model lives in a third slot, next to the
+generation and embedding models, with the same residency rules as the
+embedding slot: loaded next to the generation model when it fits, the
+generation model evicted first when it does not. What counts is the weights
+plus a request's context — its KV cache at `--decision-ctx` and a compute
+buffer — because the context is created per request and never shows up as
+used VRAM between requests. `--decision-model <path-or-name>` loads it at
+startup as a reserved companion, exactly like `--embedding-model`: `--fit`
+keeps its context's VRAM free and a chat-model swap never evicts it.
+
+```bash
+eullm serve --decision-model qwen3-1.7b --decision-ctx 16384
+```
+
+The `model` field may name any model the server can load (it then loads into
+the decision slot). Left out, or set to a System One model name such as
+`jev-latest`, it means the decision model already loaded — so a Jev client
+works unchanged. With no decision model loaded the request is refused with a
+400 saying so.
+
+Every request is written to the audit trail with `request_type: "systemone"`
+and a `decision` record: each answer with its log-probabilities and its
+probabilities before and after calibration. The state itself is not stored,
+only its SHA-256.
+
 ## API Reference
 
 The Engine exposes two sets of endpoints: the native EULLM API (Ollama-compatible) and an OpenAI-compatible API. CORS is enabled for browser-based tools.
@@ -764,6 +911,13 @@ curl -X POST http://localhost:11434/v1/embeddings \
 `usage` is honestly reported as zero rather than a fabricated token count —
 the embedding path does not run a text tokenizer count today.
 
+#### `POST /v1/systemone`
+
+Typed decisions (`noul`, `choice`, `score`) about a state, in the System One
+API shape. Not an OpenAI endpoint; it sits under `/v1` because that is where
+System One clients look for it. See
+[Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot).
+
 ## Model Catalog
 
 The Engine ships with a built-in catalog of EU models:
@@ -789,11 +943,12 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `id` | UUID v4 | Unique inference ID |
 | `timestamp` | DateTime (UTC) | Request time |
 | `model` | String | Model name |
-| `request_type` | String | `generate`, `chat`, `chat.completions` |
+| `request_type` | String | `generate`, `chat`, `chat.completions`, `systemone` |
 | `input_tokens` | u32 | Input token count |
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
+| `decision` | Object, `systemone` only | `state_sha256`, `mode`, `calibration`, `temperature`, and per answer: `id`, `type`, `labels`, `logprobs`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 

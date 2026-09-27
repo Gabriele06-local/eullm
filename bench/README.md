@@ -11,6 +11,47 @@ the T4.1 prefill/decode baseline harness.
 
 Real stress test that **proves** whether an inference server processes requests in parallel or just queues them sequentially.
 
+## `decision_bench.py` — shared-prefix benchmark for `/v1/systemone`
+
+Measures what answering many questions about the same state in one pass
+buys over asking them one at a time: for every state size (`--states`,
+default 256/1k/4k tokens) and question count (`--questions`, default
+1/4/8/16/32/64), the tokens each mode decodes, the decode time of each
+(median of `--repeat` runs, from the server's own timings) and the speedup,
+and how far the two modes' answers are apart. Standard library only.
+
+```bash
+eullm serve --decision-model qwen3-0.6b --decision-ctx 16384
+python bench/decision_bench.py --url http://localhost:11434 --json decision-bench.json
+```
+
+`--decision-ctx 16384` covers the largest default case (a 4k-token state
+with 64 questions needs about 9k tokens); a case over the limit is reported
+as skipped. `--max-separate-tokens` (default 150k) skips the one-at-a-time
+baseline where it would take too long — on a CPU, lower it.
+
+The last columns are not an error margin to shrink: the two modes read the
+same tokens and agree to ~1e-6 on an F32 model, but a quantized model's
+answers move by its own numerical noise when the batch changes shape. On
+Qwen3-0.6B Q8_0 (4-core CPU): up to 0.13 in probability, with one near-tie
+out of 32 questions flipping its answer. Calibrate in the mode you serve in.
+
+## `decision_calibration.py` — calibration comparison for `/v1/systemone`
+
+Runs a labelled JSONL dataset through the decision model once and compares
+no calibration, content-free calibration, temperature scaling (T fitted by
+5-fold cross-fitting, never on the items it scores) and both together, on
+accuracy, NLL, Brier score and ECE with 95% bootstrap intervals, plus the
+share of items answered and their accuracy at several confidence
+thresholds. The dataset format is in the script's docstring; the items are
+yours to choose — a few hundred per question type is the least that makes
+the intervals useful.
+
+```bash
+python bench/decision_calibration.py labelled.jsonl --url http://localhost:11434 \
+    --json calibration.json
+```
+
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
 Validates the KV-cache prefix reuse scheduler against the checklist in
