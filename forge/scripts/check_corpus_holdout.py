@@ -45,19 +45,25 @@ import json
 import sys
 from pathlib import Path
 
-# Where a record says which court it came from. Checked in order; the first
-# one present on the record wins. `kind` is what format_pretraining.py infers
-# from the corpus filename, so it is set even when the fetcher wrote neither
-# of the others.
+# Where a record says which court it came from. A record may carry several:
+# `chunk.py` always stamps `source_id` from the fetcher's sentence id, and the
+# CdS acquirer keys rulings by NUMERO_RICORSO, so that id carries no court code
+# -- `kind`, which format_pretraining.py infers from the corpus filename, is the
+# only field on those records that names the court.
 SOURCE_FIELDS = ("source_id", "source", "kind")
 
 
 def record_source(rec: dict) -> str:
-    for field in SOURCE_FIELDS:
-        val = rec.get(field)
-        if isinstance(val, str) and val:
-            return val.lower()
-    return ""
+    """Every field the record uses to name its source, lowercased and joined.
+
+    All of them, not the first one present: taking the first meant `kind` was
+    never read, because `source_id` is always set, so a 2025 Consiglio di Stato
+    record in ``train.jsonl`` was matched against its own ruling number and the
+    gate passed. The fields are joined with a space so a marker cannot match
+    across the seam ("c" + "ds" is not "cds").
+    """
+    parts = [str(rec[f]).lower() for f in SOURCE_FIELDS if isinstance(rec.get(f), str) and rec[f]]
+    return " ".join(parts)
 
 
 def record_year(rec: dict) -> int | None:
