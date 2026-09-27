@@ -635,8 +635,16 @@ decision should not change with the questions asked next to it, and
 because a calibration measured on labelled data then holds however the
 questions are grouped into requests when serving. The price is one decode
 call per question instead of one per batch: 2–14% slower than `batched` on
-a 4-core CPU; on a GPU, where each call's fixed cost weighs more, the
-benchmark measures it. Calibrate in the mode that will serve.
+a 4-core CPU. On a GPU a decode call has a fixed cost of its own —
+launching a few hundred kernels one by one, about 5 ms on an RTX 5070 Ti,
+more than a short question's arithmetic — so there each question is padded
+to a multiple of 64 tokens with copies of its last token. Causal attention
+keeps the padding out of everything the answer is read from; what it
+changes is the batch's shape, which then depends on the question's own
+length only, and questions of the same padded length decode in the same
+shape one after another, which lets llama.cpp reuse the previous decode's
+graph and ggml-cuda replay it as one CUDA graph. The padding is counted in
+`evaluated_tokens`. Calibrate in the mode that will serve.
 
 **Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
 `score`, and `--decision-ctx` tokens of context per request (default 8192).
