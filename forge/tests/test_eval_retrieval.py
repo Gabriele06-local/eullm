@@ -161,3 +161,95 @@ def test_grade_file_writes_the_graded_copy(tmp_path):
 ])
 def test_administrative_norms_are_named_too(question, code):
     assert named_code(question) == code
+
+
+# --- the formats the legislation files REALLY hold (Leonardo, 2026-09-27) ----
+#
+# The first version of NormIndex was tested on tidy records with
+# article_num="2043". The real files have article_num="" for the codes from
+# the Normattiva ZIP, "Art. 1." for the laws from single XML, and chunks of
+# the c.p.a. holding several articles or its index. Retrieval by article
+# never matched, and the open-book run read unrelated text. These records are
+# copied from the real files, text shortened.
+
+REAL = [
+    {"source_id": "codice_civile", "kind": "legge", "code": "codice_civile", "article_num": "",
+     "chunk_index": 0, "chunk_total": 1,
+     "text": "DISPOSIZIONI SULLA LEGGE IN GENERALE \n \n Art. 1. \n \n (Indicazione delle "
+             "fonti). \n \n Sono fonti del diritto le leggi, i regolamenti."},
+    {"source_id": "codice_civile", "kind": "legge", "code": "codice_civile", "article_num": "",
+     "chunk_index": 0, "chunk_total": 1,
+     "text": "Art. 2043. \n \n (Risarcimento per fatto illecito). \n \n Qualunque fatto doloso "
+             "o colposo, che cagiona ad altri un danno ingiusto, obbliga a risarcire il danno."},
+    {"source_id": "codice_civile", "kind": "legge", "code": "codice_civile", "article_num": "",
+     "chunk_index": 0, "chunk_total": 1,
+     "text": "Art. 2044. \n \n (Legittima difesa). \n \n Non è responsabile chi cagiona il "
+             "danno per legittima difesa, ai sensi dell'art. 2043 e seguenti."},
+    {"source_id": "costituzione/art_Art. 27.", "kind": "legge", "code": "costituzione",
+     "article_num": "Art. 27.", "chunk_index": 0, "chunk_total": 1,
+     "text": "Art. Art. 27.\nLa responsabilita' penale e' personale."},
+    {"source_id": "legge_procedimento_amministrativo/art_Art. 2.", "kind": "legge",
+     "code": "legge_procedimento_amministrativo", "article_num": "Art. 2.",
+     "chunk_index": 0, "chunk_total": 2,
+     "text": "Art. Art. 2. ((Conclusione del procedimento))\nOve il procedimento consegua..."},
+    {"source_id": "legge_procedimento_amministrativo/art_Art. 2.", "kind": "legge",
+     "code": "legge_procedimento_amministrativo", "article_num": "Art. 2.",
+     "chunk_index": 1, "chunk_total": 2, "text": "...termine di trenta giorni."},
+    {"source_id": "codice_processo_amministrativo", "kind": "legge",
+     "code": "codice_processo_amministrativo", "article_num": "", "chunk_index": 0,
+     "chunk_total": 3,
+     "text": "INDICE GENERALE \n Art. 27 - Contraddittorio \n Art. 28 - Intervento \n "
+             "Art. 29 - Azione di annullamento \n Art. 30 - Azione di condanna \n "
+             "Art. 31 - Silenzio"},
+    {"source_id": "codice_processo_amministrativo", "kind": "legge",
+     "code": "codice_processo_amministrativo", "article_num": "", "chunk_index": 1,
+     "chunk_total": 3,
+     "text": "Art. 29 \n Azione di annullamento \n 1. L'azione di annullamento per violazione "
+             "di legge si propone nel termine di decadenza di sessanta giorni."},
+    {"source_id": "codice_processo_amministrativo", "kind": "legge",
+     "code": "codice_processo_amministrativo", "article_num": "", "chunk_index": 2,
+     "chunk_total": 3, "text": "continua il testo dell'articolo senza intestazione."},
+]
+
+
+@pytest.fixture
+def real():
+    return NormIndex(REAL)
+
+
+@pytest.mark.parametrize("question, first_text", [
+    ("Che cosa prevede l'articolo 2043 del codice civile?", "Art. 2043."),
+    ("Cosa stabilisce l'art. 27 della Costituzione italiana?", "Art. Art. 27."),
+    ("Cosa dice l'art. 2 della legge 241/1990?", "Art. Art. 2."),
+    ("Cosa prevede l'art. 29 c.p.a.?", "Art. 29 \n"),
+])
+def test_the_named_article_is_found_in_the_real_formats(real, question, first_text):
+    assert real.search(question, k=1)[0]["text"].startswith(first_text)
+
+
+def test_a_reference_inside_another_article_is_not_that_article(real):
+    hits = real.by_article("Cosa prevede l'art. 2043 del codice civile?")
+    assert [h["text"][:10] for h in hits] == ["Art. 2043."]
+
+
+def test_an_article_comes_before_an_index_that_merely_lists_it(real):
+    hits = real.by_article("Cosa prevede l'art. 29 c.p.a.?")
+    assert hits[0]["text"].startswith("Art. 29 \n")
+    assert hits[-1]["text"].startswith("INDICE GENERALE")
+
+
+def test_a_chunk_without_a_header_continues_the_article_before_it(real):
+    hits = real.by_article("Cosa dice l'art. 2 della legge 241/1990?")
+    assert [h["chunk_index"] for h in hits] == [0, 1]
+
+
+def test_labels_carry_the_article_actually_found(real):
+    from eullm_forge.eval.retrieval import label
+    assert [label(r) for r in REAL[1:2] + REAL[3:4]] == [
+        "codice civile, art. 2043", "costituzione, art. 27"]
+
+
+def test_bm25_stays_inside_the_code_the_question_names(real):
+    found = real.bm25("termine di decadenza di sessanta giorni codice del processo "
+                      "amministrativo", k=5, code="codice_processo_amministrativo")
+    assert found and {r["code"] for r in found} == {"codice_processo_amministrativo"}

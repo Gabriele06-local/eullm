@@ -90,12 +90,39 @@ def named_code(text: str) -> str | None:
     return None
 
 
+_SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
+# An article's own header, at the start of a line: "Art. 2043.", "Art. Art. 1."
+# (the XML parser writes the number with its own "Art." prefix), "Art. 29 -".
+# Anchored to a line start so "ai sensi dell'art. 2043" in the body of another
+# article is not read as that article.
+_HEADER = re.compile(
+    rf"(?im)^[ \t]*(?:art\.[ \t]*)?art(?:icolo)?\.?[ \t]*(\d+)(?:[ \t-]*({_SUFFIXES}))?\b")
+_NUMBER = re.compile(rf"(?i)(\d+)(?:[\s-]*({_SUFFIXES}))?")
+
+
+def _article_key(num: str, suffix: str = "") -> str:
+    return f"{int(num)}-{suffix.lower()}" if suffix else str(int(num))
+
+
+def record_articles(record: dict) -> list[str]:
+    """The articles a record belongs to, read from what the files really hold.
+
+    The legislation files are not uniform, and the first version of this
+    module assumed they were: ``article_num`` is "" for the codes parsed out
+    of the Normattiva ZIP, "Art. 1." for the laws parsed from single XML, and
+    a chunk of the codice del processo amministrativo can hold several
+    articles (or the whole index). So the field is used when it holds a
+    number, and the headers in the text otherwise.
+    """
+    m = _NUMBER.search(str(record.get("article_num") or ""))
+    if m:
+        return [_article_key(m.group(1), m.group(2) or "")]
+    return [_article_key(n, sfx) for n, sfx in _HEADER.findall(record.get("text", ""))]
+
+
 def named_articles(text: str) -> list[str]:
     """Article numbers a question names, as the records spell them."""
-    out = []
-    for num, suffix in _ARTICLE.findall(normalize_text(text)):
-        out.append(f"{num}-{suffix}" if suffix else num)
-    return out
+    return [_article_key(num, suffix) for num, suffix in _ARTICLE.findall(normalize_text(text))]
 
 
 @dataclass
@@ -110,6 +137,19 @@ class NormIndex:
     _avg: float = 0.0
 
     def __post_init__(self) -> None:
+        # Which article each record is, once. A chunk without a header of its
+        # own continues the previous record of the same code: articles are
+        # written in order, a long one as consecutive chunks.
+        self._arts: list[list[str]] = []
+        last: dict[str, str] = {}
+        for r in self.records:
+            arts = record_articles(r)
+            code = r.get("code") or ""
+            if arts:
+                last[code] = arts[-1]
+            elif r.get("chunk_index", 0) and code in last:
+                arts = [last[code]]
+            self._arts.append(arts)
         self._docs = [Counter(tokens(r.get("text", ""))) for r in self.records]
         for d in self._docs:
             self._df.update(d.keys())
@@ -132,16 +172,22 @@ class NormIndex:
         nums = named_articles(question)
         if not code or not nums:
             return []
-        hits = [r for r in self.records
-                if r.get("code") == code and str(r.get("article_num", "")).lower() in nums]
-        return sorted(hits, key=lambda r: r.get("chunk_index", 0))
+        hits = [(len(arts), i) for i, (r, arts) in enumerate(zip(self.records, self._arts))
+                if r.get("code") == code and set(arts) & set(nums)]
+        # A chunk that is the article itself before one that merely lists it
+        # among many (an index); within an article, its chunks in order.
+        hits.sort(key=lambda h: (h[0] > 3, h[1]))
+        return [self.records[i] for _, i in hits]
 
-    def bm25(self, question: str, k: int) -> list[dict]:
-        """The k records BM25 ranks highest for the question."""
+    def bm25(self, question: str, k: int, code: str | None = None) -> list[dict]:
+        """The k records BM25 ranks highest for the question, within ``code``
+        when the question names one."""
         q = tokens(question)
         n = len(self._docs)
         scores = []
         for i, d in enumerate(self._docs):
+            if code and self.records[i].get("code") != code:
+                continue
             length = sum(d.values())
             s = 0.0
             for w in q:
@@ -160,7 +206,7 @@ class NormIndex:
         """Named article first, then BM25 to fill up to k, without repeats."""
         found = self.by_article(question)[:k]
         seen = {id(r) for r in found}
-        for r in self.bm25(question, k):
+        for r in self.bm25(question, k, code=named_code(question)):
             if len(found) >= k:
                 break
             if id(r) not in seen:
@@ -172,8 +218,12 @@ class NormIndex:
 def label(record: dict) -> str:
     """How a record is cited in the prompt: code and article."""
     code = (record.get("code") or "").replace("_", " ")
-    num = record.get("article_num")
-    return f"{code}, art. {num}" if num else code
+    arts = record_articles(record)
+    if len(arts) == 1:
+        return f"{code}, art. {arts[0]}"
+    if arts:
+        return f"{code}, artt. {arts[0]}-{arts[-1]}"
+    return code
 
 
 def open_book_prompt(question: str, records: list[dict], max_chars: int = 3000) -> str:
