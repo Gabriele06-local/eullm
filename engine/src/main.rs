@@ -2029,8 +2029,14 @@ async fn cmd_run(
     let mut launch_decision: Option<api::DecisionSlot> = None;
     let mut decision_reserve_bytes: u64 = 0;
     if let Some(ref arg) = decision_model {
-        let slot =
-            load_launch_decision(arg, store, resolved_threads, decision_ctx, backend.clone());
+        let slot = load_launch_decision(
+            arg,
+            store,
+            resolved_threads,
+            decision_ctx,
+            flash_attn,
+            backend.clone(),
+        );
         decision_reserve_bytes = slot.reserve_bytes;
         launch_decision = Some(slot);
         // Same fallback as the embedding companion above, counting both.
@@ -2695,8 +2701,16 @@ async fn cmd_serve(
     // --decision-model: same as above; `swap_model` protects its reserve
     // through `AppState::reserved_decision_bytes` once a generation model
     // is loaded.
-    let launch_decision = decision_model
-        .map(|arg| load_launch_decision(&arg, &store, threads, decision_ctx, backend.clone()));
+    let launch_decision = decision_model.map(|arg| {
+        load_launch_decision(
+            &arg,
+            &store,
+            threads,
+            decision_ctx,
+            flash_attn,
+            backend.clone(),
+        )
+    });
 
     println!("eullm ready (no model loaded — send a request with a \"model\" field to load one).");
     println!("  API (EULLM):   http://localhost:{port}/api");
@@ -2760,17 +2774,19 @@ fn load_launch_decision(
     store: &ModelStore,
     threads: u32,
     decision_ctx: u32,
+    flash_attn: bool,
     backend: Arc<llama_cpp_2::llama_backend::LlamaBackend>,
 ) -> api::DecisionSlot {
     let path = resolve_model_path(arg, store).unwrap_or_else(|| {
         eprintln!("Error: decision model '{arg}' not found.");
         std::process::exit(1);
     });
-    let model = inference::decision::DecisionModel::load(&path, threads, decision_ctx, backend)
-        .unwrap_or_else(|e| {
-            eprintln!("Error loading decision model: {e}");
-            std::process::exit(1);
-        });
+    let model =
+        inference::decision::DecisionModel::load(&path, threads, decision_ctx, flash_attn, backend)
+            .unwrap_or_else(|e| {
+                eprintln!("Error loading decision model: {e}");
+                std::process::exit(1);
+            });
     let reserve_bytes = fit::decision_reserve_bytes(&path, decision_ctx);
     // The name a request would use to ask for it: what was typed for a
     // store name, the file name for a path.

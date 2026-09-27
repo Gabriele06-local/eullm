@@ -33,6 +33,11 @@ then:
     python bench/decision_bench.py --states 256,1024 --questions 1,8,64 --repeat 5 \\
         --json results/decision-bench.json
 
+--details prints, for every case, the question whose answer moved most, with
+its coverage in both modes; --order-check asks the same questions a third
+time in reverse order, to measure how much an answer depends only on where
+its question sits in the batch.
+
 Only the Python standard library is needed. Exit code is nonzero if any
 request failed for a reason other than exceeding --decision-ctx.
 """
@@ -179,6 +184,37 @@ def compare(shared, separate):
     return max_dp, max_dlp, agree
 
 
+def worst(shared, other):
+    """The question whose raw probabilities differ most between two runs:
+    `(id, largest probability difference, answer in shared, answer in other)`."""
+    found = None
+    for qid, a in shared["answers"].items():
+        b = other["answers"][qid]
+        pa, pb = a["eullm"]["raw_probabilities"], b["eullm"]["raw_probabilities"]
+        dp = max(abs(pa[k] - pb[k]) for k in pa)
+        if found is None or dp > found[1]:
+            found = (qid, dp, a, b)
+    return found
+
+
+def show_worst(shared, separate, request_ms, context_ms):
+    """Print the question that moved most, with its coverage in both modes:
+    similar coverage and a shifted distribution is arithmetic; a coverage
+    that collapses in one mode would mean that mode read the wrong logits."""
+    qid, dp, a, b = worst(shared, separate)
+
+    def fmt(p):
+        return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in p.items()) + "}"
+
+    print(
+        f"{'':>11}worst {qid} ({a['type']}): dP {dp:.3f}, coverage "
+        f"{a['eullm']['coverage']:.4f} shared / {b['eullm']['coverage']:.4f} separate; "
+        f"shared request {request_ms:.1f} ms (context {context_ms:.1f} ms)"
+    )
+    print(f"{'':>13}shared   {fmt(a['eullm']['raw_probabilities'])}")
+    print(f"{'':>13}separate {fmt(b['eullm']['raw_probabilities'])}")
+
+
 def run_case(url, model, state, questions, mode, repeat, timeout):
     payload = {"state": state, "questions": questions, "eullm": {"mode": mode}}
     if model:
@@ -230,6 +266,17 @@ def main():
     )
     parser.add_argument(
         "--json", default=None, help="write every case's numbers to this file"
+    )
+    parser.add_argument(
+        "--details",
+        action="store_true",
+        help="print the question that differs most between the modes, per case",
+    )
+    parser.add_argument(
+        "--order-check",
+        action="store_true",
+        help="also ask the questions in reverse order (shared prefix both times) "
+        "and report how far the answers move",
     )
     args = parser.parse_args()
 
@@ -353,6 +400,13 @@ def main():
                     f"{speedup:>7.1f}x | {max_dp:>8.4f} {max_dlp:>9.4f} "
                     f"{'yes' if agree else 'NO':>6}"
                 )
+                if args.details:
+                    show_worst(
+                        shared[0],
+                        separate[0],
+                        case["shared_request_ms"],
+                        case["shared_context_ms"],
+                    )
             else:
                 saving = s0["prompt_tokens"] / s0["evaluated_tokens"]
                 print(
@@ -361,6 +415,37 @@ def main():
                     f"{case['shared_decode_ms']:>12.1f} {'-':>10} {'-':>8} | "
                     f"{'-':>8} {'-':>9} {'-':>6}"
                 )
+            if args.order_check and q > 1:
+                # Same questions, same shared prefix, reversed: every question
+                # reads the same tokens, only where its cells sit in the batch
+                # changes. What moves here moves because of the layout alone.
+                reversed_questions = dict(reversed(list(questions.items())))
+                try:
+                    rev = run_case(
+                        url,
+                        args.model,
+                        state,
+                        reversed_questions,
+                        "shared_prefix",
+                        1,
+                        args.timeout,
+                    )[0]
+                except RequestFailed as e:
+                    print(f"{'':>11}reversed order failed: {e}", file=sys.stderr)
+                    failed = True
+                else:
+                    rdp, rdlp, ragree = compare(shared[0], rev)
+                    case.update(
+                        {
+                            "order_max_probability_difference": rdp,
+                            "order_max_logprob_difference": rdlp,
+                            "order_argmax_agrees": ragree,
+                        }
+                    )
+                    print(
+                        f"{'':>11}reversed order: max dP {rdp:.4f}, max dlogP {rdlp:.4f}, "
+                        f"argmax {'yes' if ragree else 'NO'}"
+                    )
             results.append(case)
 
     if args.json:

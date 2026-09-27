@@ -87,7 +87,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--n-batch` | `2048` | Prefill batch size (tokens per eval) |
 | `--cache-type-k` | `f16` | KV cache type for keys (f16, q8_0, q4_0). Quantizing frees VRAM for more layers |
 | `--cache-type-v` | `f16` | KV cache type for values (f16, q8_0, q4_0) |
-| `--no-flash-attn` | false | Disable flash attention (on by default) |
+| `--no-flash-attn` | false | Disable flash attention (on by default), for the generation model and the decision model alike |
 | `--web` | false | Fetch URLs found in user messages and inject their content |
 | `--mmproj` | (auto) | Multimodal projector path, when it is not beside the weights |
 | `--ctx-checkpoints` | `0` | Prompt-prefix state snapshots for hybrid/recurrent models |
@@ -606,15 +606,25 @@ each phase. `bench/decision_bench.py` measures the saving for 1–64 questions
 on states of several sizes.
 
 The two modes read the same tokens, and on an F32 model they agree to about
-1e-6. On quantized weights they do not agree exactly: a question whose KV
-cells sit at other positions of the cache sums its attention in another
-order, and the 8-bit activation quantization of a Q8_0 model amplifies that
-rounding. Measured on Qwen3-0.6B: up to 0.01 in log-probability with F16
-weights, and up to ~0.2–0.7 on some codes with Q8_0, which moved an
-undecided answer from 0.46 to 0.57; confident answers barely move. It is the
-same amount the model moves when one prompt is decoded in batches of another
-size, so it is a property of the model, not of the shared prefix — but
-calibration should be measured in the mode that will serve.
+1e-6 on the CPU. On quantized weights they do not agree exactly: a question
+whose KV cells sit at other positions of the cache sums its attention in
+another order, and the 8-bit activation quantization of a Q8_0 model
+amplifies that rounding. Measured on Qwen3-0.6B on the CPU: up to 0.01 in
+log-probability with F16 weights, and up to ~0.2–0.7 on some codes with
+Q8_0, which moved an undecided answer from 0.46 to 0.57; confident answers
+barely move. On CUDA the arithmetic is coarser — ggml-cuda runs cuBLAS in
+TF32 mode and accumulates some F16 products in half precision — and so is
+the disagreement: on an RTX 5070 Ti the F32 test model differed by 6e-3, and
+Qwen3-0.6B moved some answers by up to 0.5 in probability, changing the top
+answer of a few questions near a tie. Asking the same questions in reverse
+order, shared prefix both times, moved them as much on the CPU (0.135
+against 0.130 in probability): an answer depends on where its question sits
+in the batch, not on the prefix being shared. Two
+consequences: in `shared_prefix` mode a question's probabilities can change
+with the other questions asked alongside it, which `separate` mode does not
+do; and calibration should be measured in the mode that will serve.
+`bench/decision_bench.py --details --order-check` shows both on your
+hardware.
 
 **Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
 `score`, and `--decision-ctx` tokens of context per request (default 8192).

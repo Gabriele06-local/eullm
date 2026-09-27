@@ -33,8 +33,17 @@ baseline where it would take too long — on a CPU, lower it.
 The last columns are not an error margin to shrink: the two modes read the
 same tokens and agree to ~1e-6 on an F32 model, but a quantized model's
 answers move by its own numerical noise when the batch changes shape. On
-Qwen3-0.6B Q8_0 (4-core CPU): up to 0.13 in probability, with one near-tie
-out of 32 questions flipping its answer. Calibrate in the mode you serve in.
+Qwen3-0.6B Q8_0: up to 0.13 in probability on a 4-core CPU, and up to 0.52 on
+an RTX 5070 Ti, where ggml-cuda's TF32 and half-precision arithmetic is
+coarser — enough to change the top answer of a question near a tie.
+Calibrate in the mode you serve in.
+
+`--details` prints, per case, the question that moved most with its
+coverage in both modes (a coverage that collapsed in one mode would mean
+that mode read the wrong logits; a similar coverage with a shifted
+distribution is arithmetic). `--order-check` asks the same questions again
+in reverse order, shared prefix both times: what moves there moves only
+because of where each question sits in the batch.
 
 ## `decision_calibration.py` — calibration comparison for `/v1/systemone`
 

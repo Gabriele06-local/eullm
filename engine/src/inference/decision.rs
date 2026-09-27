@@ -602,6 +602,10 @@ pub struct DecisionModel {
     threads: u32,
     /// Most KV cells one request's context may use.
     max_ctx: u32,
+    /// `--no-flash-attn` turned off, as for the generation model: llama.cpp
+    /// then decides per device (its AUTO policy); on, flash attention is
+    /// never used.
+    flash_attn: bool,
     uses_template: bool,
     codes: CodeTable,
     /// Held for a whole evaluation. Every request creates its own context,
@@ -630,6 +634,7 @@ impl DecisionModel {
         path: &Path,
         threads: u32,
         max_ctx: u32,
+        flash_attn: bool,
         backend: Arc<LlamaBackend>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !path.exists() {
@@ -671,6 +676,7 @@ impl DecisionModel {
             model,
             threads: threads.max(1),
             max_ctx,
+            flash_attn,
             uses_template,
             codes,
             eval_lock: Mutex::new(()),
@@ -808,7 +814,17 @@ impl DecisionModel {
             )));
         }
         match mode {
-            EvalMode::SharedPrefix => self.evaluate_shared(prompts, classes),
+            EvalMode::SharedPrefix if prompts.len() > 1 => self.evaluate_shared(prompts, classes),
+            // One prompt has nothing to share: split into its prefix and
+            // its last token it only costs a second decode call — 10.9 ms
+            // instead of 3.9 for a 309-token prompt on an RTX 5070 Ti —
+            // and a result that differs from the one-pass decode in the
+            // last digits for no benefit.
+            EvalMode::SharedPrefix => {
+                let (logprobs, mut stats) = self.evaluate_separate(prompts, classes)?;
+                stats.mode = EvalMode::SharedPrefix;
+                Ok((logprobs, stats))
+            }
             EvalMode::Separate => self.evaluate_separate(prompts, classes),
         }
     }
@@ -835,12 +851,18 @@ impl DecisionModel {
             .with_n_outputs_max(n_seq)
             .with_kv_unified(true)
             .with_n_threads(self.threads as i32)
-            .with_n_threads_batch(self.threads as i32);
+            .with_n_threads_batch(self.threads as i32)
+            // Set either way, as `build_ctx_params_with_cache` does: left
+            // alone, llama.cpp's default is AUTO, not off.
+            .with_flash_attention_policy(if self.flash_attn && !self.exact {
+                -1
+            } else {
+                0
+            });
         let params = if self.exact {
             params
                 .with_type_k(KvCacheType::F32)
                 .with_type_v(KvCacheType::F32)
-                .with_flash_attention_policy(0)
         } else {
             params
         };
@@ -1559,8 +1581,12 @@ mod tests {
     /// (`DecisionModel::exact`) to take the cache's own rounding out.
     ///
     /// What is left is the model's arithmetic. On F32 weights the two paths
-    /// agree to ~2e-6 (stories260K, measured), which is what the default
-    /// tolerance is for. On quantized weights they do not, and cannot: a
+    /// agree to ~2e-6 on the CPU (stories260K, measured), which is what the
+    /// default tolerance is for. A CUDA build defaults to 2e-2 instead:
+    /// ggml-cuda runs every cuBLAS handle in TF32 mode, so "F32" products
+    /// keep a 10-bit mantissa, and the same test measured 6.4e-3 on an RTX
+    /// 5070 Ti — still far below what a question reading another's tokens
+    /// would cost. On quantized weights they do not agree, and cannot: a
     /// question whose cells sit at other indices of the cache sums its
     /// attention in another order, and the 8-bit activation quantization
     /// of a Q8_0 model turns that last-digit difference into a different
@@ -1581,12 +1607,21 @@ mod tests {
         let tolerance: f64 = std::env::var("EULLM_DECISION_TEST_TOLERANCE")
             .ok()
             .and_then(|t| t.parse().ok())
-            .unwrap_or(1e-3);
+            .unwrap_or(if crate::inference::has_gpu_backend() {
+                2e-2
+            } else {
+                1e-3
+            });
         let backend = crate::inference::init_shared_backend().expect("backend");
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
-        let mut model =
-            DecisionModel::load(Path::new(&path), threads, DEFAULT_DECISION_CTX, backend)
-                .expect("load the model");
+        let mut model = DecisionModel::load(
+            Path::new(&path),
+            threads,
+            DEFAULT_DECISION_CTX,
+            true,
+            backend,
+        )
+        .expect("load the model");
         model.exact = true;
 
         let state = "Tom had a red ball. He lost it in the park on Monday. Lily found it \

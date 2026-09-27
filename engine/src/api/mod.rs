@@ -875,9 +875,10 @@ impl AppState {
         );
         let threads = self.threads;
         let max_ctx = self.decision_ctx;
+        let flash_attn = self.flash_attn;
         let backend_for_load = self.backend.clone();
         let model = tokio::task::spawn_blocking(move || {
-            DecisionModel::load(&gguf_path, threads, max_ctx, backend_for_load)
+            DecisionModel::load(&gguf_path, threads, max_ctx, flash_attn, backend_for_load)
         })
         .await
         .map_err(|e| ModelError::LoadFailed(format!("Task join error: {e}")))?
