@@ -49,11 +49,14 @@ What `shared_prefix` adds is that this noise no longer depends on the other
 questions: a question is decoded alone, in the same cache cells and in
 batches of the same shape whatever else the request asks, so its answer is
 a function of the state and that question only. `--order-check` verifies
-it: it asks the questions again in reverse order and the first and last
-alone, and in `shared_prefix` mode every answer must come back bit for bit
-the same — `dP 0.0000 ... identical`, measured on the CPU — while `batched`
+it: it asks the questions again in reverse order, the first and last alone,
+and the whole request once more starting from the state the server kept
+from the request before (`state kept`, timed), and in `shared_prefix` mode
+every answer must come back bit for bit the same — `dP 0.0000 ...
+identical`, measured on the CPU and on an RTX 5070 Ti — while `batched`
 shows how much an answer moves only because of where its question sits in
 the batch. The bench exits with an error if a `shared_prefix` answer moved.
+The timed runs themselves never start from a kept state.
 
 `--details` prints, per case and mode, the question that moved most from the
 baseline with its coverage in both (a coverage that collapsed in one mode

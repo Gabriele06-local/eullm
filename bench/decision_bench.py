@@ -45,10 +45,15 @@ then:
 
 --details prints, for every case, the question whose answer moved most in
 each mode, with its coverage; --order-check asks the same questions again in
-reverse order, in `shared_prefix` and in `batched` mode, and the first and
-last question alone in `shared_prefix` mode. In `shared_prefix` every answer
-must come back identical (dP 0.0000); `batched` shows how much an answer
-moves only because of where its question sits in the batch.
+reverse order, in `shared_prefix` and in `batched` mode, and in
+`shared_prefix` mode also the first and last question alone and the whole
+request once more with the state the server kept from the request before
+(timed: "state kept"). In `shared_prefix` every answer must come back
+identical (dP 0.0000); `batched` shows how much an answer moves only because
+of where its question sits in the batch.
+
+The timed runs never reuse a kept state: each gets a state of its own, and
+a tiny request about another state goes before each mode's first run.
 
 Only the Python standard library is needed. Exit code is nonzero if any
 request failed for a reason other than exceeding --decision-ctx, or if a
@@ -230,16 +235,37 @@ def show_worst(mode, response, separate):
 
 
 def run_case(url, model, state, questions, mode, repeat, timeout):
-    payload = {"state": state, "questions": questions, "eullm": {"mode": mode}}
-    if model:
-        payload["model"] = model
+    """`repeat` requests. The server keeps the state it decoded last and
+    skips decoding it again when the next request asks about the same one,
+    so every run after the first gets a state of its own — a marker line in
+    front — and all of them are timed from a cold state. The first run's
+    state is the unmarked one, the same in every mode, so answers compare."""
     runs = []
-    for _ in range(repeat):
+    for r in range(repeat):
+        payload = {
+            "state": state if r == 0 else f"(run {r})\n{state}",
+            "questions": questions,
+            "eullm": {"mode": mode},
+        }
+        if model:
+            payload["model"] = model
         started = time.perf_counter()
         response = post(url, payload, timeout)
         response["_client_ms"] = (time.perf_counter() - started) * 1000.0
         runs.append(response)
     return runs
+
+
+def evict(url, model, timeout):
+    """One tiny request about another state, so the next one cannot start
+    from a state the server kept from the request before."""
+    payload = {
+        "state": "(bench: nothing kept)",
+        "questions": {"q": {"type": "noul", "instructions": "Is this empty?"}},
+    }
+    if model:
+        payload["model"] = model
+    post(url, payload, timeout)
 
 
 def median(values):
@@ -272,6 +298,10 @@ def order_check(ask, runs, questions):
     the request changes. In shared_prefix mode nothing may move; in batched
     mode what moves, moves because of where its question sits in the batch.
 
+    In shared_prefix mode the same request is also asked once more right
+    after the others, about the same state: the server then starts from the
+    state it kept (`prefix_reused`), which must not move an answer either.
+
     Returns the numbers for --json, one line to print per mode, and whether
     every shared_prefix answer came back bit for bit the same. A failed
     request raises RequestFailed."""
@@ -292,16 +322,18 @@ def order_check(ask, runs, questions):
                 answer = ask(mode, 1, {qid: questions[qid]})[0]
                 alone["answers"].update(answer["answers"])
             others["alone"] = alone
+            others["kept state"] = ask(mode, 1, questions)[0]
         parts = []
         for name, other in others.items():
             dp, dlp, agree = compare(base, other)
             exact = identical(base, other)
+            slug = name.replace(" ", "_")
             numbers.update(
                 {
-                    f"{key}_{name}_max_probability_difference": dp,
-                    f"{key}_{name}_max_logprob_difference": dlp,
-                    f"{key}_{name}_argmax_agrees": agree,
-                    f"{key}_{name}_identical": exact,
+                    f"{key}_{slug}_max_probability_difference": dp,
+                    f"{key}_{slug}_max_logprob_difference": dlp,
+                    f"{key}_{slug}_argmax_agrees": agree,
+                    f"{key}_{slug}_identical": exact,
                 }
             )
             parts.append(f"{name} dP {dp:.4f}" + ("" if agree else ", argmax NO"))
@@ -309,14 +341,13 @@ def order_check(ask, runs, questions):
                 same = same and exact
         verdict = ""
         if mode == "shared_prefix":
-            if len(runs[mode]) > 1:
-                # Also between the --repeat runs of one request: tells a
-                # kernel that is not deterministic from an answer that
-                # depends on the other questions.
-                repeated = all(identical(base, r) for r in runs[mode][1:])
-                numbers["shared_repeat_identical"] = repeated
-                same = same and repeated
-                parts.append("repeated " + ("identical" if repeated else "DIFFER"))
+            kept = others["kept state"]["eullm"]
+            numbers["shared_kept_state_reused"] = kept.get("prefix_reused", False)
+            numbers["shared_kept_state_decode_ms"] = decode_ms(others["kept state"])
+            parts.append(
+                f"state kept: {decode_ms(others['kept state']):.1f} ms"
+                + ("" if kept.get("prefix_reused") else " (NOT reused)")
+            )
             verdict = " — identical" if same else " — NOT IDENTICAL"
         lines.append(f"{'':>11}{mode + ':':<15}{', '.join(parts)}{verdict}")
     return numbers, lines, same
@@ -437,6 +468,7 @@ def main():
                     case["separate_skipped"] = "--max-separate-tokens"
                     continue
                 try:
+                    evict(url, args.model, args.timeout)
                     runs[mode] = ask(mode, args.repeat)
                 except RequestFailed as e:
                     if e.status == 400 and "--decision-ctx" in e.body:

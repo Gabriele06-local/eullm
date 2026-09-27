@@ -482,6 +482,9 @@ struct ResponseExtension {
     prompt_tokens: usize,
     /// Tokens every prompt shares, decoded once.
     shared_prefix_tokens: usize,
+    /// Those tokens were still in the decision model's context from the
+    /// previous request, about the same state, and were not decoded again.
+    prefix_reused: bool,
     /// Tokens decoded for the answers.
     evaluated_tokens: usize,
     timings_ms: Timings,
@@ -719,13 +722,14 @@ pub(super) async fn systemone(
             output_tokens: 0,
         },
         eullm: ResponseExtension {
-            mode: parsed.mode.as_str(),
+            mode: decision.stats.mode.as_str(),
             calibration: parsed.calibration.as_str(),
             temperature: parsed.temperature,
             confidence_method: decision::CONFIDENCE_METHOD,
             flash_attn,
             prompt_tokens: decision.stats.prompt_tokens,
             shared_prefix_tokens: decision.stats.shared_prefix_tokens,
+            prefix_reused: decision.stats.prefix_reused,
             evaluated_tokens: decision.stats.evaluated_tokens,
             timings_ms: Timings::from(&decision.stats),
             content_free: (parsed.calibration == Calibration::ContentFree).then(|| {
@@ -985,6 +989,7 @@ mod tests {
             context_cells: 160,
             context_ms: 1.0,
             prefix_ms: 2.0,
+            prefix_reused: false,
             questions_ms: 3.0,
             readout_ms: 0.5,
         };

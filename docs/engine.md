@@ -661,10 +661,22 @@ generation and embedding models, with the same residency rules as the
 embedding slot: loaded next to the generation model when it fits, the
 generation model evicted first when it does not. What counts is the weights
 plus a request's context — its KV cache at `--decision-ctx` and a compute
-buffer — because the context is created per request and never shows up as
-used VRAM between requests. `--decision-model <path-or-name>` loads it at
-startup as a reserved companion, exactly like `--embedding-model`: `--fit`
-keeps its context's VRAM free and a chat-model swap never evicts it.
+buffer. The model keeps that context between requests, sized by the largest
+request so far, and releases it before a generation model is sized, so the
+sizing sees it as reserved, not as used. `--decision-model <path-or-name>`
+loads it at startup as a reserved companion, exactly like
+`--embedding-model`: `--fit` keeps its context's VRAM free and a chat-model
+swap never evicts it.
+
+**The same state again costs only the questions.** The context keeps the
+state the last request decoded. A request whose shared part is token for
+token the same — the next round of questions an agent asks about the same
+document — starts from it instead of decoding the state again, and reports
+`prefix_reused: true`, with `evaluated_tokens` counting only what was
+decoded. It changes no answer: the questions land in the same cells, in
+batches of the same shape, as they would from a freshly decoded state (and
+`--order-check` in the benchmark checks exactly that). A request about
+another state replaces the one kept.
 
 ```bash
 eullm serve --decision-model qwen3-1.7b --decision-ctx 16384

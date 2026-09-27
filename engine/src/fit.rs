@@ -760,10 +760,12 @@ pub(crate) fn kv_cache_bytes(
 /// What one decision request can take on top of the decision model's
 /// weights: an F16 KV cache of `max_ctx` tokens (the most a request may
 /// ask for, `--decision-ctx`) plus [`DECISION_COMPUTE_RESERVE_BYTES`]. The
-/// context only exists while a request runs, so unlike the weights it never
-/// shows up in the free-VRAM figure between requests — this is what the
-/// decision slot asks to be kept free, when it loads and when a generation
-/// model is sized next to it.
+/// decision model keeps its context between requests but releases it
+/// before a generation model is sized (`api::AppState`'s
+/// `release_decision_context`), so unlike the weights it never shows up in
+/// the free-VRAM figure that sizing reads — this is what the decision slot
+/// asks to be kept free, when it loads and when a generation model is sized
+/// next to it.
 pub(crate) fn decision_reserve_bytes(path: &Path, max_ctx: u32) -> u64 {
     let info = read_gguf_info(path);
     kv_cache_bytes(info.as_ref(), max_ctx, 2.0, 2.0).saturating_add(DECISION_COMPUTE_RESERVE_BYTES)

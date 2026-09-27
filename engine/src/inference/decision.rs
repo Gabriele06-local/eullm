@@ -36,17 +36,15 @@
 //! here needs a sampler, a conversation-sized KV cache or the scheduler, and
 //! a small decision model can stay resident next to the chat model.
 
+mod engine;
+
 use std::collections::HashMap;
-use std::num::NonZeroU32;
 use std::path::Path;
 use std::pin::pin;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
-use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
@@ -72,9 +70,9 @@ pub const MIN_OPTIONS: usize = 2;
 pub const MAX_SCORE_LEVELS: usize = 10;
 
 /// Default ceiling on the KV cells one request's context may use
-/// (`--decision-ctx`). The context is sized to each request, so this is not
-/// memory held all the time; it is the most one request may ask for, and
-/// what the slot reserves VRAM for. A request needs the state plus its
+/// (`--decision-ctx`). The context kept between requests grows to the
+/// largest request so far, so this is not memory held from the start; it is
+/// the most one request may ask for, and what the slot reserves VRAM for. A request needs the state plus its
 /// longest question — plus every other question too in `Batched` mode — so
 /// 8192 fits a state of nearly 8k tokens, or in `Batched` mode a 4k-token
 /// state with about fifty short questions.
@@ -90,13 +88,9 @@ pub const CONTENT_FREE_STATE: &str = "N/A";
 /// can tell which definition a stored number came from if it ever changes.
 pub const CONFIDENCE_METHOD: &str = "normalized_entropy";
 
-/// Upper bound on one decode call. The prefix and the questions' batch are
-/// split into chunks of at most this many tokens.
-const MAX_BATCH: u32 = 2048;
-
-/// Upper bound on llama.cpp's micro-batch: its own default, and what sizes
-/// the compute buffer the slot reserves VRAM for.
-const MAX_UBATCH: u32 = 512;
+/// Most questions one `batched` decode round holds on a recurrent or
+/// hybrid model, which keeps a recurrent state per sequence.
+const RECURRENT_BATCH_GROUP: usize = 16;
 
 /// llama.cpp attends over the cache's used cells rounded up to a multiple
 /// of this, so the attention's shape moves in steps of it.
@@ -674,12 +668,16 @@ pub struct EvalStats {
     pub evaluated_tokens: usize,
     /// Sum of the prompts' lengths: what decoding each on its own costs.
     pub prompt_tokens: usize,
-    /// KV cells the context was asked for; llama.cpp rounds it up to a
-    /// multiple of 256.
+    /// KV cells of the context the request ran in: the one kept from
+    /// earlier requests when it was large enough.
     pub context_cells: usize,
+    /// Creating that context; 0 when it was kept.
     pub context_ms: f64,
-    /// Decoding the shared prefix (not `Separate`).
+    /// Decoding the shared prefix (not `Separate`); 0 when it was reused.
     pub prefix_ms: f64,
+    /// The shared prefix was already in the context, left there by the
+    /// previous request, and was not decoded again.
+    pub prefix_reused: bool,
     /// Decoding what follows the prefix — every prompt in full for
     /// `Separate`.
     pub questions_ms: f64,
@@ -754,14 +752,10 @@ fn runtime(what: &str, e: impl std::fmt::Display) -> DecisionError {
 
 /// A loaded decision model: a `LlamaModel` on the process-wide shared
 /// backend (see `EmbeddingModel::load` for why it must be shared), the code
-/// table resolved against its tokenizer, and a cache of content-free
-/// priors.
+/// table resolved against its tokenizer, the worker that evaluates its
+/// prompts (`engine`), and a cache of content-free priors.
 pub struct DecisionModel {
-    backend: Arc<LlamaBackend>,
-    model: LlamaModel,
-    threads: u32,
-    /// Most KV cells one request's context may use.
-    max_ctx: u32,
+    model: Arc<LlamaModel>,
     /// `--no-flash-attn` turned off, as for the generation model: llama.cpp
     /// then decides per device (its AUTO policy); on, flash attention is
     /// never used.
@@ -769,9 +763,9 @@ pub struct DecisionModel {
     uses_template: bool,
     layout: PromptLayout,
     codes: CodeTable,
-    /// Held for a whole evaluation. Every request creates its own context,
-    /// sized to it; two at once would hold two of those in VRAM, and the
-    /// slot only reserves room for one (`fit::decision_reserve_bytes`).
+    /// Held for a whole request, so the priors and the answers of one
+    /// request reach the worker back to back and the state it keeps is the
+    /// request's own.
     eval_lock: Mutex<()>,
     /// Keyed by mode as well as prompt: a prior measured in one mode is not
     /// bit-for-bit the one another mode would measure.
@@ -782,6 +776,7 @@ pub struct DecisionModel {
     /// instead of to the model's numerical noise. Only the tests set it; it
     /// costs twice the KV memory.
     exact: bool,
+    engine: engine::Engine,
 }
 
 impl DecisionModel {
@@ -836,11 +831,28 @@ impl DecisionModel {
             if flash_attn { "auto" } else { "off" }
         );
 
-        Ok(Self {
+        let threads = threads.max(1);
+        let model = Arc::new(model);
+        let mut protocol = engine::Protocol::CODES;
+        if model.is_recurrent() || model.is_hybrid() {
+            // A recurrent layer keeps a state per sequence: 64 of them for
+            // one `batched` round would cost more than the round saves.
+            protocol.group = RECURRENT_BATCH_GROUP;
+        }
+        let engine = engine::Engine::start(
+            Arc::clone(&model),
             backend,
+            engine::EngineConfig {
+                threads,
+                flash_attn,
+                max_ctx,
+                protocol,
+            },
+        )
+        .map_err(|e| format!("Failed to start the decision worker: {e}"))?;
+
+        Ok(Self {
             model,
-            threads: threads.max(1),
-            max_ctx,
             flash_attn,
             uses_template,
             layout,
@@ -848,6 +860,7 @@ impl DecisionModel {
             eval_lock: Mutex::new(()),
             prior_cache: Mutex::new(HashMap::new()),
             exact: false,
+            engine,
         })
     }
 
@@ -885,17 +898,16 @@ impl DecisionModel {
                     .map_err(DecisionError::Invalid)?,
             );
         }
-
         let (prompts, state_prefix) = self.prompts(state, questions)?;
-        let prompt_refs: Vec<&[LlamaToken]> = prompts.iter().map(Vec::as_slice).collect();
 
         let _running = self
             .eval_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (logprobs, stats) =
-            self.evaluate(&prompt_refs, state_prefix, &classes, options.mode)?;
 
+        // The priors first: the worker keeps the state it decoded last, and
+        // the next request is far likelier to ask about this one than about
+        // `CONTENT_FREE_STATE`.
         let mut priors: Option<Vec<Vec<f64>>> = None;
         let mut prior_stats = None;
         let mut priors_cached = 0;
@@ -914,12 +926,12 @@ impl DecisionModel {
             priors_cached = found.iter().filter(|p| p.is_some()).count();
             let missing: Vec<usize> = (0..found.len()).filter(|&i| found[i].is_none()).collect();
             if !missing.is_empty() {
-                let refs: Vec<&[LlamaToken]> =
-                    missing.iter().map(|&i| cf_prompts[i].as_slice()).collect();
+                let missing_prompts: Vec<Vec<LlamaToken>> =
+                    missing.iter().map(|&i| cf_prompts[i].clone()).collect();
                 let missing_classes: Vec<&[Vec<LlamaToken>]> =
                     missing.iter().map(|&i| classes[i]).collect();
                 let (measured, cf_stats) =
-                    self.evaluate(&refs, cf_prefix, &missing_classes, options.mode)?;
+                    self.evaluate(missing_prompts, cf_prefix, &missing_classes, options.mode)?;
                 let mut cache = self
                     .prior_cache
                     .lock()
@@ -935,6 +947,8 @@ impl DecisionModel {
             }
             priors = Some(found.into_iter().map(Option::unwrap_or_default).collect());
         }
+
+        let (logprobs, stats) = self.evaluate(prompts, state_prefix, &classes, options.mode)?;
 
         let outcomes = logprobs
             .into_iter()
@@ -955,6 +969,14 @@ impl DecisionModel {
     /// Whether flash attention may be used (`--no-flash-attn` not given).
     pub fn flash_attn(&self) -> bool {
         self.flash_attn
+    }
+
+    /// Free the context the worker keeps between requests until the next
+    /// request needs one. A generation model is sized with this model's
+    /// context counted as reserved (`fit::decision_reserve_bytes`), so it
+    /// must not also be counted as used.
+    pub fn release_context(&self) {
+        self.engine.release();
     }
 
     /// Every question's prompt, and how many tokens at their start depend on
@@ -1058,13 +1080,13 @@ impl DecisionModel {
 
     fn evaluate(
         &self,
-        prompts: &[&[LlamaToken]],
+        prompts: Vec<Vec<LlamaToken>>,
         state_prefix: usize,
         classes: &[&[Vec<LlamaToken>]],
         mode: EvalMode,
     ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
         let n_ctx_train = self.model.n_ctx_train() as usize;
-        if let Some(longest) = prompts.iter().map(|p| p.len()).max()
+        if let Some(longest) = prompts.iter().map(Vec::len).max()
             && n_ctx_train > 0
             && longest > n_ctx_train
         {
@@ -1073,394 +1095,25 @@ impl DecisionModel {
                  trained on: shorten the state"
             )));
         }
-        match mode {
-            EvalMode::SharedPrefix => self.evaluate_isolated(prompts, state_prefix, classes),
-            EvalMode::Batched if prompts.len() > 1 => self.evaluate_batched(prompts, classes),
-            // One prompt has nothing to batch with: split into its prefix
-            // and its last token it only costs a second decode call — 10.9
-            // ms instead of 3.9 for a 309-token prompt on an RTX 5070 Ti.
+        let shortest = prompts.iter().map(Vec::len).min().unwrap_or(0);
+        let shared = match mode {
+            // Every prompt keeps at least its last token, the one read.
+            EvalMode::SharedPrefix => state_prefix.min(shortest.saturating_sub(1)),
             EvalMode::Batched => {
-                let (logprobs, mut stats) = self.evaluate_separate(prompts, classes)?;
-                stats.mode = EvalMode::Batched;
-                Ok((logprobs, stats))
+                let refs: Vec<&[LlamaToken]> = prompts.iter().map(Vec::as_slice).collect();
+                shared_prefix_len(&refs)
             }
-            EvalMode::Separate => self.evaluate_separate(prompts, classes),
-        }
-    }
-
-    /// Create a context for one evaluation. `n_seq` sequences, one logits
-    /// row each at most per decode call: `n_outputs_max` sized to that
-    /// rather than left at its default of `n_batch`, which would reserve a
-    /// vocabulary-sized row per batch slot in the compute buffer. The cache
-    /// is unified so the sequences can share the prefix's cells; without it
-    /// llama.cpp gives each sequence its own `n_ctx / n_seq` slice and
-    /// copying the prefix would copy the data.
-    fn context(
-        &self,
-        cells: usize,
-        n_batch: u32,
-        n_seq: u32,
-    ) -> Result<LlamaContext<'_>, DecisionError> {
-        let n_ctx = u32::try_from(cells).unwrap_or(u32::MAX).max(1);
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(n_ctx))
-            .with_n_batch(n_batch)
-            .with_n_ubatch(n_batch.min(MAX_UBATCH))
-            .with_n_seq_max(n_seq)
-            .with_n_outputs_max(n_seq)
-            .with_kv_unified(true)
-            .with_n_threads(self.threads as i32)
-            .with_n_threads_batch(self.threads as i32)
-            // Set either way, as `build_ctx_params_with_cache` does: left
-            // alone, llama.cpp's default is AUTO, not off.
-            .with_flash_attention_policy(if self.flash_attn && !self.exact {
-                -1
-            } else {
-                0
-            });
-        let params = if self.exact {
-            params
-                .with_type_k(KvCacheType::F32)
-                .with_type_v(KvCacheType::F32)
-        } else {
-            params
+            EvalMode::Separate => 0,
         };
-        self.model
-            .new_context(&self.backend, params)
-            .map_err(|e| DecisionError::Runtime(format!("Failed to create decision context: {e}")))
-    }
-
-    fn evaluate_batched(
-        &self,
-        prompts: &[&[LlamaToken]],
-        classes: &[&[Vec<LlamaToken>]],
-    ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
-        let started = Instant::now();
-        let n = prompts.len();
-        let prompt_tokens: usize = prompts.iter().map(|p| p.len()).sum();
-        let prefix_len = shared_prefix_len(prompts);
-        let suffix_total = prompt_tokens - n * prefix_len;
-        let cells = prefix_len + suffix_total;
-        if cells > self.max_ctx as usize {
-            return Err(DecisionError::TooLong {
-                needed: cells,
-                limit: self.max_ctx as usize,
-            });
-        }
-
-        let n_batch = u32::try_from(prefix_len.max(suffix_total))
-            .unwrap_or(MAX_BATCH)
-            .clamp(1, MAX_BATCH);
-        let mut ctx = self.context(cells, n_batch, n as u32)?;
-        let context_ms = ms_since(started);
-
-        // 1. The shared prefix, once, on sequence 0. No logits: every
-        //    prompt has at least one token after it (`shared_prefix_len`).
-        let prefix_started = Instant::now();
-        let mut batch = LlamaBatch::new(n_batch as usize, 1);
-        for (chunk_index, chunk) in prompts[0][..prefix_len]
-            .chunks(n_batch as usize)
-            .enumerate()
-        {
-            batch.clear();
-            let base = chunk_index * n_batch as usize;
-            for (j, &token) in chunk.iter().enumerate() {
-                batch
-                    .add(token, (base + j) as i32, &[0], false)
-                    .map_err(|e| runtime("Failed to build prefix batch", e))?;
-            }
-            ctx.decode(&mut batch)
-                .map_err(|e| runtime("Prefix decode failed", e))?;
-        }
-        // 2. Every other sequence starts from the same cells.
-        if prefix_len > 0 {
-            for seq in 1..n {
-                ctx.copy_kv_cache_seq(0, seq as i32, None, None)
-                    .map_err(|e| runtime("Failed to share the prefix", e))?;
-            }
-        }
-        ctx.synchronize();
-        let prefix_ms = ms_since(prefix_started);
-
-        // 3. The rest of every prompt, all in the same batches, with logits
-        //    on each prompt's last token only.
-        let questions_started = Instant::now();
-        let mut readout_ms = 0.0;
-        let mut results: Vec<Option<Vec<f64>>> = vec![None; n];
-        let mut pending: Vec<(usize, i32)> = Vec::new();
-        batch.clear();
-        for (i, prompt) in prompts.iter().enumerate() {
-            let suffix = &prompt[prefix_len..];
-            for (j, &token) in suffix.iter().enumerate() {
-                if batch.n_tokens() as u32 >= n_batch {
-                    readout_ms +=
-                        self.flush(&mut ctx, &mut batch, &mut pending, classes, &mut results)?;
-                }
-                let last = j + 1 == suffix.len();
-                if last {
-                    pending.push((i, batch.n_tokens()));
-                }
-                batch
-                    .add(token, (prefix_len + j) as i32, &[i as i32], last)
-                    .map_err(|e| runtime("Failed to build question batch", e))?;
-            }
-        }
-        if batch.n_tokens() > 0 {
-            readout_ms += self.flush(&mut ctx, &mut batch, &mut pending, classes, &mut results)?;
-        }
-        let questions_ms = ms_since(questions_started) - readout_ms;
-
-        let logprobs = results
-            .into_iter()
-            .map(|r| {
-                r.ok_or_else(|| DecisionError::Runtime("a question produced no logits".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            logprobs,
-            EvalStats {
-                mode: EvalMode::Batched,
-                prompts: n,
-                shared_prefix_tokens: prefix_len,
-                evaluated_tokens: cells,
-                prompt_tokens,
-                context_cells: cells,
-                context_ms,
-                prefix_ms,
-                questions_ms,
-                readout_ms,
-            },
-        ))
-    }
-
-    /// `SharedPrefix`: the state's tokens once on sequence 0, then each
-    /// question on sequence 1 — a copy of 0's cells, removed again once the
-    /// question's logits are read. Removing a sequence hands its cells back
-    /// and moves llama.cpp's search for free cells to the first of them, so
-    /// every question lands in the same cells right after the prefix, with
-    /// the same attention window: what it computes is the same whether it is
-    /// asked alone or among 63 others, in any order. Hybrid models work the
-    /// same way: copying a sequence copies its recurrent state too.
-    ///
-    /// One decode call per question costs a fixed ~3 ms on an RTX 5070 Ti
-    /// (Qwen3-0.6B) on top of the question's own tokens: the GPU running a
-    /// few hundred small kernels. Padding every question to a common length
-    /// so the calls replay as CUDA graphs was tried and measured 25% slower:
-    /// the fixed cost is the kernels' own run time, not their launch.
-    fn evaluate_isolated(
-        &self,
-        prompts: &[&[LlamaToken]],
-        state_prefix: usize,
-        classes: &[&[Vec<LlamaToken>]],
-    ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
-        let started = Instant::now();
-        let n = prompts.len();
-        let max_ctx = self.max_ctx as usize;
-        let prompt_tokens: usize = prompts.iter().map(|p| p.len()).sum();
-        let shortest = prompts.iter().map(|p| p.len()).min().unwrap_or(0);
-        let prefix_len = state_prefix.min(shortest.saturating_sub(1));
-        // Only one question is in the cache at a time.
-        let needed = prefix_len
-            + prompts
-                .iter()
-                .map(|p| p.len() - prefix_len)
-                .max()
-                .unwrap_or(0);
-        if needed > max_ctx {
-            return Err(DecisionError::TooLong {
-                needed,
-                limit: max_ctx,
-            });
-        }
-        // The cache is sized by the longest question, so it has to be kept
-        // out of what a question computes. llama.cpp attends over the used
-        // cells rounded up to 256, capped at the cache size: with a cache a
-        // whole number of 256 cells the cap never bites, and the window is
-        // the question's own. llama.cpp rounds the context up the same way
-        // today; done here too so that does not rest on it.
-        let cells = needed.next_multiple_of(KV_WINDOW_STEP);
-
-        // Not sized to this request: llama.cpp caps the batch at the context
-        // anyway, and a fixed one splits the prefix into the same micro-batches
-        // whatever the longest question — one more thing that cannot move a
-        // question's result.
-        let n_batch = MAX_BATCH;
-        let mut ctx = self.context(cells, n_batch, 2)?;
-        let n_batch = n_batch
-            .min(u32::try_from(cells).unwrap_or(MAX_BATCH))
-            .max(1) as usize;
-        let context_ms = ms_since(started);
-
-        let prefix_started = Instant::now();
-        let mut batch = LlamaBatch::new(n_batch, 1);
-        for (chunk_index, chunk) in prompts[0][..prefix_len].chunks(n_batch).enumerate() {
-            batch.clear();
-            let base = chunk_index * n_batch;
-            for (j, &token) in chunk.iter().enumerate() {
-                batch
-                    .add(token, (base + j) as i32, &[0], false)
-                    .map_err(|e| runtime("Failed to build prefix batch", e))?;
-            }
-            ctx.decode(&mut batch)
-                .map_err(|e| runtime("Prefix decode failed", e))?;
-        }
-        ctx.synchronize();
-        let prefix_ms = ms_since(prefix_started);
-
-        let questions_started = Instant::now();
-        let mut rows: Vec<(usize, Vec<f32>)> = Vec::with_capacity(n);
-        for (i, prompt) in prompts.iter().enumerate() {
-            if prefix_len > 0 {
-                ctx.copy_kv_cache_seq(0, 1, None, None)
-                    .map_err(|e| runtime("Failed to share the prefix", e))?;
-            }
-            let suffix = &prompt[prefix_len..];
-            let n_chunks = suffix.len().div_ceil(n_batch);
-            for (chunk_index, chunk) in suffix.chunks(n_batch).enumerate() {
-                batch.clear();
-                let base = prefix_len + chunk_index * n_batch;
-                for (j, &token) in chunk.iter().enumerate() {
-                    let last = chunk_index + 1 == n_chunks && j + 1 == chunk.len();
-                    batch
-                        .add(token, (base + j) as i32, &[1], last)
-                        .map_err(|e| runtime("Failed to build question batch", e))?;
-                }
-                ctx.decode(&mut batch)
-                    .map_err(|e| runtime("Question decode failed", e))?;
-            }
-            // Copied out, because the next decode overwrites it; scored
-            // below, all rows at once on every thread.
-            rows.push((i, ctx.get_logits_ith(batch.n_tokens() - 1).to_vec()));
-            ctx.clear_kv_cache_seq(Some(1), None, None)
-                .map_err(|e| runtime("Failed to drop a question's cells", e))?;
-        }
-        let questions_ms = ms_since(questions_started);
-
-        let readout_started = Instant::now();
-        let refs: Vec<(usize, &[f32])> = rows.iter().map(|(i, r)| (*i, r.as_slice())).collect();
-        let mut results: Vec<Option<Vec<f64>>> = vec![None; n];
-        for (i, logprobs) in score_rows(&refs, classes, self.threads as usize)? {
-            results[i] = Some(logprobs);
-        }
-        let readout_ms = ms_since(readout_started);
-
-        let logprobs = results
-            .into_iter()
-            .map(|r| {
-                r.ok_or_else(|| DecisionError::Runtime("a question produced no logits".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            logprobs,
-            EvalStats {
-                mode: EvalMode::SharedPrefix,
-                prompts: n,
-                shared_prefix_tokens: prefix_len,
-                evaluated_tokens: prompt_tokens - (n.saturating_sub(1)) * prefix_len,
-                prompt_tokens,
-                context_cells: cells,
-                context_ms,
-                prefix_ms,
-                questions_ms,
-                readout_ms,
-            },
-        ))
-    }
-
-    /// Decode `batch`, read the rows `pending` points at, and clear both.
-    /// Returns the milliseconds spent reading.
-    fn flush(
-        &self,
-        ctx: &mut LlamaContext<'_>,
-        batch: &mut LlamaBatch<'_>,
-        pending: &mut Vec<(usize, i32)>,
-        classes: &[&[Vec<LlamaToken>]],
-        results: &mut [Option<Vec<f64>>],
-    ) -> Result<f64, DecisionError> {
-        ctx.decode(batch)
-            .map_err(|e| runtime("Question decode failed", e))?;
-        // On a GPU the decode is only queued so far: wait for it here, or
-        // its arithmetic is counted as reading.
-        ctx.synchronize();
-        let started = Instant::now();
-        for (prompt, logprobs) in read_rows(ctx, pending, classes, self.threads as usize)? {
-            results[prompt] = Some(logprobs);
-        }
-        pending.clear();
-        batch.clear();
-        Ok(ms_since(started))
-    }
-
-    fn evaluate_separate(
-        &self,
-        prompts: &[&[LlamaToken]],
-        classes: &[&[Vec<LlamaToken>]],
-    ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
-        let started = Instant::now();
-        let prompt_tokens: usize = prompts.iter().map(|p| p.len()).sum();
-        let longest = prompts.iter().map(|p| p.len()).max().unwrap_or(0);
-        if longest > self.max_ctx as usize {
-            return Err(DecisionError::TooLong {
-                needed: longest,
-                limit: self.max_ctx as usize,
-            });
-        }
-        let n_batch = u32::try_from(longest)
-            .unwrap_or(MAX_BATCH)
-            .clamp(1, MAX_BATCH);
-        let mut ctx = self.context(longest, n_batch, 1)?;
-        let context_ms = ms_since(started);
-
-        let questions_started = Instant::now();
-        let mut readout_ms = 0.0;
-        let mut results: Vec<Option<Vec<f64>>> = vec![None; prompts.len()];
-        let mut pending = Vec::with_capacity(1);
-        let mut batch = LlamaBatch::new(n_batch as usize, 1);
-        for (i, prompt) in prompts.iter().enumerate() {
-            ctx.clear_kv_cache();
-            let n_chunks = prompt.len().div_ceil(n_batch as usize);
-            for (chunk_index, chunk) in prompt.chunks(n_batch as usize).enumerate() {
-                batch.clear();
-                let base = chunk_index * n_batch as usize;
-                for (j, &token) in chunk.iter().enumerate() {
-                    let last = chunk_index + 1 == n_chunks && j + 1 == chunk.len();
-                    if last {
-                        pending.push((i, batch.n_tokens()));
-                    }
-                    batch
-                        .add(token, (base + j) as i32, &[0], last)
-                        .map_err(|e| runtime("Failed to build prompt batch", e))?;
-                }
-                if chunk_index + 1 < n_chunks {
-                    ctx.decode(&mut batch)
-                        .map_err(|e| runtime("Prompt decode failed", e))?;
-                }
-            }
-            readout_ms += self.flush(&mut ctx, &mut batch, &mut pending, classes, &mut results)?;
-        }
-        let questions_ms = ms_since(questions_started) - readout_ms;
-
-        let logprobs = results
-            .into_iter()
-            .map(|r| {
-                r.ok_or_else(|| DecisionError::Runtime("a question produced no logits".into()))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok((
-            logprobs,
-            EvalStats {
-                mode: EvalMode::Separate,
-                prompts: prompts.len(),
-                shared_prefix_tokens: 0,
-                evaluated_tokens: prompt_tokens,
-                prompt_tokens,
-                context_cells: longest,
-                context_ms,
-                prefix_ms: 0.0,
-                questions_ms,
-                readout_ms,
-            },
-        ))
+        let reads = prompts.iter().map(|p| vec![p.len() - 1]).collect();
+        self.engine.evaluate(engine::Job {
+            prompts,
+            reads,
+            shared,
+            readout: engine::Readout::Classes(classes.iter().map(|c| c.to_vec()).collect()),
+            mode,
+            exact: self.exact,
+        })
     }
 }
 
@@ -1492,27 +1145,11 @@ fn shared_prefix_len(prompts: &[&[LlamaToken]]) -> usize {
     len.min(shortest.saturating_sub(1))
 }
 
-/// Per-class log-probabilities of the rows `pending` points at, as
-/// `(prompt, logprobs)`. The rows are read out of the context first and
-/// then scored on up to `workers` threads: each row is a pass over the whole
-/// vocabulary (~0.5-0.9 ms for 150k entries on one core, measured), which
-/// for 64 questions would otherwise add tens of milliseconds to a batch the
-/// GPU finished long before.
-fn read_rows(
-    ctx: &LlamaContext<'_>,
-    pending: &[(usize, i32)],
-    classes: &[&[Vec<LlamaToken>]],
-    workers: usize,
-) -> Result<Vec<(usize, Vec<f64>)>, DecisionError> {
-    let rows: Vec<(usize, &[f32])> = pending
-        .iter()
-        .map(|&(prompt, index)| (prompt, ctx.get_logits_ith(index)))
-        .collect();
-    score_rows(&rows, classes, workers)
-}
-
 /// Per-class log-probabilities of logits rows, as `(prompt, logprobs)`, on
-/// up to `workers` threads — see `read_rows` for why in parallel.
+/// up to `workers` threads: each row is a pass over the whole vocabulary
+/// (~0.5-0.9 ms for 150k entries on one core, measured), which for 64
+/// questions would otherwise add tens of milliseconds to a batch the GPU
+/// finished long before.
 fn score_rows(
     rows: &[(usize, &[f32])],
     classes: &[&[Vec<LlamaToken>]],
@@ -2267,5 +1904,86 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The worker keeps its context, and the state in it, from one request
+    /// to the next: a request about the same state skips decoding it. That
+    /// must not change an answer — not after a request about another state
+    /// replaced the one kept, not after a bigger request grew the context,
+    /// not after `batched` and `separate` requests used it in between.
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/model.gguf \
+    ///     cargo test --bin eullm decision::tests::real_ -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_a_kept_state_gives_the_answers_a_fresh_one_gives() {
+        let model = load_test_model();
+        let questions = test_questions(&model);
+        let ask = |state: &str, mode| {
+            model
+                .decide(
+                    state,
+                    &questions,
+                    DecideOptions {
+                        mode,
+                        content_free: false,
+                    },
+                )
+                .expect("decision")
+        };
+        let logprobs = |d: &Decision| -> Vec<Vec<f64>> {
+            d.outcomes.iter().map(|o| o.logprobs.clone()).collect()
+        };
+
+        let fresh = ask(TEST_STATE, EvalMode::SharedPrefix);
+        assert!(!fresh.stats.prefix_reused);
+        let kept = ask(TEST_STATE, EvalMode::SharedPrefix);
+        eprintln!("fresh: {:?}\nkept:  {:?}", fresh.stats, kept.stats);
+        assert!(kept.stats.prefix_reused, "the same state was decoded again");
+        assert_eq!(kept.stats.context_ms, 0.0, "the context was created again");
+        assert!(kept.stats.evaluated_tokens < fresh.stats.evaluated_tokens);
+        assert_eq!(
+            logprobs(&kept),
+            logprobs(&fresh),
+            "a kept state moved an answer"
+        );
+
+        let _ = ask(
+            "A cat sailed a small boat across the lake.",
+            EvalMode::SharedPrefix,
+        );
+        let replaced = ask(TEST_STATE, EvalMode::SharedPrefix);
+        assert!(!replaced.stats.prefix_reused);
+        assert_eq!(logprobs(&replaced), logprobs(&fresh));
+
+        let _ = ask(TEST_STATE, EvalMode::Batched);
+        let _ = ask(TEST_STATE, EvalMode::Separate);
+        let after_modes = ask(TEST_STATE, EvalMode::SharedPrefix);
+        assert_eq!(logprobs(&after_modes), logprobs(&fresh));
+
+        // Long enough to need more cells than any context so far — where
+        // the model was trained on that much (stories260K was not).
+        let per_copy = model
+            .model
+            .str_to_token(TEST_STATE, AddBos::Never)
+            .expect("tokenize")
+            .len();
+        let copies = engine::MIN_CELLS / per_copy.max(1) + 2;
+        if copies * per_copy + 512 > model.model.n_ctx_train() as usize {
+            eprintln!("skipping the growth check: the model's context is too short");
+            return;
+        }
+        let long_state = TEST_STATE.repeat(copies);
+        let grown = ask(&long_state, EvalMode::SharedPrefix);
+        assert!(grown.stats.context_cells > fresh.stats.context_cells);
+        let after_growth = ask(TEST_STATE, EvalMode::SharedPrefix);
+        assert_eq!(after_growth.stats.context_cells, grown.stats.context_cells);
+        assert_eq!(
+            logprobs(&after_growth),
+            logprobs(&fresh),
+            "a bigger context moved an answer"
+        );
     }
 }

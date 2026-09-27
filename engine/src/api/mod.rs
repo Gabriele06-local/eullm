@@ -81,8 +81,8 @@ pub struct DecisionSlot {
     /// VRAM a request can take on top of the weights: its KV cache at the
     /// per-request ceiling plus a compute buffer
     /// (`fit::decision_reserve_bytes`). The weights show up as used VRAM
-    /// once loaded; the context does not, because it only exists while a
-    /// request runs.
+    /// once loaded; the context the model keeps between requests is
+    /// released before a generation model is sized, so it does not.
     pub reserve_bytes: u64,
 }
 
@@ -405,6 +405,9 @@ impl AppState {
         let mmproj_bytes = crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref());
         let mut mmproj_placement = crate::fit::MmprojPlacement::from_flag(self.mmproj_offload);
         if self.fit {
+            // Counted below as reserved; the context the decision model
+            // keeps between requests must not show up as used as well.
+            self.release_decision_context().await;
             let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
             let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
             let mut reserve_bytes = self
@@ -925,10 +928,27 @@ impl AppState {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Free the context the loaded decision model keeps between requests
+    /// (`DecisionModel::release_context`), so a free-VRAM figure measured
+    /// next shows its weights as used and its context as free — the context
+    /// being what `reserved_decision_bytes` counts. The next decision
+    /// request creates it again. Waits for a request in progress to finish.
+    async fn release_decision_context(&self) {
+        let model = self
+            .decision
+            .read()
+            .await
+            .as_ref()
+            .map(|slot| Arc::clone(&slot.model));
+        if let Some(model) = model {
+            let _ = tokio::task::spawn_blocking(move || model.release_context()).await;
+        }
+    }
+
     /// The decision slot's counterpart of `reserved_embedding_bytes`: a
-    /// reserved companion's per-request context, which never shows up in
-    /// the free-VRAM figure between requests. Its weights do, so they are
-    /// not counted again.
+    /// reserved companion's per-request context, which the free-VRAM figure
+    /// does not show once `release_decision_context` has run. Its weights
+    /// do, so they are not counted again.
     async fn reserved_decision_bytes(&self) -> u64 {
         self.decision
             .read()

@@ -450,11 +450,12 @@ struct RuntimeOpts {
     /// plus its longest question (plus every other question too in
     /// `batched` mode).
     ///
-    /// Every request gets a context sized to it, so this is a ceiling, not
-    /// memory held all the time — but it is what the decision slot keeps
-    /// free in VRAM (for Qwen3-0.6B, 112 KiB per token: 896 MiB at the
-    /// default). 8192 fits a state of nearly 8k tokens, or in `batched`
-    /// mode a 4k-token state with about fifty short questions.
+    /// The decision model keeps one context between requests, sized by the
+    /// largest request so far, so this is a ceiling, not memory held from
+    /// the start — but it is what the decision slot keeps free in VRAM
+    /// (for Qwen3-0.6B, 112 KiB per token: 896 MiB at the default). 8192
+    /// fits a state of nearly 8k tokens, or in `batched` mode a 4k-token
+    /// state with about fifty short questions.
     #[arg(
         long,
         value_name = "N",
@@ -2025,8 +2026,9 @@ async fn cmd_run(
 
     // --decision-model: the same treatment for the /v1/systemone slot. What
     // it reserves is a request's whole context (KV cache at --decision-ctx
-    // plus a compute buffer), which never shows up as used VRAM between
-    // requests — see `fit::decision_reserve_bytes`.
+    // plus a compute buffer), which does not exist yet at launch and is
+    // released before a generation model is sized later — see
+    // `fit::decision_reserve_bytes`.
     let mut launch_decision: Option<api::DecisionSlot> = None;
     let mut decision_reserve_bytes: u64 = 0;
     if let Some(ref arg) = decision_model {
