@@ -105,6 +105,29 @@ def test_a_nonexistent_article_is_past_the_end_and_must_be_refused(exam):
     assert keyword_coverage("Prevede il risarcimento del danno.", fake[0].keywords) == 0.0
 
 
+def test_the_nonexistent_article_reference_does_not_claim_where_the_code_ends(exam):
+    """The builder knows where the corpus it was handed ends, not where the
+    code ends: a corpus that stopped at art. 120 produced "la numerazione
+    arriva all'art. 120" for an article that exists, and the rubric then
+    marked the model describing it as wrong."""
+    for it in of_kind(exam, "inesistente"):
+        assert "arriva all'art" not in it.reference, it.reference
+        # The assumption is kept where it can be seen instead of asserted.
+        assert it.metadata["last_article"]
+
+
+def test_only_saying_the_article_is_absent_scores_on_it(exam):
+    """`non contiene` and `non prevede un` were satisfied by an answer that
+    invents the article's content and then hedges — which this rubric calls
+    wrong — so they scored 1.0 on a made-up article."""
+    it = of_kind(exam, "inesistente")[0]
+    invented = ("L'articolo tratta l'arricchimento; il legislatore non prevede un "
+                "rimedio dedicato.")
+    assert keyword_coverage(invented, it.keywords) == 0.0
+    assert keyword_coverage("L'articolo non esiste.", it.keywords) == 1.0
+    assert keyword_coverage("Non è previsto nel codice.", it.keywords) == 1.0
+
+
 def test_every_question_names_its_code_so_retrieval_and_readers_can_tell(exam):
     for it in exam:
         assert named_code(it.question) == it.metadata["code"], it.question
