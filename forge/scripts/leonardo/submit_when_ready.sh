@@ -47,12 +47,22 @@ done
 SCRIPT="${1:?[wait] after -- give the chain: <script.slurm> [count] [sbatch args]}"
 case "$EVERY$TRIES" in *[!0-9]*) echo "[wait] --every and --tries are integers" >&2; exit 1 ;; esac
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SELF="$HERE/$(basename "${BASH_SOURCE[0]}")"
-# Paths relative to where the user stood, so the watcher job finds the same
-# files: Slurm starts it in the submission directory, but say it anyway.
+# Where this file lives — NOT where bash says it is. Slurm runs a COPY of a
+# batch script from its spool directory, so inside the watcher job
+# BASH_SOURCE points at /var/spool/.../slurm_script and nothing is beside it.
+# On 2026-09-26 that is exactly how the first watcher died on waking: it
+# looked for the chain's .slurm next to the spool copy, found nothing and
+# exited, and the corpus that arrived at 18:00 waited all night for a check
+# that never came. The interactive run knows the real directory and hands it
+# to every watcher it queues (WAIT_HOME), with the chain's script as an
+# absolute path.
+HERE="${WAIT_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+SELF="$HERE/submit_when_ready.sh"
+[ -f "$SELF" ] || { echo "[wait] cannot find myself at $SELF — set WAIT_HOME" >&2; exit 1; }
 [ -f "$SCRIPT" ] || SCRIPT="$HERE/$SCRIPT"
 [ -f "$SCRIPT" ] || { echo "[wait] no such sbatch script: $1" >&2; exit 1; }
+SCRIPT="$(cd "$(dirname "$SCRIPT")" && pwd)/$(basename "$SCRIPT")"
+shift
 
 CHAIN="$(sed -n 's/^#SBATCH --job-name=//p' "$SCRIPT" | head -1)"
 [ -n "$CHAIN" ] || { echo "[wait] $SCRIPT has no --job-name to check the queue by" >&2; exit 1; }
@@ -70,7 +80,6 @@ for f in "${NEED[@]}"; do [ -s "$f" ] || missing+=("$f"); done
 
 if [ "${#missing[@]}" -eq 0 ]; then
     echo "[wait] $(now) everything is there — submitting $CHAIN"
-    shift
     exec bash "$HERE/submit_chain.sh" "$SCRIPT" "$@"
 fi
 
@@ -94,6 +103,7 @@ again=()
 for f in "${NEED[@]}"; do again+=(--need "$f"); done
 jid=$(sbatch --parsable -J "$WATCHER" -p lrd_all_serial -c 1 --mem=1G -t 00:05:00 \
       --begin="now+${EVERY}minutes" -o "logs/$WATCHER-%j.out" \
-      "$SELF" "${again[@]}" --every "$EVERY" --tries $((TRIES - 1)) -- "$@")
+      --export=ALL,WAIT_HOME="$HERE" \
+      "$SELF" "${again[@]}" --every "$EVERY" --tries $((TRIES - 1)) -- "$SCRIPT" "$@")
 echo "[wait] $(now) will look again in $EVERY minutes (job ${jid%%;*}, $((TRIES - 1)) tries left)"
 echo "[wait]   cancel with: scancel -n $WATCHER"
