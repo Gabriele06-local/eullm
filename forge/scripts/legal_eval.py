@@ -74,6 +74,26 @@ CSV_HEADER = ["timestamp", "label", "model", "items", "keyword_coverage",
               "fully_covered", "ended_turn"]
 
 
+def append_csv_row(path: Path, row: list[str]) -> None:
+    """Append one summary row, writing the header if the file has none yet.
+
+    Existence is not enough: `open("a")` creates the file and the writer's
+    buffer is only flushed after the first row, so a run interrupted in that
+    window leaves a 0-byte CSV. The next run sees a file that exists, skips
+    the header, and the first model's row lands where the header belongs —
+    `csv.DictReader` then reads no rows and the ranking is silently empty.
+    The header is flushed before the row rather than after it.
+    """
+    needs_header = not (path.exists() and path.stat().st_size > 0)
+    with path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if needs_header:
+            w.writerow(CSV_HEADER)
+            f.flush()
+        w.writerow(row)
+        f.flush()
+
+
 def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
                      max_new_tokens: int, end_ids: list[int]) -> list[tuple[str, bool]]:
     """Greedy answers to already-templated prompts, ``batch_size`` at a time.
@@ -183,13 +203,7 @@ def main() -> int:
                                     "context": contexts.get(it.id)},
                                    ensure_ascii=False) + "\n")
     if args.csv:
-        path = Path(args.csv)
-        new_file = not path.exists()
-        with path.open("a", newline="") as f:
-            w = csv.writer(f)
-            if new_file:
-                w.writerow(CSV_HEADER)
-            w.writerow(summary_row(args.label, args.model, report, ended))
+        append_csv_row(Path(args.csv), summary_row(args.label, args.model, report, ended))
     return 0
 
 
