@@ -125,6 +125,28 @@ def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
     return grades
 
 
+def append_csv_row(path: Path, row: list[str]) -> None:
+    """Append one summary row, writing the header if the file has none yet.
+
+    The header is written on existence alone, which is not enough: `open("a")`
+    creates the file, and the writer's buffer is only flushed after the first
+    `grade_file` — 61 GB of weights and a full pass over the answers on a GPU
+    node. A job killed in that window leaves a 0-byte CSV, the re-submitted
+    job sees a file that exists, and the first model's row lands where the
+    header belongs: `csv.DictReader` then reads no rows at all and the
+    decision table is silently empty. So the test is size, not existence,
+    and the header is flushed before the expensive work rather than after it.
+    """
+    needs_header = not (path.exists() and path.stat().st_size > 0)
+    with path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        if needs_header:
+            w.writerow(CSV_HEADER)
+            f.flush()
+        w.writerow(row)
+        f.flush()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -138,18 +160,12 @@ def main() -> int:
 
     files = [p for p in args.answers if not p.name.endswith(".graded.jsonl")]
     grader = ReferenceGrader(Greedy(args.model))
-    new_file = not args.csv.exists()
-    with args.csv.open("a", newline="") as f:
-        w = csv.writer(f)
-        if new_file:
-            w.writerow(CSV_HEADER)
-        for path in files:
-            row = summary_row(label_of(path), grade_file(
-                path, grader, batch_size=args.batch_size, quiet=args.quiet))
-            w.writerow(row)
-            f.flush()
-            print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "
-                  f"partial {row[4]}, wrong {row[5]}", flush=True)
+    for path in files:
+        row = summary_row(label_of(path), grade_file(
+            path, grader, batch_size=args.batch_size, quiet=args.quiet))
+        append_csv_row(args.csv, row)
+        print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "
+              f"partial {row[4]}, wrong {row[5]}", flush=True)
     return 0
 
 

@@ -48,6 +48,7 @@ def test_the_summary_row_counts_full_marks_and_endings():
 
 def test_quiet_grading_prints_no_item(tmp_path, capsys):
     """Held-out exam ids name the article asked; --quiet must not print them."""
+    import csv
     import json
 
     spec = importlib.util.spec_from_file_location(
@@ -75,3 +76,28 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
     assert [g.label for g in grades] == ["correct"] * 3
     assert Batched.calls == 2                       # 3 prompts in batches of 2
     assert "codice_civile" not in capsys.readouterr().out
+
+    # A run killed while the first model was being graded leaves a 0-byte CSV:
+    # the file exists, so a header written on existence alone is skipped and the
+    # next row lands in its place, leaving DictReader with nothing.
+    out = tmp_path / "graded.csv"
+    for module in (ja, legal_eval):
+        out.write_text("")
+        module.append_csv_row(out, ["2026-09-27T00:00:00", "v0.3", "m", 3, 1, 0.5, 3, 3])
+        module.append_csv_row(out, ["2026-09-27T00:01:00", "v0.3", "m2", 3, 1, 0.5, 3, 3])
+        with out.open(encoding="utf-8", newline="") as f:
+            rows = list(csv.reader(f))
+        assert rows[0] == module.CSV_HEADER, module.CSV_HEADER[:2]
+        assert len(rows) == 3, module.CSV_HEADER[:2]
+        assert {r[1] for r in rows[1:]} == {"v0.3"}    # no row read as a header
+        out.unlink()
+
+    # And on a file that already has a header, nothing is repeated.
+    out = tmp_path / "graded2.csv"
+    for module in (ja, legal_eval):
+        out.unlink(missing_ok=True)
+        for label in ("a", "b"):
+            module.append_csv_row(out, ["t", label, "m", 1, 1, "1.0", 1, 1])
+        with out.open(encoding="utf-8", newline="") as f:
+            rows = list(csv.DictReader(f))
+        assert [r["label"] for r in rows] == ["a", "b"], module.CSV_HEADER[:2]
