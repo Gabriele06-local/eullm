@@ -85,12 +85,47 @@ def test_only_articles_with_exactly_one_deadline_become_deadline_questions(exam)
 
 
 def test_a_deadline_question_is_scored_on_the_deadline_in_digits_or_words(exam):
+    # `i`, not `it`: naming the variable being assigned in the generator
+    # expression made it a free variable of that expression, and the test died
+    # with a NameError on every run instead of asserting anything.
     it = next(i for i in of_kind(exam, "termine") if i.metadata["articolo"] == "2"
               and i.metadata["code"] == "codice_civile")
     assert "sessanta giorni" in it.reference
     assert keyword_coverage("Entro 60 giorni.", it.keywords) == 1.0
     assert keyword_coverage("Entro sessanta giorni.", it.keywords) == 1.0
     assert keyword_coverage("Entro trenta giorni.", it.keywords) == 0.0
+
+
+RATE_RECORD = rec("codice_civile",
+                  "Art. 1224. \n \n (Interessi legali) \n \n Gli interessi legali sono "
+                  "calcolati al tasso del 6 per cento, salvo quanto disposto per le "
+                  "obbligazioni in valuta estera. L'azione giudiziale si esercita entro "
+                  "sei mesi dalla maturazione della domanda." + FILLER,
+                  article_num="1224")
+
+
+def test_the_deadline_reference_is_the_sentence_that_states_the_deadline():
+    """The number can turn up earlier in the article for another reason — here
+    an interest rate — and looking the sentence up by the bare number hands the
+    grader that one instead, under a rubric that still asks for the deadline."""
+    items = build_exam([RATE_RECORD], per_code=4, seed=1)
+    it = next(i for i in items if i.metadata["tipo"] == "termine")
+    assert "sei mesi" in it.reference
+    assert "per cento" not in it.reference
+    assert keyword_coverage("Entro sei mesi dalla domanda.", it.keywords) == 1.0
+
+
+def test_a_cross_reference_is_not_the_deadline_answer_key():
+    cross = rec("codice_procedura_civile",
+                "Art. 750. \n \n (Interpretazione) \n \n Quando la legge rinvia ad altre "
+                "disposizioni si applicano le regole dell'articolo 30 del codice "
+                "penale. L'istanza si propone entro trenta giorni dalla notifica."
+                + FILLER,
+                article_num="750")
+    items = build_exam([cross], per_code=4, seed=2)
+    it = next(i for i in items if i.metadata["tipo"] == "termine")
+    assert "trenta giorni" in it.reference
+    assert "articolo 30" not in it.reference
 
 
 def test_repealed_articles_are_left_out(exam):
