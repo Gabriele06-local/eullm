@@ -243,7 +243,7 @@ struct RequestOptions {
     /// Temperature scaling applied after calibration; default 1.
     #[serde(default)]
     temperature: Option<f64>,
-    /// `shared_prefix` (default) or `separate`.
+    /// `shared_prefix` (default), `batched` or `separate`.
     #[serde(default)]
     mode: Option<String>,
 }
@@ -334,10 +334,11 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
     }
     let mode = match options.mode.as_deref() {
         None | Some("shared_prefix") => EvalMode::SharedPrefix,
+        Some("batched") => EvalMode::Batched,
         Some("separate") => EvalMode::Separate,
         Some(other) => {
             return Err(format!(
-                "unknown mode \"{other}\": expected \"shared_prefix\" or \"separate\""
+                "unknown mode \"{other}\": expected \"shared_prefix\", \"batched\" or \"separate\""
             ));
         }
     };
@@ -839,6 +840,19 @@ mod tests {
         assert_eq!(parsed.mode, EvalMode::SharedPrefix);
         assert_eq!(parsed.temperature, 1.0);
         assert_eq!(parsed.questions.len(), 3);
+    }
+
+    #[test]
+    fn every_mode_is_asked_for_by_the_name_it_is_reported_under() {
+        for mode in [
+            EvalMode::SharedPrefix,
+            EvalMode::Batched,
+            EvalMode::Separate,
+        ] {
+            let mut b = body();
+            b["eullm"] = json!({ "mode": mode.as_str() });
+            assert_eq!(parse(b).unwrap().mode, mode);
+        }
     }
 
     #[test]

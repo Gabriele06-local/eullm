@@ -268,12 +268,14 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 }'
 ```
 
-Up to 64 questions about the same state are answered in one pass that reads
-the state only once. Every answer comes with the raw log-probabilities it was
-taken from and a `coverage` that shows whether the model answered in the
-format asked for; every decision is recorded in the audit trail. How well
-the probabilities are calibrated has not been measured yet, so treat them as
-scores to be validated on your own data before automating on a threshold.
+Up to 64 questions about the same state are answered in one request that
+reads the state only once, and each answer depends on its own question only —
+asked alone or among others, in any order, it comes back the same. Every
+answer comes with the raw log-probabilities it was taken from and a
+`coverage` that shows whether the model answered in the format asked for;
+every decision is recorded in the audit trail. How well the probabilities are
+calibrated has not been measured yet, so treat them as scores to be validated
+on your own data before automating on a threshold.
 Details, calibration options and the numbers: [docs/engine.md](docs/engine.md#decisions-v1systemone-and-the-decision-slot).
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)

@@ -2,28 +2,38 @@
 """Shared-prefix benchmark for the decision layer (`POST /v1/systemone`).
 
 Asks Q questions about the same state, for every Q in --questions and every
-state size in --states, twice: once in `shared_prefix` mode (the state is
-decoded once and shared by every question) and once in `separate` mode (each
-question decoded on its own, the baseline). For each pair it reports:
+state size in --states, in each evaluation mode:
 
-  * tokens decoded by each mode, and the ratio — the saving the shared prefix
-    is supposed to buy, measured from the server's own counts;
+  * `shared_prefix` (the server's default): the state is decoded once, then
+    every question on its own right after it, so a question's answer depends
+    on the state and that question only;
+  * `batched`: the state once, then every question together in one batch —
+    the fewest decode calls, but an answer moves with the other questions in
+    the batch, by the model's own numerical noise;
+  * `separate`: each question decoded on its own from scratch, the baseline.
+
+For each case it reports:
+
+  * tokens decoded with the state shared and without, and the ratio — the
+    saving the shared prefix is supposed to buy, from the server's own counts;
   * decode time of each mode (prefix + questions, from the server's
-    `eullm.timings_ms`, median of --repeat runs) and the speedup;
-  * how far the two modes' answers are apart: the largest difference in any
-    raw probability and in any log-probability (codes the model all but rules
-    out, below -15, are left out), and whether every argmax agrees.
+    `eullm.timings_ms`, median of --repeat runs), and the speedup of
+    `shared_prefix` over `separate`;
+  * how far each mode's answers are from the baseline's: the largest
+    difference in any raw probability, marked with * when some question's
+    top answer differs.
 
-The two modes read the same tokens, so on an F32 model they agree to ~1e-6;
-on quantized weights they differ by the model's own numerical noise, the
-amount a prompt moves when decoded in batches of a different shape (see the
-equivalence test in engine/src/inference/decision.rs). That difference is
-what the last columns show — it is a property of the model, not a bug, but
-it is the number to know before comparing calibrations measured in one mode
-with answers served in the other.
+The three modes read the same tokens but hand them to the kernels in
+batches of different shapes, and on quantized weights that alone moves an
+answer by the model's own numerical noise: the dP columns (see the tests in
+engine/src/inference/decision.rs). It is a property of the model, not a bug
+— `shared_prefix` guarantees only that the noise does not depend on the
+other questions asked — but it is the number to know before comparing
+calibrations measured in one mode with answers served in another.
 
 Start the server with a decision model and enough context for the largest
-case (a 4k-token state with 64 questions needs about 9k tokens):
+case (a 4k-token state with 64 questions needs about 9k tokens in `batched`
+mode):
 
     eullm serve --decision-model qwen3-0.6b --decision-ctx 16384
 
@@ -33,13 +43,16 @@ then:
     python bench/decision_bench.py --states 256,1024 --questions 1,8,64 --repeat 5 \\
         --json results/decision-bench.json
 
---details prints, for every case, the question whose answer moved most, with
-its coverage in both modes; --order-check asks the same questions a third
-time in reverse order, to measure how much an answer depends only on where
-its question sits in the batch.
+--details prints, for every case, the question whose answer moved most in
+each mode, with its coverage; --order-check asks the same questions again in
+reverse order, in `shared_prefix` and in `batched` mode, and the first and
+last question alone in `shared_prefix` mode. In `shared_prefix` every answer
+must come back identical (dP 0.0000); `batched` shows how much an answer
+moves only because of where its question sits in the batch.
 
 Only the Python standard library is needed. Exit code is nonzero if any
-request failed for a reason other than exceeding --decision-ctx.
+request failed for a reason other than exceeding --decision-ctx, or if a
+`shared_prefix` answer changed with the other questions asked.
 """
 
 import argparse
@@ -165,14 +178,15 @@ def decode_ms(response):
     return t["prefix"] + t["questions"]
 
 
-def compare(shared, separate):
-    """Largest raw-probability and log-probability difference between the
-    two modes' answers, and whether every argmax agrees."""
+def compare(first, second):
+    """Largest raw-probability and log-probability difference between two
+    responses' answers to the questions both asked, and whether every argmax
+    agrees."""
     max_dp = 0.0
     max_dlp = 0.0
     agree = True
-    for qid, a in shared["answers"].items():
-        b = separate["answers"][qid]
+    for qid, b in second["answers"].items():
+        a = first["answers"][qid]
         pa, pb = a["eullm"]["raw_probabilities"], b["eullm"]["raw_probabilities"]
         la, lb = a["eullm"]["logprobs"], b["eullm"]["logprobs"]
         for label in pa:
@@ -184,12 +198,12 @@ def compare(shared, separate):
     return max_dp, max_dlp, agree
 
 
-def worst(shared, other):
+def worst(first, second):
     """The question whose raw probabilities differ most between two runs:
-    `(id, largest probability difference, answer in shared, answer in other)`."""
+    `(id, largest probability difference, answer in first, answer in second)`."""
     found = None
-    for qid, a in shared["answers"].items():
-        b = other["answers"][qid]
+    for qid, a in first["answers"].items():
+        b = second["answers"][qid]
         pa, pb = a["eullm"]["raw_probabilities"], b["eullm"]["raw_probabilities"]
         dp = max(abs(pa[k] - pb[k]) for k in pa)
         if found is None or dp > found[1]:
@@ -197,22 +211,22 @@ def worst(shared, other):
     return found
 
 
-def show_worst(shared, separate, request_ms, context_ms):
-    """Print the question that moved most, with its coverage in both modes:
-    similar coverage and a shifted distribution is arithmetic; a coverage
-    that collapses in one mode would mean that mode read the wrong logits."""
-    qid, dp, a, b = worst(shared, separate)
+def show_worst(mode, response, separate):
+    """Print the question that moved most from the baseline, with its
+    coverage in both runs: similar coverage and a shifted distribution is
+    arithmetic; a coverage that collapses in one run would mean that run
+    read the wrong logits."""
+    qid, dp, a, b = worst(response, separate)
 
     def fmt(p):
         return "{" + ", ".join(f"{k}: {v:.3f}" for k, v in p.items()) + "}"
 
     print(
-        f"{'':>11}worst {qid} ({a['type']}): dP {dp:.3f}, coverage "
-        f"{a['eullm']['coverage']:.4f} shared / {b['eullm']['coverage']:.4f} separate; "
-        f"shared request {request_ms:.1f} ms (context {context_ms:.1f} ms)"
+        f"{'':>11}{mode}: worst {qid} ({a['type']}), dP {dp:.4f}, coverage "
+        f"{a['eullm']['coverage']:.4f} / {b['eullm']['coverage']:.4f} separate"
     )
-    print(f"{'':>13}shared   {fmt(a['eullm']['raw_probabilities'])}")
-    print(f"{'':>13}separate {fmt(b['eullm']['raw_probabilities'])}")
+    print(f"{'':>13}{mode:<14}{fmt(a['eullm']['raw_probabilities'])}")
+    print(f"{'':>13}{'separate':<14}{fmt(b['eullm']['raw_probabilities'])}")
 
 
 def run_case(url, model, state, questions, mode, repeat, timeout):
@@ -230,6 +244,82 @@ def run_case(url, model, state, questions, mode, repeat, timeout):
 
 def median(values):
     return statistics.median(values) if values else float("nan")
+
+
+def identical(first, second):
+    """Whether every question `second` answered got bit-for-bit the same
+    log-probabilities in `first` (JSON carries every f64 exactly)."""
+    return all(
+        first["answers"][qid]["eullm"]["logprobs"] == b["eullm"]["logprobs"]
+        for qid, b in second["answers"].items()
+    )
+
+
+# Evaluation modes, as the server names them, and the key prefix each one's
+# numbers get in --json output.
+MODES = {"shared_prefix": "shared", "batched": "batched", "separate": "separate"}
+
+
+def ms_column(case, key, width):
+    """A mode's median decode time, or a dash where it did not run."""
+    value = case.get(f"{key}_decode_ms")
+    return f"{value:>{width}.1f}" if value is not None else f"{'-':>{width}}"
+
+
+def order_check(ask, runs, questions):
+    """The same questions reversed and, in shared_prefix mode, the first and
+    last alone: every question reads the same tokens, only what else is in
+    the request changes. In shared_prefix mode nothing may move; in batched
+    mode what moves, moves because of where its question sits in the batch.
+
+    Returns the numbers for --json, one line to print per mode, and whether
+    every shared_prefix answer came back bit for bit the same. A failed
+    request raises RequestFailed."""
+    ids = list(questions)
+    reversed_questions = dict(reversed(list(questions.items())))
+    numbers = {}
+    lines = []
+    same = True
+    for mode in ("shared_prefix", "batched"):
+        if mode not in runs:
+            continue
+        key = MODES[mode]
+        base = runs[mode][0]
+        others = {"reversed": ask(mode, 1, reversed_questions)[0]}
+        if mode == "shared_prefix":
+            alone = {"answers": {}}
+            for qid in (ids[0], ids[-1]):
+                answer = ask(mode, 1, {qid: questions[qid]})[0]
+                alone["answers"].update(answer["answers"])
+            others["alone"] = alone
+        parts = []
+        for name, other in others.items():
+            dp, dlp, agree = compare(base, other)
+            exact = identical(base, other)
+            numbers.update(
+                {
+                    f"{key}_{name}_max_probability_difference": dp,
+                    f"{key}_{name}_max_logprob_difference": dlp,
+                    f"{key}_{name}_argmax_agrees": agree,
+                    f"{key}_{name}_identical": exact,
+                }
+            )
+            parts.append(f"{name} dP {dp:.4f}" + ("" if agree else ", argmax NO"))
+            if mode == "shared_prefix":
+                same = same and exact
+        verdict = ""
+        if mode == "shared_prefix":
+            if len(runs[mode]) > 1:
+                # Also between the --repeat runs of one request: tells a
+                # kernel that is not deterministic from an answer that
+                # depends on the other questions.
+                repeated = all(identical(base, r) for r in runs[mode][1:])
+                numbers["shared_repeat_identical"] = repeated
+                same = same and repeated
+                parts.append("repeated " + ("identical" if repeated else "DIFFER"))
+            verdict = " — identical" if same else " — NOT IDENTICAL"
+        lines.append(f"{'':>11}{mode + ':':<15}{', '.join(parts)}{verdict}")
+    return numbers, lines, same
 
 
 def main():
@@ -270,12 +360,12 @@ def main():
     parser.add_argument(
         "--details",
         action="store_true",
-        help="print the question that differs most between the modes, per case",
+        help="print the question that differs most from the baseline, per mode and case",
     )
     parser.add_argument(
         "--order-check",
         action="store_true",
-        help="also ask the questions in reverse order (shared prefix both times) "
+        help="also ask the questions in reverse order, and the first and last alone, "
         "and report how far the answers move",
     )
     args = parser.parse_args()
@@ -285,6 +375,8 @@ def main():
     counts = [int(q) for q in args.questions.split(",") if q.strip()]
     if any(q < 1 or q > 64 for q in counts):
         parser.error("--questions must be between 1 and 64")
+    if args.repeat < 1:
+        parser.error("--repeat must be at least 1")
 
     # Warm-up: loads the model if --model names one, and keeps first-request
     # costs out of the first case.
@@ -305,152 +397,135 @@ def main():
     # below depend on it, and a comparison of two runs means nothing if
     # both turn out to have used the same setting.
     flash_attn = warm["eullm"].get("flash_attn", "unknown")
-    print(f"model {warm['model']}, flash attention {flash_attn}\n")
+    print(f"model {warm['model']}, flash attention {flash_attn}")
+    print(
+        "tokens: decoded with the state shared / without; speedup: separate over "
+        "shared_prefix;\ndP: largest probability difference from separate, "
+        "* when a question's top answer differs\n"
+    )
 
     header = (
         f"{'state':>6} {'Q':>3} | {'tokens sh/sep':>15} {'saving':>7} | "
-        f"{'decode ms sh':>12} {'sep':>10} {'speedup':>8} | "
-        f"{'max dP':>8} {'max dlogP':>9} {'argmax':>6}"
+        f"{'ms shared':>10} {'batched':>9} {'separate':>9} {'speedup':>8} | "
+        f"{'dP shared':>10} {'batched':>9}"
     )
     print(header)
     print("-" * len(header))
 
     results = []
     failed = False
+    moved = []
     for state_tokens in states:
         state = make_state(state_tokens)
         for q in counts:
             questions = make_questions(q)
             case = {"state_tokens_target": state_tokens, "questions": q}
-            try:
-                shared = run_case(
-                    url,
-                    args.model,
-                    state,
-                    questions,
-                    "shared_prefix",
-                    args.repeat,
-                    args.timeout,
+
+            def ask(mode, repeat, asked=questions):
+                return run_case(
+                    url, args.model, state, asked, mode, repeat, args.timeout
                 )
-            except RequestFailed as e:
-                if e.status == 400 and "--decision-ctx" in e.body:
-                    print(f"{state_tokens:>6} {q:>3} | exceeds --decision-ctx, skipped")
-                    case["skipped"] = "exceeds --decision-ctx"
-                    results.append(case)
+
+            runs = {}
+            for mode, key in MODES.items():
+                if (
+                    mode == "separate"
+                    and "shared_prefix" in runs
+                    and runs["shared_prefix"][0]["eullm"]["prompt_tokens"]
+                    > args.max_separate_tokens
+                ):
+                    case["separate_skipped"] = "--max-separate-tokens"
                     continue
-                print(
-                    f"{state_tokens:>6} {q:>3} | shared_prefix failed: {e}",
-                    file=sys.stderr,
-                )
-                failed = True
+                try:
+                    runs[mode] = ask(mode, args.repeat)
+                except RequestFailed as e:
+                    if e.status == 400 and "--decision-ctx" in e.body:
+                        case[f"{key}_skipped"] = "exceeds --decision-ctx"
+                    else:
+                        print(
+                            f"{state_tokens:>6} {q:>3} | {mode} failed: {e}",
+                            file=sys.stderr,
+                        )
+                        failed = True
+                if mode == "shared_prefix" and mode not in runs:
+                    break
+
+            shared = runs.get("shared_prefix")
+            if shared is None:
+                if "shared_skipped" in case:
+                    print(f"{state_tokens:>6} {q:>3} | exceeds --decision-ctx, skipped")
+                    results.append(case)
                 continue
             s0 = shared[0]["eullm"]
             case.update(
                 {
                     "prompt_tokens": s0["prompt_tokens"],
                     "shared_prefix_tokens": s0["shared_prefix_tokens"],
-                    "shared_evaluated_tokens": s0["evaluated_tokens"],
-                    "shared_decode_ms": median([decode_ms(r) for r in shared]),
-                    "shared_request_ms": median(
-                        [r["eullm"]["request_ms"] for r in shared]
-                    ),
-                    "shared_readout_ms": median(
-                        [r["eullm"]["timings_ms"]["readout"] for r in shared]
-                    ),
-                    "shared_context_ms": median(
-                        [r["eullm"]["timings_ms"]["context"] for r in shared]
-                    ),
                 }
             )
-
-            separate = None
-            if s0["prompt_tokens"] <= args.max_separate_tokens:
-                try:
-                    separate = run_case(
-                        url,
-                        args.model,
-                        state,
-                        questions,
-                        "separate",
-                        args.repeat,
-                        args.timeout,
-                    )
-                except RequestFailed as e:
-                    print(
-                        f"{state_tokens:>6} {q:>3} | separate failed: {e}",
-                        file=sys.stderr,
-                    )
-                    failed = True
-            if separate:
-                sep0 = separate[0]["eullm"]
-                max_dp, max_dlp, agree = compare(shared[0], separate[0])
+            for mode, responses in runs.items():
+                key = MODES[mode]
+                first = responses[0]["eullm"]
+                timings = [r["eullm"]["timings_ms"] for r in responses]
                 case.update(
                     {
-                        "separate_evaluated_tokens": sep0["evaluated_tokens"],
-                        "separate_decode_ms": median([decode_ms(r) for r in separate]),
-                        "separate_request_ms": median(
-                            [r["eullm"]["request_ms"] for r in separate]
+                        f"{key}_evaluated_tokens": first["evaluated_tokens"],
+                        f"{key}_decode_ms": median([decode_ms(r) for r in responses]),
+                        f"{key}_request_ms": median(
+                            [r["eullm"]["request_ms"] for r in responses]
                         ),
-                        "max_probability_difference": max_dp,
-                        "max_logprob_difference": max_dlp,
-                        "argmax_agrees": agree,
+                        f"{key}_context_ms": median([t["context"] for t in timings]),
+                        f"{key}_readout_ms": median([t["readout"] for t in timings]),
                     }
                 )
-                saving = sep0["evaluated_tokens"] / s0["evaluated_tokens"]
-                speedup = case["separate_decode_ms"] / case["shared_decode_ms"]
-                print(
-                    f"{state_tokens:>6} {q:>3} | "
-                    f"{s0['evaluated_tokens']:>6}/{sep0['evaluated_tokens']:<8} {saving:>6.1f}x | "
-                    f"{case['shared_decode_ms']:>12.1f} {case['separate_decode_ms']:>10.1f} "
-                    f"{speedup:>7.1f}x | {max_dp:>8.4f} {max_dlp:>9.4f} "
-                    f"{'yes' if agree else 'NO':>6}"
-                )
-                if args.details:
-                    show_worst(
-                        shared[0],
-                        separate[0],
-                        case["shared_request_ms"],
-                        case["shared_context_ms"],
-                    )
-            else:
-                saving = s0["prompt_tokens"] / s0["evaluated_tokens"]
-                print(
-                    f"{state_tokens:>6} {q:>3} | "
-                    f"{s0['evaluated_tokens']:>6}/{'(skipped)':<8} {saving:>6.1f}x | "
-                    f"{case['shared_decode_ms']:>12.1f} {'-':>10} {'-':>8} | "
-                    f"{'-':>8} {'-':>9} {'-':>6}"
-                )
-            if args.order_check and q > 1:
-                # Same questions, same shared prefix, reversed: every question
-                # reads the same tokens, only where its cells sit in the batch
-                # changes. What moves here moves because of the layout alone.
-                reversed_questions = dict(reversed(list(questions.items())))
-                try:
-                    rev = run_case(
-                        url,
-                        args.model,
-                        state,
-                        reversed_questions,
-                        "shared_prefix",
-                        1,
-                        args.timeout,
-                    )[0]
-                except RequestFailed as e:
-                    print(f"{'':>11}reversed order failed: {e}", file=sys.stderr)
-                    failed = True
-                else:
-                    rdp, rdlp, ragree = compare(shared[0], rev)
+
+            separate = runs.get("separate")
+            dp_columns = {}
+            if separate:
+                for mode in ("shared_prefix", "batched"):
+                    if mode not in runs:
+                        continue
+                    key = MODES[mode]
+                    dp, dlp, agree = compare(runs[mode][0], separate[0])
                     case.update(
                         {
-                            "order_max_probability_difference": rdp,
-                            "order_max_logprob_difference": rdlp,
-                            "order_argmax_agrees": ragree,
+                            f"{key}_max_probability_difference": dp,
+                            f"{key}_max_logprob_difference": dlp,
+                            f"{key}_argmax_agrees": agree,
                         }
                     )
-                    print(
-                        f"{'':>11}reversed order: max dP {rdp:.4f}, max dlogP {rdlp:.4f}, "
-                        f"argmax {'yes' if ragree else 'NO'}"
-                    )
+                    dp_columns[mode] = f"{dp:.4f}{' ' if agree else '*'}"
+
+            saving = s0["prompt_tokens"] / s0["evaluated_tokens"]
+            speedup = (
+                f"{case['separate_decode_ms'] / case['shared_decode_ms']:>7.1f}x"
+                if separate
+                else f"{'-':>8}"
+            )
+            print(
+                f"{state_tokens:>6} {q:>3} | "
+                f"{s0['evaluated_tokens']:>6}/{s0['prompt_tokens']:<8} {saving:>6.1f}x | "
+                f"{ms_column(case, 'shared', 10)} {ms_column(case, 'batched', 9)} "
+                f"{ms_column(case, 'separate', 9)} {speedup} | "
+                f"{dp_columns.get('shared_prefix', '-'):>10} "
+                f"{dp_columns.get('batched', '-'):>9}"
+            )
+            if args.details and separate:
+                for mode in ("shared_prefix", "batched"):
+                    if mode in runs:
+                        show_worst(mode, runs[mode][0], separate[0])
+
+            if args.order_check and q > 1:
+                try:
+                    numbers, lines, same = order_check(ask, runs, questions)
+                except RequestFailed as e:
+                    print(f"{'':>11}order check failed: {e}", file=sys.stderr)
+                    failed = True
+                else:
+                    case.update(numbers)
+                    print("\n".join(lines))
+                    if not same:
+                        moved.append(f"state {state_tokens}, {q} questions")
             results.append(case)
 
     if args.json:
@@ -467,7 +542,14 @@ def main():
                 indent=2,
             )
         print(f"\nWrote {args.json}")
-    return 1 if failed else 0
+    if moved:
+        print(
+            "\nshared_prefix answers changed with the other questions asked in: "
+            + "; ".join(moved)
+            + ". They must not: please report it with this output.",
+            file=sys.stderr,
+        )
+    return 1 if failed or moved else 0
 
 
 if __name__ == "__main__":

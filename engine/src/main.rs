@@ -447,13 +447,14 @@ struct RuntimeOpts {
     decision_model: Option<String>,
 
     /// Most tokens of context one `/v1/systemone` request may use: the state
-    /// once, plus each question's own tokens.
+    /// plus its longest question (plus every other question too in
+    /// `batched` mode).
     ///
     /// Every request gets a context sized to it, so this is a ceiling, not
     /// memory held all the time — but it is what the decision slot keeps
     /// free in VRAM (for Qwen3-0.6B, 112 KiB per token: 896 MiB at the
-    /// default). 8192 fits a 4k-token state with about fifty short
-    /// questions, or a 1k-token state with all 64 a request may ask.
+    /// default). 8192 fits a state of nearly 8k tokens, or in `batched`
+    /// mode a 4k-token state with about fifty short questions.
     #[arg(
         long,
         value_name = "N",

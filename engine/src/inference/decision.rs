@@ -15,16 +15,22 @@
 //!
 //! Questions about the same state share most of their prompt: the system
 //! prompt, the template's header and the state come first, the question
-//! last. [`EvalMode::SharedPrefix`] decodes that common prefix once on
-//! sequence 0, shares its KV cells with one sequence per question
-//! (`copy_kv_cache_seq` on a unified cache only tags the existing cells with
-//! the new sequence id — no data is copied), then decodes the rest of every
-//! question in one batch and reads the logits of each question's last
-//! token. For `Q` questions of `q` tokens on a state of `S` that is about
-//! `S + Q·q` tokens instead of the `Q·(S + q)` of asking them one at a time,
-//! which [`EvalMode::Separate`] still does: it is the reference the shared
-//! path is tested for equivalence against and the baseline it is
-//! benchmarked against.
+//! last. [`EvalMode::SharedPrefix`], the default, decodes the state's part
+//! once on sequence 0, then each question on its own on sequence 1, which
+//! starts as a copy of 0 (`copy_kv_cache_seq` on a unified cache only tags
+//! the existing cells with the new sequence id — no data is copied) and is
+//! removed again once the question's logits are read. For `Q` questions of
+//! `q` tokens on a state of `S` that is about `S + Q·q` tokens instead of
+//! the `Q·(S + q)` of asking them one at a time; and since every question
+//! is decoded alone, in the same cells, its answer is the same whatever
+//! else the request asks.
+//!
+//! [`EvalMode::Batched`] decodes the rest of every question in one batch
+//! instead, one sequence each: fewer decode calls, but on quantized weights
+//! a question's probabilities then move with the other questions in the
+//! batch, by the model's own numerical noise. [`EvalMode::Separate`] asks
+//! each question from an empty cache: the reference the other two are
+//! tested against and the baseline they are benchmarked against.
 //!
 //! A separate model slot, like `embedding`, and for the same reason: nothing
 //! here needs a sampler, a conversation-sized KV cache or the scheduler, and
@@ -45,10 +51,10 @@ use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::token::LlamaToken;
 
-/// Most questions one request may ask. Every question is its own sequence
-/// in the shared-prefix batch and gets its own vocabulary-sized logits row
-/// (~0.6 MB for a 150k vocabulary), and llama.cpp caps a context at 256
-/// sequences; 64 is the top of the range the shared-prefix benchmark
+/// Most questions one request may ask. Every question gets its own
+/// vocabulary-sized logits row (~0.6 MB for a 150k vocabulary) and, in
+/// `Batched` mode, its own sequence, which llama.cpp caps at 256 per
+/// context; 64 is the top of the range the shared-prefix benchmark
 /// measures.
 pub const MAX_QUESTIONS: usize = 64;
 
@@ -68,8 +74,10 @@ pub const MAX_SCORE_LEVELS: usize = 10;
 /// Default ceiling on the KV cells one request's context may use
 /// (`--decision-ctx`). The context is sized to each request, so this is not
 /// memory held all the time; it is the most one request may ask for, and
-/// what the slot reserves VRAM for. 8192 fits a 4k-token state with about
-/// fifty short questions, or a 1k-token state with all 64.
+/// what the slot reserves VRAM for. A request needs the state plus its
+/// longest question — plus every other question too in `Batched` mode — so
+/// 8192 fits a state of nearly 8k tokens, or in `Batched` mode a 4k-token
+/// state with about fifty short questions.
 pub const DEFAULT_DECISION_CTX: u32 = 8192;
 
 /// The state used to measure a question's content-free prior (Zhao et al.,
@@ -89,6 +97,10 @@ const MAX_BATCH: u32 = 2048;
 /// Upper bound on llama.cpp's micro-batch: its own default, and what sizes
 /// the compute buffer the slot reserves VRAM for.
 const MAX_UBATCH: u32 = 512;
+
+/// llama.cpp attends over the cache's used cells rounded up to a multiple
+/// of this, so the attention's shape moves in steps of it.
+const KV_WINDOW_STEP: usize = 256;
 
 /// Content-free priors kept per loaded model. A prior depends only on the
 /// question, so a client asking the same questions about a stream of states
@@ -617,13 +629,24 @@ impl CodeTable {
     }
 }
 
+/// A cached content-free prior: the mode it was measured in, and its prompt.
+type PriorKey = (EvalMode, Vec<LlamaToken>);
+
 /// How the prompts of one request are evaluated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EvalMode {
-    /// Decode the prefix every prompt shares once, then the rest of every
-    /// prompt in one batch. The default.
+    /// Decode the state once, then every question on its own in the cells
+    /// right after it — the same cells, the same batch shape, whatever else
+    /// the request asks. A question's probabilities depend on the state and
+    /// that question only. The default.
     SharedPrefix,
-    /// Decode every prompt on its own from an empty cache.
+    /// Decode the prefix every prompt shares once, then the rest of every
+    /// prompt in one batch: the fewest decode calls, but a question's
+    /// probabilities move with the other questions in the batch, by the
+    /// model's own numerical noise — up to 0.5 in probability on Qwen3-0.6B
+    /// on an RTX 5070 Ti, measured.
+    Batched,
+    /// Decode every prompt on its own from an empty cache: the baseline.
     Separate,
 }
 
@@ -631,6 +654,7 @@ impl EvalMode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::SharedPrefix => "shared_prefix",
+            Self::Batched => "batched",
             Self::Separate => "separate",
         }
     }
@@ -642,16 +666,19 @@ impl EvalMode {
 pub struct EvalStats {
     pub mode: EvalMode,
     pub prompts: usize,
-    /// Tokens every prompt shares, decoded once (`SharedPrefix` only).
+    /// Tokens decoded once for every prompt: the state's part of them for
+    /// `SharedPrefix`, all they start with in common for `Batched`, none
+    /// for `Separate`.
     pub shared_prefix_tokens: usize,
     /// Tokens actually decoded.
     pub evaluated_tokens: usize,
     /// Sum of the prompts' lengths: what decoding each on its own costs.
     pub prompt_tokens: usize,
-    /// KV cells the context was created with, before llama.cpp's padding.
+    /// KV cells the context was asked for; llama.cpp rounds it up to a
+    /// multiple of 256.
     pub context_cells: usize,
     pub context_ms: f64,
-    /// Decoding the shared prefix (`SharedPrefix` only).
+    /// Decoding the shared prefix (not `Separate`).
     pub prefix_ms: f64,
     /// Decoding what follows the prefix — every prompt in full for
     /// `Separate`.
@@ -712,8 +739,8 @@ impl std::fmt::Display for DecisionError {
             Self::TooLong { needed, limit } => write!(
                 f,
                 "this request needs {needed} tokens of context but the decision model allows \
-                 {limit} per request (--decision-ctx): ask fewer questions at once or shorten \
-                 the state"
+                 {limit} per request (--decision-ctx): shorten the state or the longest \
+                 question, or in \"batched\" mode ask fewer questions at once"
             ),
         }
     }
@@ -745,10 +772,10 @@ pub struct DecisionModel {
     /// Held for a whole evaluation. Every request creates its own context,
     /// sized to it; two at once would hold two of those in VRAM, and the
     /// slot only reserves room for one (`fit::decision_reserve_bytes`).
-    /// One shared-prefix batch already answers all of a request's
-    /// questions in parallel, so queueing whole requests costs little.
     eval_lock: Mutex<()>,
-    prior_cache: Mutex<HashMap<Vec<LlamaToken>, Vec<f64>>>,
+    /// Keyed by mode as well as prompt: a prior measured in one mode is not
+    /// bit-for-bit the one another mode would measure.
+    prior_cache: Mutex<HashMap<PriorKey, Vec<f64>>>,
     /// F32 KV cache and no flash attention: takes the cache's own rounding
     /// out of the comparison between shared-prefix and separate decoding,
     /// so on an F32 model the equivalence test checks the logic to ~1e-6
@@ -859,26 +886,30 @@ impl DecisionModel {
             );
         }
 
-        let prompts = self.prompts(state, questions)?;
+        let (prompts, state_prefix) = self.prompts(state, questions)?;
         let prompt_refs: Vec<&[LlamaToken]> = prompts.iter().map(Vec::as_slice).collect();
 
         let _running = self
             .eval_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let (logprobs, stats) = self.evaluate(&prompt_refs, &classes, options.mode)?;
+        let (logprobs, stats) =
+            self.evaluate(&prompt_refs, state_prefix, &classes, options.mode)?;
 
         let mut priors: Option<Vec<Vec<f64>>> = None;
         let mut prior_stats = None;
         let mut priors_cached = 0;
         if options.content_free {
-            let cf_prompts = self.prompts(CONTENT_FREE_STATE, questions)?;
+            let (cf_prompts, cf_prefix) = self.prompts(CONTENT_FREE_STATE, questions)?;
             let mut found: Vec<Option<Vec<f64>>> = {
                 let cache = self
                     .prior_cache
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner);
-                cf_prompts.iter().map(|p| cache.get(p).cloned()).collect()
+                cf_prompts
+                    .iter()
+                    .map(|p| cache.get(&(options.mode, p.clone())).cloned())
+                    .collect()
             };
             priors_cached = found.iter().filter(|p| p.is_some()).count();
             let missing: Vec<usize> = (0..found.len()).filter(|&i| found[i].is_none()).collect();
@@ -887,7 +918,8 @@ impl DecisionModel {
                     missing.iter().map(|&i| cf_prompts[i].as_slice()).collect();
                 let missing_classes: Vec<&[Vec<LlamaToken>]> =
                     missing.iter().map(|&i| classes[i]).collect();
-                let (measured, cf_stats) = self.evaluate(&refs, &missing_classes, options.mode)?;
+                let (measured, cf_stats) =
+                    self.evaluate(&refs, cf_prefix, &missing_classes, options.mode)?;
                 let mut cache = self
                     .prior_cache
                     .lock()
@@ -896,7 +928,7 @@ impl DecisionModel {
                     cache.clear();
                 }
                 for (&i, lp) in missing.iter().zip(measured) {
-                    cache.insert(cf_prompts[i].clone(), lp.clone());
+                    cache.insert((options.mode, cf_prompts[i].clone()), lp.clone());
                     found[i] = Some(lp);
                 }
                 prior_stats = Some(cf_stats);
@@ -925,17 +957,22 @@ impl DecisionModel {
         self.flash_attn
     }
 
+    /// Every question's prompt, and how many tokens at their start depend on
+    /// the state alone: the template's head, the state and the question
+    /// label. `SharedPrefix` decodes exactly those once, so the boundary
+    /// between shared and per-question tokens never moves with the set of
+    /// questions asked.
     fn prompts(
         &self,
         state: &str,
         questions: &[Question],
-    ) -> Result<Vec<Vec<LlamaToken>>, DecisionError> {
+    ) -> Result<(Vec<Vec<LlamaToken>>, usize), DecisionError> {
         let tokenize = |text: &str, add_bos: AddBos| {
             self.model
                 .str_to_token(text, add_bos)
                 .map_err(|e| DecisionError::Invalid(format!("Tokenization failed: {e}")))
         };
-        match &self.layout.wrapper {
+        let (prompts, common) = match &self.layout.wrapper {
             Some((head, tail)) if self.layout.split_tokens => {
                 let common = tokenize(
                     &format!("{head}{STATE_LABEL}{state}{QUESTION_LABEL}"),
@@ -961,31 +998,68 @@ impl DecisionModel {
                     )
                     .is_ok_and(|whole| whole == prompts[0])
                 }));
-                Ok(prompts)
+                let n = common.len();
+                return Ok((prompts, n));
             }
-            Some((head, tail)) => questions
-                .iter()
-                .map(|q| {
+            Some((head, tail)) => {
+                let prompts = questions
+                    .iter()
+                    .map(|q| {
+                        tokenize(
+                            &format!("{head}{}{tail}", user_message(state, q)),
+                            AddBos::Always,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, DecisionError>>()?;
+                let common = tokenize(
+                    &format!("{head}{STATE_LABEL}{state}{QUESTION_LABEL}"),
+                    AddBos::Always,
+                )?;
+                (prompts, common)
+            }
+            None => {
+                let render = |q: &Question| {
                     tokenize(
-                        &format!("{head}{}{tail}", user_message(state, q)),
+                        &render_prompt(&self.model, self.uses_template, &user_message(state, q)),
                         AddBos::Always,
                     )
-                })
-                .collect(),
-            None => questions
-                .iter()
-                .map(|q| {
-                    let text =
-                        render_prompt(&self.model, self.uses_template, &user_message(state, q));
-                    tokenize(&text, AddBos::Always)
-                })
-                .collect(),
-        }
+                };
+                let prompts = questions
+                    .iter()
+                    .map(render)
+                    .collect::<Result<Vec<_>, _>>()?;
+                // Without the template's head and tail as text, the state's
+                // part is what two unrelated questions about it share.
+                let a = render(&Question::Noul {
+                    instructions: "Alpha?".into(),
+                })?;
+                let b = render(&Question::Noul {
+                    instructions: "7?".into(),
+                })?;
+                let common = a[..common_prefix(&a, &b)].to_vec();
+                (prompts, common)
+            }
+        };
+        // Tokenized apart from what follows it, the state's part can end in
+        // a token or two the whole prompt merges differently: step back past
+        // them, then check every prompt really starts with what is left.
+        let boundary = common.len().saturating_sub(2);
+        let state_prefix = if prompts
+            .iter()
+            .all(|p| p.len() > boundary && p[..boundary] == common[..boundary])
+        {
+            boundary
+        } else {
+            let refs: Vec<&[LlamaToken]> = prompts.iter().map(Vec::as_slice).collect();
+            shared_prefix_len(&refs)
+        };
+        Ok((prompts, state_prefix))
     }
 
     fn evaluate(
         &self,
         prompts: &[&[LlamaToken]],
+        state_prefix: usize,
         classes: &[&[Vec<LlamaToken>]],
         mode: EvalMode,
     ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
@@ -1000,15 +1074,14 @@ impl DecisionModel {
             )));
         }
         match mode {
-            EvalMode::SharedPrefix if prompts.len() > 1 => self.evaluate_shared(prompts, classes),
-            // One prompt has nothing to share: split into its prefix and
-            // its last token it only costs a second decode call — 10.9 ms
-            // instead of 3.9 for a 309-token prompt on an RTX 5070 Ti —
-            // and a result that differs from the one-pass decode in the
-            // last digits for no benefit.
-            EvalMode::SharedPrefix => {
+            EvalMode::SharedPrefix => self.evaluate_isolated(prompts, state_prefix, classes),
+            EvalMode::Batched if prompts.len() > 1 => self.evaluate_batched(prompts, classes),
+            // One prompt has nothing to batch with: split into its prefix
+            // and its last token it only costs a second decode call — 10.9
+            // ms instead of 3.9 for a 309-token prompt on an RTX 5070 Ti.
+            EvalMode::Batched => {
                 let (logprobs, mut stats) = self.evaluate_separate(prompts, classes)?;
-                stats.mode = EvalMode::SharedPrefix;
+                stats.mode = EvalMode::Batched;
                 Ok((logprobs, stats))
             }
             EvalMode::Separate => self.evaluate_separate(prompts, classes),
@@ -1057,7 +1130,7 @@ impl DecisionModel {
             .map_err(|e| DecisionError::Runtime(format!("Failed to create decision context: {e}")))
     }
 
-    fn evaluate_shared(
+    fn evaluate_batched(
         &self,
         prompts: &[&[LlamaToken]],
         classes: &[&[Vec<LlamaToken>]],
@@ -1145,10 +1218,136 @@ impl DecisionModel {
         Ok((
             logprobs,
             EvalStats {
-                mode: EvalMode::SharedPrefix,
+                mode: EvalMode::Batched,
                 prompts: n,
                 shared_prefix_tokens: prefix_len,
                 evaluated_tokens: cells,
+                prompt_tokens,
+                context_cells: cells,
+                context_ms,
+                prefix_ms,
+                questions_ms,
+                readout_ms,
+            },
+        ))
+    }
+
+    /// `SharedPrefix`: the state's tokens once on sequence 0, then each
+    /// question on sequence 1 — a copy of 0's cells, removed again once the
+    /// question's logits are read. Removing a sequence hands its cells back
+    /// and moves llama.cpp's search for free cells to the first of them, so
+    /// every question lands in the same cells right after the prefix, with
+    /// the same attention window: what it computes is the same whether it is
+    /// asked alone or among 63 others, in any order. Hybrid models work the
+    /// same way: copying a sequence copies its recurrent state too.
+    fn evaluate_isolated(
+        &self,
+        prompts: &[&[LlamaToken]],
+        state_prefix: usize,
+        classes: &[&[Vec<LlamaToken>]],
+    ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
+        let started = Instant::now();
+        let n = prompts.len();
+        let prompt_tokens: usize = prompts.iter().map(|p| p.len()).sum();
+        let shortest = prompts.iter().map(|p| p.len()).min().unwrap_or(0);
+        let prefix_len = state_prefix.min(shortest.saturating_sub(1));
+        let longest_suffix = prompts
+            .iter()
+            .map(|p| p.len() - prefix_len)
+            .max()
+            .unwrap_or(0);
+        // Only one question is in the cache at a time.
+        let cells = prefix_len + longest_suffix;
+        if cells > self.max_ctx as usize {
+            return Err(DecisionError::TooLong {
+                needed: cells,
+                limit: self.max_ctx as usize,
+            });
+        }
+        // The cache is sized by the longest question, so it has to be kept
+        // out of what a question computes. llama.cpp attends over the used
+        // cells rounded up to 256, capped at the cache size: with a cache a
+        // whole number of 256 cells the cap never bites, and the window is
+        // the question's own. llama.cpp rounds the context up the same way
+        // today; done here too so that does not rest on it.
+        let cells = cells.next_multiple_of(KV_WINDOW_STEP);
+
+        // Not sized to this request: llama.cpp caps the batch at the context
+        // anyway, and a fixed one splits the prefix into the same micro-batches
+        // whatever the longest question — one more thing that cannot move a
+        // question's result.
+        let n_batch = MAX_BATCH;
+        let mut ctx = self.context(cells, n_batch, 2)?;
+        let n_batch = n_batch
+            .min(u32::try_from(cells).unwrap_or(MAX_BATCH))
+            .max(1) as usize;
+        let context_ms = ms_since(started);
+
+        let prefix_started = Instant::now();
+        let mut batch = LlamaBatch::new(n_batch, 1);
+        for (chunk_index, chunk) in prompts[0][..prefix_len].chunks(n_batch).enumerate() {
+            batch.clear();
+            let base = chunk_index * n_batch;
+            for (j, &token) in chunk.iter().enumerate() {
+                batch
+                    .add(token, (base + j) as i32, &[0], false)
+                    .map_err(|e| runtime("Failed to build prefix batch", e))?;
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| runtime("Prefix decode failed", e))?;
+        }
+        let prefix_ms = ms_since(prefix_started);
+
+        let questions_started = Instant::now();
+        let mut rows: Vec<(usize, Vec<f32>)> = Vec::with_capacity(n);
+        for (i, prompt) in prompts.iter().enumerate() {
+            if prefix_len > 0 {
+                ctx.copy_kv_cache_seq(0, 1, None, None)
+                    .map_err(|e| runtime("Failed to share the prefix", e))?;
+            }
+            let suffix = &prompt[prefix_len..];
+            let n_chunks = suffix.len().div_ceil(n_batch);
+            for (chunk_index, chunk) in suffix.chunks(n_batch).enumerate() {
+                batch.clear();
+                let base = prefix_len + chunk_index * n_batch;
+                for (j, &token) in chunk.iter().enumerate() {
+                    let last = chunk_index + 1 == n_chunks && j + 1 == chunk.len();
+                    batch
+                        .add(token, (base + j) as i32, &[1], last)
+                        .map_err(|e| runtime("Failed to build question batch", e))?;
+                }
+                ctx.decode(&mut batch)
+                    .map_err(|e| runtime("Question decode failed", e))?;
+            }
+            // Copied out, because the next decode overwrites it; scored
+            // below, all rows at once on every thread.
+            rows.push((i, ctx.get_logits_ith(batch.n_tokens() - 1).to_vec()));
+            ctx.clear_kv_cache_seq(Some(1), None, None)
+                .map_err(|e| runtime("Failed to drop a question's cells", e))?;
+        }
+        let questions_ms = ms_since(questions_started);
+
+        let readout_started = Instant::now();
+        let refs: Vec<(usize, &[f32])> = rows.iter().map(|(i, r)| (*i, r.as_slice())).collect();
+        let mut results: Vec<Option<Vec<f64>>> = vec![None; n];
+        for (i, logprobs) in score_rows(&refs, classes, self.threads as usize)? {
+            results[i] = Some(logprobs);
+        }
+        let readout_ms = ms_since(readout_started);
+
+        let logprobs = results
+            .into_iter()
+            .map(|r| {
+                r.ok_or_else(|| DecisionError::Runtime("a question produced no logits".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((
+            logprobs,
+            EvalStats {
+                mode: EvalMode::SharedPrefix,
+                prompts: n,
+                shared_prefix_tokens: prefix_len,
+                evaluated_tokens: prompt_tokens - (n.saturating_sub(1)) * prefix_len,
                 prompt_tokens,
                 context_cells: cells,
                 context_ms,
@@ -1257,6 +1456,11 @@ fn ms_since(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
 
+/// How many tokens `a` and `b` start with in common.
+fn common_prefix(a: &[LlamaToken], b: &[LlamaToken]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
 /// Tokens every prompt starts with, capped one short of the shortest prompt
 /// so every prompt keeps at least one token of its own — the one whose
 /// logits are read.
@@ -1292,6 +1496,16 @@ fn read_rows(
         .iter()
         .map(|&(prompt, index)| (prompt, ctx.get_logits_ith(index)))
         .collect();
+    score_rows(&rows, classes, workers)
+}
+
+/// Per-class log-probabilities of logits rows, as `(prompt, logprobs)`, on
+/// up to `workers` threads — see `read_rows` for why in parallel.
+fn score_rows(
+    rows: &[(usize, &[f32])],
+    classes: &[&[Vec<LlamaToken>]],
+    workers: usize,
+) -> Result<Vec<(usize, Vec<f64>)>, DecisionError> {
     let score = |part: &[(usize, &[f32])]| -> Result<Vec<(usize, Vec<f64>)>, DecisionError> {
         part.iter()
             .map(|&(prompt, logits)| class_logprobs(logits, classes[prompt]).map(|lp| (prompt, lp)))
@@ -1299,7 +1513,7 @@ fn read_rows(
     };
     let workers = workers.clamp(1, rows.len().max(1));
     if workers == 1 {
-        return score(&rows);
+        return score(rows);
     }
     let per_worker = rows.len().div_ceil(workers);
     std::thread::scope(|scope| {
@@ -1819,59 +2033,38 @@ mod tests {
         assert!(msg.contains("9000") && msg.contains("8192") && msg.contains("--decision-ctx"));
     }
 
-    /// The shared-prefix batch must give every question the answer it gets
-    /// on its own. A mistake in positions, sequence ids or cell sharing
-    /// does not fail loudly — a question attending to another's tokens
-    /// still yields a plausible distribution — so this compares the two
-    /// paths on a real model, with an F32 KV cache and no flash attention
-    /// (`DecisionModel::exact`) to take the cache's own rounding out.
-    ///
-    /// What is left is the model's arithmetic. On F32 weights the two paths
-    /// agree to ~2e-6 on the CPU (stories260K, measured), which is what the
-    /// default tolerance is for. A CUDA build defaults to 2e-2 instead:
-    /// ggml-cuda runs every cuBLAS handle in TF32 mode, so "F32" products
-    /// keep a 10-bit mantissa, and the same test measured 6.4e-3 on an RTX
-    /// 5070 Ti — still far below what a question reading another's tokens
-    /// would cost. On quantized weights they do not agree, and cannot: a
-    /// question whose cells sit at other indices of the cache sums its
-    /// attention in another order, and the 8-bit activation quantization
-    /// of a Q8_0 model turns that last-digit difference into a different
-    /// rounding one layer later — measured on Qwen3-0.6B: 1e-2 (F16) and up
-    /// to 0.67 nats (Q8_0) on the same questions. Run it on an F32 model
-    /// (the 1.2 MB `stories260K.gguf` llama.cpp's CI uses is enough); a
-    /// quantized one needs `EULLM_DECISION_TEST_TOLERANCE` and proves less.
-    ///
-    /// ```text
-    /// EULLM_DECISION_TEST_MODEL=/path/to/stories260K.gguf \
-    ///     cargo test --bin eullm shared_prefix_matches -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
-    fn shared_prefix_matches_separate_evaluation() {
+    /// The story every test on a real model asks about.
+    const TEST_STATE: &str = "Tom had a red ball. He lost it in the park on Monday. Lily \
+                              found it under a tree and gave it back to him, and they played \
+                              until dinner.";
+
+    /// The GGUF in `EULLM_DECISION_TEST_MODEL`, loaded as the server loads
+    /// a decision model.
+    fn load_test_model() -> DecisionModel {
         let path = std::env::var("EULLM_DECISION_TEST_MODEL")
             .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file");
-        let tolerance: f64 = std::env::var("EULLM_DECISION_TEST_TOLERANCE")
-            .ok()
-            .and_then(|t| t.parse().ok())
-            .unwrap_or(if crate::inference::has_gpu_backend() {
-                2e-2
-            } else {
-                1e-3
-            });
         let backend = crate::inference::init_shared_backend().expect("backend");
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
-        let mut model = DecisionModel::load(
+        DecisionModel::load(
             Path::new(&path),
             threads,
             DEFAULT_DECISION_CTX,
             true,
             backend,
         )
-        .expect("load the model");
-        model.exact = true;
+        .expect("load the model")
+    }
 
-        let state = "Tom had a red ball. He lost it in the park on Monday. Lily found it \
-                     under a tree and gave it back to him, and they played until dinner.";
+    /// Questions of every kind and of very different lengths — the last
+    /// one long enough that a request asking it needs a bigger cache than
+    /// one without it — keeping those the model can answer: a tiny test
+    /// model may not have every code as one token (stories260K has no
+    /// single-token Yes/No).
+    fn test_questions(model: &DecisionModel) -> Vec<Question> {
+        let long = format!(
+            "{} Which of the two children ends the story holding the ball?",
+            "Read the story again, slowly, and think about who did what and when. ".repeat(12)
+        );
         let all = vec![
             Question::Noul {
                 instructions: "Did Lily give the ball back?".into(),
@@ -1904,9 +2097,11 @@ mod tests {
                     "Long".into(),
                 ],
             },
+            Question::Choice {
+                instructions: long,
+                options: vec![("tom".into(), "Tom".into()), ("lily".into(), "Lily".into())],
+            },
         ];
-        // A tiny test model may not have every code as one token (stories260K
-        // has no single-token Yes/No); ask what it can answer.
         let questions: Vec<Question> = all
             .into_iter()
             .filter(|q| model.codes.classes(q.kind(), q.n_classes()).is_ok())
@@ -1915,44 +2110,150 @@ mod tests {
             questions.len() >= 2,
             "the model can answer too few questions to compare"
         );
+        questions
+    }
+
+    /// Every mode must give every question the answer it gets on its own.
+    /// A mistake in positions, sequence ids or cell sharing does not fail
+    /// loudly — a question attending to another's tokens still yields a
+    /// plausible distribution — so this compares `SharedPrefix` and
+    /// `Batched` with `Separate` on a real model, with an F32 KV cache and
+    /// no flash attention (`DecisionModel::exact`) to take the cache's own
+    /// rounding out.
+    ///
+    /// What is left is the model's arithmetic. On F32 weights the modes
+    /// agree to ~2e-6 on the CPU (stories260K, measured), which is what the
+    /// default tolerance is for. A CUDA build defaults to 2e-2 instead:
+    /// ggml-cuda runs every cuBLAS handle in TF32 mode, so "F32" products
+    /// keep a 10-bit mantissa, and the same test measured 6.4e-3 on an RTX
+    /// 5070 Ti — still far below what a question reading another's tokens
+    /// would cost. On quantized weights they do not agree, and cannot: a
+    /// different batch sums the same products in another order, and the
+    /// 8-bit activation quantization of a Q8_0 model turns that last-digit
+    /// difference into a different rounding one layer later — measured on
+    /// Qwen3-0.6B: 1e-2 (F16) and up to 0.67 nats (Q8_0) on the same
+    /// questions. Run it on an F32 model (the 1.2 MB `stories260K.gguf`
+    /// llama.cpp's CI uses is enough); a quantized one needs
+    /// `EULLM_DECISION_TEST_TOLERANCE` and proves less.
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/stories260K.gguf \
+    ///     cargo test --bin eullm decision::tests::real_ -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_every_mode_matches_separate_evaluation() {
+        let tolerance: f64 = std::env::var("EULLM_DECISION_TEST_TOLERANCE")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(if crate::inference::has_gpu_backend() {
+                2e-2
+            } else {
+                1e-3
+            });
+        let mut model = load_test_model();
+        model.exact = true;
+        let questions = test_questions(&model);
 
         let decide = |mode, content_free| {
             model
-                .decide(state, &questions, DecideOptions { mode, content_free })
+                .decide(TEST_STATE, &questions, DecideOptions { mode, content_free })
                 .expect("decision")
         };
-        let shared = decide(EvalMode::SharedPrefix, true);
         let separate = decide(EvalMode::Separate, false);
-        eprintln!("shared:   {:?}", shared.stats);
-        eprintln!("separate: {:?}", separate.stats);
-
-        let mut worst: f64 = 0.0;
-        for (i, (a, b)) in shared.outcomes.iter().zip(&separate.outcomes).enumerate() {
-            eprintln!(
-                "q{i}: shared {:?}\n    separate {:?}",
-                a.logprobs, b.logprobs
-            );
-            for (x, y) in a.logprobs.iter().zip(&b.logprobs) {
-                // A code the model all but rules out can sit at -30 in one
-                // path and -31 in the other without meaning anything.
-                if x.max(*y) > -15.0 {
-                    worst = worst.max((x - y).abs());
+        eprintln!("separate:      {:?}", separate.stats);
+        for mode in [EvalMode::SharedPrefix, EvalMode::Batched] {
+            let result = decide(mode, true);
+            eprintln!("{:<14} {:?}", format!("{}:", mode.as_str()), result.stats);
+            let mut worst: f64 = 0.0;
+            for (i, (a, b)) in result.outcomes.iter().zip(&separate.outcomes).enumerate() {
+                eprintln!(
+                    "  q{i}: {} {:?}\n      separate {:?}",
+                    mode.as_str(),
+                    a.logprobs,
+                    b.logprobs
+                );
+                for (x, y) in a.logprobs.iter().zip(&b.logprobs) {
+                    // A code the model all but rules out can sit at -30 in
+                    // one mode and -31 in the other without meaning anything.
+                    if x.max(*y) > -15.0 {
+                        worst = worst.max((x - y).abs());
+                    }
                 }
+                assert!(a.prior_logprobs.is_some() && b.prior_logprobs.is_none());
             }
-            assert!(a.prior_logprobs.is_some() && b.prior_logprobs.is_none());
+            eprintln!(
+                "{}: largest log-probability difference {worst:.2e} (tolerance {tolerance:.0e})",
+                mode.as_str()
+            );
+            assert!(
+                worst < tolerance,
+                "{} and separate disagree by {worst}",
+                mode.as_str()
+            );
+            assert_eq!(result.stats.mode, mode);
+            assert!(result.stats.shared_prefix_tokens > 0);
+            assert!(result.stats.evaluated_tokens < separate.stats.evaluated_tokens);
+            assert_eq!(result.stats.prompt_tokens, separate.stats.prompt_tokens);
         }
-        eprintln!("largest log-probability difference: {worst:.2e} (tolerance {tolerance:.0e})");
-        assert!(
-            worst < tolerance,
-            "shared-prefix and separate disagree by {worst}"
-        );
-        assert!(shared.stats.shared_prefix_tokens > 0);
-        assert!(shared.stats.evaluated_tokens < separate.stats.evaluated_tokens);
-        assert_eq!(shared.stats.prompt_tokens, separate.stats.prompt_tokens);
 
         // Asked again, every prior comes from the cache.
         let again = decide(EvalMode::SharedPrefix, true);
         assert_eq!(again.priors_cached, questions.len());
         assert!(again.prior_stats.is_none());
+    }
+
+    /// `SharedPrefix` promises more than agreement within a tolerance: a
+    /// question's log-probabilities are a function of the state and that
+    /// question, bit for bit, whether it is asked alone, among the others,
+    /// or in another order — and whether the request's longest question
+    /// makes the cache bigger. Checked the way the server runs (default
+    /// cache types, flash attention as loaded) and in `exact` mode, which
+    /// stores V transposed and so takes the other attention path. Any
+    /// model will do, quantized included: the guarantee is about the
+    /// model's noise, not a bound on it.
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/model.gguf \
+    ///     cargo test --bin eullm decision::tests::real_ -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_shared_prefix_answers_depend_on_their_own_question_only() {
+        let mut model = load_test_model();
+        let questions = test_questions(&model);
+        let n = questions.len();
+        let reversed: Vec<Question> = questions.iter().rev().cloned().collect();
+        for exact in [false, true] {
+            model.exact = exact;
+            let decide = |qs: &[Question]| {
+                model
+                    .decide(
+                        TEST_STATE,
+                        qs,
+                        DecideOptions {
+                            mode: EvalMode::SharedPrefix,
+                            content_free: false,
+                        },
+                    )
+                    .expect("decision")
+            };
+            let together = decide(&questions);
+            let backwards = decide(&reversed);
+            eprintln!("exact {exact}: {:?}", together.stats);
+            for (i, question) in questions.iter().enumerate() {
+                let alone = decide(std::slice::from_ref(question));
+                let expected = &together.outcomes[i].logprobs;
+                assert_eq!(
+                    &alone.outcomes[0].logprobs, expected,
+                    "exact {exact}: q{i} asked alone"
+                );
+                assert_eq!(
+                    &backwards.outcomes[n - 1 - i].logprobs,
+                    expected,
+                    "exact {exact}: q{i} asked in reverse order"
+                );
+            }
+        }
     }
 }

@@ -13,37 +13,51 @@ Real stress test that **proves** whether an inference server processes requests 
 
 ## `decision_bench.py` — shared-prefix benchmark for `/v1/systemone`
 
-Measures what answering many questions about the same state in one pass
-buys over asking them one at a time: for every state size (`--states`,
-default 256/1k/4k tokens) and question count (`--questions`, default
-1/4/8/16/32/64), the tokens each mode decodes, the decode time of each
-(median of `--repeat` runs, from the server's own timings) and the speedup,
-and how far the two modes' answers are apart. Standard library only.
+Measures what answering many questions about the same state in one request
+buys over asking them one at a time, in each of the three evaluation modes:
+`shared_prefix` (the default: the state decoded once, then each question on
+its own right after it), `batched` (the state once, then every question in
+one batch) and `separate` (each question from scratch, the baseline). For
+every state size (`--states`, default 256/1k/4k tokens) and question count
+(`--questions`, default 1/4/8/16/32/64): the tokens decoded with the state
+shared and without, the decode time of each mode (median of `--repeat` runs,
+from the server's own timings), the speedup of `shared_prefix` over
+`separate`, and how far each mode's answers are from the baseline's.
+Standard library only.
 
 ```bash
 eullm serve --decision-model qwen3-0.6b --decision-ctx 16384
 python bench/decision_bench.py --url http://localhost:11434 --json decision-bench.json
 ```
 
-`--decision-ctx 16384` covers the largest default case (a 4k-token state
-with 64 questions needs about 9k tokens); a case over the limit is reported
-as skipped. `--max-separate-tokens` (default 150k) skips the one-at-a-time
-baseline where it would take too long — on a CPU, lower it.
+`--decision-ctx 16384` covers the largest default case in `batched` mode (a
+4k-token state with 64 questions needs about 9k tokens there; the other two
+modes need only the state plus the longest question); a case over the limit
+is reported as skipped. `--max-separate-tokens` (default 150k) skips the
+one-at-a-time baseline where it would take too long — on a CPU, lower it.
 
-The last columns are not an error margin to shrink: the two modes read the
-same tokens and agree to ~1e-6 on an F32 model, but a quantized model's
-answers move by its own numerical noise when the batch changes shape. On
-Qwen3-0.6B Q8_0: up to 0.13 in probability on a 4-core CPU, and up to 0.52 on
-an RTX 5070 Ti, where ggml-cuda's TF32 and half-precision arithmetic is
-coarser — enough to change the top answer of a question near a tie.
-Calibrate in the mode you serve in.
+The dP columns are not an error margin to shrink. The modes read the same
+tokens but hand them to the kernels in batches of different shapes, and on
+quantized weights that alone moves an answer by the model's own numerical
+noise. On Qwen3-0.6B Q8_0: up to 0.13 in probability on a 4-core CPU, and
+up to 0.52 on an RTX 5070 Ti, where ggml-cuda's TF32 and half-precision
+arithmetic is coarser — enough to change the top answer of a question near a
+tie. Calibrate in the mode you serve in.
 
-`--details` prints, per case, the question that moved most with its
-coverage in both modes (a coverage that collapsed in one mode would mean
-that mode read the wrong logits; a similar coverage with a shifted
-distribution is arithmetic). `--order-check` asks the same questions again
-in reverse order, shared prefix both times: what moves there moves only
-because of where each question sits in the batch.
+What `shared_prefix` adds is that this noise no longer depends on the other
+questions: a question is decoded alone, in the same cache cells and in
+batches of the same shape whatever else the request asks, so its answer is
+a function of the state and that question only. `--order-check` verifies
+it: it asks the questions again in reverse order and the first and last
+alone, and in `shared_prefix` mode every answer must come back bit for bit
+the same — `dP 0.0000 ... identical`, measured on the CPU — while `batched`
+shows how much an answer moves only because of where its question sits in
+the batch. The bench exits with an error if a `shared_prefix` answer moved.
+
+`--details` prints, per case and mode, the question that moved most from the
+baseline with its coverage in both (a coverage that collapsed in one mode
+would mean that mode read the wrong logits; a similar coverage with a
+shifted distribution is arithmetic).
 
 ## `decision_calibration.py` — calibration comparison for `/v1/systemone`
 

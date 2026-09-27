@@ -101,7 +101,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
 | `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
-| `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use (state + every question's own tokens). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
+| `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
 
@@ -587,7 +587,7 @@ the options can be compared on labelled data before one is trusted:
 |---|---|---|
 | `calibration` | `none`; `content_free`: divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
 | `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1` |
-| `mode` | `shared_prefix`; `separate` (see below) | `shared_prefix` |
+| `mode` | `shared_prefix`; `batched`; `separate` (see below) | `shared_prefix` |
 
 The content-free prior is not always noise to remove: when the options
 themselves imply a base rate, dividing it out moves probability towards
@@ -595,38 +595,48 @@ options that are rarely right. Measure before choosing.
 
 **Many questions, one pass.** Every question's prompt starts with the same
 tokens — system prompt, template, the state — and differs only at the end.
-`shared_prefix` decodes that common prefix once, shares its KV cells with
-one sequence per question (no copy: on a unified cache the cells are only
-tagged with the extra sequences), and decodes the rest of every question in
-one batch: about `S + Q·q` tokens for `Q` questions of `q` tokens on a state
-of `S`, instead of the `Q·(S + q)` of asking one at a time. `separate` does
-exactly that, one at a time; it exists as the baseline. The response reports
-both counts (`prompt_tokens` against `evaluated_tokens`), the timings of
-each phase and `flash_attn` — `auto`, or `off` under `--no-flash-attn` — since
-both the timings and the last digits of every probability depend on it.
-`bench/decision_bench.py` measures the saving for 1–64 questions
-on states of several sizes.
+`shared_prefix` decodes that common part once, then each question on its
+own right after it, in a sequence that starts as a copy of the state's (no
+copy of data: on a unified cache the cells are only tagged with the extra
+sequence) and is dropped once the question's answer is read: about
+`S + Q·q` tokens for `Q` questions of `q` tokens on a state of `S`, instead
+of the `Q·(S + q)` of asking one at a time. `batched` decodes the same
+tokens, but every question's in one batch: fewer, larger decode calls.
+`separate` asks one question at a time from an empty cache; it exists as
+the baseline. The response reports the token counts (`prompt_tokens`
+against `evaluated_tokens`), the timings of each phase and `flash_attn` —
+`auto`, or `off` under `--no-flash-attn` — since both the timings and the
+last digits of every probability depend on it. `bench/decision_bench.py`
+measures all three for 1–64 questions on states of several sizes.
 
-The two modes read the same tokens, and on an F32 model they agree to about
-1e-6 on the CPU. On quantized weights they do not agree exactly: a question
-whose KV cells sit at other positions of the cache sums its attention in
-another order, and the 8-bit activation quantization of a Q8_0 model
-amplifies that rounding. Measured on Qwen3-0.6B on the CPU: up to 0.01 in
-log-probability with F16 weights, and up to ~0.2–0.7 on some codes with
-Q8_0, which moved an undecided answer from 0.46 to 0.57; confident answers
-barely move. On CUDA the arithmetic is coarser — ggml-cuda runs cuBLAS in
-TF32 mode and accumulates some F16 products in half precision — and so is
-the disagreement: on an RTX 5070 Ti the F32 test model differed by 6e-3, and
-Qwen3-0.6B moved some answers by up to 0.5 in probability, changing the top
-answer of a few questions near a tie. Asking the same questions in reverse
-order, shared prefix both times, moved them as much on the CPU (0.135
-against 0.130 in probability): an answer depends on where its question sits
-in the batch, not on the prefix being shared. Two
-consequences: in `shared_prefix` mode a question's probabilities can change
-with the other questions asked alongside it, which `separate` mode does not
-do; and calibration should be measured in the mode that will serve.
-`bench/decision_bench.py --details --order-check` shows both on your
-hardware.
+**Each answer depends on its own question only.** The three modes read the
+same tokens but hand them to the kernels in batches of different shapes,
+and on quantized weights that alone moves an answer — the 8-bit activation
+quantization of a Q8_0 model turns a last-digit difference in a sum into a
+different rounding one layer later. Measured on Qwen3-0.6B Q8_0 on the CPU:
+up to 0.09 in probability between `shared_prefix` and `separate`, 0.13
+between `batched` and `separate`. On CUDA the arithmetic is coarser —
+ggml-cuda runs cuBLAS in TF32 mode and accumulates some F16 products in
+half precision — and on an RTX 5070 Ti `batched` moved some answers by up
+to 0.5, changing the top answer of a few questions near a tie. None of the
+modes is the exact one; they are the same model with different rounding.
+
+What differs is what the rounding depends on. In `batched` mode a question
+sits somewhere in a batch with the others, so its answer moves with the
+other questions asked and with their order: asking the same questions in
+reverse moved answers by up to 0.15 on the CPU. In `shared_prefix` mode a
+question is decoded alone, in the same cache cells, in batches of the same
+shape and over the same attention window whatever else the request asks, so
+its answer is a function of the state and that question: asked alone, among
+63 others or in reverse order, it comes back bit for bit the same (measured
+on the CPU; `bench/decision_bench.py --order-check` checks it on your
+hardware and fails if it does not hold). That is the default because a
+decision should not change with the questions asked next to it, and
+because a calibration measured on labelled data then holds however the
+questions are grouped into requests when serving. The price is one decode
+call per question instead of one per batch: 2–14% slower than `batched` on
+a 4-core CPU; on a GPU, where each call's fixed cost weighs more, the
+benchmark measures it. Calibrate in the mode that will serve.
 
 **Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
 `score`, and `--decision-ctx` tokens of context per request (default 8192).
