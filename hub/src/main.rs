@@ -195,8 +195,42 @@ fn require_known_model(name: &str) -> Result<Value, (StatusCode, Json<Value>)> {
     })
 }
 
+/// The catalogued facts a card states about a model.
+///
+/// The cards used to hardcode "Qwen3-14B" and 6 GB of VRAM, which was true
+/// for the 7B entries and false for the 14B ones: `code-eu-14b` is attested as
+/// a Qwen3 derivative when the catalog says it is pruned and distilled from
+/// DeepSeek-V3, and every 14B is attested as needing 6 GB when the catalog
+/// says 10. A card is the one output here someone may rely on, and it is
+/// generated on demand, so it must be read from the catalog rather than
+/// remembered next to it.
+struct CatalogFacts {
+    source_model: String,
+    license: String,
+    quantization: String,
+    vram_gb: u64,
+}
+
+impl CatalogFacts {
+    fn from(entry: &Value) -> Self {
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+                .to_string()
+        };
+        Self {
+            source_model: text("source_model"),
+            license: text("license"),
+            quantization: text("quantization"),
+            vram_gb: entry.get("vram_gb").and_then(Value::as_u64).unwrap_or(0),
+        }
+    }
+}
+
 async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    require_known_model(&name)?;
+    let facts = CatalogFacts::from(&require_known_model(&name)?);
     Ok(Json(json!({
         "model": format!("eullm/{name}"),
         "card_version": "1.0",
@@ -204,9 +238,9 @@ async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode
             "description": format!("EULLM verticalizzato model: {name}"),
             "intended_use": "Domain-specific AI assistance for European businesses",
             "out_of_scope": "Medical diagnosis, legal advice (informational use only)",
-            "architecture": "Transformer (decoder-only)",
-            "base_model": "Qwen3-14B (Apache 2.0)",
-            "compression_pipeline": "Structural pruning → Knowledge distillation → Identity LoRA (merged) → GGUF Q4_K_M",
+            "architecture": format!("Transformer (decoder-only), pruned + distilled from {}", facts.source_model),
+            "base_model": format!("{} ({})", facts.source_model, facts.license),
+            "compression_pipeline": format!("Structural pruning → Knowledge distillation → Identity LoRA (merged) → GGUF {}", facts.quantization),
             "format": "GGUF",
         },
         "training": {
@@ -224,7 +258,7 @@ async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode
                 "Performance degrades on languages not in training set"
             ],
         },
-        "license": "Apache-2.0",
+        "license": facts.license,
         "contact": "dev@eullm.eu"
     })))
 }
@@ -232,7 +266,7 @@ async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode
 async fn compliance_card(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    require_known_model(&name)?;
+    let facts = CatalogFacts::from(&require_known_model(&name)?);
     Ok(Json(json!({
         "model": format!("eullm/{name}"),
         "regulation": "EU AI Act — Regulation (EU) 2024/1689",
@@ -257,10 +291,10 @@ async fn compliance_card(
             "right_to_erasure": "Not applicable — no personal data",
         },
         "technical_documentation": {
-            "architecture": "Transformer decoder-only, pruned + distilled from Qwen3-14B",
+            "architecture": format!("Transformer decoder-only, pruned + distilled from {}", facts.source_model),
             "compression_method": "NVIDIA Minitron approach: structural pruning + knowledge distillation",
-            "quantization": "Q4_K_M (4-bit, K-quants mixed)",
-            "inference_requirements": "CPU with 8GB RAM or GPU with 6GB VRAM",
+            "quantization": format!("{} (4-bit, K-quants mixed)", facts.quantization),
+            "inference_requirements": format!("CPU with 8GB RAM or GPU with {} GB VRAM", facts.vram_gb),
             "audit_trail": "Built into EULLM Engine — logs every inference request",
         },
         "human_oversight": {
@@ -752,6 +786,58 @@ mod card_scope_tests {
                 .err()
                 .unwrap_or_else(|| panic!("{name:?} must not be issued a card"));
             assert_eq!(err.0, StatusCode::NOT_FOUND, "for {name:?}");
+        }
+    }
+
+    /// A card that contradicts its own catalog is worse than a missing field:
+    /// `code-eu-14b` was attested as pruned and distilled from Qwen3-14B on an
+    /// endpoint whose purpose is to be relied on, while the catalog said
+    /// DeepSeek-V3, and every 14B was attested as needing 6 GB of VRAM against a
+    /// catalog that says 10.
+    #[tokio::test]
+    async fn a_card_never_contradicts_the_catalog() {
+        for entry in catalog() {
+            let full = entry["name"].as_str().expect("a name").to_string();
+            let short = full.trim_start_matches("eullm/").to_string();
+            let facts = CatalogFacts::from(&entry);
+
+            let card = model_card(Path(short.clone())).await.expect("a card").0;
+            let compliance = compliance_card(Path(short)).await.expect("a card").0;
+            let doc = &compliance["technical_documentation"];
+
+            assert_eq!(card["license"], facts.license, "{full} licence");
+            assert!(
+                card["summary"]["base_model"]
+                    .as_str()
+                    .expect("a string")
+                    .contains(&facts.source_model),
+                "{full} base_model must name its source model, got {}",
+                card["summary"]["base_model"]
+            );
+            assert!(
+                doc["architecture"]
+                    .as_str()
+                    .expect("a string")
+                    .contains(&facts.source_model),
+                "{full} architecture must name its source model, got {}",
+                doc["architecture"]
+            );
+            assert!(
+                doc["quantization"]
+                    .as_str()
+                    .expect("a string")
+                    .contains(&facts.quantization),
+                "{full} quantization, got {}",
+                doc["quantization"]
+            );
+            assert!(
+                doc["inference_requirements"]
+                    .as_str()
+                    .expect("a string")
+                    .contains(&facts.vram_gb.to_string()),
+                "{full} VRAM, got {}",
+                doc["inference_requirements"]
+            );
         }
     }
 }
