@@ -127,10 +127,15 @@ def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]
             for k, v in parts.items() if k not in ambiguous}
 
 
+def _number_of(token: str) -> int | None:
+    """The number a deadline token carries, in digits or in words."""
+    return int(token) if token.isdigit() else _NUMBER_WORDS.get(token.lower())
+
+
 def _deadlines(text: str) -> set[tuple[int, str]]:
     found = set()
     for num, unit in _DEADLINE.findall(text):
-        n = int(num) if num.isdigit() else _NUMBER_WORDS.get(num.lower())
+        n = _number_of(num)
         if n:
             found.add((n, _UNITS[unit.lower()]))
     return found
@@ -143,14 +148,41 @@ def _deadline_keyword(n: int, unit: str) -> str:
     return "|".join(alts)
 
 
-def _sentence_with(text: str, n: int) -> str:
-    """The sentence of the article that states the deadline."""
+def _sentences(flat: str) -> list[tuple[int, str]]:
+    """The flattened text's sentences, each with where it starts."""
+    out, offset = [], 0
+    for sentence in re.split(r"(?<=[.;])\s+", flat):
+        out.append((offset, sentence))
+        offset += len(sentence) + 1  # the single space the split consumed
+    return out
+
+
+def _sentence_with(text: str, n: int, unit: str) -> str:
+    """The sentence of the article that states the deadline.
+
+    Located by the deadline pattern that found the deadline, not by the bare
+    number: an article can carry that number earlier for another reason — a
+    rate ("il 6 per cento"), a cross-reference ("l'articolo 120") — and that
+    sentence then becomes the answer key while the rubric still asks for the
+    deadline, so the grader is handed a reference that states none and marks
+    the correct answer wrong.
+    """
+    flat = " ".join(text.split())
+    spans = _sentences(flat)
+    for m in _DEADLINE.finditer(flat):
+        if _number_of(m.group(1)) == n and _UNITS.get(m.group(2).lower()) == unit:
+            for offset, sentence in spans:
+                if offset <= m.start() < offset + len(sentence):
+                    return sentence.strip()
+    # Nothing in the article states it that way after all: keep the old
+    # behaviour of quoting the sentence that merely mentions the number,
+    # rather than nothing.
     alts = [str(n)] + ([_WORD_FOR[n]] if n in _WORD_FOR else [])
     pat = re.compile(r"\b(?:" + "|".join(alts) + r")\b", re.IGNORECASE)
-    for sentence in re.split(r"(?<=[.;])\s+", " ".join(text.split())):
+    for _, sentence in spans:
         if pat.search(sentence):
             return sentence.strip()
-    return " ".join(text.split())[:400]
+    return flat[:400]
 
 
 def _usable(a: Article) -> bool:
@@ -197,7 +229,7 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
         timed = [(a, next(iter(d))) for a in pool if len(d := _deadlines(a.text)) == 1]
         for a, (n, unit) in rng.sample(timed, min(per_code, len(timed))):
             kw = [_deadline_keyword(n, unit)]
-            ref = _sentence_with(a.text, n)
+            ref = _sentence_with(a.text, n, unit)
             rub = f"Corretto solo se indica il termine di {n} {unit}."
             items.append(item("termine", a.number,
                               f"Quale termine prevede l'art. {a.number} {of}?",
