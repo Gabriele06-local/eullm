@@ -102,17 +102,6 @@ const MAX_UBATCH: u32 = 512;
 /// of this, so the attention's shape moves in steps of it.
 const KV_WINDOW_STEP: usize = 256;
 
-/// On a GPU, `SharedPrefix` decodes each question in a whole number of
-/// this many tokens, padded after its last one. Launching a decode's few
-/// hundred kernels one by one costs ~5 ms on an RTX 5070 Ti, more than a
-/// short question's arithmetic; two decodes of the same shape in a row let
-/// llama.cpp reuse its graph and ggml-cuda replay it as one CUDA graph.
-/// The padding depends on the question's own length only, so it cannot tie
-/// one question's answer to another's. A multiple of 64 because that is
-/// what the matrix kernels work in anyway, so the padding costs little
-/// arithmetic.
-const QUESTION_STEP: usize = 64;
-
 /// Content-free priors kept per loaded model. A prior depends only on the
 /// question, so a client asking the same questions about a stream of states
 /// pays for it once. Cleared outright when full: the entries are cheap to
@@ -681,7 +670,7 @@ pub struct EvalStats {
     /// `SharedPrefix`, all they start with in common for `Batched`, none
     /// for `Separate`.
     pub shared_prefix_tokens: usize,
-    /// Tokens actually decoded, padding included.
+    /// Tokens actually decoded.
     pub evaluated_tokens: usize,
     /// Sum of the prompts' lengths: what decoding each on its own costs.
     pub prompt_tokens: usize,
@@ -787,10 +776,6 @@ pub struct DecisionModel {
     /// Keyed by mode as well as prompt: a prior measured in one mode is not
     /// bit-for-bit the one another mode would measure.
     prior_cache: Mutex<HashMap<PriorKey, Vec<f64>>>,
-    /// Pad questions to [`QUESTION_STEP`] in `SharedPrefix` mode: set when
-    /// the model runs on a GPU. On a CPU there is no launch cost to save
-    /// and the padding would be arithmetic spent for nothing.
-    pad_questions: bool,
     /// F32 KV cache and no flash attention: takes the cache's own rounding
     /// out of the comparison between shared-prefix and separate decoding,
     /// so on an F32 model the equivalence test checks the logic to ~1e-6
@@ -862,7 +847,6 @@ impl DecisionModel {
             codes,
             eval_lock: Mutex::new(()),
             prior_cache: Mutex::new(HashMap::new()),
-            pad_questions: gpu_layers != 0,
             exact: false,
         })
     }
@@ -1258,11 +1242,11 @@ impl DecisionModel {
     /// asked alone or among 63 others, in any order. Hybrid models work the
     /// same way: copying a sequence copies its recurrent state too.
     ///
-    /// On a GPU each question is padded to [`QUESTION_STEP`] tokens with
-    /// copies of its last one. Causal attention keeps the padding out of
-    /// every token before it, so the logits read are still those of the
-    /// question's last token; what the padding changes is only the batch's
-    /// shape, and that shape depends on the question's own length.
+    /// One decode call per question costs a fixed ~3 ms on an RTX 5070 Ti
+    /// (Qwen3-0.6B) on top of the question's own tokens: the GPU running a
+    /// few hundred small kernels. Padding every question to a common length
+    /// so the calls replay as CUDA graphs was tried and measured 25% slower:
+    /// the fixed cost is the kernels' own run time, not their launch.
     fn evaluate_isolated(
         &self,
         prompts: &[&[LlamaToken]],
@@ -1288,34 +1272,18 @@ impl DecisionModel {
                 limit: max_ctx,
             });
         }
-        // Cells each question is decoded in. The padding stops at the
-        // context limit rather than refuse a request that fits without it.
-        let decoded: Vec<usize> = prompts
-            .iter()
-            .map(|p| {
-                let own = p.len() - prefix_len;
-                if self.pad_questions {
-                    own.next_multiple_of(QUESTION_STEP)
-                        .min(max_ctx - prefix_len)
-                } else {
-                    own
-                }
-            })
-            .collect();
         // The cache is sized by the longest question, so it has to be kept
         // out of what a question computes. llama.cpp attends over the used
         // cells rounded up to 256, capped at the cache size: with a cache a
         // whole number of 256 cells the cap never bites, and the window is
         // the question's own. llama.cpp rounds the context up the same way
         // today; done here too so that does not rest on it.
-        let cells = (prefix_len + decoded.iter().copied().max().unwrap_or(0))
-            .next_multiple_of(KV_WINDOW_STEP);
+        let cells = needed.next_multiple_of(KV_WINDOW_STEP);
 
         // Not sized to this request: llama.cpp caps the batch at the context
         // anyway, and a fixed one splits the prefix into the same micro-batches
         // whatever the longest question — one more thing that cannot move a
-        // question's result. A multiple of `QUESTION_STEP` either way, so a
-        // question's padding never spills into a batch of its own.
+        // question's result.
         let n_batch = MAX_BATCH;
         let mut ctx = self.context(cells, n_batch, 2)?;
         let n_batch = n_batch
@@ -1339,41 +1307,30 @@ impl DecisionModel {
         ctx.synchronize();
         let prefix_ms = ms_since(prefix_started);
 
-        // Questions of the same length one after another, so consecutive
-        // decodes have the same shape as often as possible. The order they
-        // are decoded in changes nothing else.
-        let mut order: Vec<usize> = (0..n).collect();
-        order.sort_by_key(|&i| decoded[i]);
-
         let questions_started = Instant::now();
         let mut rows: Vec<(usize, Vec<f32>)> = Vec::with_capacity(n);
-        for i in order {
+        for (i, prompt) in prompts.iter().enumerate() {
             if prefix_len > 0 {
                 ctx.copy_kv_cache_seq(0, 1, None, None)
                     .map_err(|e| runtime("Failed to share the prefix", e))?;
             }
-            let own = &prompts[i][prefix_len..];
-            let last = own.len() - 1;
-            let mut read_at = None;
-            for chunk_start in (0..decoded[i]).step_by(n_batch) {
+            let suffix = &prompt[prefix_len..];
+            let n_chunks = suffix.len().div_ceil(n_batch);
+            for (chunk_index, chunk) in suffix.chunks(n_batch).enumerate() {
                 batch.clear();
-                for j in chunk_start..(chunk_start + n_batch).min(decoded[i]) {
-                    let token = own.get(j).copied().unwrap_or(own[last]);
-                    if j == last {
-                        read_at = Some(batch.n_tokens());
-                    }
+                let base = prefix_len + chunk_index * n_batch;
+                for (j, &token) in chunk.iter().enumerate() {
+                    let last = chunk_index + 1 == n_chunks && j + 1 == chunk.len();
                     batch
-                        .add(token, (prefix_len + j) as i32, &[1], j == last)
+                        .add(token, (base + j) as i32, &[1], last)
                         .map_err(|e| runtime("Failed to build question batch", e))?;
                 }
                 ctx.decode(&mut batch)
                     .map_err(|e| runtime("Question decode failed", e))?;
             }
-            let read_at = read_at
-                .ok_or_else(|| DecisionError::Runtime("a question produced no logits".into()))?;
             // Copied out, because the next decode overwrites it; scored
             // below, all rows at once on every thread.
-            rows.push((i, ctx.get_logits_ith(read_at).to_vec()));
+            rows.push((i, ctx.get_logits_ith(batch.n_tokens() - 1).to_vec()));
             ctx.clear_kv_cache_seq(Some(1), None, None)
                 .map_err(|e| runtime("Failed to drop a question's cells", e))?;
         }
@@ -1399,7 +1356,7 @@ impl DecisionModel {
                 mode: EvalMode::SharedPrefix,
                 prompts: n,
                 shared_prefix_tokens: prefix_len,
-                evaluated_tokens: prefix_len + decoded.iter().sum::<usize>(),
+                evaluated_tokens: prompt_tokens - (n.saturating_sub(1)) * prefix_len,
                 prompt_tokens,
                 context_cells: cells,
                 context_ms,
@@ -2208,29 +2165,18 @@ mod tests {
             });
         let mut model = load_test_model();
         model.exact = true;
-        model.pad_questions = false;
         let questions = test_questions(&model);
 
-        let decide = |model: &DecisionModel, mode, content_free| {
+        let decide = |mode, content_free| {
             model
                 .decide(TEST_STATE, &questions, DecideOptions { mode, content_free })
                 .expect("decision")
         };
-        let separate = decide(&model, EvalMode::Separate, false);
+        let separate = decide(EvalMode::Separate, false);
         eprintln!("separate:      {:?}", separate.stats);
-        // `SharedPrefix` both as a CPU runs it and padded as a GPU does.
-        for (mode, pad) in [
-            (EvalMode::SharedPrefix, false),
-            (EvalMode::SharedPrefix, true),
-            (EvalMode::Batched, false),
-        ] {
-            model.pad_questions = pad;
-            let result = decide(&model, mode, true);
-            eprintln!(
-                "{:<14} {:?}",
-                format!("{}{}:", mode.as_str(), if pad { " padded" } else { "" }),
-                result.stats
-            );
+        for mode in [EvalMode::SharedPrefix, EvalMode::Batched] {
+            let result = decide(mode, true);
+            eprintln!("{:<14} {:?}", format!("{}:", mode.as_str()), result.stats);
             let mut worst: f64 = 0.0;
             for (i, (a, b)) in result.outcomes.iter().zip(&separate.outcomes).enumerate() {
                 eprintln!(
@@ -2264,7 +2210,7 @@ mod tests {
         }
 
         // Asked again, every prior comes from the cache.
-        let again = decide(&model, EvalMode::SharedPrefix, true);
+        let again = decide(EvalMode::SharedPrefix, true);
         assert_eq!(again.priors_cached, questions.len());
         assert!(again.prior_stats.is_none());
     }
@@ -2275,10 +2221,9 @@ mod tests {
     /// or in another order — and whether the request's longest question
     /// makes the cache bigger. Checked the way the server runs (default
     /// cache types, flash attention as loaded) and in `exact` mode, which
-    /// stores V transposed and so takes the other attention path, each
-    /// with and without the padding a GPU gets. Any model will do,
-    /// quantized included: the guarantee is about the model's noise, not a
-    /// bound on it.
+    /// stores V transposed and so takes the other attention path. Any
+    /// model will do, quantized included: the guarantee is about the
+    /// model's noise, not a bound on it.
     ///
     /// ```text
     /// EULLM_DECISION_TEST_MODEL=/path/to/model.gguf \
@@ -2291,9 +2236,8 @@ mod tests {
         let questions = test_questions(&model);
         let n = questions.len();
         let reversed: Vec<Question> = questions.iter().rev().cloned().collect();
-        for (exact, pad) in [(false, false), (false, true), (true, false), (true, true)] {
+        for exact in [false, true] {
             model.exact = exact;
-            model.pad_questions = pad;
             let decide = |qs: &[Question]| {
                 model
                     .decide(
@@ -2308,18 +2252,18 @@ mod tests {
             };
             let together = decide(&questions);
             let backwards = decide(&reversed);
-            eprintln!("exact {exact}, padded {pad}: {:?}", together.stats);
+            eprintln!("exact {exact}: {:?}", together.stats);
             for (i, question) in questions.iter().enumerate() {
                 let alone = decide(std::slice::from_ref(question));
                 let expected = &together.outcomes[i].logprobs;
                 assert_eq!(
                     &alone.outcomes[0].logprobs, expected,
-                    "exact {exact}, padded {pad}: q{i} asked alone"
+                    "exact {exact}: q{i} asked alone"
                 );
                 assert_eq!(
                     &backwards.outcomes[n - 1 - i].logprobs,
                     expected,
-                    "exact {exact}, padded {pad}: q{i} asked in reverse order"
+                    "exact {exact}: q{i} asked in reverse order"
                 );
             }
         }

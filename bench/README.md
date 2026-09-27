@@ -20,7 +20,7 @@ its own right after it), `batched` (the state once, then every question in
 one batch) and `separate` (each question from scratch, the baseline). For
 every state size (`--states`, default 256/1k/4k tokens) and question count
 (`--questions`, default 1/4/8/16/32/64): the tokens decoded with the state
-shared and without (padding included), the decode time of each mode
+shared and without, the decode time of each mode
 (median of `--repeat` runs, from the server's own timings, which on a GPU
 wait for the computation to finish), the speedup of `shared_prefix` over
 `separate`, and how far each mode's answers are from the baseline's.

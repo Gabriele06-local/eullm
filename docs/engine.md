@@ -634,17 +634,16 @@ hardware and fails if it does not hold). That is the default because a
 decision should not change with the questions asked next to it, and
 because a calibration measured on labelled data then holds however the
 questions are grouped into requests when serving. The price is one decode
-call per question instead of one per batch: 2–14% slower than `batched` on
-a 4-core CPU. On a GPU a decode call has a fixed cost of its own —
-launching a few hundred kernels one by one, about 5 ms on an RTX 5070 Ti,
-more than a short question's arithmetic — so there each question is padded
-to a multiple of 64 tokens with copies of its last token. Causal attention
-keeps the padding out of everything the answer is read from; what it
-changes is the batch's shape, which then depends on the question's own
-length only, and questions of the same padded length decode in the same
-shape one after another, which lets llama.cpp reuse the previous decode's
-graph and ggml-cuda replay it as one CUDA graph. The padding is counted in
-`evaluated_tokens`. Calibrate in the mode that will serve.
+call per question instead of one per batch. On a 4-core CPU that is 2–14%
+slower than `batched`. On a GPU each call has a fixed cost of about 3 ms
+(Qwen3-0.6B on an RTX 5070 Ti) — the GPU running a few hundred small
+kernels, not launching them: padding every question to a common length so
+the calls replay as CUDA graphs was tried and measured 25% slower — so with
+many questions `shared_prefix` is 2–3× slower than `batched` there, and
+still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
+473 ms for states of 256 / 1k / 4k tokens, against 111 / 130 / 235 ms
+`batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
+will serve.
 
 **Limits:** 64 questions per request, 26 options per `choice`, 2–10 levels per
 `score`, and `--decision-ctx` tokens of context per request (default 8192).
