@@ -78,26 +78,48 @@ class Greedy:
         print(f"[judge] loaded {model_id} in {time.time() - t0:.0f}s", flush=True)
 
     def __call__(self, prompt: str) -> str:
-        text = self.tok.apply_chat_template([{"role": "user", "content": prompt}],
-                                            tokenize=False, add_generation_prompt=True)
-        enc = self.tok(text, return_tensors="pt", add_special_tokens=False).to(self.model.device)
+        return self.batch([prompt])[0]
+
+    def batch(self, prompts: list[str]) -> list[str]:
+        """Grade several prompts in one generate call (left-padded)."""
+        self.tok.padding_side = "left"
+        if self.tok.pad_token is None:
+            self.tok.pad_token = self.tok.eos_token
+        texts = [self.tok.apply_chat_template([{"role": "user", "content": p}],
+                                              tokenize=False, add_generation_prompt=True)
+                 for p in prompts]
+        enc = self.tok(texts, return_tensors="pt", padding=True,
+                       add_special_tokens=False).to(self.model.device)
         with self.torch.no_grad():
             out = self.model.generate(**enc, max_new_tokens=self.max_new_tokens,
-                                      do_sample=False)
-        return self.tok.decode(out[0, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+                                      do_sample=False, pad_token_id=self.tok.pad_token_id)
+        return self.tok.batch_decode(out[:, enc["input_ids"].shape[1]:],
+                                     skip_special_tokens=True)
 
 
-def grade_file(path: Path, grader: ReferenceGrader) -> list[Grade]:
-    """Grade every line of one answers file; write the .graded.jsonl beside it."""
+def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
+               quiet: bool = False) -> list[Grade]:
+    """Grade every line of one answers file; write the .graded.jsonl beside it.
+
+    With a ``chat_fn`` that has a ``batch`` method, ``batch_size`` prompts
+    go through it at once. ``quiet`` prints nothing per item: an item id of
+    the held-out exam names the article it asks about.
+    """
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
-    grades = []
+    prompts = [grader.prompt(r["question"], r.get("reference", ""), r["answer"],
+                             r.get("rubric", "")) for r in rows]
+    batch = getattr(grader.chat_fn, "batch", None)
+    raw: list[str] = []
+    for i in range(0, len(prompts), batch_size):
+        chunk = prompts[i:i + batch_size]
+        raw.extend(batch(chunk) if batch and batch_size > 1 else
+                   [grader.chat_fn(p) for p in chunk])
+    grades = [ReferenceGrader.parse(t) for t in raw]
     out = path.with_suffix(".graded.jsonl")
     with out.open("w", encoding="utf-8") as f:
-        for r in rows:
-            g = grader.grade(r["question"], r.get("reference", ""), r["answer"],
-                             r.get("rubric", ""))
-            grades.append(g)
-            print(f"[judge] {label_of(path):<22} {r['id']:<20} {g.label}", flush=True)
+        for r, g in zip(rows, grades):
+            if not quiet:
+                print(f"[judge] {label_of(path):<22} {r['id']:<20} {g.label}", flush=True)
             f.write(json.dumps({**r, "grade": g.label, "why": g.rationale},
                                ensure_ascii=False) + "\n")
     return grades
@@ -109,6 +131,9 @@ def main() -> int:
     ap.add_argument("answers", nargs="+", type=Path, help="answers-*.jsonl from legal_eval.py")
     ap.add_argument("--csv", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--batch-size", type=int, default=8)
+    ap.add_argument("--quiet", action="store_true",
+                    help="totals only — for the held-out exam (see legal_eval.py)")
     args = ap.parse_args()
 
     files = [p for p in args.answers if not p.name.endswith(".graded.jsonl")]
@@ -119,7 +144,8 @@ def main() -> int:
         if new_file:
             w.writerow(CSV_HEADER)
         for path in files:
-            row = summary_row(label_of(path), grade_file(path, grader))
+            row = summary_row(label_of(path), grade_file(
+                path, grader, batch_size=args.batch_size, quiet=args.quiet))
             w.writerow(row)
             f.flush()
             print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "

@@ -44,3 +44,34 @@ def test_the_summary_row_counts_full_marks_and_endings():
     row = legal_eval.summary_row("x", "m", report, ended=2)
     assert dict(zip(legal_eval.CSV_HEADER, row))["fully_covered"] == 1
     assert row[3] == 2 and row[4] == "0.500" and row[-1] == 2
+
+
+def test_quiet_grading_prints_no_item(tmp_path, capsys):
+    """Held-out exam ids name the article asked; --quiet must not print them."""
+    import json
+
+    spec = importlib.util.spec_from_file_location(
+        "judge_answers", SCRIPT.parent / "judge_answers.py")
+    ja = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ja)
+    from eullm_forge.eval import ReferenceGrader
+
+    src = tmp_path / "answers-m.jsonl"
+    src.write_text("\n".join(json.dumps({"id": f"norm-termine-codice_civile-{n}",
+                                         "question": "Q?", "answer": "A.",
+                                         "reference": "R."}) for n in (1, 2, 3)) + "\n")
+
+    class Batched:
+        calls = 0
+
+        def __call__(self, p):
+            return self.batch([p])[0]
+
+        def batch(self, ps):
+            Batched.calls += 1
+            return ["Grade: correct\nok"] * len(ps)
+
+    grades = ja.grade_file(src, ReferenceGrader(Batched()), batch_size=2, quiet=True)
+    assert [g.label for g in grades] == ["correct"] * 3
+    assert Batched.calls == 2                       # 3 prompts in batches of 2
+    assert "codice_civile" not in capsys.readouterr().out

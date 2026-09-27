@@ -10,7 +10,7 @@
 # geometry measured to be placed quickly. Ten items for five models is a few
 # minutes of generation; most of the job is loading the weights.
 #
-# Settable: JUDGE_DIR (required), JUDGE_GLOB (default answers-*.jsonl),
+# Settable: JUDGE_DIR (required), JUDGE_GLOB (default answers-*.jsonl), JUDGE_QUIET,
 # JUDGE_REPO (default: the checkout this file was submitted from).
 #
 #SBATCH --job-name=eullm-judge
@@ -56,4 +56,6 @@ echo "[judge] files  ${FILES[*]}"
 source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
-python "$REPO/forge/scripts/judge_answers.py" "${FILES[@]}" --csv "$DIR/graded.csv"
+# JUDGE_QUIET=1 for the held-out exam: its item ids name the articles asked.
+python "$REPO/forge/scripts/judge_answers.py" "${FILES[@]}" --csv "$DIR/graded.csv" \
+    ${JUDGE_QUIET:+--quiet}
