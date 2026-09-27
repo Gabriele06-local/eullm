@@ -174,8 +174,9 @@ def main() -> int:
         content = it.question
         if index:
             found = index.search(it.question, args.k)
-            contexts[it.id] = [norm_label(r) for r in found]
-            content = open_book_prompt(it.question, found)
+            note = index.missing_article_note(it.question)
+            contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
+            content = open_book_prompt(it.question, found, note=note)
         prompts.append(tok.apply_chat_template(
             [{"role": "user", "content": content}],
             tokenize=False, add_generation_prompt=True,

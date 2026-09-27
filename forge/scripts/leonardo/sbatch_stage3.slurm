@@ -62,7 +62,8 @@ OUT="${S3_OUT:-$WORK/eullm_runs/stage3/sft-$(basename "${BASE:-none}")}"
 echo "[s3] repo   $REPO"
 echo "[s3] commit $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
 echo "[s3] base   $BASE"
-echo "[s3] pairs  $PAIRS ($(wc -l < "$PAIRS" 2>/dev/null || echo 0) lines)"
+echo "[s3] pairs  $PAIRS ($(cat $PAIRS 2>/dev/null | wc -l) lines)"
+echo "[s3] args   ${S3_ARGS:-}"
 echo "[s3] out    $OUT"
 
 [ -n "$BASE" ] || { echo "[s3] S3_BASE is required" >&2; exit 1; }
@@ -72,10 +73,13 @@ echo "[s3] out    $OUT"
     echo "[s3] job and CURVE_KEEP=1 (see the header)" >&2
     exit 1
 }
-[ -s "$PAIRS" ] || { echo "[s3] no instruction pairs at $PAIRS" >&2; exit 1; }
+for f in $PAIRS; do [ -s "$f" ] || { echo "[s3] no instruction pairs at $f" >&2; exit 1; }; done
 
 # shellcheck disable=SC1091
 source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
-python "$REPO/forge/scripts/stage3_sft.py" --model "$BASE" --pairs "$PAIRS" --out "$OUT"
+# S3_ARGS: extra stage3_sft.py options, e.g. "--no-format-tokens --lr 1e-4
+# --epochs 1" for an instruct base. S3_PAIRS may list several files.
+# shellcheck disable=SC2086
+python "$REPO/forge/scripts/stage3_sft.py" --model "$BASE" --pairs $PAIRS --out "$OUT" ${S3_ARGS:-}
