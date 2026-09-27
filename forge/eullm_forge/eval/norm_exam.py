@@ -191,17 +191,25 @@ def _usable(a: Article) -> bool:
 
 
 def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
-               codes: set[str] | None = None) -> list[EvalItem]:
+               codes: set[str] | None = None,
+               exclude: set[tuple[str, str]] | None = None) -> list[EvalItem]:
     """Draw the exam: for each code, up to ``per_code`` items of each kind.
 
     ``seed`` None means a random one, which is the point: the builder must
     not be able to reproduce the draw from anything it can see.
+
+    ``exclude`` holds (code, article) pairs the models were trained on — the
+    open-book stage-3 pairs, see `trained_articles` — including the made-up
+    numbers of the absent-article pairs. None of them is drawn: an exam that
+    asks what training answered measures recall of the training set.
     """
+    exclude = exclude or set()
     rng = random.Random(seed if seed is not None else random.SystemRandom().random())
     arts = articles_from_records(records)
     by_code: dict[str, list[Article]] = defaultdict(list)
     for a in arts.values():
-        if a.code in CODE_LABELS and (codes is None or a.code in codes) and _usable(a):
+        if (a.code in CODE_LABELS and (codes is None or a.code in codes) and _usable(a)
+                and (a.code, a.number) not in exclude):
             by_code[a.code].append(a)
 
     items: list[EvalItem] = []
@@ -243,6 +251,8 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
         last = max(int(re.match(r"\d+", a.number).group()) for a in pool)
         for _ in range(max(1, per_code // 5)):
             fake = last + rng.randint(50, 900)
+            while (code, str(fake)) in exclude:
+                fake = last + rng.randint(50, 900)
             it = item(
                 "inesistente", str(fake), f"Che cosa prevede l'art. {fake} {of}?",
                 f"Non esiste l'art. {fake} {of}.",
@@ -266,6 +276,29 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
     for it in items:
         unique.setdefault(it.id, it)
     return list(unique.values())
+
+
+def trained_articles(pairs) -> set[tuple[str, str]]:
+    """(code, article) of every open-book training pair, read from its key.
+
+    Grounded pairs are keyed ``ob-g-<code>-<article>``, absent-article pairs
+    ``ob-m-<code>-<number>-<i>`` (see `openbook_gen`); codes are written with
+    underscores, so the first hyphen after the prefix ends the code. Other
+    pairs carry no article and are skipped.
+    """
+    out = set()
+    for p in pairs:
+        key = str(p.get("key", ""))
+        if key.startswith("ob-g-"):
+            code, _, number = key[5:].partition("-")
+        elif key.startswith("ob-m-"):
+            code, _, rest = key[5:].partition("-")
+            number = rest.split("-")[0]
+        else:
+            continue
+        if code and number:
+            out.add((code, number))
+    return out
 
 
 def retrieval_hits(items: list[EvalItem], index, k: int = 3) -> dict[str, dict[str, float]]:

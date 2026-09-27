@@ -144,3 +144,21 @@ def test_a_dry_run_writes_the_teacher_free_pairs_and_says_how_many_it_excluded(t
     assert "1 exam articles left out" in printed
     lines = [json.loads(x) for x in out.read_text().splitlines()]
     assert lines and {p["task"] for p in lines} == {"openbook_missing"}
+    # grounded jobs are still to do: a dry run never claims the data is complete
+    assert not out.with_name("o.jsonl.done").exists()
+
+
+def test_the_done_marker_appears_only_when_no_job_is_left(tmp_path):
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    out = tmp_path / "o.jsonl"
+    mod = load_script()
+    args = ["--norms", str(norms), "--no-exam", "--out", str(out), "--limit", "10"]
+    jobs = make_openbook_jobs(NormIndex(RECORDS), 10, seed=0)
+    # every grounded job already answered by an earlier link
+    with open(out.with_name("o.jsonl.rejected.jsonl"), "w") as f:
+        for j in jobs:
+            if j.kind == "grounded":
+                f.write(json.dumps({"key": j.key, "reason": "x"}) + "\n")
+    assert mod.main(args) == 0
+    assert out.with_name("o.jsonl.done").exists()

@@ -14,7 +14,12 @@ from pathlib import Path
 import pytest
 
 from eullm_forge.eval import NormIndex, keyword_coverage
-from eullm_forge.eval.norm_exam import articles_from_records, build_exam, retrieval_hits
+from eullm_forge.eval.norm_exam import (
+    articles_from_records,
+    build_exam,
+    retrieval_hits,
+    trained_articles,
+)
 from eullm_forge.eval.retrieval import named_code
 
 FILLER = " Il presente articolo contiene disposizioni di dettaglio sufficienti." * 3
@@ -232,3 +237,47 @@ def test_the_script_prints_counts_and_refuses_to_redraw(tmp_path, capsys):
     assert "[exam]" in printed and "[retrieval]" in printed
     assert "Che cosa prevede" not in printed          # counts only, never questions
     assert mod.main([str(norms), "--out", str(out)]) == 1
+
+
+def test_trained_articles_are_read_from_the_open_book_keys():
+    pairs = [{"key": "ob-g-codice_civile-2043"}, {"key": "ob-g-codice_civile-2-bis"},
+             {"key": "ob-m-codice_penale-1500-7"}, {"key": "civ-001"}, {}]
+    assert trained_articles(pairs) == {("codice_civile", "2043"), ("codice_civile", "2-bis"),
+                                       ("codice_penale", "1500")}
+
+
+def test_a_redraw_leaves_out_what_training_asked_about():
+    exclude = {("codice_civile", "2"), ("codice_civile", "3")}
+    for seed in range(20):
+        items = build_exam(RECORDS, per_code=10, seed=seed, exclude=exclude)
+        drawn = {(it.metadata["code"], it.metadata["articolo"]) for it in items}
+        assert not drawn & exclude
+        assert ("codice_civile", "1") in drawn
+
+
+def test_a_made_up_number_training_used_is_not_asked_again():
+    last = 5  # the last codice_civile article in RECORDS
+    exclude = {("codice_civile", str(n)) for n in range(last + 50, last + 900)}
+    exclude.discard(("codice_civile", str(last + 900)))
+    items = build_exam(RECORDS, per_code=5, seed=4, exclude=exclude)
+    fakes = [it for it in items if it.metadata["tipo"] == "inesistente"
+             and it.metadata["code"] == "codice_civile"]
+    assert fakes and all(it.metadata["articolo"] == str(last + 900) for it in fakes)
+
+
+def test_the_script_excludes_trained_articles_and_says_only_how_many(tmp_path, capsys):
+    import json
+
+    spec = importlib.util.spec_from_file_location("make_norm_exam", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    pairs = tmp_path / "openbook-pairs.jsonl"
+    pairs.write_text(json.dumps({"key": "ob-g-codice_civile-2"}) + "\n")
+    out = tmp_path / "exam.jsonl"
+    assert mod.main([str(norms), "--out", str(out), "--exclude-pairs", str(pairs)]) == 0
+    printed = capsys.readouterr().out
+    assert "1 trained articles left out" in printed and "codice_civile-2" not in printed
+    drawn = [json.loads(x)["metadata"] for x in out.read_text().splitlines()]
+    assert not [m for m in drawn if (m["code"], m["articolo"]) == ("codice_civile", "2")]
