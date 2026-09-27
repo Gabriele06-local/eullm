@@ -622,25 +622,39 @@ measures all three for 1–64 questions on states of several sizes.
 
 **Each answer depends on its own question only.** The three modes read the
 same tokens but hand them to the kernels in batches of different shapes,
-and on quantized weights that alone moves an answer — the 8-bit activation
-quantization of a Q8_0 model turns a last-digit difference in a sum into a
-different rounding one layer later. Measured on Qwen3-0.6B Q8_0 on the CPU:
-up to 0.09 in probability between `shared_prefix` and `separate`, 0.13
-between `batched` and `separate`. On CUDA the arithmetic is coarser —
-ggml-cuda runs cuBLAS in TF32 mode and accumulates some F16 products in
-half precision — and on an RTX 5070 Ti `batched` moved some answers by up
-to 0.5, changing the top answer of a few questions near a tie. None of the
-modes is the exact one; they are the same model with different rounding.
+and on quantized weights that alone moves an answer — a quantized model's
+matrix products round their inputs to 8 bits, which turns a last-digit
+difference in a sum into a different rounding one layer later. How far,
+measured with
+`bench/decision_bench.py` on a 4-core CPU (states of 256 and 1,024 tokens,
+1–64 questions; the largest difference in any probability from `separate`):
+
+| Model | `shared_prefix` | `batched` |
+|---|---|---|
+| Qwen3-0.6B F16 | 0.017 | 0.017 |
+| Qwen3-0.6B Q8_0 | 0.11 | 0.13 |
+| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0 (whole micro-batches shared, see [below](#jev-style-decision-models)) | 0.028 |
+
+With Qwen3-0.6B Q4_K_M, the catalog's `qwen3-0.6b`, that is enough to
+change the top answer of a question near a tie. On CUDA the arithmetic is
+coarser — ggml-cuda runs cuBLAS in TF32 mode and accumulates some F16
+products in half precision — and on an RTX 5070 Ti the same Q4_K_M model
+moved by up to 0.52. None of the modes is the exact one; they are the same
+model with different rounding. The Jev-Style model, trained to answer this
+way, is an order of magnitude steadier than an instruction-tuned model at
+the same quantization.
 
 What differs is what the rounding depends on. In `batched` mode a question
 sits somewhere in a batch with the others, so its answer moves with the
 other questions asked and with their order: asking the same questions in
-reverse moved answers by up to 0.15 on the CPU. In `shared_prefix` mode a
-question is decoded alone, in the same cache cells, in batches of the same
-shape and over the same attention window whatever else the request asks, so
-its answer is a function of the state and that question: asked alone, among
-63 others or in reverse order, it comes back bit for bit the same (measured
-on the CPU; `bench/decision_bench.py --order-check` checks it on your
+reverse moved answers by up to 0.31 on the CPU (Q4_K_M). In `shared_prefix`
+mode a question is decoded alone, in the same cache cells, in batches of the
+same shape and over the same attention window whatever else the request
+asks, so its answer is a function of the state and that question: asked
+alone, among 63 others or in reverse order, it comes back bit for bit the
+same (measured on the CPU and on an RTX 5070 Ti;
+`bench/decision_bench.py --order-check` checks it on your
 hardware and fails if it does not hold). That is the default because a
 decision should not change with the questions asked next to it, and
 because a calibration measured on labelled data then holds however the
@@ -766,11 +780,19 @@ time and all together.
 - Only the release's global temperature is applied, as its own runtime
   does when it is not given a category.
 
-`shared_prefix` shares the state in whole micro-batches: 1,024 tokens for
-the 0.8B, whose runtime computes those identically whether they are shared
-or not, and 2,048-token blocks for the 2B. The 2B decodes one block per
-call, so its `batched` requests are answered, and reported, as
-`shared_prefix`.
+`shared_prefix` gives exactly the scores the release's runtime gives,
+which are the scores its temperature was fitted on:
+
+- **2B:** its input is cut into 2,048-token blocks anyway, so the state is
+  still decoded only once. It decodes one block per call, so its `batched`
+  requests are answered, and reported, as `shared_prefix`.
+- **0.8B:** its arithmetic depends on where a 1,024-token micro-batch
+  starts, because its recurrent layers are computed in chunks from there.
+  Only whole micro-batches of the state can therefore be shared exactly.
+  A state shorter than 1,024 tokens, the common case, is decoded again
+  with every question. On a 4-core CPU, 8 questions about a 256-token
+  state take 15 s, as long as `separate`, against 5 s in `batched` mode,
+  where the answers move by up to 0.03 with the other questions asked.
 
 ## API Reference
 

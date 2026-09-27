@@ -40,10 +40,23 @@ one-at-a-time baseline where it would take too long — on a CPU, lower it.
 The dP columns are not an error margin to shrink. The modes read the same
 tokens but hand them to the kernels in batches of different shapes, and on
 quantized weights that alone moves an answer by the model's own numerical
-noise. On Qwen3-0.6B Q8_0: up to 0.13 in probability on a 4-core CPU, and
-up to 0.52 on an RTX 5070 Ti, where ggml-cuda's TF32 and half-precision
-arithmetic is coarser — enough to change the top answer of a question near a
-tie. Calibrate in the mode you serve in.
+noise. On a 4-core CPU (`--states 256,1024 --questions 1,8,64`), the
+largest dP from `separate`:
+
+| Model | `shared_prefix` | `batched` |
+|---|---|---|
+| Qwen3-0.6B F16 | 0.017 | 0.017 |
+| Qwen3-0.6B Q8_0 | 0.11 | 0.13 |
+| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0 | 0.028 |
+
+On an RTX 5070 Ti, where ggml-cuda's TF32 and half-precision arithmetic is
+coarser, Qwen3-0.6B Q4_K_M moved by up to 0.52. From Q4_K_M on, that is
+enough to change the top answer of a question near a tie. Calibrate in the
+mode you serve in. The Jev-Style model's `shared_prefix` is exact
+because it shares the state only in whole 1,024-token micro-batches. A
+state shorter than that is decoded again with every question, so
+`shared_prefix` saves nothing on it (see [docs/engine.md](../docs/engine.md#jev-style-decision-models)).
 
 What `shared_prefix` adds is that this noise no longer depends on the other
 questions: a question is decoded alone, in the same cache cells and in
