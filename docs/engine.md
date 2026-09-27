@@ -563,8 +563,14 @@ options coded `A`…`Z`, the levels `0`…`9`, or `Yes`/`No`. The logits at
 that position are read once — nothing is generated — and restricted to the
 codes. When the model loads, the server checks that every code is a single
 token for its tokenizer right after its prompt, and refuses a question whose
-codes are not; the load log lists what it found. A model trained for this
-endpoint reads its answers differently — see
+codes are not; the load log lists what it found. Everything a request
+sends — the state, the instructions, the options — is tokenized as text: a
+chat template's own turn markers inside it (`<|im_end|>`,
+`<|im_start|>assistant`) stay text instead of closing the user turn and
+writing the rest of the prompt. Only the template's text is read for control
+tokens; for the rare template that cannot be tokenized in those pieces
+exactly as it is whole, a request containing such a marker is refused with
+a 400. A model trained for this endpoint reads its answers differently — see
 [Jev-Style decision models](#jev-style-decision-models) — and the response
 says which readout was used in `eullm.readout` (`codes` or `verdict`).
 
