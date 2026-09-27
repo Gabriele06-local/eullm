@@ -507,3 +507,34 @@ def test_a_real_loader_has_one_fixed_order_per_epoch_and_skips_by_batch():
 
     other = [b.tolist() for b in distill.epoch_batches(loader, epoch=1, skip=0, seed=7)]
     assert other != a
+
+
+def test_the_tokenised_cache_fingerprint_is_stable_and_specific(tmp_path):
+    """Every link of every chain used to miss the tokenised cache and write a
+    fresh copy (1,107 files, 539 GB in the shared HF cache on 2026-09-27).
+    The fingerprint is now built from what the result depends on, so it is the
+    same on every restart and different when any of those changes."""
+    import types
+
+    data = tmp_path / "train.jsonl"
+    data.write_text('{"text": "a"}\n')
+    files = {"train": str(data), "validation": str(data)}
+    cfg = types.SimpleNamespace(cutoff_len=2048, max_train_samples=None)
+
+    class Tok:
+        name_or_path = "Qwen/Qwen3-4B-Base"
+
+        def __len__(self):
+            return 151669
+
+    fp = distill.tokenize_fingerprint
+    base = fp(cfg, Tok(), files, "train")
+    assert base == fp(cfg, Tok(), files, "train")                 # same on restart
+    assert base != fp(cfg, Tok(), files, "validation")            # per split
+    assert base != fp(types.SimpleNamespace(cutoff_len=1024, max_train_samples=None),
+                      Tok(), files, "train")                      # cutoff
+    other = Tok()
+    other.name_or_path = "Qwen/Qwen3-8B-Base"
+    assert base != fp(cfg, other, files, "train")                 # tokenizer
+    data.write_text('{"text": "a rebuilt corpus"}\n')
+    assert base != fp(cfg, Tok(), files, "train")                 # rebuilt corpus
