@@ -110,11 +110,39 @@ def test_malformed_line_does_not_hide_a_violation(tmp_path):
     assert main([str(tmp_path)]) == 1
 
 
+def test_a_ruling_number_source_id_does_not_hide_the_court(tmp_path):
+    """The real shape of a CdS record: the acquirer keys rulings by
+    NUMERO_RICORSO, so source_id is a number with no court code, and `kind` is
+    the only field naming the court. Reading the first field present matched the
+    record against its own ruling number, and a 2025 Consiglio di Stato record
+    in train.jsonl passed a gate whose whole purpose is to refuse it."""
+    leak = {"text": "Il Consiglio di Stato ha pronunciato la decisione n. 90135.",
+            "source_id": "90135/2025", "sentence_id": "90135/2025",
+            "year": 2025, "kind": "cds"}
+    write(tmp_path, "train.jsonl", [CDS_OK, leak])
+    assert main([str(tmp_path)]) == 1
+    # --require-source was satisfied by the clean record, so it must not be
+    # what makes the contaminated corpus look accounted for.
+    assert main([str(tmp_path), "--require-source", "cds"]) == 1
+
+
+def test_a_2025_cds_record_with_no_year_at_all_also_fails(tmp_path):
+    write(tmp_path, "train.jsonl",
+          [{"text": "x", "source_id": "90135", "kind": "cds"}])
+    assert main([str(tmp_path)]) == 1
+
+
 @pytest.mark.parametrize("rec,expected", [
     ({"source_id": "CDS/2019/1"}, "cds/2019/1"),
     ({"source": "cds"}, "cds"),
     ({"kind": "cds"}, "cds"),
     ({}, ""),
+    # Every field, not the first: the court can be named by any of them.
+    ({"source_id": "90135/2025", "kind": "cds"}, "90135/2025 cds"),
+    ({"source_id": "snciv/2023/1", "source": "italgiure", "kind": "snciv"},
+     "snciv/2023/1 italgiure snciv"),
+    # A marker must not match across the seam between two fields.
+    ({"source_id": "c", "kind": "ds"}, "c ds"),
 ])
 def test_record_source(rec, expected):
     assert record_source(rec) == expected
