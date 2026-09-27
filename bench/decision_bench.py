@@ -289,7 +289,7 @@ def main():
     # Warm-up: loads the model if --model names one, and keeps first-request
     # costs out of the first case.
     try:
-        run_case(
+        warm = run_case(
             url,
             args.model,
             make_state(64),
@@ -297,10 +297,15 @@ def main():
             "shared_prefix",
             1,
             args.timeout,
-        )
+        )[0]
     except (RequestFailed, OSError) as e:
         print(f"Warm-up request failed: {e}", file=sys.stderr)
         return 1
+    # Which attention kernels the server runs decisions with: the numbers
+    # below depend on it, and a comparison of two runs means nothing if
+    # both turn out to have used the same setting.
+    flash_attn = warm["eullm"].get("flash_attn", "unknown")
+    print(f"model {warm['model']}, flash attention {flash_attn}\n")
 
     header = (
         f"{'state':>6} {'Q':>3} | {'tokens sh/sep':>15} {'saving':>7} | "
@@ -453,7 +458,8 @@ def main():
             json.dump(
                 {
                     "url": args.url,
-                    "model": args.model,
+                    "model": warm["model"],
+                    "flash_attn": flash_attn,
                     "repeat": args.repeat,
                     "cases": results,
                 },

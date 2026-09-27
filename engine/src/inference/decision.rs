@@ -233,17 +233,29 @@ impl Question {
     }
 }
 
+/// What the user turn says before the state, and between the state and the
+/// question. Everything up to the end of `QUESTION_LABEL` is the same for
+/// every question about one state.
+const STATE_LABEL: &str = "State:\n";
+const QUESTION_LABEL: &str = "\n\nQuestion:";
+
 /// The user turn for one question. The state comes first and the question
 /// last on purpose: everything up to the question is shared by every
 /// question about the same state, which is what [`EvalMode::SharedPrefix`]
 /// decodes only once.
 fn user_message(state: &str, question: &Question) -> String {
+    format!(
+        "{STATE_LABEL}{state}{QUESTION_LABEL}{}",
+        question_text(question)
+    )
+}
+
+/// The question's own part of the user turn, from the space after
+/// `QUESTION_LABEL` to the last line.
+fn question_text(question: &Question) -> String {
     use std::fmt::Write as _;
 
-    let mut msg = format!(
-        "State:\n{state}\n\nQuestion: {}\n",
-        question.instructions().trim()
-    );
+    let mut msg = format!(" {}\n", question.instructions().trim());
     match question {
         Question::Noul { .. } => msg.push_str("Answer Yes or No."),
         Question::Choice { options, .. } => {
@@ -289,6 +301,127 @@ fn render_prompt(model: &LlamaModel, uses_template: bool, user: &str) -> String 
         return rendered.prompt;
     }
     format!("{SYSTEM_PROMPT}\n\n{user}\n\nAnswer:")
+}
+
+/// How one model's prompts are put together, worked out once at load.
+///
+/// Rendering a prompt through the model's Jinja template costs ~9 ms each
+/// for Qwen3's (measured: 598 ms for 64 questions, against 95 ms to decode
+/// all of them on an RTX 5070 Ti), and tokenizing it costs time in
+/// proportion to the state, once per question. Neither needs repeating
+/// when the template embeds the user turn verbatim and the tokenizer
+/// splits cleanly after `QUESTION_LABEL` — both checked here, so a model
+/// where either does not hold falls back to the slow, always-correct path.
+struct PromptLayout {
+    /// The rendered text before and after the user turn: the template's own
+    /// when it embeds the turn verbatim, the plain-text prompt's without a
+    /// template. `None`: render every prompt.
+    wrapper: Option<(String, String)>,
+    /// Tokenizing everything up to `QUESTION_LABEL` and the rest apart
+    /// gives exactly the whole prompt's tokens: the state is tokenized once
+    /// per request instead of once per question.
+    split_tokens: bool,
+}
+
+impl PromptLayout {
+    fn resolve(model: &LlamaModel, uses_template: bool) -> Self {
+        let wrapper = template_wrapper(|user| Some(render_prompt(model, uses_template, user)));
+        let split_tokens = wrapper.as_ref().is_some_and(|(head, tail)| {
+            split_tokenization_holds(
+                |text, bos| {
+                    let add_bos = if bos { AddBos::Always } else { AddBos::Never };
+                    model
+                        .str_to_token(text, add_bos)
+                        .ok()
+                        .map(|tokens| tokens.into_iter().map(|t| t.0).collect())
+                },
+                head,
+                tail,
+            )
+        });
+        Self {
+            wrapper,
+            split_tokens,
+        }
+    }
+
+    fn describe(&self) -> &'static str {
+        match (&self.wrapper, self.split_tokens) {
+            (Some(_), true) => "template rendered once, state tokenized once per request",
+            (Some(_), false) => "template rendered once, every prompt tokenized whole",
+            (None, _) => "template rendered and tokenized per question",
+        }
+    }
+}
+
+/// The text a rendered prompt puts before and after the user turn, when
+/// every probe comes back verbatim between the same two strings. The probes
+/// carry what a real turn can: newlines, brackets and quotes, markup, a
+/// `</think>`, non-ASCII text — a template that escapes, trims inside or
+/// rewrites any of it fails the check and keeps per-question rendering.
+fn template_wrapper<F>(render: F) -> Option<(String, String)>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    const PROBES: [&str; 2] = [
+        "State:\nx {a} [b] <c> \"d\" 'e' </think>\n\nQuestion: Is it?\nA) f: g\nAnswer Yes or No.",
+        "State:\n«Il cliente» chiede — €12,50\n\nQuestion: Qual è?\n0) basso\n1) alto\nReply.",
+    ];
+    let mut found: Option<(String, String)> = None;
+    for probe in PROBES {
+        let rendered = render(probe)?;
+        let at = rendered.find(probe)?;
+        let (head, tail) = (&rendered[..at], &rendered[at + probe.len()..]);
+        match &found {
+            None => found = Some((head.to_string(), tail.to_string())),
+            Some((h, t)) if h == head && t == tail => {}
+            Some(_) => return None,
+        }
+    }
+    found
+}
+
+/// Whether tokenizing `head + state + QUESTION_LABEL` and `question + tail`
+/// apart gives exactly the tokens of the whole prompt, for questions that
+/// start with any of a spread of characters. The split falls after the
+/// label's colon; a tokenizer that merges across it (`": I"` as one token),
+/// or that prefixes a fragment with a space of its own (SentencePiece's
+/// dummy prefix), fails here and keeps whole-prompt tokenization.
+/// `tokenize(text, add_bos)`.
+fn split_tokenization_holds<F>(tokenize: F, head: &str, tail: &str) -> bool
+where
+    F: Fn(&str, bool) -> Option<Vec<i32>>,
+{
+    const STARTS: [&str; 10] = [
+        "Is it urgent?",
+        "is it",
+        "3 items",
+        "«Quoted»",
+        "\"Quoted\"",
+        "(a)",
+        "Qual è l'area?",
+        "¿Qué?",
+        "什么",
+        "-x",
+    ];
+    let common = format!("{head}{STATE_LABEL}x{QUESTION_LABEL}");
+    let Some(common_tokens) = tokenize(&common, true) else {
+        return false;
+    };
+    STARTS.iter().all(|start| {
+        let rest = format!(" {start}\nAnswer Yes or No.{tail}");
+        match (
+            tokenize(&format!("{common}{rest}"), true),
+            tokenize(&rest, false),
+        ) {
+            (Some(whole), Some(rest_tokens)) => {
+                whole.len() == common_tokens.len() + rest_tokens.len()
+                    && whole[..common_tokens.len()] == common_tokens[..]
+                    && whole[common_tokens.len()..] == rest_tokens[..]
+            }
+            _ => false,
+        }
+    })
 }
 
 /// The answer codes of one question kind.
@@ -607,6 +740,7 @@ pub struct DecisionModel {
     /// never used.
     flash_attn: bool,
     uses_template: bool,
+    layout: PromptLayout,
     codes: CodeTable,
     /// Held for a whole evaluation. Every request creates its own context,
     /// sized to it; two at once would hold two of those in VRAM, and the
@@ -666,9 +800,13 @@ impl DecisionModel {
             );
         }
         let codes = CodeTable::resolve(&model, uses_template)?;
+        let layout = PromptLayout::resolve(&model, uses_template);
         tracing::info!(
-            "Decision model loaded — codes: {}; up to {max_ctx} tokens of context per request",
-            codes.summary()
+            "Decision model loaded — codes: {}; prompts: {}; flash attention {}; up to {max_ctx} \
+             tokens of context per request",
+            codes.summary(),
+            layout.describe(),
+            if flash_attn { "auto" } else { "off" }
         );
 
         Ok(Self {
@@ -678,6 +816,7 @@ impl DecisionModel {
             max_ctx,
             flash_attn,
             uses_template,
+            layout,
             codes,
             eval_lock: Mutex::new(()),
             prior_cache: Mutex::new(HashMap::new()),
@@ -781,20 +920,67 @@ impl DecisionModel {
         })
     }
 
+    /// Whether flash attention may be used (`--no-flash-attn` not given).
+    pub fn flash_attn(&self) -> bool {
+        self.flash_attn
+    }
+
     fn prompts(
         &self,
         state: &str,
         questions: &[Question],
     ) -> Result<Vec<Vec<LlamaToken>>, DecisionError> {
-        questions
-            .iter()
-            .map(|q| {
-                let text = render_prompt(&self.model, self.uses_template, &user_message(state, q));
-                self.model
-                    .str_to_token(&text, AddBos::Always)
-                    .map_err(|e| DecisionError::Invalid(format!("Tokenization failed: {e}")))
-            })
-            .collect()
+        let tokenize = |text: &str, add_bos: AddBos| {
+            self.model
+                .str_to_token(text, add_bos)
+                .map_err(|e| DecisionError::Invalid(format!("Tokenization failed: {e}")))
+        };
+        match &self.layout.wrapper {
+            Some((head, tail)) if self.layout.split_tokens => {
+                let common = tokenize(
+                    &format!("{head}{STATE_LABEL}{state}{QUESTION_LABEL}"),
+                    AddBos::Always,
+                )?;
+                let prompts = questions
+                    .iter()
+                    .map(|q| {
+                        let rest = tokenize(&format!("{}{tail}", question_text(q)), AddBos::Never)?;
+                        let mut tokens = Vec::with_capacity(common.len() + rest.len());
+                        tokens.extend_from_slice(&common);
+                        tokens.extend(rest);
+                        Ok(tokens)
+                    })
+                    .collect::<Result<Vec<_>, DecisionError>>()?;
+                // The load-time check covers the characters a question can
+                // start with; this one covers the request at hand, in debug
+                // builds, where the extra whole-prompt tokenization is free.
+                debug_assert!(questions.first().is_none_or(|q| {
+                    tokenize(
+                        &format!("{head}{}{tail}", user_message(state, q)),
+                        AddBos::Always,
+                    )
+                    .is_ok_and(|whole| whole == prompts[0])
+                }));
+                Ok(prompts)
+            }
+            Some((head, tail)) => questions
+                .iter()
+                .map(|q| {
+                    tokenize(
+                        &format!("{head}{}{tail}", user_message(state, q)),
+                        AddBos::Always,
+                    )
+                })
+                .collect(),
+            None => questions
+                .iter()
+                .map(|q| {
+                    let text =
+                        render_prompt(&self.model, self.uses_template, &user_message(state, q));
+                    tokenize(&text, AddBos::Always)
+                })
+                .collect(),
+        }
     }
 
     fn evaluate(
@@ -1524,6 +1710,66 @@ mod tests {
         let score = user_message(state, &q3);
         assert!(score.contains("0) Cosmetic\n1) Blocking\n"), "{score}");
         assert!(user_message(state, &q1).ends_with("Answer Yes or No."));
+    }
+
+    #[test]
+    fn a_template_that_embeds_the_turn_verbatim_is_rendered_once() {
+        let render = |user: &str| {
+            Some(format!(
+                "<s>system\nSYS</s><s>user\n{user}</s><s>assistant\n"
+            ))
+        };
+        let (head, tail) = template_wrapper(render).expect("verbatim template");
+        assert_eq!(head, "<s>system\nSYS</s><s>user\n");
+        assert_eq!(tail, "</s><s>assistant\n");
+    }
+
+    #[test]
+    fn a_template_that_rewrites_the_turn_is_rendered_per_question() {
+        // Escapes markup: the turn no longer appears verbatim.
+        let escaping = |user: &str| Some(format!("[{}]", user.replace('<', "&lt;")));
+        assert!(template_wrapper(escaping).is_none());
+        // Wraps it in something that depends on the turn itself.
+        let counting = |user: &str| Some(format!("{} chars: {user}", user.len()));
+        assert!(template_wrapper(counting).is_none());
+        // Does not render at all.
+        assert!(template_wrapper(|_: &str| None).is_none());
+    }
+
+    #[test]
+    fn split_tokenization_holds_only_where_the_boundary_is_a_clean_split() {
+        // One token per character: splitting anywhere is exact.
+        let chars = |text: &str, _bos: bool| Some(text.chars().map(|c| c as i32).collect());
+        assert!(split_tokenization_holds(chars, "H", "T"));
+
+        // A token that spans the label's colon and the question's first
+        // word, as a BPE merge across the boundary would.
+        let merging = |text: &str, _bos: bool| {
+            let mut out = Vec::new();
+            let mut rest = text;
+            while let Some(c) = rest.chars().next() {
+                if rest.starts_with(": I") {
+                    out.push(-1);
+                    rest = &rest[3..];
+                } else {
+                    out.push(c as i32);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+            Some(out)
+        };
+        assert!(!split_tokenization_holds(merging, "H", "T"));
+
+        // A marker in front of every fragment, as SentencePiece's dummy
+        // prefix space adds.
+        let prefixing = |text: &str, _bos: bool| {
+            Some(
+                std::iter::once(0)
+                    .chain(text.chars().map(|c| c as i32))
+                    .collect(),
+            )
+        };
+        assert!(!split_tokenization_holds(prefixing, "H", "T"));
     }
 
     #[test]

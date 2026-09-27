@@ -472,6 +472,10 @@ struct ResponseExtension {
     calibration: &'static str,
     temperature: f64,
     confidence_method: &'static str,
+    /// `auto` or `off` (`--no-flash-attn`): which attention kernels the
+    /// numbers below came from, since timings and the last digits of every
+    /// probability depend on it.
+    flash_attn: &'static str,
     /// All prompts' tokens together: what asking each question on its own
     /// decodes.
     prompt_tokens: usize,
@@ -671,6 +675,7 @@ pub(super) async fn systemone(
         mode: parsed.mode,
         content_free: parsed.calibration == Calibration::ContentFree,
     };
+    let flash_attn = if model.flash_attn() { "auto" } else { "off" };
     let (parsed, decision) = tokio::task::spawn_blocking(move || {
         let decision = model.decide(&parsed.state, &parsed.questions, options);
         (parsed, decision)
@@ -717,6 +722,7 @@ pub(super) async fn systemone(
             calibration: parsed.calibration.as_str(),
             temperature: parsed.temperature,
             confidence_method: decision::CONFIDENCE_METHOD,
+            flash_attn,
             prompt_tokens: decision.stats.prompt_tokens,
             shared_prefix_tokens: decision.stats.shared_prefix_tokens,
             evaluated_tokens: decision.stats.evaluated_tokens,

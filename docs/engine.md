@@ -601,8 +601,10 @@ tagged with the extra sequences), and decodes the rest of every question in
 one batch: about `S + Q·q` tokens for `Q` questions of `q` tokens on a state
 of `S`, instead of the `Q·(S + q)` of asking one at a time. `separate` does
 exactly that, one at a time; it exists as the baseline. The response reports
-both counts (`prompt_tokens` against `evaluated_tokens`) and the timings of
-each phase. `bench/decision_bench.py` measures the saving for 1–64 questions
+both counts (`prompt_tokens` against `evaluated_tokens`), the timings of
+each phase and `flash_attn` — `auto`, or `off` under `--no-flash-attn` — since
+both the timings and the last digits of every probability depend on it.
+`bench/decision_bench.py` measures the saving for 1–64 questions
 on states of several sizes.
 
 The two modes read the same tokens, and on an F32 model they agree to about
