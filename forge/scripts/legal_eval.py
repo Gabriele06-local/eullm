@@ -74,6 +74,35 @@ CSV_HEADER = ["timestamp", "label", "model", "items", "keyword_coverage",
               "fully_covered", "ended_turn"]
 
 
+def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
+                     max_new_tokens: int, end_ids: list[int]) -> list[tuple[str, bool]]:
+    """Greedy answers to already-templated prompts, ``batch_size`` at a time.
+
+    Returns (answer, ended_its_turn) per prompt. In a batch a finished
+    sequence is padded until the longest one ends, so "ended" is whether an
+    end token was generated at all, and the answer is cut there.
+    """
+    import torch
+
+    tok.padding_side = "left"          # decoder-only: pad before the prompt
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    out_all = []
+    for i in range(0, len(prompts), batch_size):
+        chunk = prompts[i:i + batch_size]
+        enc = tok(chunk, return_tensors="pt", padding=True,
+                  add_special_tokens=False).to(model.device)
+        with torch.no_grad():
+            out = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
+                                 eos_token_id=end_ids, pad_token_id=tok.pad_token_id)
+        for row in out[:, enc["input_ids"].shape[1]:].tolist():
+            cut = next((j for j, t in enumerate(row) if t in end_ids), None)
+            text = tok.decode(row[:cut] if cut is not None else row,
+                              skip_special_tokens=True).strip()
+            out_all.append((text, cut is not None))
+    return out_all
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -87,6 +116,12 @@ def main() -> int:
                     help="legislazione_*.chunks.jsonl files: ask OPEN BOOK, "
                          "with the retrieved norms in the prompt")
     ap.add_argument("--k", type=int, default=3, help="norms retrieved per question")
+    ap.add_argument("--batch-size", type=int, default=0,
+                    help="questions generated together (default: 16 on GPU, 1 on CPU)")
+    ap.add_argument("--quiet", action="store_true",
+                    help="print totals only, never a question or an answer: for the "
+                         "held-out exam, whose questions nobody improving the models "
+                         "should read (see make_norm_exam.py)")
     args = ap.parse_args()
 
     import torch
@@ -98,35 +133,41 @@ def main() -> int:
         print(f"[eval] open book: {len(index.records):,} legislation records, "
               f"{args.k} per question", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
+    cuda = torch.cuda.is_available()
     model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
+    if cuda:
+        model.to("cuda")
     model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
+    batch = args.batch_size or (16 if cuda else 1)
+    print(f"[eval] {len(items)} items on {'GPU' if cuda else 'CPU'}, batch {batch}", flush=True)
 
-    answers, contexts, ended = {}, {}, 0
+    contexts, prompts = {}, []
     for it in items:
         content = it.question
         if index:
             found = index.search(it.question, args.k)
             contexts[it.id] = [norm_label(r) for r in found]
             content = open_book_prompt(it.question, found)
-            print(f"\n[eval] {it.id} reads: {'; '.join(contexts[it.id]) or 'nothing found'}")
-        prompt = tok.apply_chat_template(
+        prompts.append(tok.apply_chat_template(
             [{"role": "user", "content": content}],
             tokenize=False, add_generation_prompt=True,
-        )
-        ids = tok(prompt, return_tensors="pt", add_special_tokens=False)
-        with torch.no_grad():
-            out = model.generate(**ids, max_new_tokens=args.max_new_tokens,
-                                 do_sample=False, eos_token_id=end_ids)
-        new = out[0, ids["input_ids"].shape[1]:]
-        ended += len(new) > 0 and int(new[-1]) in end_ids
-        answers[it.id] = tok.decode(new, skip_special_tokens=True).strip()
-        print(f"\n[eval] {it.id}: {it.question}\n{answers[it.id]}", flush=True)
+        ))
+    results = generate_answers(model, tok, prompts, batch_size=batch,
+                               max_new_tokens=args.max_new_tokens, end_ids=end_ids)
+    answers = {it.id: text for it, (text, _) in zip(items, results)}
+    ended = sum(e for _, e in results)
+    if not args.quiet:
+        for it in items:
+            if index:
+                print(f"\n[eval] {it.id} reads: {'; '.join(contexts[it.id]) or 'nothing found'}")
+            print(f"\n[eval] {it.id}: {it.question}\n{answers[it.id]}", flush=True)
 
     report = evaluate_qa(items, answers)
-    for r in report["per_item"]:
-        print(f"[eval] {r['id']:<20} keywords {r['keyword_coverage']:.2f}")
+    if not args.quiet:
+        for r in report["per_item"]:
+            print(f"[eval] {r['id']:<20} keywords {r['keyword_coverage']:.2f}")
     s = report["summary"]
     print(f"\n[eval] {args.label or args.model}: keyword coverage "
           f"{s['keyword_coverage']:.3f} over {s['n']} items, "
