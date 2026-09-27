@@ -15,6 +15,10 @@ teacher and are written directly.
 --exclude-exam is REQUIRED when an exam exists: its articles are left out, and
 it prints how many, never which. Resumable like generate_instructions.py:
 jobs come from the seed, and keys already written are skipped.
+
+When no job is left it writes ``<out>.done``, so a watcher
+(submit_when_ready.sh --need) can start stage 3 on complete data instead of
+someone checking the queue.
 """
 
 from __future__ import annotations
@@ -102,19 +106,26 @@ def main(argv: list[str] | None = None) -> int:
     todo = [j for j in todo if j.kind == "grounded"]
     print(f"[ob] {accepted} missing-article pairs written; {len(todo)} grounded to go",
           flush=True)
-    if args.dry_run or not todo:
-        if args.dry_run and todo:
+    done_marker = args.out.with_name(args.out.name + ".done")
+    if args.dry_run:
+        if todo:
             print("--- one teacher prompt ---\n" + build_messages(todo[0])[1]["content"][:1200])
+        return 0
+    if not todo:
+        done_marker.touch()
+        print(f"[ob] nothing left to do -> {done_marker}", flush=True)
         return 0
 
     cfg = GenConfig()
     gen = TransformersGenerator(args.model, args.max_new_tokens)
     todo.sort(key=lambda j: len(j.text), reverse=True)
     tokens, gen_seconds, last_batch = 0, 0.0, 0.0
+    finished = True
     for i in range(0, len(todo), args.batch_size):
         elapsed = (time.time() - start) / 60
         if args.stop_after_min and elapsed + 1.5 * last_batch / 60 > args.stop_after_min:
             print(f"[ob] stopping at {elapsed:.0f} min, before the walltime", flush=True)
+            finished = False
             break
         batch = todo[i:i + args.batch_size]
         t0 = time.time()
@@ -135,6 +146,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[ob] {i + len(batch)}/{len(todo)}  accepted {accepted}  rejected "
               f"{dict(reasons)}  {tokens / max(gen_seconds, 1e-9):.0f} tok/s", flush=True)
     print(f"[ob] done: {accepted} accepted, rejected {dict(reasons)}", flush=True)
+    if finished:
+        done_marker.touch()
+        print(f"[ob] every job processed -> {done_marker}", flush=True)
     return 0
 
 

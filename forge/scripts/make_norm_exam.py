@@ -11,11 +11,17 @@ held-out set is that nobody improving the models reads it.
 
 The draw uses a random seed that is not printed. ``--codes`` limits it to one
 vertical, e.g. the three administrative sources.
+
+``--exclude-pairs`` leaves out every article an open-book training file asks
+about (and the made-up numbers of its absent-article pairs). A redraw after
+training on such pairs must use it, or the exam partly asks what training
+answered. Like the rest, it prints how many, never which.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections import Counter
 from pathlib import Path
@@ -23,7 +29,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import NormIndex, save_eval_set  # noqa: E402
-from eullm_forge.eval.norm_exam import build_exam, retrieval_hits  # noqa: E402
+from eullm_forge.eval.norm_exam import (  # noqa: E402
+    build_exam,
+    retrieval_hits,
+    trained_articles,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--codes", nargs="+", help="only these codes (default: all)")
     ap.add_argument("--check-retrieval", action="store_true",
                     help="also report how often retrieval finds each item's article")
+    ap.add_argument("--exclude-pairs", nargs="+", type=Path, default=[],
+                    help="open-book training pairs whose articles must not be drawn")
     ap.add_argument("--force", action="store_true", help="overwrite an existing exam")
     args = ap.parse_args(argv)
 
@@ -43,8 +55,14 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
     index = NormIndex.from_files(args.norms)
+    exclude: set[tuple[str, str]] = set()
+    for path in args.exclude_pairs:
+        with open(path, encoding="utf-8") as f:
+            exclude |= trained_articles(json.loads(line) for line in f if line.strip())
+    if args.exclude_pairs:
+        print(f"[exam] {len(exclude)} trained articles left out")
     items = build_exam(index.records, per_code=args.per_code,
-                       codes=set(args.codes) if args.codes else None)
+                       codes=set(args.codes) if args.codes else None, exclude=exclude)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save_eval_set(items, args.out)
 
