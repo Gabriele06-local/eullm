@@ -51,6 +51,7 @@ Or with explicit args (overrides YAML if both are present):
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -475,6 +476,31 @@ def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
 # ---------------------------------------------------------------------------
 
 
+def tokenize_fingerprint(cfg: DistillConfig, tokenizer, data_files: dict, split: str) -> str:
+    """A fingerprint for the tokenised split that is the same on every link.
+
+    `datasets` names the cache of a `.map()` after a hash of the function it
+    runs, and the function here closes over the tokenizer, whose hash is not
+    stable across processes. So every link of every chain missed the cache,
+    tokenised the whole corpus again and wrote a fresh copy next to the old
+    ones: 539 GB of them in the shared HF cache by 2026-09-27, when the
+    project went over its 1 TB quota and the chains could no longer save.
+
+    What the tokenised split depends on is named explicitly instead: the
+    tokenizer (name and vocabulary size), the cutoff, the sample limit and
+    the data file itself (path, size and modification time, so a rebuilt
+    corpus gets a new cache rather than a stale one).
+    """
+    path = Path(data_files[split])
+    st = path.stat()
+    key = "|".join(str(x) for x in (
+        "distill-tokenise-v1", getattr(tokenizer, "name_or_path", ""), len(tokenizer),
+        cfg.cutoff_len, cfg.max_train_samples if split == "train" else None,
+        path.resolve(), st.st_size, int(st.st_mtime), split,
+    ))
+    return hashlib.sha256(key.encode()).hexdigest()[:32]
+
+
 def build_dataloaders(cfg: DistillConfig, tokenizer):
     data_files = {
         "train": str(Path(cfg.dataset_dir) / cfg.train_file),
@@ -494,13 +520,20 @@ def build_dataloaders(cfg: DistillConfig, tokenizer):
         )
 
     cols = raw["train"].column_names
-    tokenized = raw.map(
-        _tok,
-        batched=True,
-        remove_columns=cols,
-        num_proc=4,
-        desc="tokenising",
-    )
+    # Split by split, each with a fingerprint that survives a restart: see
+    # tokenize_fingerprint. The same corpus is tokenised once per chain and
+    # reused by every link after it.
+    tokenized = {
+        split: ds.map(
+            _tok,
+            batched=True,
+            remove_columns=cols,
+            num_proc=4,
+            desc=f"tokenising {split}",
+            new_fingerprint=tokenize_fingerprint(cfg, tokenizer, data_files, split),
+        )
+        for split, ds in raw.items()
+    }
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     train_loader = DataLoader(
         tokenized["train"], batch_size=cfg.per_device_train_batch_size,
