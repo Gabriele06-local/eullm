@@ -61,6 +61,24 @@
 #     `GPU_TARGETS`/`CMAKE_HIP_ARCHITECTURES` under `rocm` from
 #     `EULLM_AMDGPU_TARGETS` (without it the HIP architecture is detected from
 #     the build host's own GPUs, which is wrong on an HPC login node).
+#   - `llama-cpp-sys-2/build.rs`: `-Wno-unused-function` on the wrapper and
+#     mtmd compiles — llama.cpp's headers (clip-impl.h, miniaudio.h, jinja)
+#     define static helpers most translation units never call, 700+ warnings
+#     that cargo replayed on every build.
+#   - `model.rs`: `str_to_token_plain`, tokenization with special-token text
+#     left as text (`parse_special = false`) — what text a request sends must
+#     be tokenized as; the decision layer relies on it.
+#   - `model.rs`: `#[allow(deprecated)]` on the five deprecated token-to-text
+#     methods that take the deprecated `Special`, and the unused
+#     `use std::slice` removed — upstream's own compile warnings.
+#   - `context.rs`: `LlamaContext::synchronize` (`llama_synchronize`), so a
+#     timing taken after an asynchronous GPU decode measures the decode.
+#   - `context/params/get_set.rs`: `with_non_causal_attention` /
+#     `non_causal_attention` (`attention_type`), for the block-causal
+#     attention of the Jev-Style 2B decision model.
+#   - `context/kv_cache.rs`: `clear_kv_cache_cells` (`llama_memory_clear`
+#     with `data = false`) — a recurrent or hybrid model's memory refuses
+#     `seq_rm(-1, ...)`, so clearing every sequence needs it.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"

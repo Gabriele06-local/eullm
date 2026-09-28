@@ -14,10 +14,11 @@ members = [
     # self-contained (dependency versions inlined from upstream's
     # `[workspace.dependencies]`), so no root inheritance table is needed.
     #
-    # llama.cpp C++ source is a git submodule pinned to
-    # e79e4bf660e19f2ad851e06c6913f7a8c5852621 (tag b10405), fetched through
-    # the EU-hosted mirror https://github.com/eullm/llama.cpp (see
-    # .gitmodules).
+    # llama.cpp C++ source is a git submodule (b11100 at the 0.1.156
+    # re-vendor), fetched through the EU-hosted mirror
+    # https://github.com/eullm/llama.cpp (see .gitmodules). Read the current
+    # pin from `git ls-tree HEAD engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`,
+    # not from a comment: this one named b10405 long after the b11100 bump.
     #
     # To refresh: re-vendor llama-cpp-2/llama-cpp-sys-2 from the eullm
     # llama-cpp-rs mirror and bump the submodule pin to the matching llama.cpp
