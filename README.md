@@ -247,7 +247,7 @@ written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
 changes. There is no command-line flag for it on purpose: a token on the
 command line is visible to every local user in `ps`.
 
-### Decisions without generation (`/v1/systemone`, not yet released)
+### Decisions without generation (`/v1/systemone`, new in v0.7.20)
 
 Routing, triage, "does this need a human?": questions whose answer is a
 choice, not a text. `POST /v1/systemone` asks a small model typed questions
