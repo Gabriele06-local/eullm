@@ -161,4 +161,5 @@ def test_the_done_marker_appears_only_when_no_job_is_left(tmp_path):
             if j.kind == "grounded":
                 f.write(json.dumps({"key": j.key, "reason": "x"}) + "\n")
     assert mod.main(args) == 0
-    assert out.with_name("o.jsonl.done").exists()
+    # submit_when_ready.sh tests with -s: an empty marker counts as missing
+    assert out.with_name("o.jsonl.done").stat().st_size > 0
