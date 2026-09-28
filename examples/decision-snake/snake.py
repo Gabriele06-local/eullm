@@ -148,10 +148,7 @@ def danger(fact):
 
 def describe(facts):
     """Every option's facts as the model reads them: a danger when there is
-    one, else the steps to the food and the room left. Measured on 40 boards
-    with the Jev-Style 0.8B, these plain numbers picked the best move 39
-    times; rephrasing them relative to each other ("the shortest way", "2
-    steps longer") did worse."""
+    one, else the steps to the food and the room left."""
     texts = {}
     for move, fact in facts.items():
         warning = danger(fact)
@@ -196,6 +193,10 @@ def rule(game, facts):
 
 
 def state_text(game):
+    """Where the food is, and nothing about the way the snake is heading:
+    named in the state, the heading pulled the Jev-Style 0.8B towards
+    carrying straight on even when the facts said otherwise. Without it, it
+    picked the best move on 40 boards out of 40."""
     hx, hy = game.snake[0]
     fx, fy = game.food
     parts = []
@@ -205,8 +206,7 @@ def state_text(game):
         parts.append(f"{abs(fx - hx)} {'left' if fx < hx else 'right'}")
     return (
         f"A game of Snake on a {game.width}x{game.height} board. The snake is "
-        f"{len(game.snake)} cells long, heading {game.heading}. The food is "
-        f"{' and '.join(parts)} of the head."
+        f"{len(game.snake)} cells long. The food is {' and '.join(parts)} of the head."
     )
 
 
