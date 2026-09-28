@@ -15,8 +15,8 @@
 #     refusing the data, a missing file, or the quota (2026-09-26);
 #   * a job pending for a reason that never resolves by itself
 #     (DependencyNeverSatisfied, a hold);
-#   * a watcher whose file exists but is empty, or that has been waiting
-#     for more than twelve hours.
+#   * a watcher whose file exists but is empty. One that simply waits long
+#     is shown, not flagged: the package watcher waits a whole training run.
 #
 # Read-only: it submits, cancels and writes nothing. It prints counts and
 # log lines of the pipeline, never the held-out exam.
@@ -56,7 +56,14 @@ while IFS='|' read -r id name state elapsed; do
             case "$name" in
                 eullm-p*|eullm-stage3|eullm-gen-*)
                     if [ "$(secs "$elapsed")" -lt 600 ]; then
-                        flag "$id $name ended $state after only $elapsed — a link that short did no work"
+                        # The last link of a generation chain finds nothing
+                        # left and exits in seconds, which is correct.
+                        log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
+                        if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
+                            echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
+                        else
+                            flag "$id $name ended $state after only $elapsed — a link that short did no work"
+                        fi
                     fi ;;
             esac ;;
     esac
@@ -70,24 +77,32 @@ echo "== watchers =="
 found=0
 for name in $(squeue --me -h -o "%j" | grep '^wait-' | sort -u); do
     found=1
-    log="$(ls -t "$RUNS"/*/logs/"$name"-*.out 2>/dev/null | head -1)"
+    log="$(ls -t "$RUNS"/*/logs/"$name"-[0-9]*.out 2>/dev/null | head -1)"
     if [ -z "$log" ]; then
         echo "   $name: queued, no log found under $RUNS/*/logs"
         continue
     fi
     grep '^\[wait\]' "$log" | sed 's/^/   /'
-    if grep -q 'present but EMPTY' "$log"; then
-        flag "$name waits on an EMPTY file (see above) — it will never start by itself"
-    fi
-    # Also catch an empty file with a watcher from before that message existed.
-    for f in $(sed -n 's/.*not yet: //p' "$log"); do
+    # What it waits for is judged NOW, not from its log: the log is as old as
+    # its last wake, and the file may have arrived since. An empty file never
+    # counts, so that is the one state that needs a human.
+    ready=1
+    for f in $(sed -n -e 's/.*not yet: //p' -e 's/.*counts as missing): //p' "$log"); do
         if [ -e "$f" ] && [ ! -s "$f" ]; then
-            flag "$name waits on $f, which exists but is EMPTY"
+            flag "$name waits on $f, which exists but is EMPTY — it will never start by itself"
+            ready=0
+        elif [ ! -s "$f" ]; then
+            ready=0
         fi
     done
+    if [ "$ready" -eq 1 ]; then
+        echo "   -> everything it needs is there now: it submits at its next wake"
+    fi
+    # Waiting long is normal when the input is a long job's output (the
+    # package watcher waits for a whole training run), so this is a note.
     left="$(sed -n 's/.*(job [0-9]*, \([0-9]*\) tries left).*/\1/p' "$log" | tail -1)"
-    if [ -n "$left" ] && [ "$left" -lt 108 ]; then
-        flag "$name has been waiting for more than 12 hours ($left tries left)"
+    if [ -n "$left" ]; then
+        echo "   -> $left tries left"
     fi
 done
 [ "$found" -eq 1 ] || echo "   none queued"
