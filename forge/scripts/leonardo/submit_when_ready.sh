@@ -78,12 +78,19 @@ fi
 missing=()
 for f in "${NEED[@]}"; do [ -s "$f" ] || missing+=("$f"); done
 
+# An EMPTY file is not there — a copy that stopped at zero bytes proves
+# nothing — but it must not read like a file that never appeared. On
+# 2026-09-28 the open-book generator marked itself done with an empty file,
+# and this watcher said "not yet" every twenty minutes all night while stage
+# 3 waited. Now it says what it sees.
+what() { if [ -e "$1" ]; then echo "present but EMPTY (counts as missing): $1"; else echo "not yet: $1"; fi; }
+
 if [ "${#missing[@]}" -eq 0 ]; then
     echo "[wait] $(now) everything is there — submitting $CHAIN"
     exec bash "$HERE/submit_chain.sh" "$SCRIPT" "$@"
 fi
 
-for f in "${missing[@]}"; do echo "[wait] $(now) not yet: $f"; done
+for f in "${missing[@]}"; do echo "[wait] $(now) $(what "$f")"; done
 
 # A watcher already waiting? Then this call only reported. The running
 # watcher (this job, when it is one) is not "another" one.

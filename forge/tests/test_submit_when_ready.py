@@ -1,0 +1,114 @@
+"""The watcher and what it waits for, run together as they run on Leonardo.
+
+On 2026-09-27 the open-book generator and `submit_when_ready.sh` were each
+tested alone: the generator wrote its ``.done`` marker, the watcher waited for
+a file. Nobody ran one after the other. The marker was empty, the watcher
+counts only non-empty files, and stage 3 waited all night behind a check that
+said "not yet" every twenty minutes. These tests hand the watcher the file the
+real producer writes, with `squeue`/`sbatch` stubbed on PATH, so a producer
+and its consumer cannot drift apart again without a red test.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import shutil
+import stat
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from eullm_forge.datasets.openbook_gen import make_openbook_jobs
+from eullm_forge.eval import NormIndex
+
+LEONARDO = Path(__file__).resolve().parents[1] / "scripts" / "leonardo"
+GENERATOR = Path(__file__).resolve().parents[1] / "scripts" / "generate_openbook_pairs.py"
+
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+
+
+def _exe(path: Path, body: str) -> None:
+    path.write_text(body)
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+
+
+@pytest.fixture
+def cluster(tmp_path):
+    """A fake scheduler: an empty queue, an sbatch that records, and a chain
+    submitter that records instead of submitting."""
+    home = tmp_path / "leonardo"
+    home.mkdir()
+    shutil.copy(LEONARDO / "submit_when_ready.sh", home)
+    _exe(home / "submit_chain.sh", '#!/usr/bin/env bash\necho "$*" >> "$CALLS.chain"\n')
+    (home / "sbatch_stage3.slurm").write_text("#!/bin/bash\n#SBATCH --job-name=eullm-stage3\n")
+    bin_ = tmp_path / "bin"
+    bin_.mkdir()
+    _exe(bin_ / "squeue", "#!/usr/bin/env bash\nexit 0\n")
+    _exe(bin_ / "sbatch", '#!/usr/bin/env bash\necho "$*" >> "$CALLS.sbatch"\necho 4242\n')
+    calls = tmp_path / "calls"
+    env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "CALLS": str(calls),
+           "WAIT_HOME": str(home)}
+
+    def watch(*need: Path) -> tuple[subprocess.CompletedProcess, str, str]:
+        args = [a for f in need for a in ("--need", str(f))]
+        run = subprocess.run(["bash", str(home / "submit_when_ready.sh"), *args, "--",
+                              "sbatch_stage3.slurm", "2"],
+                             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+        chain = Path(f"{calls}.chain")
+        queued = Path(f"{calls}.sbatch")
+        return (run, chain.read_text() if chain.exists() else "",
+                queued.read_text() if queued.exists() else "")
+
+    return watch
+
+
+FILLER = " Il presente articolo contiene disposizioni di dettaglio sufficienti." * 3
+RECORDS = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+            "text": f"Art. {n}. \n \n (Rubrica {n}). \n \n Disciplina {n}.{FILLER}"}
+           for n in range(1, 41)]
+
+
+def _generate_until_done(tmp_path: Path) -> Path:
+    """Run the real generator to the end: every teacher job already answered
+    by an earlier link, so it only has to say it is done."""
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    out = tmp_path / "openbook-pairs.jsonl"
+    with open(tmp_path / "openbook-pairs.jsonl.rejected.jsonl", "w") as f:
+        for j in make_openbook_jobs(NormIndex(RECORDS), 10, seed=0):
+            if j.kind == "grounded":
+                f.write(json.dumps({"key": j.key, "reason": "x"}) + "\n")
+    spec = importlib.util.spec_from_file_location("generate_openbook_pairs", GENERATOR)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["--norms", str(norms), "--no-exam", "--out", str(out),
+                     "--limit", "10"]) == 0
+    return out.with_name(out.name + ".done")
+
+
+def test_the_generators_done_marker_starts_stage_3(tmp_path, cluster):
+    marker = _generate_until_done(tmp_path)
+    run, chain, queued = cluster(marker)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "submitting eullm-stage3" in run.stdout
+    assert "sbatch_stage3.slurm 2" in chain
+    assert not queued  # no second watcher
+
+
+def test_an_empty_file_is_named_as_empty_and_does_not_start_anything(tmp_path, cluster):
+    marker = tmp_path / "openbook-pairs.jsonl.done"
+    marker.touch()
+    run, chain, queued = cluster(marker)
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "present but EMPTY" in run.stdout
+    assert not chain
+    assert "wait-eullm-stage3" in queued  # it will look again
+
+
+def test_a_file_that_never_appeared_is_not_yet(tmp_path, cluster):
+    run, chain, _ = cluster(tmp_path / "nothing.done")
+    assert "not yet:" in run.stdout and "EMPTY" not in run.stdout
+    assert not chain
