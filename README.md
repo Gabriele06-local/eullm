@@ -36,7 +36,13 @@
 
 ## Decisions in milliseconds, all local
 
-https://github.com/user-attachments/assets/d078a003-174f-473f-8c76-f9f4bb99be3f
+<p align="center">
+  <a href="https://github.com/user-attachments/assets/fa7c94c0-56a3-4329-a106-9ec2c1b643ef">
+    <img width="720" height="405" alt="Jev-Style 2B plays Snake through EuLLM on an RTX 5070 Ti, every move decided locally" src="https://github.com/user-attachments/assets/fb3baf16-47db-48a0-bb77-0050f2d42a25" />
+  </a>
+  <br>
+  <sub>▶ <a href="https://github.com/user-attachments/assets/fa7c94c0-56a3-4329-a106-9ec2c1b643ef">The whole game, one minute</a></sub>
+</p>
 
 A small model decides every move of this game of Snake, **in about 8 ms a
 decision** on one RTX 5070 Ti, and fills the whole board. Nothing is
