@@ -155,8 +155,10 @@ main() {
   download "$base/checksums.txt" "$tmp/checksums.txt"
   download "$base/$asset" "$tmp/$asset"
 
-  # checksums.txt lines look like "<hash>  <artifact-dir>/<file>", so match
-  # on the file name at the end of the path, not on the whole path.
+  # checksums.txt lines look like "<hash>  <file>", but match on the base name
+  # at the end of the path: a release made before 0.7.12 listed the download
+  # artifact directory in front of it ("<hash>  <dir>/<file>") and this has to
+  # keep reading those too.
   expected=$(awk -v f="$asset" '{ n = $2; sub(/.*\//, "", n); if (n == f) { print $1; exit } }' "$tmp/checksums.txt")
   [ -n "$expected" ] || die "$asset is not listed in checksums.txt, refusing to install an unverified binary"
   actual=$(sha256_of "$tmp/$asset")

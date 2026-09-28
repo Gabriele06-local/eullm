@@ -80,8 +80,10 @@ function Install-EuLLM {
         $sums = Join-Path $tmp 'checksums.txt'
         Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $sums
 
-        # checksums.txt lines look like "<hash>  <artifact-dir>/<file>", so
-        # match on the file name at the end of the path.
+        # checksums.txt lines look like "<hash>  <file>", but match on the file
+        # name at the end of the path: a release made before 0.7.12 listed the
+        # download artifact directory in front of it ("<hash>  <dir>/<file>")
+        # and this has to keep reading those too.
         $listed = @{}
         foreach ($line in Get-Content $sums) {
             $parts = $line -split '\s+', 2
