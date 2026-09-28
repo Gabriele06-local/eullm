@@ -156,7 +156,7 @@ main() {
   download "$base/$asset" "$tmp/$asset"
 
   # checksums.txt lines look like "<hash>  <file>", but match on the base name
-  # at the end of the path: a release made before 0.7.12 listed the download
+  # at the end of the path: releases up to 0.7.20 listed the download
   # artifact directory in front of it ("<hash>  <dir>/<file>") and this has to
   # keep reading those too.
   expected=$(awk -v f="$asset" '{ n = $2; sub(/.*\//, "", n); if (n == f) { print $1; exit } }' "$tmp/checksums.txt")
