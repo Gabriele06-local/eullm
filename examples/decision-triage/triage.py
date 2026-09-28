@@ -5,16 +5,26 @@ Every email becomes the state of one request that asks five questions at
 once — the state is read once for all of them:
 
   * which team handles it (`choice`, the teams you describe);
+  * what kind of email it is: legitimate, phishing or spam (`choice`);
   * does it need an answer today (`noul`);
   * how upset is the sender (`score`: calm, dissatisfied, angry);
-  * does it carry sensitive personal data (`noul`);
-  * is it phishing or a scam (`noul`).
+  * does it talk about someone's health (`noul`).
 
-The model answers with probabilities; the policy is plain code, so it can be
-read and changed: phishing goes to quarantine, an email whose team the model
-is unsure of goes to a person, urgency or anger raises the priority, and
-sensitive data is flagged. Nothing leaves the server, and every decision is
-in its audit trail (the email itself only as a SHA-256).
+What code can check exactly, code checks: an IBAN, a payment card number or
+an Italian tax code in the text is found by pattern and checksum, not asked
+about. The model answers with probabilities, and the policy acting on them
+is plain code too, so it can be read and changed: phishing and spam are set
+aside, an email whose team the model is unsure of goes to a person, urgency
+or anger raises the priority, personal data is flagged. Nothing leaves the
+server, and every decision is in its audit trail (the email itself only as
+a SHA-256).
+
+How a question is put matters. On the 13 sample emails with the Jev-Style
+0.8B, "is this phishing?" as a yes/no question put the angry customer, the
+lawyer's letter and the job application over 0.7; asked as a choice between
+legitimate, phishing and spam, every email came out on the right side. A
+yes/no question about "sensitive data" missed both the IBAN and the hospital
+stay; the IBAN is now a pattern, and the question is only about health.
 
     eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
     eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
@@ -63,19 +73,27 @@ QUESTIONS = {
         "instructions": "Quanto è arrabbiato il mittente?",
         "criteria": ["calmo", "insoddisfatto", "arrabbiato"],
     },
-    "dati_sensibili": {
+    "salute": {
         "type": "noul",
         "instructions": (
-            "L'email contiene dati personali sensibili: salute, IBAN o numeri di "
-            "carta completi, documenti d'identità, codici fiscali."
+            "L'email parla della salute di una persona: malattie, ricoveri, "
+            "interventi, terapie."
         ),
     },
-    "phishing": {
-        "type": "noul",
-        "instructions": (
-            "L'email è un tentativo di phishing o una truffa: chiede credenziali, "
-            "pagamenti urgenti o di aprire link sospetti fingendosi qualcun altro."
-        ),
+    "tipo": {
+        "type": "choice",
+        "instructions": "Che tipo di email è?",
+        "criteria": {
+            "legittima": (
+                "un cliente, un fornitore, un avvocato, un candidato o un partner "
+                "che scrive davvero all'azienda"
+            ),
+            "phishing": (
+                "si finge una banca, un corriere o un servizio per rubare "
+                "credenziali o soldi, con un link o una richiesta di pagamento"
+            ),
+            "spam": "pubblicità non richiesta",
+        },
     },
 }
 
@@ -140,12 +158,66 @@ SAMPLES = [
         "listino per rivenditori e le condizioni per ordini sopra i 5.000 euro.",
     },
     {
+        "from": "Fatturazione <billing@corriere-espresso-it.example.net>",
+        "subject": "Fattura non pagata – spedizione bloccata",
+        "body": "La sua spedizione è bloccata in dogana. Per sbloccarla paghi 2,99 "
+        "euro di diritti entro oggi a questo link: "
+        "http://pagamento-dogana.example.net/p",
+    },
+    {
+        "from": "Ufficio crediti Tessuti Riva <crediti@tessutiriva.example.it>",
+        "subject": "Sollecito fattura 2026/311 scaduta",
+        "body": "Buongiorno, la fattura 2026/311 di 1.240 euro è scaduta il 15 "
+        "settembre. Vi preghiamo di saldarla con bonifico alle coordinate indicate "
+        "in fattura.",
+    },
+    {
+        "from": "Maria Lombardi <maria.lombardi@example.it>",
+        "subject": "Ritiro pacco",
+        "body": "Buongiorno, sono ricoverata in ospedale dopo un intervento al "
+        "ginocchio e non potrò ritirare il pacco fino a lunedì prossimo. Potete "
+        "tenerlo in deposito?",
+    },
+    {
         "from": "Elena Colombo <elena.colombo@example.com>",
         "subject": "Candidatura magazziniere",
         "body": "Buongiorno, allego il mio curriculum per la posizione di "
         "magazziniere pubblicata sul vostro sito. Sono disponibile da subito.",
     },
 ]
+
+
+def iban_ok(candidate):
+    """ISO 13616 check digits: the IBAN, rotated and read as a number, is 1
+    modulo 97."""
+    rotated = candidate[4:] + candidate[:4]
+    digits = "".join(str(int(c, 36)) for c in rotated)
+    return int(digits) % 97 == 1
+
+
+def luhn_ok(number):
+    total = 0
+    for i, d in enumerate(reversed(number)):
+        n = int(d) * (2 if i % 2 else 1)
+        total += n - 9 if n > 9 else n
+    return total % 10 == 0
+
+
+def personal_data(text):
+    """The personal data code can find exactly: IBANs and payment card
+    numbers whose check digits hold, and Italian tax codes."""
+    found = []
+    for match in re.finditer(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b", text):
+        if iban_ok(match.group().replace(" ", "")):
+            found.append("IBAN")
+            break
+    for match in re.finditer(r"\b\d(?:[ -]?\d){12,18}\b", text):
+        if luhn_ok(re.sub(r"[ -]", "", match.group())):
+            found.append("numero di carta")
+            break
+    if re.search(r"\b[A-Z]{6}\d{2}[A-EHLMPR-T]\d{2}[A-Z]\d{3}[A-Z]\b", text.upper()):
+        found.append("codice fiscale")
+    return found
 
 
 def text_of(message):
@@ -235,15 +307,18 @@ def ask(args, teams, mail):
     return answer
 
 
-def policy(args, answers):
-    """What to do with the email, from the model's answers. Plain code: the
-    thresholds are the flags of this script."""
+def policy(args, mail, answers):
+    """What to do with the email, from the model's answers and what code
+    found in it. Plain code: the thresholds are the flags of this script."""
     team = answers["reparto"]
-    flags = []
-    if answers["dati_sensibili"]["noul"] >= args.threshold:
-        flags.append("dati sensibili")
-    if answers["phishing"]["noul"] >= args.threshold:
+    flags = personal_data(mail["subject"] + " " + mail["body"])
+    if answers["salute"]["noul"] >= args.threshold:
+        flags.append("dati sulla salute")
+    kind = answers["tipo"]["probabilities"]
+    if kind["phishing"] >= args.quarantine:
         return "quarantena", "", flags
+    if kind["spam"] >= args.quarantine:
+        return "spam", "", flags
     urgent = answers["urgente"]["noul"] >= args.threshold
     angry = answers["tono"]["score"] >= 1.5
     priority = "alta" if urgent or angry else "normale"
@@ -274,6 +349,12 @@ def main():
         type=float,
         default=0.5,
         help="probability from which a yes/no answer counts as yes (default 0.5)",
+    )
+    parser.add_argument(
+        "--quarantine",
+        type=float,
+        default=0.7,
+        help="phishing or spam probability from which an email is set aside (default 0.7)",
     )
     parser.add_argument(
         "--min-team",
@@ -311,7 +392,7 @@ def main():
     for n, mail in enumerate(mails, 1):
         response = ask(args, teams, mail)
         answers = response["answers"]
-        action, priority, flags = policy(args, answers)
+        action, priority, flags = policy(args, mail, answers)
         team = answers["reparto"]
         row = {
             "n": n,
@@ -321,7 +402,7 @@ def main():
             "reparto_p": round(team["probabilities"][team["choice"]], 2),
             "urgente_p": round(answers["urgente"]["noul"], 2),
             "tono": round(answers["tono"]["score"], 2),
-            "phishing_p": round(answers["phishing"]["noul"], 2),
+            "phishing_p": round(answers["tipo"]["probabilities"]["phishing"], 2),
             "segnalazioni": "; ".join(flags),
             "ms": round(response["_ms"]),
         }
