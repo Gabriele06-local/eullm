@@ -2,7 +2,7 @@
 
 > **Archived R&D — not in the production build path.**
 >
-> This document captures benchmarks we ran in Q1-Q2 2026 while evaluating TurboQuant integration via the AmesianX/llama.cpp fork. **TurboQuant is no longer shipped in eullm builds from v0.5.8 onwards** — see [README → Research & Experiments](../README.md#research--experiments) for the rationale. The numbers below remain valid for the v0.5.x TurboQuant variants archived at the [v0.5.7 release](https://github.com/eullm/eullm/releases/tag/EuLLM-v0.5.7); they're kept here for transparency and as a baseline if TurboQuant (or a derivative) lands upstream in llama.cpp later.
+> This document captures benchmarks we ran in Q1-Q2 2026 while evaluating TurboQuant integration via the AmesianX/llama.cpp fork. **TurboQuant is no longer shipped in eullm builds from v0.5.8 onwards** — see [Research and experiments](research.md) for the rationale. The numbers below remain valid for the v0.5.x TurboQuant variants archived at the [v0.5.7 release](https://github.com/eullm/eullm/releases/tag/EuLLM-v0.5.7); they're kept here for transparency and as a baseline if TurboQuant (or a derivative) lands upstream in llama.cpp later.
 
 ---
 

@@ -307,7 +307,7 @@ Available types: `f16`, `f32`, `q8_0`, `q4_0`, `q4_1`, `q5_0`, `q5_1`.
 
 > **Note:** Quantized V cache types (Q4_0, Q8_0) require Flash Attention. On GPUs where Flash Attention doesn't support these types, the engine automatically falls back to F16 KV cache and logs a warning. You can also set F16 explicitly by omitting the `--cache-type-v` flag.
 >
-> **TurboQuant note:** v0.5.x of the engine integrated an experimental TurboQuant (Walsh-Hadamard + Lloyd-Max) KV compression via the AmesianX/llama.cpp fork. It is **not in v0.5.8 onwards** — see [README → Research & Experiments](../README.md#research--experiments) and the archived numbers in [`turboquant-quality-report.md`](turboquant-quality-report.md) / [`turboquant-kv-stress-report.md`](turboquant-kv-stress-report.md).
+> **TurboQuant note:** v0.5.x of the engine integrated an experimental TurboQuant (Walsh-Hadamard + Lloyd-Max) KV compression via the AmesianX/llama.cpp fork. It is **not in v0.5.8 onwards** — see [Research and experiments](research.md) and the archived numbers in [`turboquant-quality-report.md`](turboquant-quality-report.md) / [`turboquant-kv-stress-report.md`](turboquant-kv-stress-report.md).
 
 ## Constrained JSON Decoding (`format: "json"`)
 
