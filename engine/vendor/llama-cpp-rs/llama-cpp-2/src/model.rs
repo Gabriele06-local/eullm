@@ -4,7 +4,6 @@ use std::num::NonZeroU16;
 use std::os::raw::c_int;
 use std::path::Path;
 use std::ptr::{self, NonNull};
-use std::slice;
 use std::str::Utf8Error;
 
 use crate::context::params::LlamaContextParams;
@@ -311,6 +310,7 @@ impl LlamaModel {
     ///
     /// See [`TokenToStringError`] for more information.
     #[deprecated(since = "0.1.0", note = "Use `token_to_piece` instead")]
+    #[allow(deprecated)] // EuLLM: takes the deprecated `Special`
     pub fn token_to_str(
         &self,
         token: LlamaToken,
@@ -336,6 +336,7 @@ impl LlamaModel {
     /// [`Self::token_to_bytes_with_size`] contains a positive nonzero value. This should never
     /// happen.
     #[deprecated(since = "0.1.0", note = "Use `token_to_piece_bytes` instead")]
+    #[allow(deprecated)] // EuLLM: takes the deprecated `Special`
     pub fn token_to_bytes(
         &self,
         token: LlamaToken,
@@ -362,6 +363,7 @@ impl LlamaModel {
         since = "0.1.0",
         note = "Use `token_to_piece` for each token individually instead"
     )]
+    #[allow(deprecated)] // EuLLM: takes the deprecated `Special`
     pub fn tokens_to_str(
         &self,
         tokens: &[LlamaToken],
@@ -453,6 +455,50 @@ impl LlamaModel {
         // Safety: `size` < `capacity` and llama-cpp has initialized elements up to `size`
         unsafe { buffer.set_len(size) }
         Ok(buffer)
+    }
+
+    /// EuLLM addition: [`Self::str_to_token`] with special-token text left
+    /// as text. `str_to_token` parses special tokens, so `"<|im_end|>"`
+    /// inside the string becomes the control token; here it is split into
+    /// ordinary tokens like any other text — what text a user wrote must be
+    /// tokenized as, and what HF `tokenizers` does with
+    /// `encode_special_tokens = true`.
+    ///
+    /// # Errors
+    ///
+    /// - if [`str`] contains a null byte.
+    pub fn str_to_token_plain(
+        &self,
+        str: &str,
+        add_bos: AddBos,
+    ) -> Result<Vec<LlamaToken>, StringToTokenError> {
+        let add_bos = matches!(add_bos, AddBos::Always);
+        let c_string = CString::new(str)?;
+        let len = c_int::try_from(c_string.as_bytes().len())?;
+        let mut buffer: Vec<LlamaToken> =
+            Vec::with_capacity(std::cmp::max(8, (str.len() / 2) + usize::from(add_bos)));
+        let mut capacity = buffer.capacity();
+        loop {
+            let size = unsafe {
+                llama_cpp_sys_2::llama_tokenize(
+                    self.vocab_ptr(),
+                    c_string.as_ptr(),
+                    len,
+                    buffer.as_mut_ptr().cast::<llama_cpp_sys_2::llama_token>(),
+                    c_int::try_from(capacity).expect("buffer capacity should fit into a c_int"),
+                    add_bos,
+                    false,
+                )
+            };
+            if let Ok(size) = usize::try_from(size) {
+                // Safety: llama.cpp initialized `size` <= capacity elements.
+                unsafe { buffer.set_len(size) }
+                return Ok(buffer);
+            }
+            // A negative size is the capacity it needs.
+            capacity = usize::try_from(-i64::from(size)).expect("needed capacity fits a usize");
+            buffer.reserve_exact(capacity);
+        }
     }
 
     /// Get the type of a token.
@@ -571,6 +617,7 @@ impl LlamaModel {
     /// - if `buffer_size` does not fit into a [`c_int`].
     /// - if the returned size from llama-cpp does not fit into a [`usize`]. (this should never happen)
     #[deprecated(since = "0.1.0", note = "Use `token_to_piece` instead")]
+    #[allow(deprecated)] // EuLLM: takes the deprecated `Special`
     pub fn token_to_str_with_size(
         &self,
         token: LlamaToken,
@@ -601,6 +648,7 @@ impl LlamaModel {
     /// - if `buffer_size` does not fit into a [`c_int`].
     /// - if the returned size from llama-cpp does not fit into a [`usize`]. (this should never happen)
     #[deprecated(since = "0.1.0", note = "Use `token_to_piece_bytes` instead")]
+    #[allow(deprecated)] // EuLLM: takes the deprecated `Special`
     pub fn token_to_bytes_with_size(
         &self,
         token: LlamaToken,

@@ -99,6 +99,19 @@ impl LlamaContext<'_> {
         Ok(unsafe { llama_cpp_sys_2::llama_memory_seq_rm(mem, src, p0, p1) })
     }
 
+    /// EuLLM addition: empty the memory of every sequence, cells only.
+    ///
+    /// [`Self::clear_kv_cache`] also zeroes the buffers, a pass over the
+    /// whole cache for nothing a caller that only needs the cells free can
+    /// see: a free cell is masked out of every attention sum. And unlike
+    /// `clear_kv_cache_seq(None, ..)` it works on recurrent and hybrid
+    /// models, whose memory refuses to remove "all sequences" and so
+    /// removes nothing at all.
+    pub fn clear_kv_cache_cells(&mut self) {
+        let mem = unsafe { llama_cpp_sys_2::llama_get_memory(self.context.as_ptr()) };
+        unsafe { llama_cpp_sys_2::llama_memory_clear(mem, false) }
+    }
+
     /// Clear the KV cache
     pub fn clear_kv_cache(&mut self) {
         let mem = unsafe { llama_cpp_sys_2::llama_get_memory(self.context.as_ptr()) };

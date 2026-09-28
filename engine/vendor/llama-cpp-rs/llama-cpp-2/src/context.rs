@@ -111,6 +111,15 @@ impl<'model> LlamaContext<'model> {
         unsafe { llama_cpp_sys_2::llama_rs_memory_breakdown_print(self.context.as_ptr()) }
     }
 
+    /// EuLLM addition: waits until every computation queued on this context
+    /// has finished. On a GPU backend `decode` returns once the work is
+    /// queued, and llama.cpp waits for it only when an output is read — so a
+    /// decode that produces no output, like a prompt prefix, has no other
+    /// point at which its time can be measured.
+    pub fn synchronize(&self) {
+        unsafe { llama_cpp_sys_2::llama_synchronize(self.context.as_ptr()) }
+    }
+
     /// Decodes the batch.
     ///
     /// # Errors

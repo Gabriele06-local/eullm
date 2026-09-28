@@ -273,6 +273,10 @@ pub fn openai_routes() -> Router<S> {
         .route("/models", get(list_models_openai))
         .route("/chat/completions", post(chat_completions))
         .route("/embeddings", post(embeddings_openai))
+        // System One-compatible decisions (TypeSafe's Jev API shape): typed
+        // answers read from a decision model's logits. Under /v1 because
+        // that is where System One clients look for it.
+        .route("/systemone", post(super::systemone::systemone))
 }
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────
@@ -1074,7 +1078,7 @@ async fn version(State(state): State<S>) -> Json<Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "api_port": state.api_port,
         // EULLM extension: how many times a model was evicted to make VRAM
-        // room for the other slot (generation <-> embedding). See
+        // room for another slot (generation <-> embedding or decision). See
         // `AppState::cross_slot_evictions`.
         "model_swaps": state
             .cross_slot_evictions

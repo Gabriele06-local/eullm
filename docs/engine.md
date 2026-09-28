@@ -87,7 +87,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--n-batch` | `2048` | Prefill batch size (tokens per eval) |
 | `--cache-type-k` | `f16` | KV cache type for keys (f16, q8_0, q4_0). Quantizing frees VRAM for more layers |
 | `--cache-type-v` | `f16` | KV cache type for values (f16, q8_0, q4_0) |
-| `--no-flash-attn` | false | Disable flash attention (on by default) |
+| `--no-flash-attn` | false | Disable flash attention (on by default), for the generation model and the decision model alike |
 | `--web` | false | Fetch URLs found in user messages and inject their content |
 | `--mmproj` | (auto) | Multimodal projector path, when it is not beside the weights |
 | `--ctx-checkpoints` | `0` | Prompt-prefix state snapshots for hybrid/recurrent models |
@@ -98,8 +98,10 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--daemon` | false | Run as a background daemon |
 | `--pidfile` | `/tmp/eullm.pid` | PID file path (with `--daemon`) |
 | `--logfile` | `~/.eullm/logs/eullm.log` | Daemon log file (with `--daemon`). Set `--pidfile` alone and the log stays beside it |
-| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation model and the embedding model independently |
+| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
+| `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
+| `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
 
@@ -505,6 +507,298 @@ falls back to mean-pooling its per-token embeddings. Output vectors are
 L2-normalized. Rerankers (RANK-pooling models) are out of scope for this
 endpoint — normalizing a single relevance score would collapse it.
 
+## Decisions: `/v1/systemone` and the Decision Slot
+
+`POST /v1/systemone` answers typed questions about a *state* — a ticket, a
+document, a conversation, a JSON object — without generating any text. It
+takes the request and response shape of the System One API (TypeSafe's
+Jev), so a client written for it can point its base URL at EuLLM. Three
+question types:
+
+| Type | Question | Answer |
+|---|---|---|
+| `noul` | Is this statement true of the state? (`criteria`, optional: `{"true": "…", "false": "…"}`, what each answer means) | `noul`: P(yes) |
+| `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options; up to 255 with a [Jev-Style model](#jev-style-decision-models)) | `choice`, `probabilities`, `confidence` |
+| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
+
+```bash
+curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
+  "state": "Help! My payouts have been failing for 3 days.",
+  "questions": {
+    "is_urgent": { "type": "noul", "instructions": "Does this convey urgency?" },
+    "team": { "type": "choice", "instructions": "Which team should handle it?",
+              "criteria": { "billing": "Payments and payouts", "tech": "Bugs", "other": "Anything else" } },
+    "severity": { "type": "score", "instructions": "How severe is it?",
+                  "criteria": ["Cosmetic", "Degraded, with a workaround", "Blocking"] }
+  }
+}'
+```
+
+```json
+{
+  "model": "qwen3-4b",
+  "answers": {
+    "is_urgent": { "type": "noul", "noul": 0.95, "eullm": { ... } },
+    "team": { "type": "choice", "choice": "billing",
+              "probabilities": { "billing": 0.91, "tech": 0.07, "other": 0.02 },
+              "confidence": 0.71, "eullm": { ... } },
+    "severity": { "type": "score", "score": 1.43,
+                  "legend": { "0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking" },
+                  "probabilities": { "0": 0.0, "1": 0.57, "2": 0.43 },
+                  "confidence": 0.32, "eullm": { ... } }
+  },
+  "usage": { "input_tokens": 312, "output_tokens": 0 },
+  "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
+             "evaluated_tokens": 312, "timings_ms": { ... }, ... }
+}
+```
+
+Answers and options come back in the order the request listed them; options
+are shown to the model lettered in that order.
+
+**How an answer is computed.** With an instruction-tuned model — the *code
+readout* — each question becomes one chat prompt (the model's own template,
+reasoning switched off) ending where the answer would begin, with the
+options coded `A`…`Z`, the levels `0`…`9`, or `Yes`/`No`. The logits at
+that position are read once — nothing is generated — and restricted to the
+codes. When the model loads, the server checks that every code is a single
+token for its tokenizer right after its prompt, and refuses a question whose
+codes are not; the load log lists what it found. Everything a request
+sends — the state, the instructions, the options — is tokenized as text: a
+chat template's own turn markers inside it (`<|im_end|>`,
+`<|im_start|>assistant`) stay text instead of closing the user turn and
+writing the rest of the prompt. Only the template's text is read for control
+tokens; for the rare template that cannot be tokenized in those pieces
+exactly as it is whole, a request containing such a marker is refused with
+a 400. A model trained for this endpoint reads its answers differently — see
+[Jev-Style decision models](#jev-style-decision-models) — and the response
+says which readout was used in `eullm.readout` (`codes` or `verdict`).
+
+Next to the System One fields, every answer carries an `eullm` object with
+what it was derived from, so a stored response can be re-examined or
+re-calibrated later:
+
+| Field | Meaning |
+|---|---|
+| `logprobs` | Code readout: full-vocabulary log-probability of each answer's code |
+| `scores` | Verdict readout: each option's score, `logit(" yes") − logit(" no")` at its slot |
+| `raw_probabilities` | The same, renormalized over the answers (a softmax of the scores), before calibration and temperature |
+| `coverage` | Code readout: share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
+| `prior_logprobs` | The content-free prior that was divided out (with `content_free` calibration only) |
+
+`confidence` is `1 − H(p) / ln K` — 1 when all probability is on one answer,
+0 when it is spread evenly — and named in `eullm.confidence_method`.
+
+**Calibration is not a solved problem here, and nothing is claimed about
+it yet.** The mechanism reproduces with any model; calibrated probabilities
+do not come with it. The request's `eullm` object picks what is applied, so
+the options can be compared on labelled data before one is trusted:
+
+| `eullm` option | Values | Default |
+|---|---|---|
+| `calibration` | `none`; `content_free` (code readout): divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
+| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1`; a Jev-Style model's own calibrated temperature |
+| `mode` | `shared_prefix`; `batched`; `separate` (see below) | `shared_prefix` |
+
+The content-free prior is not always noise to remove: when the options
+themselves imply a base rate, dividing it out moves probability towards
+options that are rarely right. Measure before choosing.
+
+**Many questions, one pass.** Every question's prompt starts with the same
+tokens — system prompt, template, the state — and differs only at the end.
+`shared_prefix` decodes that common part once, then each question on its
+own right after it, in a sequence that starts as a copy of the state's (no
+copy of data: on a unified cache the cells are only tagged with the extra
+sequence) and is dropped once the question's answer is read: about
+`S + Q·q` tokens for `Q` questions of `q` tokens on a state of `S`, instead
+of the `Q·(S + q)` of asking one at a time. `batched` decodes the same
+tokens, but every question's in one batch: fewer, larger decode calls.
+`separate` asks one question at a time from an empty cache; it exists as
+the baseline. The response reports the token counts (`prompt_tokens`
+against `evaluated_tokens`), the timings of each phase and `flash_attn` —
+`auto`, or `off` under `--no-flash-attn` — since both the timings and the
+last digits of every probability depend on it. `bench/decision_bench.py`
+measures all three for 1–64 questions on states of several sizes.
+
+**Each answer depends on its own question only.** The three modes read the
+same tokens but hand them to the kernels in batches of different shapes,
+and on quantized weights that alone moves an answer — a quantized model's
+matrix products round their inputs to 8 bits, which turns a last-digit
+difference in a sum into a different rounding one layer later. How far,
+measured with `bench/decision_bench.py` (the largest difference in any
+probability from `separate`; on the CPU over states of 256 and 1,024 tokens
+with 1–64 questions, on the GPU with the benchmark's defaults):
+
+| Model | 4-core CPU: `shared_prefix` | `batched` | RTX 5070 Ti: `shared_prefix` | `batched` |
+|---|---|---|---|---|
+| Qwen3-0.6B F16 | 0.017 | 0.017 | | |
+| Qwen3-0.6B Q8_0 | 0.11 | 0.13 | | |
+| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 | 0.53 | 0.52 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | 0.039 | 0.033 |
+| Jev-Style-2B-Decision-v3 Q4_K_M | | | 0 | 0 |
+
+With Qwen3-0.6B Q4_K_M, the catalog's `qwen3-0.6b`, that is enough to
+change the top answer of a question near a tie, and more so on CUDA, where
+the arithmetic is coarser: ggml-cuda runs cuBLAS in TF32 mode and
+accumulates some F16 products in half precision. None of the modes is the
+exact one; they are the same model with different rounding. The Jev-Style
+models, trained to answer this way, are an order of magnitude steadier than
+an instruction-tuned model at the same quantization, and the 2B's modes read
+the same blocks, so they agree exactly (see
+[below](#jev-style-decision-models)).
+
+What differs is what the rounding depends on. In `batched` mode a question
+sits somewhere in a batch with the others, so its answer moves with the
+other questions asked and with their order: asking the same questions in
+reverse moved answers by up to 0.31 on the CPU (Q4_K_M). In `shared_prefix`
+mode a question is decoded alone, in the same cache cells, in batches of the
+same shape and over the same attention window whatever else the request
+asks, so its answer is a function of the state and that question: asked
+alone, among 63 others or in reverse order, it comes back bit for bit the
+same (measured on the CPU and on an RTX 5070 Ti;
+`bench/decision_bench.py --order-check` checks it on your
+hardware and fails if it does not hold). That is the default because a
+decision should not change with the questions asked next to it, and
+because a calibration measured on labelled data then holds however the
+questions are grouped into requests when serving. The price is one decode
+call per question instead of one per batch. On a 4-core CPU that is 2–14%
+slower than `batched`. On a GPU each call has a fixed cost of about 3 ms
+(Qwen3-0.6B on an RTX 5070 Ti) — the GPU running a few hundred small
+kernels, not launching them: padding every question to a common length so
+the calls replay as CUDA graphs was tried and measured 25% slower — so with
+many questions `shared_prefix` is 2–3× slower than `batched` there, and
+still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
+473 ms for states of 256 / 1k / 4k tokens, against 111 / 130 / 235 ms
+`batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
+will serve.
+
+**Limits:** 64 questions per request, 26 options per `choice` (255 with a
+Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
+context per request (default 8192). A request over the context limit is
+refused with a 400 that says how many tokens it needed.
+
+**Which model.** A model trained for this endpoint — a
+[Jev-Style model](#jev-style-decision-models) — or a small
+instruction-tuned one: Qwen3 0.6B–4B from the catalog are the intended size.
+An instruction-tuned decision model must be able to answer without reasoning
+first; a model that always opens a reasoning block (the DeepSeek-R1 family)
+spends its first token on the tag, and every answer's `coverage` shows it.
+
+**The decision slot.** The model lives in a third slot, next to the
+generation and embedding models, with the same residency rules as the
+embedding slot: loaded next to the generation model when it fits, the
+generation model evicted first when it does not. What counts is the weights
+plus a request's context — its KV cache at `--decision-ctx` and a compute
+buffer. The model keeps that context between requests, sized by the largest
+request so far, and releases it before a generation model is sized, so the
+sizing sees it as reserved, not as used. `--decision-model <path-or-name>`
+loads it at startup as a reserved companion, exactly like
+`--embedding-model`: `--fit` keeps its context's VRAM free and a chat-model
+swap never evicts it.
+
+**The same state again costs only the questions.** The context keeps the
+state the last request decoded. A request whose shared part is token for
+token the same — the next round of questions an agent asks about the same
+document — starts from it instead of decoding the state again, and reports
+`prefix_reused: true`, with `evaluated_tokens` counting only what was
+decoded. It changes no answer: the questions land in the same cells, in
+batches of the same shape, as they would from a freshly decoded state (and
+`--order-check` in the benchmark checks exactly that). A request about
+another state replaces the one kept.
+
+```bash
+eullm serve --decision-model qwen3-1.7b --decision-ctx 16384
+```
+
+The `model` field may name any model the server can load (it then loads into
+the decision slot). Left out, or set to a System One model name such as
+`jev-latest`, it means the decision model already loaded — so a Jev client
+works unchanged. With no decision model loaded the request is refused with a
+400 saying so.
+
+Every request is written to the audit trail with `request_type: "systemone"`
+and a `decision` record: each answer with its log-probabilities and its
+probabilities before and after calibration. The state itself is not stored,
+only its SHA-256.
+
+### Jev-Style decision models
+
+[Jev-Style](https://github.com/lawrence3699/jev-style) (Apache-2.0)
+publishes Qwen3.5 fine-tunes trained for the three question types of this
+endpoint, and they read an answer differently — the *verdict readout*. Every
+option is followed by a ` ->` slot, and the option's score is
+`logit(" yes") − logit(" no")` at its slot. The options are all read in the
+same pass, not as competing codes, so a `choice` can have up to 255 of them.
+The probabilities are `softmax(scores / T)`, with the temperature `T` fitted
+on held-out data and released with the model. It is applied by default; a
+request's `temperature` overrides it, and `1` gives the probabilities of the
+raw scores.
+
+| Model | Input | Get it |
+|---|---|---|
+| Jev-Style-0.8B-Decision-v3 (0.53 GB in Q4_K_M) | Causal attention; question, options and slots within 2,048 tokens | `eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M` |
+| Jev-Style-2B-Decision-v3 (1.3 GB in Q4_K_M) | Block-causal attention over 2,048-token blocks; options that do not fit one block become a numbered catalogue | `eullm pull hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q4_K_M` |
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m --decision-ctx 25600
+```
+
+The server recognizes such a model when it loads, in one of two ways:
+
+- from the `readout_config.json` released with the model, when that file
+  sits next to the GGUF;
+- otherwise from the model's name (`general.name`) — the case of a GGUF
+  pulled on its own.
+
+The load log says which and prints the temperature.
+
+**The input is the one the model was trained on.** It is not a chat
+prompt. The input is rebuilt token for token: each segment tokenized on
+its own, with text never parsed for special tokens, and a structured
+state serialized the way the release's runtime writes JSON. It is
+computed the way that runtime computes it: the same micro-batches, flash
+attention off on the CPU for the 2B, and one block per decode call for
+the block-causal attention.
+
+This was checked against that runtime, Q4_K_M on the CPU, on 24 cases for
+the 0.8B and 28 for the 2B:
+
+- short, JSON, long, and special-token-laden states;
+- every question type, up to 30 options — and 70 in the 2B's numbered
+  catalogue form.
+
+The token ids were identical and, in `separate` mode, the scores agreed to
+4e-16, asked one at a time and all together.
+
+**Differences from the code readout:**
+
+- `content_free` calibration is refused, since the model brings its own.
+- `eullm.scores` replaces `eullm.logprobs`, and there is no `coverage`:
+  every option is read at a slot of its own.
+- Input over 25,600 tokens, or options that do not fit the model's
+  budget, is refused rather than truncated. Raise `--decision-ctx` to
+  25600 to allow the longest input the models accept.
+- Only the release's global temperature is applied, as its own runtime
+  does when it is not given a category.
+
+`shared_prefix` decodes the state once, as with any model, and each
+question on its own after it:
+
+- **2B:** its input is cut into 2,048-token blocks at the end of the state
+  anyway, so sharing the state changes no score: `shared_prefix` gives the
+  runtime's scores exactly, on the CPU and on an RTX 5070 Ti. It decodes one
+  block per call, so its `batched` requests are answered, and reported, as
+  `shared_prefix`.
+- **0.8B:** its arithmetic depends on where a 1,024-token micro-batch
+  starts, because its recurrent layers are computed in chunks from there,
+  and sharing the state moves where its questions' micro-batches start. Its
+  `shared_prefix` scores are therefore within the model's own noise of the
+  runtime's: up to 0.025 in probability on the CPU, 0.039 on an RTX 5070 Ti.
+  `separate` gives them exactly, at the cost of decoding the state again for
+  every question: 64 questions about a 1,024-token state take 0.62 s on an
+  RTX 5070 Ti in `shared_prefix` mode, 3.2 s in `separate`.
+
 ## API Reference
 
 The Engine exposes two sets of endpoints: the native EULLM API (Ollama-compatible) and an OpenAI-compatible API. CORS is enabled for browser-based tools.
@@ -764,6 +1058,13 @@ curl -X POST http://localhost:11434/v1/embeddings \
 `usage` is honestly reported as zero rather than a fabricated token count —
 the embedding path does not run a text tokenizer count today.
 
+#### `POST /v1/systemone`
+
+Typed decisions (`noul`, `choice`, `score`) about a state, in the System One
+API shape. Not an OpenAI endpoint; it sits under `/v1` because that is where
+System One clients look for it. See
+[Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot).
+
 ## Model Catalog
 
 The Engine ships with a built-in catalog of EU models:
@@ -789,11 +1090,12 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `id` | UUID v4 | Unique inference ID |
 | `timestamp` | DateTime (UTC) | Request time |
 | `model` | String | Model name |
-| `request_type` | String | `generate`, `chat`, `chat.completions` |
+| `request_type` | String | `generate`, `chat`, `chat.completions`, `systemone` |
 | `input_tokens` | u32 | Input token count |
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
+| `decision` | Object, `systemone` only | `state_sha256`, `mode`, `calibration`, `temperature`, and per answer: `id`, `type`, `labels`, `logprobs`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 

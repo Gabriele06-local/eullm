@@ -158,6 +158,38 @@ impl LlamaContextParams {
         self
     }
 
+    /// EuLLM addition: non-causal attention (`LLAMA_ATTENTION_TYPE_NON_CAUSAL`)
+    /// for every decode on this context, or llama.cpp's default otherwise.
+    ///
+    /// A non-causal token attends to every cache cell of its sequence,
+    /// with no position test: fed one block of tokens per decode call, a
+    /// decoder then attends block-causally — each block sees all earlier
+    /// blocks and all of itself. llama.cpp requires a non-causal batch to
+    /// fit one micro-batch (`n_ubatch >= n_tokens`).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use llama_cpp_2::context::params::LlamaContextParams;
+    /// let params = LlamaContextParams::default().with_non_causal_attention(true);
+    /// assert!(params.non_causal_attention());
+    /// ```
+    #[must_use]
+    pub fn with_non_causal_attention(mut self, non_causal: bool) -> Self {
+        self.context_params.attention_type = if non_causal {
+            llama_cpp_sys_2::LLAMA_ATTENTION_TYPE_NON_CAUSAL
+        } else {
+            llama_cpp_sys_2::LLAMA_ATTENTION_TYPE_UNSPECIFIED
+        };
+        self
+    }
+
+    /// EuLLM addition: whether [`Self::with_non_causal_attention`] is set.
+    #[must_use]
+    pub fn non_causal_attention(&self) -> bool {
+        self.context_params.attention_type == llama_cpp_sys_2::LLAMA_ATTENTION_TYPE_NON_CAUSAL
+    }
+
     /// EuLLM addition: get `n_outputs_max` (see [`Self::with_n_outputs_max`]).
     ///
     /// # Examples

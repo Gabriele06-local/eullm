@@ -11,6 +11,88 @@ the T4.1 prefill/decode baseline harness.
 
 Real stress test that **proves** whether an inference server processes requests in parallel or just queues them sequentially.
 
+## `decision_bench.py` — shared-prefix benchmark for `/v1/systemone`
+
+Measures what answering many questions about the same state in one request
+buys over asking them one at a time, in each of the three evaluation modes:
+`shared_prefix` (the default: the state decoded once, then each question on
+its own right after it), `batched` (the state once, then every question in
+one batch) and `separate` (each question from scratch, the baseline). For
+every state size (`--states`, default 256/1k/4k tokens) and question count
+(`--questions`, default 1/4/8/16/32/64): the tokens decoded with the state
+shared and without, the decode time of each mode
+(median of `--repeat` runs, from the server's own timings, which on a GPU
+wait for the computation to finish), the speedup of `shared_prefix` over
+`separate`, and how far each mode's answers are from the baseline's.
+Standard library only.
+
+```bash
+eullm serve --decision-model qwen3-0.6b --decision-ctx 16384
+python bench/decision_bench.py --url http://localhost:11434 --json decision-bench.json
+```
+
+`--decision-ctx 16384` covers the largest default case in `batched` mode (a
+4k-token state with 64 questions needs about 9k tokens there; the other two
+modes need only the state plus the longest question); a case over the limit
+is reported as skipped. `--max-separate-tokens` (default 150k) skips the
+one-at-a-time baseline where it would take too long — on a CPU, lower it.
+
+The dP columns are not an error margin to shrink. The modes read the same
+tokens but hand them to the kernels in batches of different shapes, and on
+quantized weights that alone moves an answer by the model's own numerical
+noise. The largest dP from `separate`, on a 4-core CPU
+(`--states 256,1024 --questions 1,8,64`) and on an RTX 5070 Ti (the
+defaults), where ggml-cuda's TF32 and half-precision arithmetic is coarser:
+
+| Model | CPU `shared_prefix` | CPU `batched` | GPU `shared_prefix` | GPU `batched` |
+|---|---|---|---|---|
+| Qwen3-0.6B F16 | 0.017 | 0.017 | | |
+| Qwen3-0.6B Q8_0 | 0.11 | 0.13 | | |
+| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 | 0.53 | 0.52 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | 0.039 | 0.033 |
+| Jev-Style-2B-Decision-v3 Q4_K_M | | | 0 | 0 |
+
+From Q4_K_M on, the noise of an instruction-tuned model is enough to change
+the top answer of a question near a tie. Calibrate in the mode you serve in.
+The Jev-Style 2B shows none: its input is cut into blocks where the state
+ends, so every mode decodes the same blocks, and its `batched` requests are
+answered as `shared_prefix` (see
+[docs/engine.md](../docs/engine.md#jev-style-decision-models)).
+
+What `shared_prefix` adds is that this noise no longer depends on the other
+questions: a question is decoded alone, in the same cache cells and in
+batches of the same shape whatever else the request asks, so its answer is
+a function of the state and that question only. `--order-check` verifies
+it: it asks the questions again in reverse order, the first and last alone,
+and the whole request once more starting from the state the server kept
+from the request before (`state kept`, timed), and in `shared_prefix` mode
+every answer must come back bit for bit the same — `dP 0.0000 ...
+identical`, measured on the CPU and on an RTX 5070 Ti — while `batched`
+shows how much an answer moves only because of where its question sits in
+the batch. The bench exits with an error if a `shared_prefix` answer moved.
+The timed runs themselves never start from a kept state.
+
+`--details` prints, per case and mode, the question that moved most from the
+baseline with its coverage in both (a coverage that collapsed in one mode
+would mean that mode read the wrong logits; a similar coverage with a
+shifted distribution is arithmetic).
+
+## `decision_calibration.py` — calibration comparison for `/v1/systemone`
+
+Runs a labelled JSONL dataset through the decision model once and compares
+no calibration, content-free calibration, temperature scaling (T fitted by
+5-fold cross-fitting, never on the items it scores) and both together, on
+accuracy, NLL, Brier score and ECE with 95% bootstrap intervals, plus the
+share of items answered and their accuracy at several confidence
+thresholds. The dataset format is in the script's docstring; the items are
+yours to choose — a few hundred per question type is the least that makes
+the intervals useful.
+
+```bash
+python bench/decision_calibration.py labelled.jsonl --url http://localhost:11434 \
+    --json calibration.json
+```
+
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
 Validates the KV-cache prefix reuse scheduler against the checklist in

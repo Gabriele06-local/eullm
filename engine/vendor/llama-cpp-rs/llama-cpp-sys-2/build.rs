@@ -645,6 +645,10 @@ fn main() {
             .include(llama_src.join("ggml/include"))
             .include(llama_src.join("vendor"))
             .flag_if_supported("-std=c++17")
+            // EuLLM: llama.cpp's headers define static helpers that most
+            // translation units never call; left on, this warning floods
+            // every build (cargo replays it even when nothing is rebuilt).
+            .flag_if_supported("-Wno-unused-function")
             .pic(true);
 
         if matches!(target_os, TargetOs::Windows(WindowsVariant::Msvc)) {
@@ -1256,6 +1260,10 @@ fn main() {
             .include(llama_src.join("vendor"))
             .flag_if_supported("-std=c++17")
             .flag_if_supported("-Wno-cast-qual")
+            // EuLLM: clip-impl.h and miniaudio.h define static helpers that
+            // most of the files including them never call — over 700
+            // warnings per build otherwise, replayed by cargo on every build.
+            .flag_if_supported("-Wno-unused-function")
             .pic(true);
 
         if matches!(target_os, TargetOs::Windows(WindowsVariant::Msvc)) {
