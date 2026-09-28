@@ -1140,8 +1140,7 @@ impl DecisionModel {
                     v.describe()
                 );
                 let protocol = match v.render {
-                    // The ubatch its scores were validated with; whole
-                    // ubatches of the state are what can be shared exactly.
+                    // The ubatch its scores were validated with.
                     verdict::Render::V1 => engine::Protocol {
                         batch: 4096,
                         ubatch: VERDICT_V1_UBATCH as u32,
@@ -1358,16 +1357,15 @@ impl DecisionModel {
             .map(|q| verdict::render(v, &encode, &prefix, q))
             .collect::<Result<Vec<_>, _>>()?;
         let p = prefix.len();
-        let shared = match (options.mode, v.render) {
-            // Only whole micro-batches of the state can be shared and still
-            // give every question what decoding it alone gives: llama.cpp's
-            // kernels, and the recurrent layers' chunking, depend on where
-            // a micro-batch starts.
-            (EvalMode::SharedPrefix, verdict::Render::V1) => {
-                (p / VERDICT_V1_UBATCH) * VERDICT_V1_UBATCH
-            }
-            (EvalMode::Separate, _) => 0,
-            _ => p,
+        // The whole state is decoded once. With render v2, whose input is
+        // cut into blocks at the state's end anyway, that changes no score.
+        // With render v1 it moves them by the model's own noise, since
+        // llama.cpp's kernels and the recurrent layers' chunking depend on
+        // where a micro-batch starts: up to 0.024 in probability, measured.
+        // `separate` gives the release runtime's scores exactly.
+        let shared = match options.mode {
+            EvalMode::Separate => 0,
+            EvalMode::SharedPrefix | EvalMode::Batched => p,
         };
         let _running = self
             .eval_lock
@@ -2536,20 +2534,6 @@ mod tests {
         );
     }
 
-    /// A Jev-Style model must read what its release's own runtime reads and
-    /// score what it scores. The reference is written by that runtime —
-    /// `jev_style_decision_gguf.py` driving `jev-score`, built against the
-    /// same llama.cpp — for states short and long (whole micro-batches of
-    /// it shared), structured, and full of special-token text, and for every
-    /// question type: every case's token ids must match exactly, and its
-    /// scores, asked alone and all together, to `EULLM_JEV_TOLERANCE`
-    /// (default 1e-4).
-    ///
-    /// ```text
-    /// EULLM_DECISION_TEST_MODEL=/path/to/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf \
-    /// EULLM_JEV_REFERENCE=/path/to/reference_08.json \
-    ///     cargo test --bin eullm decision::tests::real_jev -- --ignored --nocapture
-    /// ```
     /// A state that holds the template's own turn markers stays text: the
     /// prompt carries the control tokens the template puts there and no
     /// other, and a state without them is tokenized as the whole prompt
@@ -2606,6 +2590,23 @@ mod tests {
         }
     }
 
+    /// A Jev-Style model must read what its release's own runtime reads and
+    /// score what it scores. The reference is written by that runtime —
+    /// `jev_style_decision_gguf.py` driving `jev-score`, built against the
+    /// same llama.cpp — for states short and long, structured, and full of
+    /// special-token text, and for every question type. Every case's token
+    /// ids must match exactly, and its scores in `separate` mode, asked
+    /// alone and all together, to `EULLM_JEV_TOLERANCE` (default 1e-4).
+    /// `shared_prefix` decodes the state once: exact as well for render v2,
+    /// whose blocks already start where the state ends; within the model's
+    /// noise for render v1 — under 0.1 in probability, where a question read
+    /// at the wrong slot or against the wrong state would be far off.
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf \
+    /// EULLM_JEV_REFERENCE=/path/to/reference_08.json \
+    ///     cargo test --bin eullm decision::tests::real_jev -- --ignored --nocapture
+    /// ```
     #[test]
     #[ignore = "needs a Jev-Style GGUF and its reference scores"]
     fn real_jev_style_model_reads_and_scores_as_its_own_runtime() {
@@ -2679,7 +2680,11 @@ mod tests {
                 .str_to_token_plain(t, AddBos::Never)
                 .map_err(|e| DecisionError::Invalid(e.to_string()))
         };
-        let options = DecideOptions {
+        let exact = DecideOptions {
+            mode: EvalMode::Separate,
+            content_free: false,
+        };
+        let shared = DecideOptions {
             mode: EvalMode::SharedPrefix,
             content_free: false,
         };
@@ -2729,7 +2734,7 @@ mod tests {
             };
             let want: Vec<f64> = decide.iter().map(|x| x.as_f64().unwrap()).collect();
             let got = model
-                .decide(&state, std::slice::from_ref(&q), options)
+                .decide(&state, std::slice::from_ref(&q), exact)
                 .unwrap_or_else(|e| panic!("{} q{}: {e}", c["state"], c["question"]));
             let want = in_class_order(&q, want);
             for (a, b) in got.outcomes[0].logprobs.iter().zip(&want) {
@@ -2751,17 +2756,40 @@ mod tests {
         assert!(worst <= tolerance, "scores differ by {worst}");
 
         let mut worst_many: f64 = 0.0;
+        let mut worst_shared: f64 = 0.0;
+        let mut worst_shared_p: f64 = 0.0;
         for (state, list) in &by_state {
             let questions: Vec<Question> = list.iter().map(|(q, _)| q.clone()).collect();
-            let got = model.decide(state, &questions, options).unwrap();
-            eprintln!("{} questions together: {:?}", questions.len(), got.stats);
-            for (outcome, (_, want)) in got.outcomes.iter().zip(list) {
-                for (a, b) in outcome.logprobs.iter().zip(want) {
-                    worst_many = worst_many.max((a - b).abs());
+            let separate = model.decide(state, &questions, exact).unwrap();
+            let once = model.decide(state, &questions, shared).unwrap();
+            eprintln!("{} questions together: {:?}", questions.len(), once.stats);
+            for ((a, s), (_, want)) in separate.outcomes.iter().zip(&once.outcomes).zip(list) {
+                for ((x, y), w) in a.logprobs.iter().zip(&s.logprobs).zip(want) {
+                    worst_many = worst_many.max((x - w).abs());
+                    worst_shared = worst_shared.max((y - w).abs());
+                }
+                let got = calibrated_probabilities(&s.logprobs, None, 1.0);
+                let want = calibrated_probabilities(want, None, 1.0);
+                for (x, w) in got.iter().zip(&want) {
+                    worst_shared_p = worst_shared_p.max((x - w).abs());
                 }
             }
         }
-        eprintln!("all questions of a state together: largest score difference {worst_many:.2e}");
+        eprintln!(
+            "all questions of a state together: largest score difference {worst_many:.2e} \
+             (separate), {worst_shared:.2e} (shared_prefix, probability {worst_shared_p:.2e})"
+        );
         assert!(worst_many <= tolerance, "scores differ by {worst_many}");
+        match v.render {
+            verdict::Render::V2 => {
+                assert!(worst_shared <= tolerance, "scores differ by {worst_shared}");
+            }
+            verdict::Render::V1 => {
+                assert!(
+                    worst_shared_p < 0.1,
+                    "probabilities differ by {worst_shared_p}"
+                );
+            }
+        }
     }
 }

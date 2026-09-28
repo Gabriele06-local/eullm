@@ -625,25 +625,27 @@ same tokens but hand them to the kernels in batches of different shapes,
 and on quantized weights that alone moves an answer — a quantized model's
 matrix products round their inputs to 8 bits, which turns a last-digit
 difference in a sum into a different rounding one layer later. How far,
-measured with
-`bench/decision_bench.py` on a 4-core CPU (states of 256 and 1,024 tokens,
-1–64 questions; the largest difference in any probability from `separate`):
+measured with `bench/decision_bench.py` (the largest difference in any
+probability from `separate`; on the CPU over states of 256 and 1,024 tokens
+with 1–64 questions, on the GPU with the benchmark's defaults):
 
-| Model | `shared_prefix` | `batched` |
-|---|---|---|
-| Qwen3-0.6B F16 | 0.017 | 0.017 |
-| Qwen3-0.6B Q8_0 | 0.11 | 0.13 |
-| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 |
-| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0 (whole micro-batches shared, see [below](#jev-style-decision-models)) | 0.028 |
+| Model | 4-core CPU: `shared_prefix` | `batched` | RTX 5070 Ti: `shared_prefix` | `batched` |
+|---|---|---|---|---|
+| Qwen3-0.6B F16 | 0.017 | 0.017 | | |
+| Qwen3-0.6B Q8_0 | 0.11 | 0.13 | | |
+| Qwen3-0.6B Q4_K_M | 0.34 | 0.32 | 0.53 | 0.52 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | | 0.033 |
+| Jev-Style-2B-Decision-v3 Q4_K_M | | | 0 | 0 |
 
 With Qwen3-0.6B Q4_K_M, the catalog's `qwen3-0.6b`, that is enough to
-change the top answer of a question near a tie. On CUDA the arithmetic is
-coarser — ggml-cuda runs cuBLAS in TF32 mode and accumulates some F16
-products in half precision — and on an RTX 5070 Ti the same Q4_K_M model
-moved by up to 0.52. None of the modes is the exact one; they are the same
-model with different rounding. The Jev-Style model, trained to answer this
-way, is an order of magnitude steadier than an instruction-tuned model at
-the same quantization.
+change the top answer of a question near a tie, and more so on CUDA, where
+the arithmetic is coarser: ggml-cuda runs cuBLAS in TF32 mode and
+accumulates some F16 products in half precision. None of the modes is the
+exact one; they are the same model with different rounding. The Jev-Style
+models, trained to answer this way, are an order of magnitude steadier than
+an instruction-tuned model at the same quantization, and the 2B's modes read
+the same blocks, so they agree exactly (see
+[below](#jev-style-decision-models)).
 
 What differs is what the rounding depends on. In `batched` mode a question
 sits somewhere in a batch with the others, so its answer moves with the
@@ -766,8 +768,8 @@ the 0.8B and 28 for the 2B:
 - every question type, up to 30 options — and 70 in the 2B's numbered
   catalogue form.
 
-The token ids were identical and the scores agreed to 4e-16, asked one at a
-time and all together.
+The token ids were identical and, in `separate` mode, the scores agreed to
+4e-16, asked one at a time and all together.
 
 **Differences from the code readout:**
 
@@ -780,19 +782,22 @@ time and all together.
 - Only the release's global temperature is applied, as its own runtime
   does when it is not given a category.
 
-`shared_prefix` gives exactly the scores the release's runtime gives,
-which are the scores its temperature was fitted on:
+`shared_prefix` decodes the state once, as with any model, and each
+question on its own after it:
 
-- **2B:** its input is cut into 2,048-token blocks anyway, so the state is
-  still decoded only once. It decodes one block per call, so its `batched`
-  requests are answered, and reported, as `shared_prefix`.
+- **2B:** its input is cut into 2,048-token blocks at the end of the state
+  anyway, so sharing the state changes no score: `shared_prefix` gives the
+  runtime's scores exactly, on the CPU and on an RTX 5070 Ti. It decodes one
+  block per call, so its `batched` requests are answered, and reported, as
+  `shared_prefix`.
 - **0.8B:** its arithmetic depends on where a 1,024-token micro-batch
-  starts, because its recurrent layers are computed in chunks from there.
-  Only whole micro-batches of the state can therefore be shared exactly.
-  A state shorter than 1,024 tokens, the common case, is decoded again
-  with every question. On a 4-core CPU, 8 questions about a 256-token
-  state take 15 s, as long as `separate`, against 5 s in `batched` mode,
-  where the answers move by up to 0.03 with the other questions asked.
+  starts, because its recurrent layers are computed in chunks from there,
+  and sharing the state moves where its questions' micro-batches start. Its
+  `shared_prefix` scores are therefore within the model's own noise of the
+  runtime's: up to 0.024 in probability on the CPU. `separate` gives them
+  exactly, at the cost of decoding the state again for every question: 8
+  questions about a 256-token state take 5.3 s on a 4-core CPU in
+  `shared_prefix` mode, 13.4 s in `separate`.
 
 ## API Reference
 
