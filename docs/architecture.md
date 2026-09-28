@@ -220,3 +220,48 @@ All EULLM infrastructure runs on EU servers:
 | Website | Hetzner | DE |
 
 Zero telemetry is sent outside the EU.
+
+## Platform overview
+
+```
+┌─────────────────────────────────────────────────────┐
+│                    Your application                   │
+│         (Open WebUI, LangChain, n8n, custom)         │
+└──────────────────────┬──────────────────────────────┘
+                       │ OpenAI-compatible API
+┌──────────────────────▼──────────────────────────────┐
+│                   EULLM Engine                       │
+│  ┌─────────┐  ┌──────────┐  ┌────────────────────┐  │
+│  │ Runtime  │  │ Audit    │  │ Compliance         │  │
+│  │ (llama   │  │ Trail    │  │ Documentation      │  │
+│  │  .cpp)   │  │ Logger   │  │ Generator          │  │
+│  └─────────┘  └──────────┘  └────────────────────┘  │
+└──────────────────────┬──────────────────────────────┘
+                       │
+        ┌──────────────┼──────────────┐
+        ▼              ▼              ▼
+┌──────────────┐ ┌──────────┐ ┌──────────────┐
+│  EULLM Hub   │ │  EULLM   │ │  Your local  │
+│  (EU registry│ │  Forge   │ │  models      │
+│  DE/FR/FI)   │ │          │ │  (GGUF)      │
+│              │ │          │ │              │
+└──────────────┘ └──────────┘ └──────────────┘
+
+EULLM Forge — Verticalizzazione Pipeline:
+┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+│ Structural│──▶│Knowledge │──▶│Quantize  │──▶│Identity  │──▶│  GGUF    │
+│ Pruning   │   │Distill.  │   │(Q4_K_M)  │   │LoRA      │   │  Export  │
+│ 14B → 7B  │   │Teacher→  │   │FP16→INT4 │   │Brand +   │   │  ~4.5GB  │
+│           │   │Student   │   │          │   │Language  │   │          │
+└──────────┘   └──────────┘   └──────────┘   └──────────┘   └──────────┘
+```
+
+## Tech stack
+
+| Component | Technology | Why |
+|-----------|-----------|-----|
+| Engine (CLI/Runtime) | Rust + llama.cpp | Performance, single binary, quantized KV cache |
+| Forge (verticalizzazione) | Python + PyTorch + NVIDIA ModelOpt | ML ecosystem standard |
+| Hub (registry) | Rust API + S3-compatible storage | Fast, hostable on any EU cloud |
+| Website | Next.js | SSR, SEO optimized |
+| CI/CD | GitHub Actions | Open source standard |

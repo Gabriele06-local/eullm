@@ -18,7 +18,7 @@ The GitHub Actions workflows have been carefully optimized. **Do not remove cach
 
 ## TurboQuant removed in v0.5.8 (history note)
 
-Earlier versions (v0.5.x) shipped a TurboQuant-experimental variant via the AmesianX/llama.cpp fork. That added three jobs (`build-cuda-turboquant`, `build-metal-turboquant`, `build-windows-cuda-turboquant`), an `engine-turboquant` CI job, a vendored `engine/vendor/` dir, a `[patch.crates-io]` block, and was the multi-hour long-pole of every release. **All of it was removed in v0.5.8** — see README → Research & Experiments for the rationale. Several lessons below were learned on those jobs; they still apply to any future C++/CUDA work (e.g. when a future llama.cpp DLL strategy lands).
+Earlier versions (v0.5.x) shipped a TurboQuant-experimental variant via the AmesianX/llama.cpp fork. That added three jobs (`build-cuda-turboquant`, `build-metal-turboquant`, `build-windows-cuda-turboquant`), an `engine-turboquant` CI job, a vendored `engine/vendor/` dir, a `[patch.crates-io]` block, and was the multi-hour long-pole of every release. **All of it was removed in v0.5.8** — see `docs/research.md` for the rationale. Several lessons below were learned on those jobs; they still apply to any future C++/CUDA work (e.g. when a future llama.cpp DLL strategy lands).
 
 ## Cache key design — read this before touching any sccache key
 
