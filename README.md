@@ -36,6 +36,19 @@
 
 ---
 
+### Real-time decisions, locally
+
+https://github.com/user-attachments/assets/d078a003-174f-473f-8c76-f9f4bb99be3f
+
+A 2B decision model (Jev-Style 2B) plays Snake through EuLLM on one RTX 5070
+Ti: every choice is a single [`/v1/systemone`](#decisions-without-generation-v1systemone-new-in-v0720)
+call, answered in about 8 ms, with nothing generated and no external API.
+Snake is only the visible benchmark of a general pattern: a small local model
+that turns a state into a structured decision in milliseconds — a ticket into
+route, escalate or close; a document into accept, reject or review; an
+agent's state into its next action. The [email triage example](examples/README.md#decision-triagetriagepy--sorting-incoming-email)
+is the same pattern on text.
+
 > ### 🇪🇺 Proven: a 35B-parameter model, fully local, on EU-available ARM hardware, no GPU
 >
 > A 35B-parameter hybrid MoE model (`qwen3.6-35b-a3b`, ~3B active params/token)

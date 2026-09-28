@@ -143,7 +143,7 @@ def encoder(outputs):
     return subprocess.Popen(command, stdin=subprocess.PIPE)
 
 
-def render(browser, frames, layout, outputs, seconds, caption):
+def render(browser, frames, layout, outputs, seconds, caption, hardware):
     """Draw every video frame with the page and pipe it to ffmpeg."""
     width, height = LAYOUTS[layout]
     page = browser.new_page(viewport={"width": width, "height": height})
@@ -156,7 +156,7 @@ def render(browser, frames, layout, outputs, seconds, caption):
         for n, (i, speed) in enumerate(plan):
             badge = round(speed) if speed >= 2 else None
             if (i, badge) != shown:
-                video = {"speed": badge, "caption": caption}
+                video = {"speed": badge, "caption": caption, "hardware": hardware}
                 page.evaluate("([f, v]) => render(f, v)", [frames[i], video])
                 image = page.screenshot(type="png")
                 shown = (i, badge)
@@ -212,7 +212,12 @@ def main():
     parser.add_argument(
         "--caption",
         default="",
-        help='a line under the title, e.g. "Jev-Style 0.8B on an RTX 5070 Ti"',
+        help='a line under the title, e.g. "Jev-Style 2B plays Snake"',
+    )
+    parser.add_argument(
+        "--hardware",
+        default="",
+        help='what the server runs on, for the LOCAL badge, e.g. "RTX 5070 Ti"',
     )
     parser.add_argument(
         "--layouts",
@@ -268,7 +273,15 @@ def main():
                 outputs = [(out / f"snake-{layout}.mp4", None, 18)]
                 if layout == "wide":
                     outputs.append((out / "snake-readme.mp4", 1280, 30))
-                render(browser, frames, layout, outputs, args.seconds, args.caption)
+                render(
+                    browser,
+                    frames,
+                    layout,
+                    outputs,
+                    args.seconds,
+                    args.caption,
+                    args.hardware,
+                )
                 for path, _, _ in outputs:
                     size = path.stat().st_size / 1e6
                     print(f"{path}: {size:.1f} MB", flush=True)
