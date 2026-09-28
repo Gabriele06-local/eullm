@@ -27,7 +27,7 @@ FILLER = " Il presente articolo contiene disposizioni di dettaglio sufficienti."
 RECORDS = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
             "text": f"Art. {n}. \n \n (Rubrica {n}). \n \n La domanda si propone entro "
                     f"sessanta giorni.{FILLER}"}
-           for n in range(1, 31)]
+           for n in range(1, 61)]
 
 
 def _exe(path: Path, body: str) -> None:
@@ -99,3 +99,21 @@ def test_a_round_without_its_exclusions_refuses(leonardo):
     assert r.returncode == 1
     assert "ROUND_PAIRS is required" in r.stderr
     assert not calls
+
+
+def test_a_development_round_shares_no_article_with_the_held_out_exam(leonardo):
+    run, work = leonardo
+    run()                                         # the held-out exam
+    held = work / "eval" / "norm-exam-v2.jsonl"
+    dev = work / "eval" / "norm-exam-dev.jsonl"
+    r, calls = run(ROUND_ITEMS=str(dev), ROUND_OUT=str(work / "eval" / "dev"),
+                   ROUND_EXCLUDE_EXAM=str(held), ROUND_QUIET="0")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "articles of the other exam left out" in r.stdout
+
+    def arts(p):
+        return {(json.loads(x)["metadata"]["code"], json.loads(x)["metadata"]["articolo"])
+                for x in p.read_text().splitlines()}
+    assert any(json.loads(x)["metadata"]["tipo"] == "contenuto"
+               for x in dev.read_text().splitlines())
+    assert not arts(dev) & arts(held)

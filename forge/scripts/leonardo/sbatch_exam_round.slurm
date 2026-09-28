@@ -26,6 +26,10 @@
 #   ROUND_ITEMS   exam file (default $WORK/eval/norm-exam-v2.jsonl)
 #   ROUND_OUT     answers directory (default $WORK/eval/norm-exam-answers-v2)
 #   ROUND_NORMS   legislation files (default $WORK/norms/legislazione_*.chunks.jsonl)
+#   ROUND_EXCLUDE_EXAM  another exam whose articles are not drawn — set it to the
+#                 held-out exam when drawing a readable development set
+#   ROUND_QUIET   1 (default) grades without printing items; 0 only for a
+#                 development set, never for the held-out exam
 #   ROUND_REPO    checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-exam-round
@@ -86,6 +90,8 @@ else
     EXCLUDE=()
     # shellcheck disable=SC2206
     [ "$PAIRS" = "none" ] || EXCLUDE=(--exclude-pairs $PAIRS)
+    # shellcheck disable=SC2206
+    [ -z "${ROUND_EXCLUDE_EXAM:-}" ] || EXCLUDE+=(--exclude-exam $ROUND_EXCLUDE_EXAM)
     python "$REPO/forge/scripts/make_norm_exam.py" "${NORMS[@]}" --out "$ITEMS" \
         "${EXCLUDE[@]}" --check-retrieval || { echo "[round] drawing the exam failed" >&2; exit 1; }
 fi
@@ -98,7 +104,8 @@ exam=$(sbatch --parsable --export=ALL "$LEO/sbatch_norm_exam.slurm") ||
 exam="${exam%%;*}"
 echo "[round] exam submitted: $exam"
 
-export JUDGE_DIR="$OUT" JUDGE_QUIET=1 JUDGE_REPO="$REPO"
+export JUDGE_DIR="$OUT" JUDGE_REPO="$REPO"
+if [ "${ROUND_QUIET:-1}" = "0" ]; then unset JUDGE_QUIET; else export JUDGE_QUIET=1; fi
 judge=$(sbatch --parsable --export=ALL --dependency="afterok:$exam" "$LEO/sbatch_judge.slurm") ||
     { echo "[round] could not submit the judge (exam $exam is queued)" >&2; exit 1; }
 echo "[round] judge submitted: ${judge%%;*} (after $exam)"

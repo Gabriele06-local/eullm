@@ -302,6 +302,11 @@ done
 SMOKE_OUT="$(mktemp "${TMPDIR:-/tmp}/eullm-smoke-XXXXXX.txt")"
 trap 'rm -f "$SMOKE_TMPL" "$SMOKE_OUT"' EXIT
 
+# -c: without it llama-cli sizes the KV cache for the model's full trained
+# context. Qwen3-4B-Instruct-2507 declares 262,144 tokens, about 38 GB of
+# cache, and on 2026-09-28 that killed the v0.3 package job on the 30 GB
+# serial partition right after a good GGUF had been written. A smoke prompt
+# needs a few hundred tokens.
 smoke_rc=0
 timeout "${SMOKE_TIMEOUT:-180}" \
     "$LCPP_DIR/build/bin/llama-cli" \
@@ -309,7 +314,7 @@ timeout "${SMOKE_TIMEOUT:-180}" \
     --chat-template-file "$SMOKE_TMPL" \
     ${smoke_noconv[@]+"${smoke_noconv[@]}"} \
     -p "Articolo 2086 del codice civile italiano: " \
-    -n 128 -t 4 --temp 0.7 --top-p 0.95 --no-display-prompt \
+    -c "${SMOKE_CTX:-2048}" -n 128 -t 4 --temp 0.7 --top-p 0.95 --no-display-prompt \
     < /dev/null > "$SMOKE_OUT" 2>&1 || smoke_rc=$?
 
 # The bare prompts are the loop, not output, and there can be tens of
