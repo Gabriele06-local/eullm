@@ -75,6 +75,14 @@ _DEADLINE = re.compile(
     r"(\d+|[a-z]+)\s+(giorni|giorno|mesi|mese|anni|anno|ore)\b", re.IGNORECASE)
 
 
+def _is_rubrica(text: str) -> bool:
+    """A rubrica is a short title with a capital: "Termine di prova". Text
+    between double parentheses is also how Normattiva marks words an
+    amendment inserted, and "in ogni caso" once became the topic of a
+    question as if it were a heading."""
+    return len(text) < 120 and text[:1].isupper()
+
+
 @dataclass
 class Article:
     """One article, reassembled from however the file chunked it."""
@@ -88,13 +96,27 @@ class Article:
         """The rubrica, when the text carries one right after the header."""
         lines = [ln.strip() for ln in self.text.splitlines() if ln.strip()]
         for ln in lines[:3]:
-            m = re.fullmatch(r"\(+\s*(.+?)\s*\)+\.?", ln)
-            if m and len(m.group(1)) < 120:
-                return m.group(1)
-            m = re.search(r"\(\(\s*(.+?)\s*\)\)", ln)
-            if m and len(m.group(1)) < 120:
-                return m.group(1)
+            for m in (re.fullmatch(r"\(+\s*(.+?)\s*\)+\.?", ln),
+                      re.search(r"\(\(\s*(.+?)\s*\)\)", ln)):
+                if m and _is_rubrica(m.group(1)):
+                    return m.group(1)
         return ""
+
+
+# Normattiva appends its amendment notes to the article they amend: a run of
+# footnote markers ("(3a) (15a) ((289a))"), a line of dashes, then
+# "AGGIORNAMENTO (3a) La L. 3 aprile 1957, n. 235 ha disposto ...". The notes
+# are not the article. On the development set of 2026-09-28 a deadline in a
+# note ("la presente modifica si applica ... entro centoventi giorni") became
+# the answer key to "Quale termine prevede l'art. 289 del codice penale?".
+_NOTES = re.compile(r"\s*-{5,}\s*AGGIORNAMENTO\b.*", re.DOTALL)
+_MARKERS = re.compile(r"(?:\s*\(\(?\d+[a-z]?\)\)?)+\s*$")
+
+
+def strip_notes(text: str) -> str:
+    """The article without Normattiva's amendment notes and the footnote
+    markers that point at them."""
+    return _MARKERS.sub("", _NOTES.sub("", text)).strip()
 
 
 def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]:
@@ -123,7 +145,7 @@ def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]
                 ambiguous.add(key)
             parts[key].append(text[m.start():end])
             last[code] = key[1]
-    return {k: Article(k[0], k[1], "\n".join(v).strip())
+    return {k: Article(k[0], k[1], strip_notes("\n".join(v)))
             for k, v in parts.items() if k not in ambiguous}
 
 
@@ -185,9 +207,23 @@ def _sentence_with(text: str, n: int, unit: str) -> str:
     return flat[:400]
 
 
+# The grader reads the reference to decide what is right, and treats what
+# the reference does not say as invented. Cut at 800 characters, it failed
+# answers that quoted the article correctly past the cut (development set,
+# 2026-09-28: art. 11 and 6 of L. 241/1990, art. 452-ter c.p.). So the
+# reference is the whole article, and articles too long to hand the grader
+# whole are not asked about.
+MAX_REFERENCE_CHARS = 6000
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _usable(a: Article) -> bool:
     head = normalize_text(a.text[:300])
-    return len(a.text) >= 150 and "abrogat" not in head
+    return (150 <= len(a.text) and len(_flat(a.text)) <= MAX_REFERENCE_CHARS
+            and "abrogat" not in head)
 
 
 def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
@@ -228,17 +264,24 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
                           "vertical": _vertical, "fonte": "testo di legge"})
 
         for a in rng.sample(pool, min(per_code, len(pool))):
-            ref = " ".join(a.text.split())[:800]
             items.append(item(
-                "contenuto", a.number, f"Che cosa prevede l'art. {a.number} {of}?", ref, [],
-                "Corretto se riporta il contenuto essenziale dell'articolo di riferimento; "
-                "sbagliato se descrive un altro articolo o ne inventa il contenuto."))
+                "contenuto", a.number, f"Che cosa prevede l'art. {a.number} {of}?",
+                _flat(a.text), [],
+                "Il riferimento è il testo integrale dell'articolo. Corretto se ne riporta "
+                "il contenuto essenziale; i dettagli presenti nel testo non sono errori. "
+                "Sbagliato se descrive un altro articolo o attribuisce all'articolo "
+                "contenuti che il testo non contiene."))
 
         timed = [(a, next(iter(d))) for a in pool if len(d := _deadlines(a.text)) == 1]
         for a, (n, unit) in rng.sample(timed, min(per_code, len(timed))):
             kw = [_deadline_keyword(n, unit)]
-            ref = _sentence_with(a.text, n, unit)
-            rub = f"Corretto solo se indica il termine di {n} {unit}."
+            # The sentence that states the deadline first, so the key is
+            # unmistakable; then the article, so that what else a right
+            # answer says can be checked instead of counted as invented.
+            ref = (f"{_sentence_with(a.text, n, unit)}\n\n"
+                   f"Testo integrale dell'articolo: {_flat(a.text)}")
+            rub = (f"Corretto solo se indica il termine di {n} {unit}. Altri dettagli "
+                   "presenti nel testo dell'articolo non sono errori.")
             items.append(item("termine", a.number,
                               f"Quale termine prevede l'art. {a.number} {of}?",
                               ref, kw, rub))

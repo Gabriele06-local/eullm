@@ -115,8 +115,9 @@ def test_the_deadline_reference_is_the_sentence_that_states_the_deadline():
     grader that one instead, under a rubric that still asks for the deadline."""
     items = build_exam([RATE_RECORD], per_code=4, seed=1)
     it = next(i for i in items if i.metadata["tipo"] == "termine")
-    assert "sei mesi" in it.reference
-    assert "per cento" not in it.reference
+    key = it.reference.split("\n\nTesto integrale")[0]
+    assert "sei mesi" in key
+    assert "per cento" not in key
     assert keyword_coverage("Entro sei mesi dalla domanda.", it.keywords) == 1.0
 
 
@@ -129,8 +130,9 @@ def test_a_cross_reference_is_not_the_deadline_answer_key():
                 article_num="750")
     items = build_exam([cross], per_code=4, seed=2)
     it = next(i for i in items if i.metadata["tipo"] == "termine")
-    assert "trenta giorni" in it.reference
-    assert "articolo 30" not in it.reference
+    key = it.reference.split("\n\nTesto integrale")[0]
+    assert "trenta giorni" in key
+    assert "articolo 30" not in key
 
 
 def test_repealed_articles_are_left_out(exam):
@@ -281,3 +283,68 @@ def test_the_script_excludes_trained_articles_and_says_only_how_many(tmp_path, c
     assert "1 trained articles left out" in printed and "codice_civile-2" not in printed
     drawn = [json.loads(x)["metadata"] for x in out.read_text().splitlines()]
     assert not [m for m in drawn if (m["code"], m["articolo"]) == ("codice_civile", "2")]
+
+
+# --- what the development set of 2026-09-28 showed, on the real file format ---
+
+# As the Normattiva files hold them (copied from legislazione_codice_civile
+# and legislazione_codice_procedura_civile): footnote markers, a line of
+# dashes, then the amendment notes.
+NOTED = rec("codice_civile",
+            "Art. 5. \n \n (Atti di disposizione del proprio corpo). \n \n Gli atti di "
+            "disposizione del proprio corpo sono vietati quando cagionino una diminuzione "
+            "permanente della integrita' fisica, o quando siano altrimenti contrari alla "
+            "legge, all'ordine pubblico o al buon costume." + FILLER
+            + " \n(3a) (15a) (15b) (56a) ((289a)) ------------- AGGIORNAMENTO (3a) La L. 3 "
+            "aprile 1957, n. 235 ha disposto (con l'art. 1, commi 1 e 2) che \"E' consentito "
+            "il prelievo di parti del cadavere\" e che la presente modifica si applica "
+            "decorsi trenta giorni dalla data di entrata in vigore.")
+MULTI_NOTE = rec("codice_procedura_civile",
+                 "Art. 5. \n \n (Momento determinante della giurisdizione e della "
+                 "competenza). \n \n La giurisdizione e la competenza si determinano con "
+                 "riguardo alla legge vigente al momento della proposizione della domanda."
+                 + FILLER + " \n (67) ((72)) ------------- AGGIORNAMENTO (67) La L. 26 "
+                 "novembre 1990, n. 353 ha disposto (con l'art. 92, comma 1) che \"la presente "
+                 "legge entra in vigore il 1 gennaio 1993\" ------------- AGGIORNAMENTO (72) La")
+
+
+def test_amendment_notes_are_not_part_of_the_article():
+    arts = articles_from_records([NOTED, MULTI_NOTE])
+    for a in arts.values():
+        assert "AGGIORNAMENTO" not in a.text
+        assert "ha disposto" not in a.text
+        assert not a.text.rstrip().endswith(")"), a.text[-40:]
+    assert arts[("codice_civile", "5")].text.endswith("dettaglio sufficienti.")
+
+
+def test_a_deadline_in_a_note_never_becomes_a_question():
+    items = build_exam([NOTED], per_code=4, seed=1)
+    assert not [it for it in items if it.metadata["tipo"].startswith("termine")]
+
+
+def test_words_an_amendment_inserted_are_not_a_heading():
+    inserted = rec("codice_procedura_penale",
+                   "Art. 438. \n \n ((in ogni caso)) L'imputato puo' chiedere il giudizio "
+                   "abbreviato entro quindici giorni." + FILLER)
+    arts = articles_from_records([inserted, NOTED])
+    assert arts[("codice_procedura_penale", "438")].heading == ""
+    assert arts[("codice_civile", "5")].heading == "Atti di disposizione del proprio corpo"
+    items = build_exam([inserted], per_code=4, seed=1)
+    assert not [it for it in items if it.metadata["tipo"] == "termine_argomento"]
+
+
+def test_the_reference_is_the_whole_article_not_its_first_800_characters():
+    tail = " Il recesso e' ammesso per sopravvenuti motivi di pubblico interesse."
+    long_art = rec("legge_procedimento_amministrativo",
+                   "Art. Art. 11. ((Accordi integrativi o sostitutivi del provvedimento))\n"
+                   + "Disposizione iniziale di contenuto generale. " * 30 + tail,
+                   article_num="Art. 11.")
+    items = build_exam([long_art], per_code=4, seed=1)
+    it = next(i for i in items if i.metadata["tipo"] == "contenuto")
+    assert len(it.reference) > 800
+    assert it.reference.endswith(tail.strip())
+
+
+def test_an_article_too_long_to_hand_the_grader_whole_is_not_asked():
+    huge = rec("codice_civile", "Art. 9. \n \n (Lungo). \n \n " + "Parola. " * 1200)
+    assert build_exam([huge], per_code=4, seed=1) == []
