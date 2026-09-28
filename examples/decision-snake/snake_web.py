@@ -122,6 +122,8 @@ class Show:
                 "best": self.counts["best"],
                 "late": self.counts["late"],
                 "forced": self.counts["forced"],
+                "one_way": self.counts["one way"],
+                "tail": self.counts["tail"],
                 "no_safe": self.counts["no safe move"],
                 "median_ms": round(statistics.median(self.latencies), 1)
                 if self.latencies
