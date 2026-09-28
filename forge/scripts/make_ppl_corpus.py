@@ -16,8 +16,17 @@ which has already cost a measurement somewhere:
   selection rule.
 * **Determinism.** Comparing a student against a base means running the same
   corpus twice. "The same" has to survive a shell history being lost, so the
-  selection is by position, not by a fresh random draw, and a `--seed` sample
-  is recorded when used.
+  selection is a seeded shuffle, and the seed has a default: the shipped
+  command names no `--seed`, and file order is not a property worth having.
+  `val.jsonl` is written in source-slice order (`format_pretraining.py` writes
+  the split as the corpus files are globbed, so it is grouped by court), which
+  means taking a prefix of it is taking the alphabetically first court and
+  nothing else. On a four-court corpus the 40-chunk corpus built that way held
+  records from two of the four, and every row of `perplexity.csv` inherits
+  that. Both the rule and the seed are written to the sidecar, and
+  `perplexity_compare.sh` keys its cached base on the corpus size as well as
+  its name, so a regenerated corpus is re-measured rather than compared
+  against a number from another one.
 * **Size.** 340 chunks took 1 h 37 m per model on the serial partition. Three
   models is most of a day for a number that settles in the first forty. This
   sizes the file to a chunk target instead of dumping the whole split.
@@ -48,6 +57,12 @@ from pathlib import Path
 # estimate.
 CHARS_PER_TOKEN = 3.5
 
+# The seed the shipped command gets, so the corpus is a seeded draw and not a
+# prefix of the split. It is the split's own seed, which is not a claim that
+# the two draws are related — only that neither has to be typed to be
+# reproducible. Written into the sidecar either way.
+DEFAULT_SEED = 42
+
 
 def parse_args(argv=None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -66,9 +81,12 @@ def parse_args(argv=None) -> argparse.Namespace:
                         "this many tokens (default: 512)")
     p.add_argument("--text-field", default="text",
                    help="JSON field holding the text (default: text)")
-    p.add_argument("--seed", type=int, default=None,
-                   help="sample records at random with this seed instead of "
-                        "taking them in file order")
+    p.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                   help="seed for the selection shuffle (default: "
+                        f"{DEFAULT_SEED}). Pass a negative number to take the "
+                        "records in file order, which over the split as "
+                        "format_pretraining.py writes it means the first court "
+                        "only.")
     p.add_argument("--force", action="store_true",
                    help="overwrite an existing output file")
     return p.parse_args(argv)
@@ -79,22 +97,25 @@ def target_chars(chunks: int, ctx: int) -> int:
     return int(chunks * ctx * CHARS_PER_TOKEN)
 
 
-def select(records: list[str], want_chars: int, seed: int | None) -> list[str]:
-    """Take records until the character budget is met.
+def select(records: list[tuple[str, str | None]], want_chars: int,
+           seed: int | None) -> list[tuple[str, str | None]]:
+    """Take (text, kind) records until the character budget is met.
 
-    In file order by default, which is reproducible without recording
-    anything. With a seed, shuffled first — the seed is what makes that
-    reproducible instead, and it goes into the metadata.
+    Shuffled with ``seed`` first, so the draw does not depend on how the split
+    happens to be ordered. A negative seed, or None, means file order — which
+    over val.jsonl as format_pretraining.py writes it is a prefix, and so a
+    single court; kept because it is what "the first N records" has to mean
+    when someone asks for it.
     """
-    if seed is not None:
+    if seed is not None and seed >= 0:
         import random
         records = list(records)
         random.Random(seed).shuffle(records)
-    out: list[str] = []
+    out: list[tuple[str, str | None]] = []
     total = 0
     for rec in records:
         out.append(rec)
-        total += len(rec)
+        total += len(rec[0])
         if total >= want_chars:
             break
     return out
@@ -113,7 +134,7 @@ def main(argv=None) -> int:
     print(f"[corpus] target        {args.target_chunks} chunks x {args.ctx} tok "
           f"~= {want:,} chars", file=sys.stderr)
 
-    texts: list[str] = []
+    texts: list[tuple[str, str | None]] = []
     skipped = 0
     with args.val.open(encoding="utf-8") as fh:
         for line in fh:
@@ -127,7 +148,10 @@ def main(argv=None) -> int:
                 continue
             text = (rec.get(args.text_field) or "").strip()
             if text:
-                texts.append(text)
+                # Keep the collection with the text: a perplexity number is
+                # only worth citing if you can say which courts it is about.
+                kind = rec.get("kind")
+                texts.append((text, kind if isinstance(kind, str) else None))
             else:
                 skipped += 1
 
@@ -138,7 +162,7 @@ def main(argv=None) -> int:
         )
 
     chosen = select(texts, want, args.seed)
-    body = "\n\n".join(chosen) + "\n"
+    body = "\n\n".join(text for text, _ in chosen) + "\n"
 
     if len(body) < want:
         print(f"[warn] the whole split is {len(body):,} chars, short of the "
@@ -148,6 +172,10 @@ def main(argv=None) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(body, encoding="utf-8")
 
+    kinds: dict[str, int] = {}
+    for _, kind in chosen:
+        if kind:
+            kinds[kind] = kinds.get(kind, 0) + 1
     meta = {
         "source": str(args.val),
         "records_available": len(texts),
@@ -155,15 +183,24 @@ def main(argv=None) -> int:
         "records_skipped": skipped,
         "bytes": len(body.encode("utf-8")),
         "chars": len(body),
-        "selection": "shuffled" if args.seed is not None else "file order",
+        "selection": ("file order" if args.seed is None or args.seed < 0
+                      else f"shuffled at seed {args.seed}"),
         "seed": args.seed,
+        "kinds_drawn": dict(sorted(kinds.items())),
+        "kinds_available": dict(sorted({
+            kind: sum(1 for _, k in texts if k == kind)
+            for kind in {k for _, k in texts if k}
+        }.items())),
         "target_chunks": args.target_chunks,
         "ctx": args.ctx,
         "estimated_chunks": int(len(body) / CHARS_PER_TOKEN / args.ctx),
         "note": (
             "Held-out: val.jsonl is a 1% split at seed 42, disjoint from "
-            "train.jsonl, over a deduplicated corpus. In-domain by "
-            "construction. estimated_chunks is an estimate at "
+            "train.jsonl, over a deduplicated corpus, and it is written in "
+            "source-slice order — which is why the selection is shuffled "
+            "rather than positional. In-domain by construction; kinds_drawn "
+            "says which collections the number is actually about. "
+            "estimated_chunks is an estimate at "
             f"{CHARS_PER_TOKEN} chars/token — record what llama-perplexity "
             "actually reports."
         ),
