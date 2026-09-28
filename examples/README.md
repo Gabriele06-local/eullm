@@ -17,29 +17,45 @@ eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
 `--url` points either script at another server, and `--api-key` (or
 `EULLM_API_KEY`) sends a key when the server requires one.
 
-### `decision-snake/snake.py` — a model plays Snake
+### `decision-snake/` — a model plays Snake
 
 ```bash
-python examples/decision-snake/snake.py
+python examples/decision-snake/snake_web.py   # in a browser, at http://127.0.0.1:8765
+python examples/decision-snake/snake.py       # in the terminal
 ```
 
 The code lists the moves that do not crash at once and computes exact facts
 about each one: how far the food is afterwards, how much room is left, whether
 the snake can still reach its own tail. The model reads the facts and picks a
-move with one `choice` question per step; a move the code knows to be a dead
-end is not offered while a safe one exists. The game never waits for it: each
+move among the safe ones, with one `choice` question per step. When only one
+move is safe, or none, there is nothing to judge and code plays it — with
+none, the move with the most room. The game never waits for the model: each
 tick plays the answer that has arrived by the end of the tick, and a plain rule
 plays when it has not.
 
-On a GPU a decision takes a few tens of milliseconds and the game runs in real
-time. On a CPU a decision takes a second or two: add `--tick 0` to wait for
-every answer.
+The browser version draws the board and, for every move, what the model read,
+the options it was shown with the probability it gave each, the best ones by
+the facts, and how long it took; buttons pause the game, switch to the plain
+rule and set the speed. The page and the game run on your machine and talk
+only to your EuLLM server. On a server without a screen, forward the port with
+`ssh -L 8765:127.0.0.1:8765 you@server` and open the page on your computer.
 
-The one thing that mattered in the prompt: the state says where the food is,
-but not which way the snake is heading. With the heading named, the Jev-Style
-0.8B tended to carry straight on even when the facts said otherwise; without
-it, it picked one of the best moves by the facts 60 times out of 60 in a game,
-and on 40 boards out of 40.
+On a GPU a decision takes a few tens of milliseconds and the game runs in real
+time. On a CPU a decision takes a second or two: tick "wait for every answer"
+on the page, or add `--tick 0` in the terminal.
+
+Two things mattered, both found by measuring:
+
+- **The state says where the food is, not which way the snake is heading.**
+  With the heading named, the Jev-Style 0.8B tended to carry straight on even
+  when the facts said otherwise; without it, it picked one of the best moves
+  by the facts 60 times out of 60 in a game, and on 40 boards out of 40.
+- **What code knows for certain, code decides.** At first the model also
+  chose when no move was safe, and there it went wrong: offered a dead end
+  next to a risky move with ten times the room, it took the dead end. Over
+  ten games on a GPU it averaged 39.5 points against the plain rule's 54.5,
+  although 92% of its moves were among the best by the facts. Comparing room
+  is arithmetic, so code does it now.
 
 ```bash
 # no display: ten games, then the rule alone on the same boards, to compare

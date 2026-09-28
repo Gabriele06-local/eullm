@@ -7,14 +7,18 @@ afterwards (shortest path), how much room is left (flood fill), whether the
 snake could still reach its own tail, which is what keeps it alive. The
 model does what it is good at: it reads those facts and picks one move,
 with a single `choice` question per step. Nothing is generated. And what
-code knows for certain, code enforces: a move it knows to be a dead end is
-not offered while a safe one exists.
+code knows for certain, code decides: the model chooses among the safe
+moves only; with a single safe move, or none, there is nothing to judge,
+and code plays the one there is, or the one with the most room.
 
 The game never waits for the model. Every tick starts a request and plays
 whatever answer has arrived when the tick ends; a late answer is dropped
 and a plain rule plays that tick instead. `--tick 0` waits for every
 answer — a turn-based game, for a CPU, where one decision takes about a
 second — and is the default with `--headless`.
+
+`snake_web.py` next to this file shows the same game in a browser, with
+every option the model was shown and the probability it gave each.
 
 Start the server with a decision model — a Jev-Style model is the one
 trained for this — then run the game:
@@ -164,6 +168,9 @@ def describe(facts):
                 f"the food cannot be reached from there; {fact['room']} cells of room"
             )
         else:
+            # "1 steps", not "1 step": with the same word after every count
+            # the options differ in the number alone, and on the same boards
+            # the Jev-Style 0.8B put 0.74 on the best move against 0.66.
             texts[move] = (
                 f"food {fact['food_steps']} steps away; {fact['room']} cells of room; "
                 "the tail stays within reach"
@@ -172,12 +179,15 @@ def describe(facts):
 
 
 def value(fact):
-    """How good a move is, as far as the facts can tell: safe first, then
-    the food reachable, then the fewest steps to it — or, with the food out
-    of reach, the most room."""
-    steps = fact["food_steps"]
-    reachable = steps is not None
-    return (danger(fact) is None, reachable, -steps if reachable else fact["room"])
+    """How good a move is, as far as the facts can tell. A safe move: the
+    food reachable first, then the fewest steps to it, or with the food out
+    of reach the most room. A dangerous one: room enough for the body first,
+    then the most room, where the tail has the longest to free the way."""
+    if danger(fact) is None:
+        steps = fact["food_steps"]
+        reachable = steps is not None
+        return (True, reachable, -steps if reachable else fact["room"])
+    return (False, fact["room"] >= fact["length"], fact["room"])
 
 
 def best(facts):
@@ -221,14 +231,15 @@ class Client:
         self.model, self.api_key = model, api_key
         self.instructions, self.timeout = instructions, timeout
 
-    def decide(self, game, facts):
+    def decide(self, state, criteria):
+        """The model's pick among `criteria` (move -> its facts)."""
         payload = {
-            "state": state_text(game),
+            "state": state,
             "questions": {
                 "move": {
                     "type": "choice",
                     "instructions": self.instructions,
-                    "criteria": describe(facts),
+                    "criteria": criteria,
                 }
             },
         }
@@ -257,7 +268,84 @@ class Client:
             "probabilities": answer["probabilities"],
             "confidence": answer["confidence"],
             "ms": (time.perf_counter() - started) * 1000.0,
+            "model": body.get("model"),
         }
+
+
+class Decision:
+    """One move: which, how it was chosen (`model`, `late`, `rule`,
+    `forced`, `no safe move`), the options it was chosen from and, when the
+    model chose, its answer and the state it read."""
+
+    def __init__(self, move, how, facts, answer=None, state=None):
+        self.move, self.how, self.facts = move, how, facts
+        self.answer, self.state = answer, state
+
+    def status(self):
+        if self.how == "model":
+            a = self.answer
+            shares = ", ".join(f"{m} {p:.2f}" for m, p in a["probabilities"].items())
+            return (
+                f"model: {self.move}  ({shares}; confidence {a['confidence']:.2f}; "
+                f"{a['ms']:.0f} ms)"
+            )
+        if self.how == "late":
+            return f"answer late: the rule played {self.move}"
+        return f"{self.how}: {self.move}"
+
+
+class Decider:
+    """Picks every move. The model chooses among the safe moves. Code plays
+    what needs no judgement — the only safe move, or with none the move with
+    the most room — and the rule plays a tick whose answer is late, or every
+    move with `player="rule"`.
+
+    One request at a time: while an answer is still on its way, the rule
+    plays and the server is not asked again."""
+
+    def __init__(self, client, player="model", tick=0.0):
+        self.client, self.player, self.tick = client, player, tick
+        self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.pending = None
+
+    def decide(self, game):
+        """The next move; None when every move crashes."""
+        facts = options(game)
+        if not facts:
+            return None
+        safe_moves = {m: f for m, f in facts.items() if danger(f) is None}
+        started = time.perf_counter()
+        # What is left when no move is safe is a comparison of room, which
+        # code does exactly: offered a dead end next to a risky move with
+        # ten times the room, the Jev-Style 0.8B took the dead end, and
+        # those moves ended its games.
+        if not safe_moves:
+            return Decision(rule(game, facts), "no safe move", facts)
+        if len(safe_moves) == 1:
+            return Decision(next(iter(safe_moves)), "forced", safe_moves)
+        if self.player == "rule":
+            return Decision(rule(game, safe_moves), "rule", safe_moves)
+        state = state_text(game)
+        asked = None
+        if self.pending is None or self.pending.done():
+            self.pending = asked = self.pool.submit(
+                self.client.decide, state, describe(safe_moves)
+            )
+        answer = None
+        if asked is not None:
+            wait = None
+            if self.tick > 0:
+                wait = max(0.0, self.tick - (time.perf_counter() - started))
+            try:
+                answer = asked.result(timeout=wait)
+            except concurrent.futures.TimeoutError:
+                pass
+        if answer is not None and answer["move"] in safe_moves:
+            return Decision(answer["move"], "model", safe_moves, answer, state)
+        return Decision(rule(game, safe_moves), "late", safe_moves)
+
+    def close(self):
+        self.pool.shutdown(wait=False, cancel_futures=True)
 
 
 class Screen:
@@ -292,92 +380,51 @@ class Screen:
         sys.stdout.flush()
 
 
-def play_game(args, client, rng, pool, screen, log):
+def play_game(args, decider, rng, screen, log):
     """One game; returns its record. With `log`, every move the model made
     goes to it as one JSON line."""
     game = Game(args.width, args.height, rng)
     counts = collections.Counter()
     latencies = []
     idle = 0
-    pending = None
-    status = "starting"
     end = "move limit reached"
     if screen:
-        screen.draw(game, [f"score 0   length {len(game.snake)}", status])
+        screen.draw(game, [f"score 0   length {len(game.snake)}", "starting"])
     for tick in range(args.max_ticks):
         if game.food is None:
             end = "the board is full: won"
             break
-        facts = options(game)
-        if not facts:
+        started = time.perf_counter()
+        decision = decider.decide(game)
+        if decision is None:
             end = "no move left"
             break
-        # What code knows to be deadly is not offered while a safe move
-        # exists: the model chooses among the moves worth choosing between.
-        # Offered a dead end, the Jev-Style 0.8B took it once in 200 moves,
-        # and that one move ended the game.
-        facts = {m: f for m, f in facts.items() if danger(f) is None} or facts
-        started = time.perf_counter()
-        if len(facts) == 1:
-            move, how = next(iter(facts)), "forced"
-            status = f"forced: {move}"
-        elif args.player == "rule":
-            move, how = rule(game, facts), "rule"
-            status = f"rule: {move}"
-        else:
-            # One request at a time: while an answer is still on its way,
-            # the rule plays and the server is not asked again.
-            asked = None
-            if pending is None or pending.done():
-                pending = asked = pool.submit(client.decide, game, facts)
-            wait = (
-                None
-                if args.tick == 0
-                else max(0.0, args.tick - (time.perf_counter() - started))
-            )
-            answer = None
-            if asked is not None:
-                try:
-                    answer = asked.result(timeout=wait)
-                except concurrent.futures.TimeoutError:
-                    pass
-            if answer is not None and answer["move"] in facts:
-                move, how = answer["move"], "model"
-                latencies.append(answer["ms"])
-                ideal = best(facts)
-                if move in ideal:
-                    counts["best"] += 1
-                if log:
-                    entry = {
-                        "state": state_text(game),
-                        "options": describe(facts),
-                        "model": move,
-                        "best": sorted(ideal),
-                        "probabilities": answer["probabilities"],
-                        "confidence": answer["confidence"],
-                        "ms": round(answer["ms"], 1),
-                    }
-                    log.write(json.dumps(entry) + "\n")
-                shares = ", ".join(
-                    f"{m} {p:.2f}" for m, p in answer["probabilities"].items()
-                )
-                status = (
-                    f"model: {move}  ({shares}; confidence {answer['confidence']:.2f}; "
-                    f"{answer['ms']:.0f} ms)"
-                )
-            else:
-                move, how = rule(game, facts), "late"
-                status = f"answer late: the rule played {move}"
-        counts[how] += 1
+        counts[decision.how] += 1
+        if decision.how == "model":
+            latencies.append(decision.answer["ms"])
+            ideal = best(decision.facts)
+            if decision.move in ideal:
+                counts["best"] += 1
+            if log:
+                entry = {
+                    "state": decision.state,
+                    "options": describe(decision.facts),
+                    "model": decision.move,
+                    "best": sorted(ideal),
+                    "probabilities": decision.answer["probabilities"],
+                    "confidence": decision.answer["confidence"],
+                    "ms": round(decision.answer["ms"], 1),
+                }
+                log.write(json.dumps(entry) + "\n")
         before = game.score
-        if not game.play(move):
-            end = f"crashed moving {move}"
+        if not game.play(decision.move):
+            end = f"crashed moving {decision.move}"
             break
         idle = 0 if game.score > before else idle + 1
         if screen:
             lines = [
                 f"score {game.score}   length {len(game.snake)}   move {tick + 1}",
-                status,
+                decision.status(),
             ]
             screen.draw(game, lines)
         if args.tick > 0:
@@ -406,7 +453,8 @@ def summary(n, result, player):
             line += f" (median {statistics.median(lat):.0f} ms)"
         line += (
             f", {c['best']} of them among the best by the facts; "
-            f"{c['late']} late, {c['forced']} forced"
+            f"{c['late']} late, {c['forced']} forced, "
+            f"{c['no safe move']} with no safe move"
         )
     return line
 
@@ -466,17 +514,18 @@ def main():
     rng = random.Random(args.seed)
     screen = None if args.headless else Screen(args.color)
     log = open(args.log, "w", encoding="utf-8") if args.log else None
+    decider = Decider(client, args.player, args.tick)
     results = []
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            for n in range(1, args.games + 1):
-                results.append(play_game(args, client, rng, pool, screen, log))
-                if screen:
-                    screen.close()
-                print(summary(n, results[-1], args.player))
+        for n in range(1, args.games + 1):
+            results.append(play_game(args, decider, rng, screen, log))
+            if screen:
+                screen.close()
+            print(summary(n, results[-1], args.player))
     except KeyboardInterrupt:
         print("\nstopped")
     finally:
+        decider.close()
         if screen:
             screen.close()
         if log:

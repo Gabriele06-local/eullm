@@ -298,7 +298,8 @@ Loading no decision model changes nothing else: chat, completions and
 embeddings work exactly as before.
 
 Two small programs show it at work: a model playing Snake, one decision per
-move, and a triage of incoming email, in [`examples/`](examples/README.md).
+move, which you can watch in a browser with the probability it gave each move,
+and a triage of incoming email, in [`examples/`](examples/README.md).
 Details, calibration options and the numbers: [docs/engine.md](docs/engine.md#decisions-v1systemone-and-the-decision-slot).
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)
