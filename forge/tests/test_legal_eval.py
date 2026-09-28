@@ -104,3 +104,35 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
         with out.open(encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
         assert [r["label"] for r in rows] == ["a", "b"], module.CSV_HEADER[:2]
+
+
+# --- the chat prompt: thinking off, for every kind of template ---------------
+
+def _tokenizer(template: str):
+    """A real tokenizer with a real chat template, and nothing to download."""
+    tokenizers = __import__("pytest").importorskip("tokenizers")
+    transformers = __import__("pytest").importorskip("transformers")
+    raw = tokenizers.Tokenizer(tokenizers.models.WordLevel({"[UNK]": 0}, unk_token="[UNK]"))
+    tok = transformers.PreTrainedTokenizerFast(tokenizer_object=raw)
+    tok.chat_template = template
+    return tok
+
+
+# The part of Qwen3's hybrid template that decides whether the model thinks.
+HYBRID = ("{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+          "{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n"
+          "{% if enable_thinking is defined and enable_thinking is false %}"
+          "<think>\n\n</think>\n\n{% endif %}{% endif %}")
+# A template with no such switch, like Qwen3-4B-Instruct-2507's.
+PLAIN = ("{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}<|im_end|>\n"
+         "{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
+
+
+def test_a_hybrid_model_is_asked_with_thinking_off():
+    prompt = legal_eval.chat_prompt(_tokenizer(HYBRID), "Che cosa prevede l'art. 2043 c.c.?")
+    assert prompt.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+
+
+def test_a_template_without_the_switch_is_unchanged():
+    prompt = legal_eval.chat_prompt(_tokenizer(PLAIN), "Domanda?")
+    assert prompt == "<|im_start|>user\nDomanda?<|im_end|>\n<|im_start|>assistant\n"

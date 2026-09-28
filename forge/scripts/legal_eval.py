@@ -100,6 +100,20 @@ def append_csv_row(path: Path, row: list[str]) -> None:
         f.flush()
 
 
+def chat_prompt(tok, content: str) -> str:
+    """One user turn in the model's chat format, with thinking switched off.
+
+    Qwen3's hybrid models (Qwen3-8B and the like) think by default: they open
+    with a <think> block that eats the answer budget and is graded as the
+    answer. ``enable_thinking=False`` is the switch their template reads; a
+    template that has no such switch (Qwen3-4B-Instruct-2507, base models)
+    ignores the extra variable, so every model is asked the same way.
+    """
+    return tok.apply_chat_template([{"role": "user", "content": content}],
+                                   tokenize=False, add_generation_prompt=True,
+                                   enable_thinking=False)
+
+
 def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
                      max_new_tokens: int, end_ids: list[int]) -> list[tuple[str, bool]]:
     """Greedy answers to already-templated prompts, ``batch_size`` at a time.
@@ -177,10 +191,7 @@ def main() -> int:
             note = index.missing_article_note(it.question)
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             content = open_book_prompt(it.question, found, note=note)
-        prompts.append(tok.apply_chat_template(
-            [{"role": "user", "content": content}],
-            tokenize=False, add_generation_prompt=True,
-        ))
+        prompts.append(chat_prompt(tok, content))
     results = generate_answers(model, tok, prompts, batch_size=batch,
                                max_new_tokens=args.max_new_tokens, end_ids=end_ids)
     answers = {it.id: text for it, (text, _) in zip(items, results)}
