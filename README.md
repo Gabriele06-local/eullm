@@ -252,12 +252,13 @@ command line is visible to every local user in `ps`.
 Routing, triage, "does this need a human?": questions whose answer is a
 choice, not a text. `POST /v1/systemone` asks a small model typed questions
 about a state — yes/no, one of N options, a level on a scale — and returns
-probabilities read straight from its next-token distribution, with nothing
-generated. The API follows System One (TypeSafe's Jev), so a client written
-for it works against a local EuLLM:
+probabilities read straight from the model, with nothing generated. The API
+follows System One (TypeSafe's Jev), so a client written for it works
+against a local EuLLM:
 
 ```bash
-eullm serve --decision-model qwen3-1.7b
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
 curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
   "state": "Help! My payouts have been failing for 3 days.",
   "questions": {
@@ -268,27 +269,33 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 }'
 ```
 
+**Which model.** Use one trained for exactly this: the
+[Jev-Style](https://github.com/lawrence3699/jev-style) decision models
+(Apache-2.0, 0.8B and 2B), recognized when they load. They read every option
+as a yes/no verdict of its own, so a question can list up to 255 options,
+and each ships with a calibration temperature fitted on held-out data,
+applied by default. An instruction-tuned chat model such as `qwen3-1.7b`
+works too, but it is far less steady. Measured on an RTX 5070 Ti with 64
+questions about a one-page (1,024-token) document:
+
+| Decision model | Time | Largest change in an answer between modes |
+|---|---|---|
+| Jev-Style 2B, Q4_K_M (1.3 GB) | 0.66 s | 0 — exactly the scores of its release |
+| Jev-Style 0.8B, Q4_K_M (0.53 GB) | 0.62 s | 0.04 |
+| Qwen3-0.6B, Q4_K_M, instruction-tuned | 0.39 s | 0.53 |
+
+A change of 0.53 is enough to flip the top answer of a question near a tie,
+and an instruction-tuned model's calibration has not been measured: with one
+of those, validate on your own data before automating on a threshold.
+
 Up to 64 questions about the same state are answered in one request that
-reads the state only once, and each answer depends on its own question only —
-asked alone or among others, in any order, it comes back the same. Every
-answer comes with the raw log-probabilities it was taken from and a
-`coverage` that shows whether the model answered in the format asked for;
-every decision is recorded in the audit trail. How well an instruction-tuned
-model's probabilities are calibrated has not been measured yet, so treat
-them as scores to be validated on your own data before automating on a
-threshold.
-
-The decision model can also be one trained for exactly this: the
-[Jev-Style](https://github.com/lawrence3699/jev-style) models (Apache-2.0,
-0.8B and 2B), recognized when they load. They read every option as a
-yes/no verdict of its own, so a question can list up to 255 options. Each
-model ships with a calibration temperature fitted on held-out data, which is
-applied by default:
-
-```bash
-eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
-eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
-```
+reads the state only once. Each answer depends on its own question only —
+asked alone or among others, in any order, it comes back the same — and the
+next request about the same state does not read it again. What a request
+sends is always read as text, so a document cannot slip the model's own
+turn markers into the prompt. Every decision is recorded in the audit trail.
+Loading no decision model changes nothing else: chat, completions and
+embeddings work exactly as before.
 
 Details, calibration options and the numbers: [docs/engine.md](docs/engine.md#decisions-v1systemone-and-the-decision-slot).
 

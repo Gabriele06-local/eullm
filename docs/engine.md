@@ -677,12 +677,14 @@ Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
 context per request (default 8192). A request over the context limit is
 refused with a 400 that says how many tokens it needed.
 
-**Which model.** A model trained for this endpoint — a
-[Jev-Style model](#jev-style-decision-models) — or a small
-instruction-tuned one: Qwen3 0.6B–4B from the catalog are the intended size.
-An instruction-tuned decision model must be able to answer without reasoning
-first; a model that always opens a reasoning block (the DeepSeek-R1 family)
-spends its first token on the tag, and every answer's `coverage` shows it.
+**Which model.** Preferably one trained for this endpoint, a
+[Jev-Style model](#jev-style-decision-models): calibrated by its authors, up
+to 255 options, and an order of magnitude steadier than an instruction-tuned
+model at the same quantization (see the table above). A small
+instruction-tuned model also works: Qwen3 0.6B–4B from the catalog are the
+intended size. It must be able to answer without reasoning first; a model
+that always opens a reasoning block (the DeepSeek-R1 family) spends its
+first token on the tag, and every answer's `coverage` shows it.
 
 **The decision slot.** The model lives in a third slot, next to the
 generation and embedding models, with the same residency rules as the
