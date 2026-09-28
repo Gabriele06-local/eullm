@@ -151,6 +151,27 @@ Two traps worth stating each time they apply:
 * Never tell the user to submit jobs that depend on a change until the check
   above has printed the expected value.
 
+## Automation is tested with the thing it waits for, and checked every morning
+
+On 2026-09-27 the open-book generator wrote an EMPTY `.done` marker and
+`submit_when_ready.sh` counts only non-empty files, so stage 3 waited all
+night behind a watcher that said "not yet" every twenty minutes. Each half
+had its own passing test; nobody had run one after the other. Rules:
+
+* **A producer and its consumer are tested together.** Anything that waits
+  for a file (watchers, `--need`, dependent jobs) gets a test that feeds it
+  the file the real producer writes — see `tests/test_submit_when_ready.py`.
+  A stub of the producer's output does not count: the stub is exactly where
+  the two drift apart.
+* **Messages to the user carry only commands to run NOW.** Commands for later
+  go in a later message. Anything conditional ("when X is done, run Y") is a
+  watcher or a dependency, never the user's job to time; the user runs what
+  is sent, in order, as soon as it arrives.
+* **Every morning starts with `bash forge/scripts/leonardo/status.sh`**: what
+  is running, what died or ended suspiciously fast, what waits on what, and
+  a `[!!]` line for each thing that needs a human. If it finds a problem
+  whose shape it did not know, teach it that shape.
+
 ## Base Models
 
 Only fully permissive licenses:
