@@ -16,6 +16,10 @@ vertical, e.g. the three administrative sources.
 about (and the made-up numbers of its absent-article pairs). A redraw after
 training on such pairs must use it, or the exam partly asks what training
 answered. Like the rest, it prints how many, never which.
+
+``--exclude-exam`` leaves out the articles of another exam. It exists to draw
+a DEVELOPMENT set: a second draw that may be read, to find out why answers
+are wrong, while the held-out exam stays unread and shares no article with it.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.eval import NormIndex, save_eval_set  # noqa: E402
+from eullm_forge.eval import NormIndex, load_eval_set, save_eval_set  # noqa: E402
 from eullm_forge.eval.norm_exam import (  # noqa: E402
     build_exam,
     retrieval_hits,
@@ -47,6 +51,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="also report how often retrieval finds each item's article")
     ap.add_argument("--exclude-pairs", nargs="+", type=Path, default=[],
                     help="open-book training pairs whose articles must not be drawn")
+    ap.add_argument("--exclude-exam", nargs="+", type=Path, default=[],
+                    help="another exam whose articles must not be drawn (e.g. draw a "
+                         "readable development set that shares nothing with the held-out one)")
     ap.add_argument("--force", action="store_true", help="overwrite an existing exam")
     args = ap.parse_args(argv)
 
@@ -61,6 +68,15 @@ def main(argv: list[str] | None = None) -> int:
             exclude |= trained_articles(json.loads(line) for line in f if line.strip())
     if args.exclude_pairs:
         print(f"[exam] {len(exclude)} trained articles left out")
+    other: set[tuple[str, str]] = set()
+    for path in args.exclude_exam:
+        for it in load_eval_set(path):
+            md = it.metadata
+            if md.get("code") and md.get("articolo"):
+                other.add((md["code"], str(md["articolo"])))
+    if args.exclude_exam:
+        print(f"[exam] {len(other)} articles of the other exam left out")
+    exclude |= other
     items = build_exam(index.records, per_code=args.per_code,
                        codes=set(args.codes) if args.codes else None, exclude=exclude)
     args.out.parent.mkdir(parents=True, exist_ok=True)
