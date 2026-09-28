@@ -21,7 +21,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "forge" / "scripts" / "leonardo" / "sbatch_exam_round.slurm"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+pytestmark = pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None,
+                                reason="needs POSIX bash (on Windows, bash is WSL's)")
 
 FILLER = " Il presente articolo contiene disposizioni di dettaglio sufficienti." * 3
 RECORDS = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,

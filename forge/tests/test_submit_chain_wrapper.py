@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,8 @@ import pytest
 SUITE = Path(__file__).resolve().parent / "test_submit_chain.sh"
 
 
-@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+@pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None,
+                    reason="needs POSIX bash (on Windows, bash is WSL's)")
 def test_submit_chain_dependency_wiring():
     result = subprocess.run(
         ["bash", str(SUITE)],

@@ -14,13 +14,15 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "leonardo" / "status.sh"
 
-pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+pytestmark = pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") is None,
+                                reason="needs POSIX bash (on Windows, bash is WSL's)")
 
 
 def _exe(path: Path, body: str) -> None:
