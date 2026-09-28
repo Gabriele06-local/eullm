@@ -1901,12 +1901,29 @@ jobs:
       - name: Create checksums
         run: |
           cd artifacts
+          : > checksums.txt
           for dir in */; do
             for file in "$dir"*; do
-              sha256sum "$file" >> checksums.txt
+              # "<hash>  <asset name>", not "<hash>  <dir>/<file>". The
+              # release assets are uploaded flat, and the instructions on the
+              # release page say `sha256sum -c checksums.txt`, which can only
+              # work if the name in the file is the name the user downloaded.
+              # Both installers already match on the base name
+              # (install.sh:160, install.ps1:87), so this changes nothing for
+              # them. The hash and the name are taken apart explicitly rather
+              # than by rewriting the line: a sed over the whole line is
+              # greedy and takes the hash with it.
+              line=$(sha256sum "$file")
+              printf '%s  %s\n' "${line%% *}" "${file##*/}" >> checksums.txt
             done
           done
           cat checksums.txt
+          # ...and the check that keeps it that way, since what it prevents is a
+          # verification command on the release page that cannot succeed.
+          if grep -qE '^[0-9a-f]{64}  .*/' checksums.txt; then
+            echo "::error::checksums.txt lists artifact paths, not asset names"
+            exit 1
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
