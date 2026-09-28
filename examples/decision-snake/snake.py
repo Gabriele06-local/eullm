@@ -506,7 +506,7 @@ def summary(n, result, player):
         if lat:
             line += f" (median {statistics.median(lat):.0f} ms)"
         line += (
-            f", {c['best']} of them among the best by the facts; {c['late']} late; "
+            f", {c['best']} matched the evaluator's best move; {c['late']} late; "
             f"by code: {c['forced']} with one safe move, {c['one way']} with one "
             f"safe way to the food, {c['tail']} following the tail, "
             f"{c['no safe move']} with no safe move"
