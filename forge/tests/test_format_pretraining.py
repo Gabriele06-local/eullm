@@ -83,3 +83,46 @@ def test_known_group_by_field_keeps_documents_whole(tmp_path):
     assert train_docs == {"doc-0", "doc-1"} - val_docs
     assert val_docs, "one whole document must be held out"
     assert train_docs, "one whole document must be trained on"
+
+
+# --- what the slice file name says about the records in it ------------------
+
+@pytest.mark.parametrize("name,year,kind", [
+    # The shape it always handled.
+    ("italgiure_snciv_2023.dedup.jsonl", 2023, "snciv"),
+    # The range names docs/corpus-acquisition.md tells you to copy. The year
+    # used to be thrown away by int("2017-2024"), so the whole Consiglio di
+    # Stato slice reached train.jsonl with no year at all.
+    ("italgiure_cds_2017-2024.dedup.jsonl", 2024, "cds"),
+    # A range that reaches into the held-out window takes its end: a year
+    # too high refuses a corpus, a year too low lets one through.
+    ("italgiure_snciv_2021-2026.dedup.jsonl", 2026, "snciv"),
+    # A multi-word collection used to be cut to its first word, so the civil
+    # and the criminal Cassazione slice both arrived as "cassazione".
+    ("italgiure_cassazione_civile_2023.dedup.jsonl", 2023, "cassazione_civile"),
+    ("italgiure_cassazione_penale_2023.dedup.jsonl", 2023, "cassazione_penale"),
+    # Every legislation code used to be stamped "codice".
+    ("legislazione_codice_civile.chunks.jsonl", None, "codice_civile"),
+    ("legislazione_ricorsi_amministrativi.chunks.jsonl", None, "ricorsi_amministrativi"),
+])
+def test_a_slice_file_name_yields_its_year_and_collection(name, year, kind):
+    assert fmt._infer_year_kind(Path(name)) == (year, kind)
+
+
+def test_a_range_slice_stamps_a_year_the_held_out_gate_can_use(tmp_path):
+    """End to end, because the year only matters once it is in train.jsonl:
+    without it the held-out gate has nothing but the fetcher's id to read."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "italgiure_cds_2017-2024.dedup.jsonl").write_text(
+        json.dumps({"text": "dispositivo", "sentence_id": "90135/2017"}) + "\n"
+        + json.dumps({"text": "dispositivo", "sentence_id": "90136/2019"}) + "\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    assert fmt.main([str(corpus), "--output", str(out), "--group-by", "none"]) == 0
+    rows = [json.loads(ln) for f in sorted(out.glob("*.jsonl"))
+            for ln in f.read_text(encoding="utf-8").splitlines()]
+    assert rows, "the split must not have written nothing"
+    assert {r["year"] for r in rows} == {2024}
+    assert {r["kind"] for r in rows} == {"cds"}

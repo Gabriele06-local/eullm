@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -62,16 +63,43 @@ def _iter_jsonl(path: Path) -> Iterator[dict]:
 
 
 def _infer_year_kind(path: Path) -> tuple[int | None, str | None]:
-    """italgiure_snciv_2023.dedup.jsonl -> (2023, "snciv")."""
-    parts = path.name.split("_")
-    if len(parts) >= 3:
-        kind = parts[1]
-        try:
-            year = int(parts[2].split(".", 1)[0])
-        except ValueError:
-            year = None
-        return year, kind
-    return None, None
+    """The year and the collection a corpus slice is named for.
+
+    ``italgiure_snciv_2023.dedup.jsonl``            -> (2023, "snciv")
+    ``italgiure_cds_2017-2024.dedup.jsonl``          -> (2024, "cds")
+    ``italgiure_cassazione_civile_2023.dedup.jsonl`` -> (2023, "cassazione_civile")
+    ``legislazione_codice_civile.chunks.jsonl``      -> (None, "codice_civile")
+
+    Both parts used to be taken by position, which only worked for
+    ``italgiure_<court>_<year>``. ``int(parts[2])`` threw the year away on the
+    range names the corpus docs tell you to use, and ``parts[1]`` cut a
+    multi-word collection to its first word — so the whole Consiglio di Stato
+    slice reached ``train.jsonl`` with no ``year`` at all (leaving the
+    held-out gate nothing but the fetcher's id string to work with), and
+    ``cassazione_civile`` and ``cassazione_penale`` both arrived as
+    ``kind="cassazione"``, indistinguishable on the two sides of the split.
+
+    A range takes its LAST year: the number ends up in the held-out gate,
+    where a year at or after the cut-off is what has to be caught, and the
+    end of a range is the end that can only be too low, never too high.
+    """
+    name = path.name
+    for suffix in (".dedup.jsonl", ".chunks.jsonl", ".jsonl", ".json"):
+        if name.endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    for prefix in ("italgiure_", "legislazione_"):
+        if name.startswith(prefix):
+            name = name[len(prefix) :]
+            break
+    parts = name.split("_")
+    year = None
+    if parts:
+        years = re.findall(r"(?:19|20)\d{2}", parts[-1])
+        if years:
+            year = int(years[-1])
+            parts.pop()
+    return year, ("_".join(parts) or None)
 
 
 def _format_stats_human(stats: FormatStats) -> str:
