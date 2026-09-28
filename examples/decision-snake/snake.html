@@ -66,15 +66,22 @@
   .opt { display: grid; grid-template-columns: 28px 1fr 52px; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid transparent; }
   .opt + .opt { margin-top: 6px; }
   .opt.chosen { border-color: var(--snake); background: rgba(74, 222, 128, 0.07); }
-  .arrow { font-size: 20px; text-align: center; }
+  .arrow { font-size: 20px; line-height: 1; text-align: center; }
   .bar { height: 8px; background: #20252e; border-radius: 99px; overflow: hidden; grid-column: 2; }
   .bar > i { display: block; height: 100%; background: var(--bar); border-radius: 99px; transition: width 120ms linear; }
   .opt.chosen .bar > i { background: var(--snake); }
   .pct { text-align: right; font-variant-numeric: tabular-nums; grid-row: 1; grid-column: 3; }
-  .fact { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
+  /* The move panel keeps one height from move to move, so the eye can stay
+     on it: always three option rows (a move never has more), empty ones
+     kept invisible, and a fixed number of lines for every text. */
+  :root { --fact-lines: 2; --asked-lines: 2; }
+  @media (max-width: 860px) { :root { --fact-lines: 3; --asked-lines: 3; } }
+  .opt.ghost { visibility: hidden; }
+  .fact, .asked { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .fact { grid-column: 2 / 4; font-size: 13px; color: var(--muted); height: calc(var(--fact-lines) * 1.45em); -webkit-line-clamp: var(--fact-lines); }
   .fact .star { color: var(--best); }
-  .meta { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 1.45em; }
-  .asked { margin-bottom: 12px; padding: 8px 10px; border-radius: 10px; background: #12151b; font-size: 13px; color: var(--muted); min-height: 3.2em; }
+  .meta { margin-top: 10px; font-size: 13px; color: var(--muted); height: 1.45em; white-space: nowrap; overflow: hidden; }
+  .asked { margin-bottom: 12px; padding: 8px 10px; border-radius: 10px; background: #12151b; font-size: 13px; color: var(--muted); box-sizing: content-box; height: calc(var(--asked-lines) * 1.45em); -webkit-line-clamp: var(--asked-lines); }
   .asked b { color: var(--text); font-weight: 600; }
   #model { text-transform: none; letter-spacing: 0; }
   .empty { color: var(--muted); font-size: 13px; align-self: center; }
@@ -239,6 +246,10 @@ let size = "";
 const VIDEO = new URLSearchParams(location.search).get("video");
 if (VIDEO) document.body.classList.add("video", VIDEO);
 
+// An empty option row: it keeps the move panel's height with fewer options.
+const GHOST = '<div class="opt ghost" aria-hidden="true"><div class="arrow">·</div><div class="bar"></div><div class="pct"></div><div class="fact"></div></div>';
+$("options").innerHTML = GHOST.repeat(3);
+
 const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
 function post(body) {
@@ -356,6 +367,7 @@ function render(f, video) {
         <div class="fact">${esc(move)}: ${esc(text)}${star}</div>
       </div>`;
     });
+    while (rows.length < 3) rows.push(GHOST);
     $("options").innerHTML = rows.join("");
     $("asked").innerHTML = d.state
       ? "<b>The model read:</b> " + esc(d.state)
