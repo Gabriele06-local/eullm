@@ -26,7 +26,8 @@ python examples/decision-snake/snake.py
 The code lists the moves that do not crash at once and computes exact facts
 about each one: how far the food is afterwards, how much room is left, whether
 the snake can still reach its own tail. The model reads the facts and picks a
-move with one `choice` question per step. The game never waits for it: each
+move with one `choice` question per step; a move the code knows to be a dead
+end is not offered while a safe one exists. The game never waits for it: each
 tick plays the answer that has arrived by the end of the tick, and a plain rule
 plays when it has not.
 

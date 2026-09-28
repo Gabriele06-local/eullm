@@ -6,7 +6,9 @@ straight away and computes exact facts about each one — how far the food is
 afterwards (shortest path), how much room is left (flood fill), whether the
 snake could still reach its own tail, which is what keeps it alive. The
 model does what it is good at: it reads those facts and picks one move,
-with a single `choice` question per step. Nothing is generated.
+with a single `choice` question per step. Nothing is generated. And what
+code knows for certain, code enforces: a move it knows to be a dead end is
+not offered while a safe one exists.
 
 The game never waits for the model. Every tick starts a request and plays
 whatever answer has arrived when the tick ends; a late answer is dropped
@@ -140,7 +142,8 @@ def options(game):
 def danger(fact):
     """Why a move could kill the snake later, or None when it is safe."""
     if fact["room"] < fact["length"]:
-        return f"dead end: only {fact['room']} cells of room for a snake of {fact['length']}"
+        cells = "cell" if fact["room"] == 1 else "cells"
+        return f"dead end: only {fact['room']} {cells} of room for a snake of {fact['length']}"
     if not fact["tail"]:
         return f"risky: the tail would be out of reach, {fact['room']} cells of room"
     return None
@@ -309,6 +312,11 @@ def play_game(args, client, rng, pool, screen, log):
         if not facts:
             end = "no move left"
             break
+        # What code knows to be deadly is not offered while a safe move
+        # exists: the model chooses among the moves worth choosing between.
+        # Offered a dead end, the Jev-Style 0.8B took it once in 200 moves,
+        # and that one move ended the game.
+        facts = {m: f for m, f in facts.items() if danger(f) is None} or facts
         started = time.perf_counter()
         if len(facts) == 1:
             move, how = next(iter(facts)), "forced"
@@ -336,10 +344,6 @@ def play_game(args, client, rng, pool, screen, log):
             if answer is not None and answer["move"] in facts:
                 move, how = answer["move"], "model"
                 latencies.append(answer["ms"])
-                if danger(facts[move]) and any(
-                    danger(f) is None for f in facts.values()
-                ):
-                    counts["dangerous"] += 1
                 ideal = best(facts)
                 if move in ideal:
                     counts["best"] += 1
@@ -401,8 +405,8 @@ def summary(n, result, player):
         if lat:
             line += f" (median {statistics.median(lat):.0f} ms)"
         line += (
-            f", {c['best']} of them among the best by the facts, "
-            f"{c['dangerous']} dangerous; {c['late']} late, {c['forced']} forced"
+            f", {c['best']} of them among the best by the facts; "
+            f"{c['late']} late, {c['forced']} forced"
         )
     return line
 
