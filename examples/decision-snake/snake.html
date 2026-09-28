@@ -20,6 +20,7 @@
     --rule: #94a3b8;
     --forced: #60a5fa;
     --nosafe: #fb923c;
+    --tail: #c084fc;
     --late: #f87171;
   }
   * { box-sizing: border-box; }
@@ -65,15 +66,22 @@
   .opt { display: grid; grid-template-columns: 28px 1fr 52px; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid transparent; }
   .opt + .opt { margin-top: 6px; }
   .opt.chosen { border-color: var(--snake); background: rgba(74, 222, 128, 0.07); }
-  .arrow { font-size: 20px; text-align: center; }
+  .arrow { font-size: 20px; line-height: 1; text-align: center; }
   .bar { height: 8px; background: #20252e; border-radius: 99px; overflow: hidden; grid-column: 2; }
   .bar > i { display: block; height: 100%; background: var(--bar); border-radius: 99px; transition: width 120ms linear; }
   .opt.chosen .bar > i { background: var(--snake); }
   .pct { text-align: right; font-variant-numeric: tabular-nums; grid-row: 1; grid-column: 3; }
-  .fact { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
+  /* The move panel keeps one height from move to move, so the eye can stay
+     on it: always three option rows (a move never has more), empty ones
+     kept invisible, and a fixed number of lines for every text. */
+  :root { --fact-lines: 2; --asked-lines: 2; }
+  @media (max-width: 860px) { :root { --fact-lines: 3; --asked-lines: 3; } }
+  .opt.ghost { visibility: hidden; }
+  .fact, .asked { display: -webkit-box; -webkit-box-orient: vertical; overflow: hidden; }
+  .fact { grid-column: 2 / 4; font-size: 13px; color: var(--muted); height: calc(var(--fact-lines) * 1.45em); -webkit-line-clamp: var(--fact-lines); }
   .fact .star { color: var(--best); }
-  .meta { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 1.45em; }
-  .asked { margin-bottom: 12px; padding: 8px 10px; border-radius: 10px; background: #12151b; font-size: 13px; color: var(--muted); min-height: 3.2em; }
+  .meta { margin-top: 10px; font-size: 13px; color: var(--muted); height: 1.45em; white-space: nowrap; overflow: hidden; }
+  .asked { margin-bottom: 12px; padding: 8px 10px; border-radius: 10px; background: #12151b; font-size: 13px; color: var(--muted); box-sizing: content-box; height: calc(var(--asked-lines) * 1.45em); -webkit-line-clamp: var(--asked-lines); }
   .asked b { color: var(--text); font-weight: 600; }
   #model { text-transform: none; letter-spacing: 0; }
   .empty { color: var(--muted); font-size: 13px; align-self: center; }
@@ -102,6 +110,45 @@
   .kv span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
   .error { display: none; margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.4); color: #fecaca; font-size: 14px; }
   .error.show { display: block; }
+  .ff { position: absolute; top: 24px; right: 24px; display: none; padding: 6px 16px; border-radius: 999px; background: rgba(15, 17, 21, 0.78); font-weight: 700; font-size: 24px; font-variant-numeric: tabular-nums; }
+  .ff.show { display: block; }
+  .v-only { display: none; }
+
+  /* ?video=wide (1920x1080) and ?video=tall (1080x1920): the page as
+     snake_video.py draws it, frame by frame, for a video to post. */
+  body.video { overflow: hidden; }
+  body.video * { transition: none !important; }
+  body.video .v-only { display: revert; }
+  body.video .no-video, body.video #controls, body.video #link, body.video .facts-note { display: none; }
+  body.video main { max-width: none; margin: 0; align-content: start; }
+  body.video h1 { font-size: 36px; }
+  body.video .sub { font-size: 21px; }
+  body.video .pill { font-size: 15px; padding: 4px 12px; }
+  body.video .caption { flex-basis: 100%; font-size: 22px; }
+  body.video .stat .v { font-size: 42px; }
+  body.video .stat .k { font-size: 14px; }
+  body.video h2 { font-size: 16px; }
+  body.video .asked { font-size: 18px; }
+  body.video .arrow { font-size: 30px; }
+  body.video .opt { grid-template-columns: 40px 1fr 70px; padding: 10px 12px; }
+  body.video .bar { height: 12px; }
+  body.video .pct { font-size: 22px; }
+  body.video .fact { font-size: 18px; }
+  body.video .meta { font-size: 18px; }
+  body.video .kv { font-size: 18px; }
+  body.video footer { color: var(--muted); font-size: 18px; }
+  body.video.wide main { width: 1920px; height: 1080px; padding: 40px 56px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 24px 40px; }
+  /* Instagram covers the top and bottom of a Reel with its own buttons and
+     text, and the lower right edge with its icons: the board and the move
+     stay clear of them. */
+  body.video.tall main { width: 1080px; height: 1920px; padding: 170px 48px 0; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+  body.video.tall aside { display: contents; }
+  body.video.tall .panel + .panel { margin-top: 0; }
+  body.video.tall header { order: 0; }
+  body.video.tall #stats-panel { order: 1; }
+  body.video.tall section { order: 2; }
+  body.video.tall #move-panel { order: 3; margin-right: 110px; }
+  body.video.tall #game-panel, body.video.tall footer { display: none; }
 </style>
 </head>
 <body>
@@ -111,14 +158,16 @@
     <span class="sub">one <code>/v1/systemone</code> choice per move</span>
     <span class="pill" id="model">model: —</span>
     <span class="pill" id="link">connecting…</span>
+    <span class="caption v-only" id="caption"></span>
   </header>
 
   <section>
     <div class="board-wrap">
       <canvas id="board" width="800" height="600" aria-label="Snake board"></canvas>
       <div class="overlay" id="overlay"><div><b id="over-title">Game over</b><span id="over-text"></span></div></div>
+      <div class="ff" id="ff"></div>
     </div>
-    <div class="panel" style="margin-top:14px">
+    <div class="panel" id="controls" style="margin-top:14px">
       <div class="row">
         <button class="primary" id="toggle">Pause</button>
         <button id="new">New game</button>
@@ -137,39 +186,43 @@
   </section>
 
   <aside>
-    <div class="panel">
+    <div class="panel" id="stats-panel">
       <div class="stats">
         <div class="stat"><div class="v" id="score">0</div><div class="k">score</div></div>
         <div class="stat"><div class="v" id="length">3</div><div class="k">length</div></div>
         <div class="stat"><div class="v" id="moves">0</div><div class="k">moves</div></div>
-        <div class="stat"><div class="v" id="game">1</div><div class="k">game</div></div>
+        <div class="stat no-video"><div class="v" id="game">1</div><div class="k">game</div></div>
+        <div class="stat v-only"><div class="v" id="ms">—</div><div class="k">ms a decision</div></div>
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" id="move-panel">
       <h2><span>This move</span><span class="pill" id="how">—</span></h2>
       <div class="asked" id="asked">Waiting for the first move…</div>
       <div id="options"></div>
       <div class="meta" id="meta"></div>
-      <div class="facts-note">The facts are computed by code; the model reads them and chooses, answering <i id="question">the same question</i> every move. <span class="star" style="color:var(--best)">★</span> marks the best moves by the facts.</div>
+      <div class="facts-note">Code computes the facts and keeps the snake safe; the model chooses the way to the food, answering <i id="question">the same question</i> <span class="star" style="color:var(--best)">★</span> marks the best moves by the facts.</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" id="game-panel">
       <h2><span>This game</span></h2>
       <div class="kv">
         <span>moves chosen by the model</span><span id="s-model">0</span>
         <span>of them among the best by the facts</span><span id="s-best">—</span>
         <span>median decision time</span><span id="s-ms">—</span>
-        <span>late answers (the rule played)</span><span id="s-late">0</span>
-        <span>only one safe move</span><span id="s-forced">0</span>
-        <span>no safe move (code chose the most room)</span><span id="s-nosafe">0</span>
+        <span class="no-video">late answers (the rule played)</span><span class="no-video" id="s-late">0</span>
+        <span>code: only one safe move</span><span id="s-forced">0</span>
+        <span>code: only one safe way to the food</span><span id="s-oneway">0</span>
+        <span>code: no safe way to the food, follows the tail</span><span id="s-tail">0</span>
+        <span class="no-video">code: no safe move, the most room</span><span class="no-video" id="s-nosafe">0</span>
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel no-video">
       <h2><span>Scores</span><span id="mean"></span></h2>
       <div class="history" id="history"><span class="empty">The first game is still on.</span></div>
     </div>
+    <footer class="v-only">github.com/eullm/eullm · examples/decision-snake</footer>
   </aside>
 </main>
 
@@ -182,11 +235,20 @@ const HOW = {
   model: ["model", "var(--model)"],
   rule: ["rule", "var(--rule)"],
   forced: ["one safe move", "var(--forced)"],
+  "one way": ["one way to the food", "var(--forced)"],
+  tail: ["follows the tail", "var(--tail)"],
   "no safe move": ["no safe move", "var(--nosafe)"],
   late: ["late: rule", "var(--late)"],
 };
 let last = null;
 let size = "";
+// ?video=wide or ?video=tall: no server, snake_video.py calls render().
+const VIDEO = new URLSearchParams(location.search).get("video");
+if (VIDEO) document.body.classList.add("video", VIDEO);
+
+// An empty option row: it keeps the move panel's height with fewer options.
+const GHOST = '<div class="opt ghost" aria-hidden="true"><div class="arrow">·</div><div class="bar"></div><div class="pct"></div><div class="fact"></div></div>';
+$("options").innerHTML = GHOST.repeat(3);
 
 const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
@@ -267,9 +329,15 @@ function draw(f) {
   }
 }
 
-function render(f) {
+function render(f, video) {
   last = f;
   draw(f);
+  if (video) {
+    // How much faster than the opening moves the video runs here.
+    $("ff").textContent = video.speed ? "▶▶ ×" + video.speed : "";
+    $("ff").classList.toggle("show", !!video.speed);
+    $("caption").textContent = video.caption || "";
+  }
   $("score").textContent = f.score;
   $("length").textContent = f.length;
   $("moves").textContent = f.moves;
@@ -299,12 +367,15 @@ function render(f) {
         <div class="fact">${esc(move)}: ${esc(text)}${star}</div>
       </div>`;
     });
+    while (rows.length < 3) rows.push(GHOST);
     $("options").innerHTML = rows.join("");
     $("asked").innerHTML = d.state
       ? "<b>The model read:</b> " + esc(d.state)
       : d.how === "rule" ? "The plain rule chose: the model was not asked."
       : d.how === "late" ? "The answer did not arrive within the move: the rule played it."
       : d.how === "forced" ? "Only one safe move: nothing to decide, the model was not asked."
+      : d.how === "one way" ? "Only one safe way to the food: code took it, the model was not asked."
+      : d.how === "tail" ? "No safe way to the food: code follows the tail, the longest way round, until one opens."
       : "No move was safe: code took the one with the most room, without the model.";
     $("meta").textContent = d.ms != null
       ? `decided in ${d.ms} ms · confidence ${d.confidence.toFixed(2)}`
@@ -315,8 +386,11 @@ function render(f) {
   $("s-model").textContent = s.model;
   $("s-best").textContent = s.model ? `${s.best} (${Math.round((100 * s.best) / s.model)}%)` : "—";
   $("s-ms").textContent = s.median_ms != null ? s.median_ms + " ms" : "—";
+  $("ms").textContent = s.median_ms != null ? (s.median_ms < 100 ? s.median_ms.toFixed(1) : Math.round(s.median_ms)) : "—";
   $("s-late").textContent = s.late;
   $("s-forced").textContent = s.forced;
+  $("s-oneway").textContent = s.one_way;
+  $("s-tail").textContent = s.tail;
   $("s-nosafe").textContent = s.no_safe;
 
   const max = Math.max(10, ...f.scores);
@@ -332,16 +406,18 @@ function render(f) {
   $("overlay").classList.toggle("show", !!f.end);
   if (f.end) {
     $("over-title").textContent = "Score " + f.score;
-    $("over-text").textContent = f.end + (f.running ? " · next game starting" : "");
+    $("over-text").textContent = f.end + (f.running && !VIDEO ? " · next game starting" : "");
   }
   $("error").classList.toggle("show", !!f.error);
   $("error").textContent = f.error || "";
 }
 
-const events = new EventSource("/events");
-events.onmessage = e => render(JSON.parse(e.data));
-events.onopen = () => { $("link").textContent = "live"; $("link").style.color = "var(--model)"; };
-events.onerror = () => { $("link").textContent = "disconnected"; $("link").style.color = "var(--late)"; };
+if (!VIDEO) {
+  const events = new EventSource("/events");
+  events.onmessage = e => render(JSON.parse(e.data));
+  events.onopen = () => { $("link").textContent = "live"; $("link").style.color = "var(--model)"; };
+  events.onerror = () => { $("link").textContent = "disconnected"; $("link").style.color = "var(--late)"; };
+}
 
 $("toggle").onclick = () => post({ action: last && last.running && !last.error ? "pause" : "start" });
 $("new").onclick = () => post({ action: "new" });

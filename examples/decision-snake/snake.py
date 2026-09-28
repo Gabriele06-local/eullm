@@ -2,14 +2,17 @@
 """Snake played by a decision model through EuLLM's `POST /v1/systemone`.
 
 Code does what code is good at: it lists the moves that do not crash
-straight away and computes exact facts about each one — how far the food is
-afterwards (shortest path), how much room is left (flood fill), whether the
-snake could still reach its own tail, which is what keeps it alive. The
-model does what it is good at: it reads those facts and picks one move,
-with a single `choice` question per step. Nothing is generated. And what
-code knows for certain, code decides: the model chooses among the safe
-moves only; with a single safe move, or none, there is nothing to judge,
-and code plays the one there is, or the one with the most room.
+straight away and computes exact facts about each one. A move is safe when
+the head can still reach the tail afterwards: however coiled, a snake that
+can follow its own tail never traps itself. A way to the food is safe when
+the snake, having followed it and grown, can still reach its tail. The
+model reads the facts and picks the way to the food, with a single
+`choice` question per step. Nothing is generated.
+
+What is arithmetic, code decides: with one safe move, or one safe way to
+the food, it plays it; with no safe way to the food it follows the tail,
+the longest way round, until one opens; with no safe move at all it takes
+the one with the most room.
 
 The game never waits for the model. Every tick starts a request and plays
 whatever answer has arrived when the tick ends; a late answer is dropped
@@ -21,10 +24,11 @@ second — and is the default with `--headless`.
 every option the model was shown and the probability it gave each.
 
 Start the server with a decision model — a Jev-Style model is the one
-trained for this — then run the game:
+trained for this; the 2B reads the step counts better than the 0.8B — then
+run the game:
 
-    eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
-    eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+    eullm pull hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q4_K_M
+    eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m
     python examples/decision-snake/snake.py
 
     # no display, ten games, then the plain rule alone on the same boards
@@ -48,11 +52,7 @@ import urllib.request
 
 MOVES = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}
 
-INSTRUCTIONS = (
-    "Choose the snake's next move. Never choose a dead end or a risky move "
-    "while a safe one exists. Among the safe moves, choose the one that "
-    "reaches the food soonest."
-)
+INSTRUCTIONS = "Choose the snake's next move: the one that reaches the food soonest."
 
 
 class Game:
@@ -107,21 +107,49 @@ class Game:
 
 
 def flood(game, snake):
-    """Every cell the head of `snake` can reach, with its distance, when its
-    body blocks the way. The tail does not: it moves on as the snake does."""
+    """Every cell the head of `snake` can reach: how many steps away, and the
+    cell it is reached from. The body blocks the way; the tail does not, it
+    moves on as the snake does."""
     blocked = set(snake[1:-1])
     start = snake[0]
-    seen = {start: 0}
+    seen = {start: (0, None)}
     queue = collections.deque([start])
     while queue:
-        x, y = queue.popleft()
+        here = queue.popleft()
+        steps = seen[here][0]
+        x, y = here
         for dx, dy in MOVES.values():
             cell = (x + dx, y + dy)
             if cell in seen or cell in blocked or not game.inside(cell):
                 continue
-            seen[cell] = seen[(x, y)] + 1
+            seen[cell] = (steps + 1, here)
             queue.append(cell)
     return seen
+
+
+def reaches_tail(game, snake, seen=None):
+    """Whether the head can still reach the tail. That is what keeps a snake
+    alive: however it is coiled, it can follow its own tail until the way
+    opens, since the tail keeps moving out of the way."""
+    if len(snake) >= game.width * game.height:
+        return True  # the board is full: nothing left to reach
+    if seen is None:
+        seen = flood(game, snake)
+    return snake[-1] in seen
+
+
+def after_eating(game, snake, seen):
+    """The snake after taking the shortest way to the food and eating it."""
+    way = []
+    cell = game.food
+    while cell != snake[0]:
+        way.append(cell)
+        cell = seen[cell][1]
+    body = list(snake)
+    for n, cell in enumerate(reversed(way)):
+        grows = n == len(way) - 1
+        body = [cell] + (body if grows else body[:-1])
+    return body
 
 
 def options(game):
@@ -131,31 +159,44 @@ def options(game):
         snake = game.after(move)
         if snake is None:
             continue
-        reach = flood(game, snake)
+        seen = flood(game, snake)
         eats = snake[0] == game.food
+        tail = reaches_tail(game, snake, seen)
+        # Whether the food can be eaten without being cut off from the tail
+        # afterwards: followed to its end on the way the food is nearest by,
+        # a snake that grows as it eats can wall itself in.
+        if eats:
+            food_safe = tail
+        elif tail and game.food in seen:
+            food_safe = reaches_tail(game, after_eating(game, snake, seen))
+        else:
+            food_safe = False
         found[move] = {
             "eats": eats,
-            "food_steps": 0 if eats else reach.get(game.food),
-            "room": len(reach),  # the head's own cell included
-            "tail": snake[-1] in reach,
+            "food_steps": 0 if eats else seen.get(game.food, (None,))[0],
+            "food_safe": food_safe,
+            "tail": tail,
+            "tail_steps": seen.get(snake[-1], (None,))[0],
+            "room": len(seen),  # the head's own cell included
             "length": len(snake),
         }
     return found
 
 
 def danger(fact):
-    """Why a move could kill the snake later, or None when it is safe."""
+    """Why a move could kill the snake, or None when it is safe: when the
+    head can still reach the tail."""
+    if fact["tail"]:
+        return None
     if fact["room"] < fact["length"]:
         cells = "cell" if fact["room"] == 1 else "cells"
         return f"dead end: only {fact['room']} {cells} of room for a snake of {fact['length']}"
-    if not fact["tail"]:
-        return f"risky: the tail would be out of reach, {fact['room']} cells of room"
-    return None
+    return f"risky: the tail would be out of reach, {fact['room']} cells of room"
 
 
 def describe(facts):
-    """Every option's facts as the model reads them: a danger when there is
-    one, else the steps to the food and the room left."""
+    """Every option's facts, in words. The model reads those of the safe ways
+    to the food: the steps to it, and nothing else."""
     texts = {}
     for move, fact in facts.items():
         warning = danger(fact)
@@ -163,31 +204,35 @@ def describe(facts):
             texts[move] = warning
         elif fact["eats"]:
             texts[move] = "eats the food now"
-        elif fact["food_steps"] is None:
-            texts[move] = (
-                f"the food cannot be reached from there; {fact['room']} cells of room"
-            )
-        else:
+        elif fact["food_safe"]:
             # "1 steps", not "1 step": with the same word after every count
             # the options differ in the number alone, and on the same boards
             # the Jev-Style 0.8B put 0.74 on the best move against 0.66.
+            texts[move] = f"food {fact['food_steps']} steps away"
+        elif fact["food_steps"] is None:
             texts[move] = (
-                f"food {fact['food_steps']} steps away; {fact['room']} cells of room; "
-                "the tail stays within reach"
+                "the food cannot be reached from there; "
+                f"follows the tail, {fact['tail_steps']} steps behind"
+            )
+        else:
+            texts[move] = (
+                "eating the food from there would cut the snake off from its tail; "
+                f"follows the tail, {fact['tail_steps']} steps behind"
             )
     return texts
 
 
 def value(fact):
-    """How good a move is, as far as the facts can tell. A safe move: the
-    food reachable first, then the fewest steps to it, or with the food out
-    of reach the most room. A dangerous one: room enough for the body first,
-    then the most room, where the tail has the longest to free the way."""
-    if danger(fact) is None:
-        steps = fact["food_steps"]
-        reachable = steps is not None
-        return (True, reachable, -steps if reachable else fact["room"])
-    return (False, fact["room"] >= fact["length"], fact["room"])
+    """How good a move is, as far as the facts can tell. A safe way to the
+    food first, the fewest steps first. Then a safe move that only follows
+    the tail, the longest way round first: it leaves the body the most time
+    to move out of the way. Then, when nothing is safe, room enough for the
+    body, and the most room."""
+    if fact["tail"]:
+        if fact["food_safe"]:
+            return (2, -fact["food_steps"])
+        return (1, fact["tail_steps"] or 0)
+    return (0, fact["room"] >= fact["length"], fact["room"])
 
 
 def best(facts):
@@ -206,20 +251,17 @@ def rule(game, facts):
 
 
 def state_text(game):
-    """Where the food is, and nothing about the way the snake is heading:
-    named in the state, the heading pulled the Jev-Style 0.8B towards
-    carrying straight on even when the facts said otherwise. Without it, it
-    picked the best move on 40 boards out of 40."""
-    hx, hy = game.snake[0]
-    fx, fy = game.food
-    parts = []
-    if fy != hy:
-        parts.append(f"{abs(fy - hy)} {'up' if fy < hy else 'down'}")
-    if fx != hx:
-        parts.append(f"{abs(fx - hx)} {'left' if fx < hx else 'right'}")
+    """The board and the snake, and no direction a model could follow in
+    place of the facts. Named in the state, the way the snake was heading
+    drew the Jev-Style 0.8B into carrying straight on; where the food lies
+    drew both models to the move pointing at it, even where the shortest
+    safe way to the food starts the other way round: on 20 such boards the
+    0.8B took the shortest way once and the 2B 11 times. Without it, the 2B
+    took the shortest way on 16 of them, and on 20 boards out of 20 where
+    it points at the food; the 0.8B on 9 and 17."""
     return (
-        f"A game of Snake on a {game.width}x{game.height} board. The snake is "
-        f"{len(game.snake)} cells long. The food is {' and '.join(parts)} of the head."
+        f"A game of Snake on a {game.width}x{game.height} board. "
+        f"The snake is {len(game.snake)} cells long."
     )
 
 
@@ -273,9 +315,10 @@ class Client:
 
 
 class Decision:
-    """One move: which, how it was chosen (`model`, `late`, `rule`,
-    `forced`, `no safe move`), the options it was chosen from and, when the
-    model chose, its answer and the state it read."""
+    """One move: which, how it was chosen (`model`, `late`, `rule`, or by
+    code: `forced`, `one way`, `tail`, `no safe move`), the options it was
+    chosen from and, when the model chose, its answer and the state it
+    read."""
 
     def __init__(self, move, how, facts, answer=None, state=None):
         self.move, self.how, self.facts = move, how, facts
@@ -295,10 +338,12 @@ class Decision:
 
 
 class Decider:
-    """Picks every move. The model chooses among the safe moves. Code plays
-    what needs no judgement — the only safe move, or with none the move with
-    the most room — and the rule plays a tick whose answer is late, or every
-    move with `player="rule"`.
+    """Picks every move. The model chooses the way to the food, among the
+    safe ones. Code plays what is arithmetic, not judgement: the only safe
+    move; the only safe way to the food; following the tail when no way to
+    the food is safe; the move with the most room when nothing is safe. The
+    rule plays a tick whose answer is late, or every move with
+    `player="rule"`.
 
     One request at a time: while an answer is still on its way, the rule
     plays and the server is not asked again."""
@@ -314,22 +359,31 @@ class Decider:
         if not facts:
             return None
         safe_moves = {m: f for m, f in facts.items() if danger(f) is None}
+        ways = {m: f for m, f in safe_moves.items() if f["food_safe"]}
         started = time.perf_counter()
-        # What is left when no move is safe is a comparison of room, which
-        # code does exactly: offered a dead end next to a risky move with
-        # ten times the room, the Jev-Style 0.8B took the dead end, and
-        # those moves ended its games.
+        # What is left without a choice of ways to the food is a comparison
+        # of numbers, which code makes exactly: offered a dead end next to a
+        # risky move with ten times the room, the Jev-Style 0.8B took the
+        # dead end; asked which move follows the tail the longest way round,
+        # it picked one of the best 15 times out of 30, no better than luck.
         if not safe_moves:
             return Decision(rule(game, facts), "no safe move", facts)
         if len(safe_moves) == 1:
             return Decision(next(iter(safe_moves)), "forced", safe_moves)
+        if not ways:
+            return Decision(rule(game, safe_moves), "tail", safe_moves)
+        if len(ways) == 1:
+            return Decision(next(iter(ways)), "one way", safe_moves)
         if self.player == "rule":
-            return Decision(rule(game, safe_moves), "rule", safe_moves)
+            return Decision(rule(game, ways), "rule", ways)
+        # Only the safe ways to the food are offered: a way into a trap that
+        # pointed at the food drew the model 20 times out of 20, whatever
+        # its facts said.
         state = state_text(game)
         asked = None
         if self.pending is None or self.pending.done():
             self.pending = asked = self.pool.submit(
-                self.client.decide, state, describe(safe_moves)
+                self.client.decide, state, describe(ways)
             )
         answer = None
         if asked is not None:
@@ -340,9 +394,9 @@ class Decider:
                 answer = asked.result(timeout=wait)
             except concurrent.futures.TimeoutError:
                 pass
-        if answer is not None and answer["move"] in safe_moves:
-            return Decision(answer["move"], "model", safe_moves, answer, state)
-        return Decision(rule(game, safe_moves), "late", safe_moves)
+        if answer is not None and answer["move"] in ways:
+            return Decision(answer["move"], "model", ways, answer, state)
+        return Decision(rule(game, ways), "late", ways)
 
     def close(self):
         self.pool.shutdown(wait=False, cancel_futures=True)
@@ -452,8 +506,9 @@ def summary(n, result, player):
         if lat:
             line += f" (median {statistics.median(lat):.0f} ms)"
         line += (
-            f", {c['best']} of them among the best by the facts; "
-            f"{c['late']} late, {c['forced']} forced, "
+            f", {c['best']} of them among the best by the facts; {c['late']} late; "
+            f"by code: {c['forced']} with one safe move, {c['one way']} with one "
+            f"safe way to the food, {c['tail']} following the tail, "
             f"{c['no safe move']} with no safe move"
         )
     return line
@@ -482,7 +537,7 @@ def main():
     )
     parser.add_argument("--games", type=int, default=1)
     parser.add_argument(
-        "--max-ticks", type=int, default=2000, help="moves per game at most"
+        "--max-ticks", type=int, default=100000, help="moves per game at most"
     )
     parser.add_argument("--seed", type=int, default=None, help="food placement seed")
     parser.add_argument(
