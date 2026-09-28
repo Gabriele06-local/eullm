@@ -18,7 +18,9 @@ jobs come from the seed, and keys already written are skipped.
 
 When no job is left it writes ``<out>.done``, so a watcher
 (submit_when_ready.sh --need) can start stage 3 on complete data instead of
-someone checking the queue.
+someone checking the queue. The marker is never empty: the watcher counts
+only a non-empty file as there (a copy that stopped at zero bytes is not a
+file), and on 2026-09-28 an empty marker kept stage 3 waiting all night.
 """
 
 from __future__ import annotations
@@ -107,12 +109,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[ob] {accepted} missing-article pairs written; {len(todo)} grounded to go",
           flush=True)
     done_marker = args.out.with_name(args.out.name + ".done")
+
+    def mark_done() -> None:
+        done_marker.write_text(f"done {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
     if args.dry_run:
         if todo:
             print("--- one teacher prompt ---\n" + build_messages(todo[0])[1]["content"][:1200])
         return 0
     if not todo:
-        done_marker.touch()
+        mark_done()
         print(f"[ob] nothing left to do -> {done_marker}", flush=True)
         return 0
 
@@ -147,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
               f"{dict(reasons)}  {tokens / max(gen_seconds, 1e-9):.0f} tok/s", flush=True)
     print(f"[ob] done: {accepted} accepted, rejected {dict(reasons)}", flush=True)
     if finished:
-        done_marker.touch()
+        mark_done()
         print(f"[ob] every job processed -> {done_marker}", flush=True)
     return 0
 
