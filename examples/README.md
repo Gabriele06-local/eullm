@@ -84,6 +84,43 @@ python examples/decision-snake/snake.py --headless --games 10 --seed 1 --player 
 python examples/decision-snake/snake.py --headless --log moves.jsonl
 ```
 
+#### A video of it
+
+`decision-snake/snake_video.py` plays a game with the model and renders it,
+frame by frame, with the same page in a headless browser. Three files come
+out, ready to post:
+
+| File | Size | For |
+|---|---|---|
+| `snake-wide.mp4` | 1920×1080 | X |
+| `snake-tall.mp4` | 1080×1920 | Instagram Reels, X vertical |
+| `snake-readme.mp4` | 1280×720, a few MB | a README on GitHub |
+
+```bash
+pip install playwright
+python -m playwright install chromium
+sudo apt install ffmpeg          # or your system's own package
+python examples/decision-snake/snake_video.py --url http://localhost:11434 \
+    --games 3 --caption "Jev-Style 2B on an RTX 5070 Ti"
+```
+
+Every move on screen is the game as it was played: the model's answers, each
+with the time it took, and the moves code made. Only the pace is chosen for
+watching: the opening moves at five a second, then fast forward, marked on
+screen, then the end of the game. `--games 3` keeps the
+best of three games; `--seconds` sets the length, 60 by default (X takes up
+to 140 without a subscription). The game is saved as `snake-game.jsonl`, and
+`--from snake-game.jsonl` renders it again without playing. ffmpeg is run as
+a program of its own, the one installed on your system; nothing of it
+becomes part of EuLLM. In the vertical video the score, the board and the
+move stay clear of the text and buttons Instagram lays over a Reel.
+
+To show the video in a README on GitHub, drag `snake-readme.mp4` into the
+comment box of any issue or pull request (it need not be posted), copy the
+`https://github.com/user-attachments/assets/…` link GitHub puts there, and
+paste the link alone on a line of the README: GitHub shows it as a player.
+On a free plan a video can be at most 10 MB.
+
 ### `decision-triage/triage.py` — sorting incoming email
 
 ```bash

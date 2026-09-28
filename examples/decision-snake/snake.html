@@ -115,40 +115,62 @@
   .v-only { display: none; }
 
   /* ?video=wide (1920x1080) and ?video=tall (1080x1920): the page as
-     snake_video.py draws it, frame by frame, for a video to post. */
+     snake_video.py draws it, frame by frame, for a video to post. A video
+     is watched shrunk, a Reel on a phone to about a third: the type is two
+     to three times the page's, and only what matters is shown. */
   body.video { overflow: hidden; }
   body.video * { transition: none !important; }
   body.video .v-only { display: revert; }
-  body.video .no-video, body.video #controls, body.video #link, body.video .facts-note { display: none; }
+  body.video .no-video, body.video #controls, body.video #link, body.video .facts-note,
+  body.video #game-panel, body.video .sub, body.video #asked { display: none; }
+  body.video.wide { --v-title: 56px; --v-text: 32px; --v-small: 26px; --v-big: 76px; }
+  body.video.tall { --v-title: 62px; --v-text: 36px; --v-small: 30px; --v-big: 84px; }
   body.video main { max-width: none; margin: 0; align-content: start; }
-  body.video h1 { font-size: 36px; }
-  body.video .sub { font-size: 21px; }
-  body.video .pill { font-size: 15px; padding: 4px 12px; }
-  body.video .caption { flex-basis: 100%; font-size: 22px; }
-  body.video .stat .v { font-size: 42px; }
-  body.video .stat .k { font-size: 14px; }
-  body.video h2 { font-size: 16px; }
-  body.video .asked { font-size: 18px; }
-  body.video .arrow { font-size: 30px; }
-  body.video .opt { grid-template-columns: 40px 1fr 70px; padding: 10px 12px; }
-  body.video .bar { height: 12px; }
-  body.video .pct { font-size: 22px; }
-  body.video .fact { font-size: 18px; }
-  body.video .meta { font-size: 18px; }
-  body.video .kv { font-size: 18px; }
-  body.video footer { color: var(--muted); font-size: 18px; }
-  body.video.wide main { width: 1920px; height: 1080px; padding: 40px 56px; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 24px 40px; }
-  /* Instagram covers the top and bottom of a Reel with its own buttons and
-     text, and the lower right edge with its icons: the board and the move
-     stay clear of them. */
-  body.video.tall main { width: 1080px; height: 1920px; padding: 170px 48px 0; grid-template-columns: minmax(0, 1fr); gap: 20px; }
-  body.video.tall aside { display: contents; }
+  body.video h1 { font-size: var(--v-title); line-height: 1.1; }
+  body.video .caption { flex-basis: 100%; font-size: var(--v-text); }
+  body.video .brand { font-size: var(--v-small); color: var(--muted); }
+  body.video .pill { font-size: var(--v-small); padding: 4px 16px; }
+  body.video .panel { padding: 22px 26px; border-radius: 20px; }
+  body.video .panel + .panel { margin-top: 20px; }
+  body.video .stats { grid-template-columns: repeat(3, 1fr); }
+  body.video .stat .v { font-size: var(--v-big); line-height: 1.1; }
+  body.video .stat .k { font-size: var(--v-small); white-space: nowrap; }
+  body.video h2 { font-size: var(--v-small); margin-bottom: 14px; align-items: center; }
+  body.video .opt { grid-template-columns: 1.3em 1fr 2.9em; gap: 6px 14px; padding: 12px 16px; border-radius: 14px; font-size: var(--v-text); }
+  body.video .opt + .opt { margin-top: 10px; }
+  body.video .arrow { font-size: 1.15em; }
+  body.video .bar { height: 14px; }
+  body.video .fact, body.video .meta, body.video .v-summary { font-size: var(--v-small); }
+  body.video .meta { margin-top: 12px; }
+  body.video .v-summary { margin-top: 10px; color: var(--muted); }
+  body.video .ff { top: 28px; right: 28px; font-size: var(--v-text); }
+  body.video .overlay { font-size: var(--v-text); }
+  body.video .overlay b { font-size: var(--v-big); }
+
+  body.video.wide main { width: 1920px; height: 1080px; padding: 44px 52px; grid-template-columns: 1112px minmax(0, 1fr); gap: 28px 40px; }
+  body.video.wide header { align-items: center; }
+  body.video.wide .brand { margin-left: auto; }
+
+  /* A Reel: Instagram lays its own text and buttons over the top ~200 px,
+     the bottom ~380 px and the lower right edge. The score, the board and
+     the move stay between them; the captions go last. */
+  body.video.tall main { width: 1080px; height: 1920px; padding: 200px 44px 0; grid-template-columns: minmax(0, 1fr); gap: 20px; justify-items: stretch; }
+  body.video.tall header, body.video.tall aside { display: contents; }
   body.video.tall .panel + .panel { margin-top: 0; }
-  body.video.tall header { order: 0; }
+  body.video.tall h1 { order: 0; }
   body.video.tall #stats-panel { order: 1; }
-  body.video.tall section { order: 2; }
-  body.video.tall #move-panel { order: 3; margin-right: 110px; }
-  body.video.tall #game-panel, body.video.tall footer { display: none; }
+  body.video.tall section { order: 2; justify-self: center; width: 918px; }
+  body.video.tall #move-panel { order: 3; margin-right: 90px; }
+  body.video.tall .caption { order: 4; }
+  body.video.tall #model { order: 5; justify-self: start; }
+  body.video.tall .brand { order: 6; }
+  body.video.tall #options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+  body.video.tall .opt + .opt { margin-top: 0; }
+  body.video.tall .opt { grid-template-columns: auto 1fr; align-content: start; }
+  body.video.tall .arrow { grid-area: 1 / 1; text-align: left; }
+  body.video.tall .pct { grid-area: 1 / 2; }
+  body.video.tall .bar { grid-area: 2 / 1 / 3 / 3; }
+  body.video.tall .fact { grid-area: 3 / 1 / 4 / 3; }
 </style>
 </head>
 <body>
@@ -158,6 +180,7 @@
     <span class="sub">one <code>/v1/systemone</code> choice per move</span>
     <span class="pill" id="model">model: —</span>
     <span class="pill" id="link">connecting…</span>
+    <span class="brand v-only">github.com/eullm/eullm</span>
     <span class="caption v-only" id="caption"></span>
   </header>
 
@@ -190,9 +213,9 @@
       <div class="stats">
         <div class="stat"><div class="v" id="score">0</div><div class="k">score</div></div>
         <div class="stat"><div class="v" id="length">3</div><div class="k">length</div></div>
-        <div class="stat"><div class="v" id="moves">0</div><div class="k">moves</div></div>
+        <div class="stat no-video"><div class="v" id="moves">0</div><div class="k">moves</div></div>
         <div class="stat no-video"><div class="v" id="game">1</div><div class="k">game</div></div>
-        <div class="stat v-only"><div class="v" id="ms">—</div><div class="k">ms a decision</div></div>
+        <div class="stat v-only"><div class="v" id="ms">—</div><div class="k">ms to decide</div></div>
       </div>
     </div>
 
@@ -201,6 +224,7 @@
       <div class="asked" id="asked">Waiting for the first move…</div>
       <div id="options"></div>
       <div class="meta" id="meta"></div>
+      <div class="v-summary v-only" id="v-summary"></div>
       <div class="facts-note">Code computes the facts and keeps the snake safe; the model chooses the way to the food, answering <i id="question">the same question</i> <span class="star" style="color:var(--best)">★</span> marks the best moves by the facts.</div>
     </div>
 
@@ -209,7 +233,7 @@
       <div class="kv">
         <span>moves chosen by the model</span><span id="s-model">0</span>
         <span>of them among the best by the facts</span><span id="s-best">—</span>
-        <span>median decision time</span><span id="s-ms">—</span>
+        <span class="no-video">median decision time</span><span class="no-video" id="s-ms">—</span>
         <span class="no-video">late answers (the rule played)</span><span class="no-video" id="s-late">0</span>
         <span>code: only one safe move</span><span id="s-forced">0</span>
         <span>code: only one safe way to the food</span><span id="s-oneway">0</span>
@@ -222,7 +246,6 @@
       <h2><span>Scores</span><span id="mean"></span></h2>
       <div class="history" id="history"><span class="empty">The first game is still on.</span></div>
     </div>
-    <footer class="v-only">github.com/eullm/eullm · examples/decision-snake</footer>
   </aside>
 </main>
 
@@ -384,6 +407,9 @@ function render(f, video) {
 
   const s = f.stats;
   $("s-model").textContent = s.model;
+  $("v-summary").textContent = s.model
+    ? `The model has chosen ${s.model} moves, ${Math.round((100 * s.best) / s.model)}% of them among the best by the facts.`
+    : "";
   $("s-best").textContent = s.model ? `${s.best} (${Math.round((100 * s.best) / s.model)}%)` : "—";
   $("s-ms").textContent = s.median_ms != null ? s.median_ms + " ms" : "—";
   $("ms").textContent = s.median_ms != null ? (s.median_ms < 100 ? s.median_ms.toFixed(1) : Math.round(s.median_ms)) : "—";
@@ -406,7 +432,9 @@ function render(f, video) {
   $("overlay").classList.toggle("show", !!f.end);
   if (f.end) {
     $("over-title").textContent = "Score " + f.score;
-    $("over-text").textContent = f.end + (f.running && !VIDEO ? " · next game starting" : "");
+    $("over-text").textContent = f.end + (VIDEO
+      ? ` · ${f.length} of ${f.width * f.height} cells`
+      : f.running ? " · next game starting" : "");
   }
   $("error").classList.toggle("show", !!f.error);
   $("error").textContent = f.error || "";

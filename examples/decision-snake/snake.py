@@ -209,16 +209,16 @@ def describe(facts):
             # the options differ in the number alone, and on the same boards
             # the Jev-Style 0.8B put 0.74 on the best move against 0.66.
             texts[move] = f"food {fact['food_steps']} steps away"
-        elif fact["food_steps"] is None:
-            texts[move] = (
-                "the food cannot be reached from there; "
-                f"follows the tail, {fact['tail_steps']} steps behind"
-            )
         else:
-            texts[move] = (
-                "eating the food from there would cut the snake off from its tail; "
-                f"follows the tail, {fact['tail_steps']} steps behind"
-            )
+            n = fact["tail_steps"]
+            behind = f"follows the tail, {n} step{'' if n == 1 else 's'} behind"
+            if fact["food_steps"] is None:
+                texts[move] = f"the food cannot be reached from there; {behind}"
+            else:
+                texts[move] = (
+                    "eating the food from there would cut the snake off from its "
+                    f"tail; {behind}"
+                )
     return texts
 
 
@@ -484,7 +484,7 @@ def play_game(args, decider, rng, screen, log):
         if args.tick > 0:
             time.sleep(max(0.0, args.tick - (time.perf_counter() - started)))
         if idle > args.width * args.height * 2:
-            end = "going round in circles: stopped"
+            end = f"stopped: {idle} moves without eating"
             break
     return {
         "score": game.score,
