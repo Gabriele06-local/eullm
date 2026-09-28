@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake · EuLLM decisions</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262b35;
+    --text: #e6e8eb;
+    --muted: #9aa3ad;
+    --snake: #4ade80;
+    --snake-dark: #166534;
+    --food: #f87171;
+    --best: #facc15;
+    --bar: #3b4452;
+    --model: #4ade80;
+    --rule: #94a3b8;
+    --forced: #60a5fa;
+    --nosafe: #fb923c;
+    --late: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: 20px 16px 32px;
+    display: grid;
+    grid-template-columns: minmax(0, 1.35fr) minmax(300px, 1fr);
+    gap: 20px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { main { grid-template-columns: minmax(0, 1fr); } }
+  header { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: baseline; }
+  h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: 0.2px; }
+  .sub { color: var(--muted); }
+  .pill {
+    display: inline-block; padding: 2px 10px; border-radius: 999px;
+    font-size: 12px; font-weight: 650; letter-spacing: 0.4px; text-transform: uppercase;
+    background: #222834; color: var(--muted);
+  }
+  .board-wrap { position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px; }
+  canvas { display: block; margin: 0 auto; max-width: 100%; height: auto; border-radius: 8px; }
+  .overlay {
+    position: absolute; inset: 12px; display: none; align-items: center; justify-content: center;
+    background: rgba(15, 17, 21, 0.72); border-radius: 8px; text-align: center; font-size: 20px;
+  }
+  .overlay.show { display: flex; }
+  .overlay b { display: block; font-size: 30px; margin-bottom: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; }
+  .panel + .panel { margin-top: 14px; }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .stat { text-align: center; }
+  .stat .v { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .stat .k { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  h2 { margin: 0 0 10px; font-size: 13px; font-weight: 650; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; display: flex; justify-content: space-between; gap: 8px; }
+  .opt { display: grid; grid-template-columns: 28px 1fr 52px; gap: 4px 10px; align-items: center; padding: 8px 10px; border-radius: 10px; border: 1px solid transparent; }
+  .opt + .opt { margin-top: 6px; }
+  .opt.chosen { border-color: var(--snake); background: rgba(74, 222, 128, 0.07); }
+  .arrow { font-size: 20px; text-align: center; }
+  .bar { height: 8px; background: #20252e; border-radius: 99px; overflow: hidden; grid-column: 2; }
+  .bar > i { display: block; height: 100%; background: var(--bar); border-radius: 99px; transition: width 120ms linear; }
+  .opt.chosen .bar > i { background: var(--snake); }
+  .pct { text-align: right; font-variant-numeric: tabular-nums; grid-row: 1; grid-column: 3; }
+  .fact { grid-column: 2 / 4; font-size: 13px; color: var(--muted); }
+  .fact .star { color: var(--best); }
+  .meta { margin-top: 10px; font-size: 13px; color: var(--muted); min-height: 1.45em; }
+  .asked { margin-bottom: 12px; padding: 8px 10px; border-radius: 10px; background: #12151b; font-size: 13px; color: var(--muted); min-height: 3.2em; }
+  .asked b { color: var(--text); font-weight: 600; }
+  #model { text-transform: none; letter-spacing: 0; }
+  .empty { color: var(--muted); font-size: 13px; align-self: center; }
+  .facts-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button, .seg label {
+    font: inherit; color: var(--text); background: #222834; border: 1px solid var(--line);
+    border-radius: 10px; padding: 7px 14px; cursor: pointer;
+  }
+  button:hover, .seg label:hover { background: #2a3140; }
+  button.primary { background: var(--snake); color: #062b14; border-color: var(--snake); font-weight: 650; }
+  .seg { display: inline-flex; }
+  .seg input { position: absolute; opacity: 0; pointer-events: none; }
+  .seg label { border-radius: 0; }
+  .seg label:first-of-type { border-radius: 10px 0 0 10px; }
+  .seg label:last-of-type { border-radius: 0 10px 10px 0; }
+  .seg input:checked + label { background: #2f3a4c; border-color: #3d4a61; font-weight: 650; }
+  .seg input:focus-visible + label, button:focus-visible { outline: 2px solid var(--forced); outline-offset: 2px; }
+  input[type=range] { width: 170px; accent-color: var(--snake); }
+  .check { display: inline-flex; gap: 8px; align-items: center; color: var(--muted); font-size: 14px; }
+  .history { display: flex; gap: 3px; align-items: flex-end; height: 64px; margin-top: 4px; }
+  .history i { flex: 1; max-width: 18px; background: #3b4452; border-radius: 3px 3px 0 0; min-height: 2px; }
+  .history i.last { background: var(--snake); }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 16px; font-size: 14px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  .error { display: none; margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.4); color: #fecaca; font-size: 14px; }
+  .error.show { display: block; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Snake, decided by EuLLM</h1>
+    <span class="sub">one <code>/v1/systemone</code> choice per move</span>
+    <span class="pill" id="model">model: —</span>
+    <span class="pill" id="link">connecting…</span>
+  </header>
+
+  <section>
+    <div class="board-wrap">
+      <canvas id="board" width="800" height="600" aria-label="Snake board"></canvas>
+      <div class="overlay" id="overlay"><div><b id="over-title">Game over</b><span id="over-text"></span></div></div>
+    </div>
+    <div class="panel" style="margin-top:14px">
+      <div class="row">
+        <button class="primary" id="toggle">Pause</button>
+        <button id="new">New game</button>
+        <span class="seg" role="radiogroup" aria-label="Who decides">
+          <input type="radio" name="player" id="p-model" value="model" checked><label for="p-model">Model</label>
+          <input type="radio" name="player" id="p-rule" value="rule"><label for="p-rule">Rule</label>
+        </span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <label class="check" for="speed">Move every <b id="speed-v">150 ms</b></label>
+        <input type="range" id="speed" min="20" max="800" step="10" value="150">
+        <label class="check"><input type="checkbox" id="wait"> wait for every answer (CPU)</label>
+      </div>
+      <div class="error" id="error"></div>
+    </div>
+  </section>
+
+  <aside>
+    <div class="panel">
+      <div class="stats">
+        <div class="stat"><div class="v" id="score">0</div><div class="k">score</div></div>
+        <div class="stat"><div class="v" id="length">3</div><div class="k">length</div></div>
+        <div class="stat"><div class="v" id="moves">0</div><div class="k">moves</div></div>
+        <div class="stat"><div class="v" id="game">1</div><div class="k">game</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2><span>This move</span><span class="pill" id="how">—</span></h2>
+      <div class="asked" id="asked">Waiting for the first move…</div>
+      <div id="options"></div>
+      <div class="meta" id="meta"></div>
+      <div class="facts-note">The facts are computed by code; the model reads them and chooses, answering <i id="question">the same question</i> every move. <span class="star" style="color:var(--best)">★</span> marks the best moves by the facts.</div>
+    </div>
+
+    <div class="panel">
+      <h2><span>This game</span></h2>
+      <div class="kv">
+        <span>moves chosen by the model</span><span id="s-model">0</span>
+        <span>of them among the best by the facts</span><span id="s-best">—</span>
+        <span>median decision time</span><span id="s-ms">—</span>
+        <span>late answers (the rule played)</span><span id="s-late">0</span>
+        <span>only one safe move</span><span id="s-forced">0</span>
+        <span>no safe move (code chose the most room)</span><span id="s-nosafe">0</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2><span>Scores</span><span id="mean"></span></h2>
+      <div class="history" id="history"><span class="empty">The first game is still on.</span></div>
+    </div>
+  </aside>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const canvas = $("board");
+const ctx = canvas.getContext("2d");
+const ARROWS = { up: "↑", down: "↓", left: "←", right: "→" };
+const HOW = {
+  model: ["model", "var(--model)"],
+  rule: ["rule", "var(--rule)"],
+  forced: ["one safe move", "var(--forced)"],
+  "no safe move": ["no safe move", "var(--nosafe)"],
+  late: ["late: rule", "var(--late)"],
+};
+let last = null;
+let size = "";
+
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+function post(body) {
+  fetch("/control", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
+
+function sizeCanvas(w, h) {
+  const box = canvas.parentElement.clientWidth - 24;
+  const cell = Math.max(4, Math.floor(box / w));
+  const ratio = window.devicePixelRatio || 1;
+  // Resizing clears the canvas: only when the board or the window changed.
+  const key = [w, h, cell, ratio].join();
+  if (key !== size) {
+    size = key;
+    canvas.width = w * cell * ratio;
+    canvas.height = h * cell * ratio;
+    canvas.style.width = w * cell + "px";
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  }
+  return cell;
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function mix(a, b, t) {
+  const pa = a.match(/\w\w/g).map(h => parseInt(h, 16));
+  const pb = b.match(/\w\w/g).map(h => parseInt(h, 16));
+  return "rgb(" + pa.map((v, i) => Math.round(v + (pb[i] - v) * t)).join(",") + ")";
+}
+
+function draw(f) {
+  const cell = sizeCanvas(f.width, f.height);
+  ctx.fillStyle = "#12151b";
+  ctx.fillRect(0, 0, f.width * cell, f.height * cell);
+  ctx.fillStyle = "#1c212a";
+  for (let x = 0; x < f.width; x++)
+    for (let y = 0; y < f.height; y++)
+      if ((x + y) % 2 === 0) ctx.fillRect(x * cell, y * cell, cell, cell);
+
+  if (f.food) {
+    const [fx, fy] = f.food;
+    const cx = fx * cell + cell / 2, cy = fy * cell + cell / 2;
+    ctx.shadowColor = "rgba(248,113,113,0.8)";
+    ctx.shadowBlur = cell * 0.5;
+    ctx.fillStyle = "#f87171";
+    ctx.beginPath(); ctx.arc(cx, cy, cell * 0.32, 0, Math.PI * 2); ctx.fill();
+    ctx.shadowBlur = 0;
+  }
+
+  const n = f.snake.length;
+  for (let i = n - 1; i >= 0; i--) {
+    const [x, y] = f.snake[i];
+    const pad = i === 0 ? cell * 0.04 : cell * 0.1;
+    ctx.fillStyle = i === 0 ? "#86efac" : mix("4ade80", "166534", n > 1 ? i / (n - 1) : 0);
+    roundRect(x * cell + pad, y * cell + pad, cell - 2 * pad, cell - 2 * pad, cell * 0.28);
+    ctx.fill();
+  }
+  if (n) {
+    const [hx, hy] = f.snake[0];
+    const d = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[f.heading] || [1, 0];
+    const cx = hx * cell + cell / 2, cy = hy * cell + cell / 2;
+    const side = [-d[1], d[0]];
+    ctx.fillStyle = "#052e16";
+    for (const s of [-1, 1]) {
+      const ex = cx + d[0] * cell * 0.18 + side[0] * s * cell * 0.18;
+      const ey = cy + d[1] * cell * 0.18 + side[1] * s * cell * 0.18;
+      ctx.beginPath(); ctx.arc(ex, ey, cell * 0.07, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
+function render(f) {
+  last = f;
+  draw(f);
+  $("score").textContent = f.score;
+  $("length").textContent = f.length;
+  $("moves").textContent = f.moves;
+  $("game").textContent = f.games;
+  $("model").textContent = "model: " + (f.model || "—");
+  $("toggle").textContent = f.running && !f.error ? "Pause" : "Start";
+  $("p-" + f.player).checked = true;
+  if (document.activeElement !== $("speed")) {
+    $("speed").value = f.tick_ms;
+    $("speed-v").textContent = f.tick_ms + " ms";
+  }
+  $("wait").checked = f.wait;
+  if (f.question) $("question").textContent = "“" + f.question + "”";
+
+  const d = f.decision;
+  if (d) {
+    const [label, color] = HOW[d.how] || [d.how, "var(--muted)"];
+    $("how").textContent = label;
+    $("how").style.color = color;
+    const rows = Object.entries(d.options).map(([move, text]) => {
+      const p = d.probabilities ? d.probabilities[move] || 0 : (move === d.move ? 1 : 0);
+      const star = d.best.includes(move) ? ' <span class="star">★</span>' : "";
+      return `<div class="opt${move === d.move ? " chosen" : ""}">
+        <div class="arrow" title="${esc(move)}">${ARROWS[move] || esc(move)}</div>
+        <div class="bar"><i style="width:${(p * 100).toFixed(1)}%"></i></div>
+        <div class="pct">${d.probabilities ? (p * 100).toFixed(0) + "%" : ""}</div>
+        <div class="fact">${esc(move)}: ${esc(text)}${star}</div>
+      </div>`;
+    });
+    $("options").innerHTML = rows.join("");
+    $("asked").innerHTML = d.state
+      ? "<b>The model read:</b> " + esc(d.state)
+      : d.how === "rule" ? "The plain rule chose: the model was not asked."
+      : d.how === "late" ? "The answer did not arrive within the move: the rule played it."
+      : d.how === "forced" ? "Only one safe move: nothing to decide, the model was not asked."
+      : "No move was safe: code took the one with the most room, without the model.";
+    $("meta").textContent = d.ms != null
+      ? `decided in ${d.ms} ms · confidence ${d.confidence.toFixed(2)}`
+      : "";
+  }
+
+  const s = f.stats;
+  $("s-model").textContent = s.model;
+  $("s-best").textContent = s.model ? `${s.best} (${Math.round((100 * s.best) / s.model)}%)` : "—";
+  $("s-ms").textContent = s.median_ms != null ? s.median_ms + " ms" : "—";
+  $("s-late").textContent = s.late;
+  $("s-forced").textContent = s.forced;
+  $("s-nosafe").textContent = s.no_safe;
+
+  const max = Math.max(10, ...f.scores);
+  $("history").innerHTML = f.scores.length
+    ? f.scores
+        .map((v, i) => `<i class="${i === f.scores.length - 1 ? "last" : ""}" style="height:${(100 * v) / max}%" title="score ${v}"></i>`)
+        .join("")
+    : '<span class="empty">The first game is still on.</span>';
+  $("mean").textContent = f.scores.length
+    ? "mean " + (f.scores.reduce((a, b) => a + b, 0) / f.scores.length).toFixed(1) + " over " + f.scores.length
+    : "";
+
+  $("overlay").classList.toggle("show", !!f.end);
+  if (f.end) {
+    $("over-title").textContent = "Score " + f.score;
+    $("over-text").textContent = f.end + (f.running ? " · next game starting" : "");
+  }
+  $("error").classList.toggle("show", !!f.error);
+  $("error").textContent = f.error || "";
+}
+
+const events = new EventSource("/events");
+events.onmessage = e => render(JSON.parse(e.data));
+events.onopen = () => { $("link").textContent = "live"; $("link").style.color = "var(--model)"; };
+events.onerror = () => { $("link").textContent = "disconnected"; $("link").style.color = "var(--late)"; };
+
+$("toggle").onclick = () => post({ action: last && last.running && !last.error ? "pause" : "start" });
+$("new").onclick = () => post({ action: "new" });
+for (const r of document.querySelectorAll('input[name="player"]')) r.onchange = () => post({ player: r.value });
+$("speed").oninput = () => { $("speed-v").textContent = $("speed").value + " ms"; };
+$("speed").onchange = () => post({ tick_ms: Number($("speed").value) });
+$("wait").onchange = () => post({ wait: $("wait").checked });
+window.addEventListener("resize", () => last && draw(last));
+</script>
+</body>
+</html>
