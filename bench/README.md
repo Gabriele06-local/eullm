@@ -49,7 +49,7 @@ defaults), where ggml-cuda's TF32 and half-precision arithmetic is coarser:
 | Qwen3-0.6B F16 | 0.017 | 0.017 | | |
 | Qwen3-0.6B Q8_0 | 0.11 | 0.13 | | |
 | Qwen3-0.6B Q4_K_M | 0.34 | 0.32 | 0.53 | 0.52 |
-| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | | 0.033 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | 0.039 | 0.033 |
 | Jev-Style-2B-Decision-v3 Q4_K_M | | | 0 | 0 |
 
 From Q4_K_M on, the noise of an instruction-tuned model is enough to change

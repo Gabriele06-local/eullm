@@ -1361,7 +1361,8 @@ impl DecisionModel {
         // cut into blocks at the state's end anyway, that changes no score.
         // With render v1 it moves them by the model's own noise, since
         // llama.cpp's kernels and the recurrent layers' chunking depend on
-        // where a micro-batch starts: up to 0.024 in probability, measured.
+        // where a micro-batch starts: up to 0.04 in probability, measured on
+        // a CPU and on CUDA.
         // `separate` gives the release runtime's scores exactly.
         let shared = match options.mode {
             EvalMode::Separate => 0,

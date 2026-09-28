@@ -634,7 +634,7 @@ with 1–64 questions, on the GPU with the benchmark's defaults):
 | Qwen3-0.6B F16 | 0.017 | 0.017 | | |
 | Qwen3-0.6B Q8_0 | 0.11 | 0.13 | | |
 | Qwen3-0.6B Q4_K_M | 0.34 | 0.32 | 0.53 | 0.52 |
-| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | | 0.033 |
+| Jev-Style-0.8B-Decision-v3 Q4_K_M | 0.024 | 0.028 | 0.039 | 0.033 |
 | Jev-Style-2B-Decision-v3 Q4_K_M | | | 0 | 0 |
 
 With Qwen3-0.6B Q4_K_M, the catalog's `qwen3-0.6b`, that is enough to
@@ -794,10 +794,10 @@ question on its own after it:
   starts, because its recurrent layers are computed in chunks from there,
   and sharing the state moves where its questions' micro-batches start. Its
   `shared_prefix` scores are therefore within the model's own noise of the
-  runtime's: up to 0.024 in probability on the CPU. `separate` gives them
-  exactly, at the cost of decoding the state again for every question: 8
-  questions about a 256-token state take 5.3 s on a 4-core CPU in
-  `shared_prefix` mode, 13.4 s in `separate`.
+  runtime's: up to 0.025 in probability on the CPU, 0.039 on an RTX 5070 Ti.
+  `separate` gives them exactly, at the cost of decoding the state again for
+  every question: 64 questions about a 1,024-token state take 0.62 s on an
+  RTX 5070 Ti in `shared_prefix` mode, 3.2 s in `separate`.
 
 ## API Reference
 
