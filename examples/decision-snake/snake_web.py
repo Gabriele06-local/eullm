@@ -213,7 +213,7 @@ class Show:
         elif game.food is None:
             self.finish("the board is full: won")
         elif self.idle > game.width * game.height * 2:
-            self.finish("going round in circles")
+            self.finish(f"stopped: {self.idle} moves without eating")
         self.publish(self.snapshot(decision))
 
     def finish(self, why):
