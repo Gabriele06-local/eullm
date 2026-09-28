@@ -81,7 +81,7 @@ function Install-EuLLM {
         Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $sums
 
         # checksums.txt lines look like "<hash>  <file>", but match on the file
-        # name at the end of the path: a release made before 0.7.12 listed the
+        # name at the end of the path: releases up to 0.7.20 listed the
         # download artifact directory in front of it ("<hash>  <dir>/<file>")
         # and this has to keep reading those too.
         $listed = @{}
