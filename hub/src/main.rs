@@ -230,7 +230,14 @@ impl CatalogFacts {
 }
 
 async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let facts = CatalogFacts::from(&require_known_model(&name)?);
+    // Normalise once, as download_model does. find_in_catalog tolerates the
+    // `eullm/` prefix, so without this a client that percent-encodes the slash
+    // (`eullm%2Flegal-it-7b`, which axum decodes back to a real `/`) passed the
+    // catalog check and then had the prefix added a second time — a fully
+    // affirmative compliance card published for `eullm/eullm/legal-it-7b`, a
+    // model id that is in no catalog anywhere.
+    let name = name.strip_prefix("eullm/").unwrap_or(&name);
+    let facts = CatalogFacts::from(&require_known_model(name)?);
     Ok(Json(json!({
         "model": format!("eullm/{name}"),
         "card_version": "1.0",
@@ -266,7 +273,10 @@ async fn model_card(Path(name): Path<String>) -> Result<Json<Value>, (StatusCode
 async fn compliance_card(
     Path(name): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let facts = CatalogFacts::from(&require_known_model(&name)?);
+    // Normalised as in model_card: the card must be labelled with the model the
+    // catalog knows, not with whatever spelling of it arrived in the URL.
+    let name = name.strip_prefix("eullm/").unwrap_or(&name);
+    let facts = CatalogFacts::from(&require_known_model(name)?);
     Ok(Json(json!({
         "model": format!("eullm/{name}"),
         "regulation": "EU AI Act — Regulation (EU) 2024/1689",
@@ -837,6 +847,41 @@ mod card_scope_tests {
                     .contains(&facts.vram_gb.to_string()),
                 "{full} VRAM, got {}",
                 doc["inference_requirements"]
+            );
+        }
+    }
+
+    /// A card is labelled with the model the catalog knows, whichever spelling
+    /// of the name arrived in the URL. `eullm%2Flegal-it-7b` decodes back to a
+    /// real `/`, passes the catalog check, and used to be answered with a card
+    /// for `eullm/eullm/legal-it-7b` — a fully affirmative AI Act attestation
+    /// for a model id in no catalog.
+    #[tokio::test]
+    async fn a_card_is_labelled_with_the_catalogue_name() {
+        for entry in catalog() {
+            let full = entry["name"].as_str().expect("a name").to_string();
+            let short = full.trim_start_matches("eullm/").to_string();
+
+            let card = model_card(Path(short.clone())).await.expect("a card").0;
+            let compliance = compliance_card(Path(short.clone()))
+                .await
+                .expect("a card")
+                .0;
+            assert_eq!(card["model"], entry["name"], "card model, bare name");
+            assert_eq!(
+                compliance["model"], entry["name"],
+                "compliance model, bare name"
+            );
+
+            let prefixed = model_card(Path(full.clone())).await.expect("a card").0;
+            let prefixed_compliance = compliance_card(Path(full.clone())).await.expect("a card").0;
+            assert_eq!(
+                prefixed["model"], entry["name"],
+                "card model, eullm/ prefix"
+            );
+            assert_eq!(
+                prefixed_compliance["model"], entry["name"],
+                "compliance model, eullm/ prefix"
             );
         }
     }
