@@ -92,25 +92,34 @@ pub fn check_gpu_support(gpu_layers: i32) -> i32 {
     let has_gpu = has_gpu_backend();
 
     if gpu_layers != 0 && !has_gpu {
+        // Offload-all (-1) is the default, not something the user asked
+        // for: every run of a CPU build lands here. It used to print the
+        // box below each time, telling people who downloaded a binary to
+        // rebuild it with cargo — the first thing a Windows user saw on a
+        // plain `eullm run`. A CPU build running on the CPU is the expected
+        // case; say so in one line, and where the GPU builds are.
+        if gpu_layers < 0 {
+            tracing::info!(
+                "CPU build: inference runs on the CPU. GPU builds (NVIDIA, AMD, Apple) are on \
+                 https://github.com/eullm/eullm/releases; on Windows, `eullm-cuda` or \
+                 `$env:EULLM_VARIANT='cuda'` with install.ps1."
+            );
+            return 0;
+        }
         eprintln!();
         eprintln!("╔══════════════════════════════════════════════════════════════╗");
-        eprintln!("║  WARNING: GPU requested but this binary has no GPU support  ║");
+        eprintln!("║  WARNING: --gpu-layers asked for the GPU, but this is a      ║");
+        eprintln!("║  CPU build. All inference will run on the CPU.               ║");
         eprintln!("║                                                              ║");
-        eprintln!("║  All inference will run on CPU (very slow for large prompts) ║");
-        eprintln!("║                                                              ║");
-        eprintln!("║  Rebuild with GPU support:                                   ║");
-        eprintln!("║    cargo build --release --features cuda    # NVIDIA         ║");
-        eprintln!("║    cargo build --release --features rocm    # AMD            ║");
-        eprintln!("║    cargo build --release --features vulkan  # Cross-platform ║");
-        eprintln!("║    cargo build --release --features metal   # Apple Silicon  ║");
-        eprintln!("║                                                              ║");
-        eprintln!("║  Docker: use the engine-gpu service or build with:           ║");
-        eprintln!("║    docker build --build-arg FEATURES=cuda -t eullm .         ║");
+        eprintln!("║  Download a GPU build (NVIDIA, AMD, Apple) from              ║");
+        eprintln!("║    https://github.com/eullm/eullm/releases                   ║");
+        eprintln!("║  or, from source:                                            ║");
+        eprintln!("║    cargo build --release --features cuda|rocm|vulkan|metal   ║");
         eprintln!("╚══════════════════════════════════════════════════════════════╝");
         eprintln!();
         tracing::warn!(
             "No GPU backend compiled: requested gpu_layers={gpu_layers}, forcing 0. \
-             Rebuild with --features cuda/rocm/vulkan/metal for GPU acceleration."
+             Use a GPU build from the releases page, or rebuild with --features cuda/rocm/vulkan/metal."
         );
         return 0;
     }

@@ -13,6 +13,12 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **No more `←[32m`-style codes in the Windows console.** In the classic Windows PowerShell or Command Prompt window, every log line, the model picker and the terminal chat showed the escape codes behind their colours as text (Windows Terminal was not affected). EuLLM now turns colour support on in the console when it starts, and writes plain log lines when it cannot, for example when the output goes to a file.
+- **The CPU build no longer tells you to rebuild it.** Every `eullm run` on a CPU build printed a boxed warning that a GPU was requested and suggested `cargo build --features cuda`, although nobody had asked for a GPU: offloading to it is simply the default. It now prints one line saying it runs on the CPU and where the GPU builds are. The warning box remains for an explicit `--gpu-layers` on a CPU build, and now points to the ready-made GPU downloads first.
+
 ## 0.7.20 — 2026-09-28
 
 A decision endpoint, `/v1/systemone`, and the Jev-Style models that answer it best. Without a decision model loaded, nothing else changes: chat, completions and embeddings work exactly as in 0.7.11.

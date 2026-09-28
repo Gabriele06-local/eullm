@@ -645,19 +645,35 @@ async fn main() {
         }
     }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                // Module paths are rooted at the [[bin]] name ("eullm" in
-                // Cargo.toml), not the package name ("eullm-engine") - there's
-                // no separate lib.rs, so every tracing::info!/warn! call site
-                // resolves its target under "eullm::...". "eullm_engine=info"
-                // never matched anything, silently disabling all engine
-                // logging (KV-reuse diagnostics, context/scheduler startup
-                // info, etc.) unless RUST_LOG was set explicitly.
-                .unwrap_or_else(|_| "eullm=info".into()),
-        )
-        .init();
+    // The Windows console shows ANSI colour codes as literal text (`←[32m`)
+    // unless virtual terminal processing is switched on for it, which the
+    // classic Windows PowerShell / cmd console does not do by default:
+    // every log line, the model picker and the terminal chat came out
+    // littered with escape codes there, while Windows Terminal hid the
+    // problem. Switch it on once, before anything is logged; where it
+    // cannot be (output redirected to a file, no console at all) keep the
+    // log lines plain instead of writing escape codes into them. On every
+    // other platform this is `None` and the subscriber keeps its own default
+    // (which honours NO_COLOR).
+    let logs = tracing_subscriber::fmt();
+    let logs = if anstyle_query::windows::enable_ansi_colors() == Some(false) {
+        logs.with_ansi(false)
+    } else {
+        logs
+    };
+
+    logs.with_env_filter(
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            // Module paths are rooted at the [[bin]] name ("eullm" in
+            // Cargo.toml), not the package name ("eullm-engine") - there's
+            // no separate lib.rs, so every tracing::info!/warn! call site
+            // resolves its target under "eullm::...". "eullm_engine=info"
+            // never matched anything, silently disabling all engine
+            // logging (KV-reuse diagnostics, context/scheduler startup
+            // info, etc.) unless RUST_LOG was set explicitly.
+            .unwrap_or_else(|_| "eullm=info".into()),
+    )
+    .init();
 
     // Install signal handler for SIGABRT — llama.cpp calls abort() on
     // GGML_ASSERT failures, which kills the process with no diagnostic info.
