@@ -348,3 +348,15 @@ def test_the_reference_is_the_whole_article_not_its_first_800_characters():
 def test_an_article_too_long_to_hand_the_grader_whole_is_not_asked():
     huge = rec("codice_civile", "Art. 9. \n \n (Lungo). \n \n " + "Parola. " * 1200)
     assert build_exam([huge], per_code=4, seed=1) == []
+
+
+def test_consolidated_text_notes_and_inline_markers_are_not_the_article():
+    art = rec("codice_consumo",
+              "Art. Art. 105. (Presunzione e valutazione di sicurezza) Un prodotto si presume "
+              "sicuro. (171) ((173)) Se rifiuta il terzo, il giudice lo condanna." + FILLER
+              + " Note all' art. 105: - La direttiva 3 dicembre 2001 n. 95 del Parlamento "
+              "europeo e del Consiglio.", article_num="Art. 105.")
+    text = articles_from_records([art])[("codice_consumo", "105")].text
+    assert "Note all'" not in text and "direttiva" not in text
+    assert "(171)" not in text and "((173))" not in text
+    assert "si presume sicuro. Se rifiuta il terzo" in text

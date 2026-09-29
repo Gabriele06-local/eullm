@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -44,6 +45,7 @@ def topic_questions(path: Path) -> list[EvalItem]:
                     or not key.startswith("ob-g-"):
                 continue
             code, _, number = key[len("ob-g-"):].partition("-")
+            number = re.sub(r"-v\d+$", "", number)
             question = p["instruction"].rsplit("Domanda: ", 1)[-1].strip()
             items.append(EvalItem(id=key, domain="legal", lang="it", question=question,
                                   metadata={"tipo": "argomento_insegnante", "code": code,

@@ -109,14 +109,19 @@ class Article:
 # are not the article. On the development set of 2026-09-28 a deadline in a
 # note ("la presente modifica si applica ... entro centoventi giorni") became
 # the answer key to "Quale termine prevede l'art. 289 del codice penale?".
-_NOTES = re.compile(r"\s*-{5,}\s*AGGIORNAMENTO\b.*", re.DOTALL)
+_NOTES = re.compile(r"\s*(?:-{5,}\s*AGGIORNAMENTO\b|Note all'\s*art\.).*", re.DOTALL)
 _MARKERS = re.compile(r"(?:\s*\(\(?\d+[a-z]?\)\)?)+\s*$")
+# The same markers inside the text, where the note refers to a single comma:
+# "... argomenti di prova. (171) ((173)) Se rifiuta il terzo ...".
+_INLINE_MARKERS = re.compile(r"(?:\s+\(\(?\d+[a-z]?\)\)?)+(?=\s)")
 
 
 def strip_notes(text: str) -> str:
-    """The article without Normattiva's amendment notes and the footnote
-    markers that point at them."""
-    return _MARKERS.sub("", _NOTES.sub("", text)).strip()
+    """The article without Normattiva's notes (the "AGGIORNAMENTO" blocks and
+    the "Note all'art." of the consolidated texts) and the footnote markers
+    that point at them."""
+    text = _MARKERS.sub("", _NOTES.sub("", text))
+    return _INLINE_MARKERS.sub("", text).strip()
 
 
 def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]:
@@ -334,6 +339,7 @@ def trained_articles(pairs) -> set[tuple[str, str]]:
         key = str(p.get("key", ""))
         if key.startswith("ob-g-"):
             code, _, number = key[5:].partition("-")
+            number = re.sub(r"-v\d+$", "", number)     # a second question, same article
         elif key.startswith("ob-m-"):
             code, _, rest = key[5:].partition("-")
             number = rest.split("-")[0]
