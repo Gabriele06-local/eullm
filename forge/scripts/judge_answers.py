@@ -147,20 +147,31 @@ def append_csv_row(path: Path, row: list[str]) -> None:
         f.flush()
 
 
-def refusal_for(grades: list[Grade], path: Path) -> str | None:
-    """Why this run must not produce a score, or None when it may.
+def unreadable_note(grades: list[Grade], path: Path) -> str | None:
+    """What to say about unreadable grader lines, or None when there are none.
 
-    A grader line we could not read is not a verdict of zero, and a mean that
-    folds one in with a wrong answer produces a number that reads like a legal
-    result while being too low for a reason nobody can see in it. The
-    .graded.jsonl beside the answers already carries every grade, including
-    which ones were unreadable, so refusing costs nothing but the row.
+    A grader line we could not read is not a verdict of zero: folded into the
+    mean with the wrong answers it makes the number too low for a reason
+    nobody can see in it. Nor is it a reason to throw the model's score away,
+    or to stop grading the models after it in the same job. So the score is
+    taken over the readable lines, the unreadable ones are counted in the
+    ``unparsed`` column, and this note says where to find them.
     """
     unreadable = sum(g.label == "unparsed" for g in grades)
     if not unreadable:
         return None
-    return (f"{unreadable} of {len(grades)} grade(s) unreadable, refusing to "
-            f"write a score for them. They are in {path.with_suffix('.graded.jsonl')}.")
+    return (f"{unreadable} of {len(grades)} grade(s) unreadable; the score is over the "
+            f"{len(grades) - unreadable} readable ones. They are in "
+            f"{path.with_suffix('.graded.jsonl')}.")
+
+
+def scored_row(label: str, grades: list[Grade]) -> list:
+    """`summary_row` over the readable grades, with every item and every
+    unreadable line still counted."""
+    row = summary_row(label, [g for g in grades if g.label != "unparsed"])
+    row[2] = len(grades)
+    row[6] = sum(g.label == "unparsed" for g in grades)
+    return row
 
 
 def main() -> int:
@@ -178,11 +189,10 @@ def main() -> int:
     grader = ReferenceGrader(Greedy(args.model))
     for path in files:
         grades = grade_file(path, grader, batch_size=args.batch_size, quiet=args.quiet)
-        refusal = refusal_for(grades, path)
-        if refusal:
-            print(f"[judge] {label_of(path)}: {refusal}", flush=True)
-            return 1
-        row = summary_row(label_of(path), grades)
+        note = unreadable_note(grades, path)
+        if note:
+            print(f"[judge] {label_of(path)}: WARNING {note}", flush=True)
+        row = scored_row(label_of(path), grades)
         append_csv_row(args.csv, row)
         print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "
               f"partial {row[4]}, wrong {row[5]}", flush=True)

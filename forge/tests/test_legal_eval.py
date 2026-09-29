@@ -82,11 +82,14 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
 
     # A run whose grader lines we could not read must not produce a score: the
     # mean would be quietly too low, and it would look like a legal verdict.
-    assert ja.refusal_for(grades, src) is None
+    assert ja.unreadable_note(grades, src) is None
     one_unreadable = grades + [Grade("unparsed", "Grade: incorrect")]
-    refusal = ja.refusal_for(one_unreadable, src)
-    assert refusal and "1 of 4" in refusal
-    assert "graded.jsonl" in refusal
+    note = ja.unreadable_note(one_unreadable, src)
+    assert note and "1 of 4" in note and "graded.jsonl" in note
+    # The score is over the readable lines; the unreadable one is counted, not zeroed.
+    row = ja.scored_row("m", one_unreadable)
+    assert row[2] == 4 and row[6] == 1
+    assert row[-1] == ja.summary_row("m", grades)[-1]
 
     # The 0-byte CSV case: the file exists, so a header written on existence
     # alone is skipped and the next row lands in its place, leaving DictReader
