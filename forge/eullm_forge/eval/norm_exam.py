@@ -69,6 +69,10 @@ _NUMBER_WORDS = {
 _WORD_FOR = {v: k for k, v in _NUMBER_WORDS.items() if k not in ("un", "una")}
 _UNITS = {"giorno": "giorni", "giorni": "giorni", "mese": "mesi", "mesi": "mesi",
           "anno": "anni", "anni": "anni", "ora": "ore", "ore": "ore"}
+# The singular of each plural, from the same table, so a one-unit deadline can
+# be named the way it is written rather than the way it is counted.
+_SINGULAR = {plural: singular for singular, plural in _UNITS.items()
+             if singular != plural}
 _DEADLINE = re.compile(
     r"\b(?:entro|nel termine(?: perentorio| di decadenza)? di|non oltre|decorsi|"
     r"nei|trascorsi)\s+(?:il termine (?:perentorio |di decadenza )?di\s+)?"
@@ -169,6 +173,18 @@ def _deadlines(text: str) -> set[tuple[int, str]]:
 
 
 def _deadline_keyword(n: int, unit: str) -> str:
+    """The keyword a deadline answer is scored on, in digits or in words.
+
+    ``unit`` has already been pluralised, so a one-unit deadline needs the
+    singular put back: coverage is a normalised substring test, and neither
+    "un anno" nor "1 anno" contains "1 anni". That made every single-unit
+    deadline item unwinnable -- the correct answer scored zero, and a model
+    that invented a different deadline scored the same.
+    """
+    if n == 1:
+        singular = _SINGULAR.get(unit, unit)
+        # "un'ora" normalises to "un ora", so the article form covers it.
+        return f"1 {singular}|un {singular}"
     alts = [f"{n} {unit}"]
     if n in _WORD_FOR:
         alts.append(f"{_WORD_FOR[n]} {unit}")
