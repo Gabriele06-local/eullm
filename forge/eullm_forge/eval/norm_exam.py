@@ -119,23 +119,39 @@ def strip_notes(text: str) -> str:
     return _MARKERS.sub("", _NOTES.sub("", text)).strip()
 
 
-_INDEX_HEADING = re.compile(r"^indice\b", re.IGNORECASE)
+# A line of a table of contents: a header and a title, nothing else. Real
+# articles have a body; one shorter than this could never be asked about
+# anyway (`_usable` wants 150 characters).
+_INDEX_LINE_CHARS = 150
 
 
-def _is_index(text: str, marks: list) -> bool:
-    """Whether a record is a table of contents rather than any of its articles.
+def _drop_index_lines(text: str, marks: list) -> tuple[str, list]:
+    """The record without the lines of a table of contents, and its headers.
 
     The legislation files open the administrative codes with one: a heading
-    reading ``INDICE GENERALE`` and then a line per article, each a number and
-    a title with no text of its own. Two conditions, so that a real article
-    whose rubrica happens to be called "Indice delle materie" is not mistaken
-    for one: the heading has to be the first thing in the record, and an index
-    lists several articles by definition.
+    reading ``INDICE GENERALE`` and a line per article, each a number and a
+    title with no text of its own. Read at face value, every line leaves a stub
+    under its number, and the real article then looks like a second, ambiguous
+    occurrence of a number already there -- so it is dropped, and the code
+    contributes nothing. The index is recognised by its shape, not by its
+    heading, because it is longer than one chunk and only the first one begins
+    with ``INDICE``: in a record with several headers, a stretch from one
+    header to the next that is shorter than `_INDEX_LINE_CHARS` is blanked out
+    (same length, so every position stays where it was) and the headers are
+    read again. A record with a single header is left alone, so a real
+    article whose rubrica is "Indice delle materie" is still an article, and
+    the last two lines of an index, alone in a chunk, are still caught.
     """
-    if len(marks) < 3:
-        return False
-    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
-    return bool(_INDEX_HEADING.match(first))
+    if len(marks) < 2:
+        return text, marks
+    bounds = [m.start() for m in marks] + [len(text)]
+    out = text
+    for a, b in zip(bounds, bounds[1:]):
+        if len(" ".join(text[a:b].split())) < _INDEX_LINE_CHARS:
+            out = out[:a] + " " * (b - a) + out[b:]
+    if out == text:
+        return text, marks
+    return out, list(_HEADER.finditer(out))
 
 
 def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]:
@@ -154,13 +170,8 @@ def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]
     for r in records:
         code, text = r.get("code") or "", r.get("text", "")
         marks = list(_HEADER.finditer(text))
-        if _is_index(text, marks):
-            # The table of contents is not the articles: taking its headers at
-            # face value leaves a stub under every number it lists, and the
-            # real article then looks like a second, ambiguous occurrence of a
-            # number that is already there -- so it is dropped, and a code
-            # whose file opens with an index contributes nothing at all.
-            continue
+        # A table of contents is not the articles (see `_drop_index_lines`).
+        text, marks = _drop_index_lines(text, marks)
         lead = text[: marks[0].start()] if marks else text
         if lead.strip() and code in last and r.get("chunk_index", 0):
             parts[(code, last[code])].append(lead)

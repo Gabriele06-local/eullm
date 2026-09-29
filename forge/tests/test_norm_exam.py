@@ -99,6 +99,35 @@ def test_a_rubrica_called_indice_is_still_an_article():
     assert ("codice_civile", "5") in articles_from_records([one])
 
 
+def test_an_index_longer_than_one_chunk_is_dropped_whole():
+    """The real index is longer than a chunk and only its first chunk says
+    INDICE; the next one, and one where the index ends and the articles
+    begin, must lose their index lines too."""
+    first = rec("codice_processo_amministrativo",
+                "INDICE GENERALE \n Art. 1 - Effettivita' \n Art. 2 - Giusto processo \n "
+                "Art. 3 - Dovere di motivazione")
+    second = rec("codice_processo_amministrativo",
+                 "Art. 4 - Rinvio esterno \n Art. 5 - Ricorso \n Art. 6 - Consiglio di Stato",
+                 chunk_index=1)
+    mixed = rec("codice_processo_amministrativo",
+                "Art. 7 - Giurisdizione \n Art. 8 - Cognizione incidentale \n "
+                "Art. 1 \n Effettivita' \n 1. La giurisdizione amministrativa assicura una "
+                "tutela piena ed effettiva secondo i principi della Costituzione." + FILLER,
+                chunk_index=2)
+    art5 = rec("codice_processo_amministrativo",
+               "Art. 5 \n Ricorso \n 1. Il ricorso si propone entro sessanta giorni dalla "
+               "notificazione dell'atto." + FILLER, chunk_index=3)
+    tail = rec("codice_processo_amministrativo",
+               "Art. 9 - Competenza \n Art. 10 - Rilievo dell'incompetenza", chunk_index=4)
+    art9 = rec("codice_processo_amministrativo",
+               "Art. 9 \n Competenza \n 1. Il difetto di competenza e' rilevato d'ufficio "
+               "entro trenta giorni." + FILLER, chunk_index=5)
+    arts = articles_from_records([first, second, mixed, art5, tail, art9])
+    assert sorted(k[1] for k in arts) == ["1", "5", "9"]
+    assert "Rinvio esterno" not in arts[("codice_processo_amministrativo", "1")].text
+    assert "sessanta giorni" in arts[("codice_processo_amministrativo", "5")].text
+
+
 def test_the_heading_is_read_in_both_styles():
     arts = articles_from_records(RECORDS)
     assert arts[("codice_civile", "2")].heading == "Termine di prova"
