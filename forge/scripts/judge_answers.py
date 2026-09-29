@@ -147,6 +147,22 @@ def append_csv_row(path: Path, row: list[str]) -> None:
         f.flush()
 
 
+def refusal_for(grades: list[Grade], path: Path) -> str | None:
+    """Why this run must not produce a score, or None when it may.
+
+    A grader line we could not read is not a verdict of zero, and a mean that
+    folds one in with a wrong answer produces a number that reads like a legal
+    result while being too low for a reason nobody can see in it. The
+    .graded.jsonl beside the answers already carries every grade, including
+    which ones were unreadable, so refusing costs nothing but the row.
+    """
+    unreadable = sum(g.label == "unparsed" for g in grades)
+    if not unreadable:
+        return None
+    return (f"{unreadable} of {len(grades)} grade(s) unreadable, refusing to "
+            f"write a score for them. They are in {path.with_suffix('.graded.jsonl')}.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -161,8 +177,12 @@ def main() -> int:
     files = [p for p in args.answers if not p.name.endswith(".graded.jsonl")]
     grader = ReferenceGrader(Greedy(args.model))
     for path in files:
-        row = summary_row(label_of(path), grade_file(
-            path, grader, batch_size=args.batch_size, quiet=args.quiet))
+        grades = grade_file(path, grader, batch_size=args.batch_size, quiet=args.quiet)
+        refusal = refusal_for(grades, path)
+        if refusal:
+            print(f"[judge] {label_of(path)}: {refusal}", flush=True)
+            return 1
+        row = summary_row(label_of(path), grades)
         append_csv_row(args.csv, row)
         print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "
               f"partial {row[4]}, wrong {row[5]}", flush=True)

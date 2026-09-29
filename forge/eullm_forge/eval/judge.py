@@ -188,7 +188,12 @@ Respond with exactly one line: "Grade: correct", "Grade: partial", or "Grade: wr
 Then, on a new line, a one-sentence justification.
 """
 
-_GRADE_RE = re.compile(r"grade\s*[:=]?\s*(correct|partial|wrong)", re.IGNORECASE)
+# The label may be decorated, and a 30B model decorates: "Grade: **correct**"
+# is a correct answer, and reading it as unreadable turned a formatting
+# difference into a legal error worth a third of a point. The gap between
+# "grade" and the label is therefore a few non-word characters rather than
+# nothing at all; an underscore counts as decoration too, for "_wrong_".
+_GRADE_RE = re.compile(r"grade\b[\W_]{0,4}(correct|partial|wrong)", re.IGNORECASE)
 GRADE_SCORES = {"correct": 1.0, "partial": 0.5, "wrong": 0.0}
 
 
@@ -201,8 +206,18 @@ class Grade:
 
     @property
     def score(self) -> float:
-        """1 correct, 0.5 partial, 0 wrong or unparseable."""
-        return GRADE_SCORES.get(self.label, 0.0)
+        """1 correct, 0.5 partial, 0 wrong, nan when the reply was unreadable.
+
+        A line we could not read is not a verdict of zero. It scored zero
+        because that is what `GRADE_SCORES.get` returns for an unknown label,
+        and a mean that folds an unreadable grader line in with a wrong answer
+        produces a plausible number that is too low for a reason nobody can
+        see in it. nan poisons the mean instead, and judge_answers.py refuses
+        to write the row.
+        """
+        if self.label not in GRADE_SCORES:
+            return float("nan")
+        return GRADE_SCORES[self.label]
 
 
 class ReferenceGrader:

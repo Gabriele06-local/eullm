@@ -58,7 +58,7 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
         "judge_answers", SCRIPT.parent / "judge_answers.py")
     ja = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(ja)
-    from eullm_forge.eval import ReferenceGrader
+    from eullm_forge.eval import Grade, ReferenceGrader
 
     src = tmp_path / "answers-m.jsonl"
     src.write_text("\n".join(json.dumps({"id": f"norm-termine-codice_civile-{n}",
@@ -80,9 +80,17 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
     assert Batched.calls == 2                       # 3 prompts in batches of 2
     assert "codice_civile" not in capsys.readouterr().out
 
-    # A run killed while the first model was being graded leaves a 0-byte CSV:
-    # the file exists, so a header written on existence alone is skipped and the
-    # next row lands in its place, leaving DictReader with nothing.
+    # A run whose grader lines we could not read must not produce a score: the
+    # mean would be quietly too low, and it would look like a legal verdict.
+    assert ja.refusal_for(grades, src) is None
+    one_unreadable = grades + [Grade("unparsed", "Grade: incorrect")]
+    refusal = ja.refusal_for(one_unreadable, src)
+    assert refusal and "1 of 4" in refusal
+    assert "graded.jsonl" in refusal
+
+    # The 0-byte CSV case: the file exists, so a header written on existence
+    # alone is skipped and the next row lands in its place, leaving DictReader
+    # with nothing.
     out = tmp_path / "graded.csv"
     for module in (ja, legal_eval):
         out.write_text("")

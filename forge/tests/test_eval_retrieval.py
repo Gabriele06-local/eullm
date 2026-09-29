@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -108,11 +109,31 @@ def test_from_files_reads_jsonl(tmp_path):
     ("Grade: correct\nMatches the reference.", "correct", 1.0),
     ("grade: PARTIAL\nRight article, wrong term.", "partial", 0.5),
     ("Grade: wrong\nThirty days, not one hundred and twenty.", "wrong", 0.0),
-    ("I think it is fine.", "unparsed", 0.0),
+    # Decorated labels are still labels: a 30B model puts asterisks on them,
+    # and reading that as unreadable turned a formatting difference into a
+    # legal error.
+    ("Grade: **correct**\nMatches the reference.", "correct", 1.0),
+    ("Grade: _wrong_\nThe deadline is wrong.", "wrong", 0.0),
+    ("**Grade: partial**\nHalf of it.", "partial", 0.5),
 ])
 def test_grades_are_parsed_and_scored(raw, label, score):
     g = ReferenceGrader.parse(raw)
     assert (g.label, g.score) == (label, score)
+
+
+@pytest.mark.parametrize("raw", [
+    "I think it is fine.",
+    "Grade: incorrect",
+    "Verdetto: corretto",
+    "The answer is correct: it cites art. 2043.",
+])
+def test_an_unreadable_grade_is_nan_and_not_a_zero(raw):
+    """It used to score 0.0, which is the score of a wrong answer, so a mean
+    over a run with one unreadable line was quietly too low for a reason
+    nothing in it showed."""
+    g = ReferenceGrader.parse(raw)
+    assert g.label == "unparsed"
+    assert math.isnan(g.score)
 
 
 def test_the_grader_shows_the_reference_to_the_model():
