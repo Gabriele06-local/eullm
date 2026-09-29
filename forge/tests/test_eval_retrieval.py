@@ -335,3 +335,30 @@ def test_the_retrieval_check_prints_counts_per_boost_and_no_question(tmp_path, c
 
 def test_the_default_ranking_is_unchanged_until_a_boost_is_chosen():
     assert NormIndex(REAL).heading_boost == 0
+
+
+def test_the_retrieval_check_measures_the_teachers_topic_questions(tmp_path, capsys):
+    """Paraphrased, the way people ask: the fairer test of a rubrica weight."""
+    norms = tmp_path / "legislazione_cpc.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in CITAZIONE) + "\n")
+    pairs = tmp_path / "openbook-pairs.jsonl"
+    rows = [
+        {"task": "openbook_grounded", "named": False, "key": "ob-g-codice_procedura_civile-163",
+         "instruction": "Testi normativi di riferimento: ...\n\nDomanda: Nel codice di "
+                        "procedura civile, cosa deve contenere la citazione?", "output": "x"},
+        {"task": "openbook_grounded", "named": True, "key": "ob-g-codice_procedura_civile-164",
+         "instruction": "Domanda: Cosa dice l'art. 164 del codice di procedura civile?",
+         "output": "x"},
+        {"task": "openbook_missing", "key": "ob-m-codice_procedura_civile-900-1",
+         "instruction": "Domanda: art. 900?", "output": "x"},
+    ]
+    pairs.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_retrieval.py"
+    spec = importlib.util.spec_from_file_location("check_retrieval", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert [it.metadata["articolo"] for it in mod.topic_questions(pairs)] == ["163"]
+    assert mod.main(["--pairs", str(pairs), "--norms", str(norms), "--boost", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "argomento_insegnante n=1" in out
+    assert "citazione" not in out
