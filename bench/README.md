@@ -93,6 +93,14 @@ python bench/decision_calibration.py labelled.jsonl --url http://localhost:11434
     --json calibration.json
 ```
 
+## `reflexbench/` — does a decision pick the tools a request needs?
+
+MVP 0 of the [Reflex roadmap](../docs/reflex-roadmap.md): on MetaTool and
+BFCL, how many tools a method can drop without losing the one needed, how
+much of the tool-calling model's prompt that saves, and what the decision
+costs — `/v1/systemone` in two layouts against BM25 and embeddings. See
+[`reflexbench/README.md`](reflexbench/README.md).
+
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
 Validates the KV-cache prefix reuse scheduler against the checklist in

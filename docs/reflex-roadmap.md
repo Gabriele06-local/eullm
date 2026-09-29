@@ -1,6 +1,7 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** planning · 29 September 2026 · work starts on `feat/reflexbench`
+**Status:** MVP 0 harness written, first GPU and CPU runs pending · 29 September 2026 ·
+`feat/reflexbench`
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -74,23 +75,29 @@ must answer three questions before anything else is built:
 2. **How many tokens does that keep out of the large model's prompt?**
 3. **What does the decision cost, on a GPU and on a CPU?**
 
-- [🔧 now] A normalized dataset format, one JSON object per line: the
+The harness is [`bench/reflexbench/`](../bench/reflexbench/README.md):
+standard library only, one command, offline unit tests.
+
+- [✅ done] A normalized dataset format, one JSON object per line: the
   request, the tools on offer (name and description), the tools it needs
   (none, one or several).
-- [🔧 now] Loaders that download public sets at run time — nothing is
-  committed to the repository:
-  - [MetaTool](https://github.com/HowieHwong/MetaTool) (MIT): single and
-    multi-tool selection, and whether a tool is needed at all;
-  - [BFCL](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard)
-    (Apache-2.0): requests for which no offered function fits;
-  - [ToolRet](https://github.com/mangopy/benchmarking-tool-retrieval)
+- Loaders that download public sets at run time — nothing is committed to
+  the repository:
+  - [✅ done] [MetaTool](https://github.com/HowieHwong/MetaTool) (MIT):
+    single and multi-tool selection over one catalog of 199 tools;
+  - [✅ done] [BFCL](https://huggingface.co/datasets/gorilla-llm/Berkeley-Function-Calling-Leaderboard)
+    (Apache-2.0): one function of several fits, or none of them does;
+  - [🆕 next] [ToolRet](https://github.com/mangopy/benchmarking-tool-retrieval)
     (Apache-2.0, ACL 2025): 7.6k tasks over a 43k-tool corpus, for scale.
 - [🆕 next] An Italian set of our own, a few hundred requests over the tools
   a typical Italian company uses: invoices, calendar, CRM, stock, email.
-- [🔧 now] The methods compared on the same items:
-  - **no filter**: every tool goes to the large model, the reference cost;
+- [✅ done] The methods compared on the same items:
+  - **no filter**: every tool goes to the large model, the reference cost
+    every "specs kept" figure is a share of;
   - **BM25** over names and descriptions, pure keyword matching;
   - **embeddings** from EuLLM itself (`/v1/embeddings`), cosine similarity;
+    Qwen3-Embedding-0.6B (Apache-2.0) with its query instruction is the
+    baseline to beat;
   - **Reflex, layout A**: the request is the state, the tool descriptions
     are the options — natural, but every request reads the whole catalog;
   - **Reflex, layout B**: the catalog is the state, the request goes in the
@@ -100,15 +107,18 @@ must answer three questions before anything else is built:
     still understands a tool from its name alone is what the benchmark says;
   - [🆕 next] **two stages**: embeddings keep 20, Reflex picks among them;
   - [🆕 next] **the large model** choosing on its own, the quality ceiling.
-- [🔧 now] Metrics:
-  - recall@k — every tool the request needs is among the first k;
-  - the k that keeps 95% and 99% of requests whole;
-  - accuracy on "no tool needed", where the set has such requests;
-  - tokens of tool descriptions sent at that k, against all of them,
-    counted with the tokenizer of the model that will receive them;
-  - decision latency p50 and p95, GPU and CPU, Jev-Style 0.8B and 2B.
-- [🔧 now] Benchmark runs write to their own `EULLM_AUDIT_DIR`: thousands of
-  decisions do not belong in a production audit trail.
+- Metrics:
+  - [✅ done] recall@k — every tool the request needs is among the first k;
+  - [✅ done] the k that keeps 95% and 99% of requests whole;
+  - [✅ done] accuracy on "no tool needed", where the set has such requests,
+    and how often "no tool" wins on requests that do need one;
+  - [✅ done] the share of the tool specs still sent at that k, against all
+    of them; [🆕 next] the same in tokens, counted with the tokenizer of the
+    model that will receive them (four characters a token until then);
+  - [✅ done] decision latency p50 and p95, and the tokens the decision
+    model read; [🔧 now] measured on GPU and CPU, Jev-Style 0.8B and 2B.
+- [✅ done] Benchmark runs write to their own `EULLM_AUDIT_DIR`: thousands
+  of decisions do not belong in a production audit trail.
 
 **Done when** a report, reproducible from one command, answers the three
 questions above on MetaTool and BFCL, on an RTX 5070 Ti and on a CPU.

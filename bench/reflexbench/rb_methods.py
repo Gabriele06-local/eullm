@@ -1,0 +1,287 @@
+"""The ways ReflexBench ranks the tools offered with a request.
+
+Every method returns the same thing, a `Ranking`: the candidates from most
+to least likely to be needed, what it cost, and, for Reflex, how likely it
+found that no tool is needed at all.
+
+  * `bm25`: keyword matching over names and descriptions, no model at all;
+  * `embed`: cosine similarity of embeddings from EuLLM's `/v1/embeddings`;
+    the tools' vectors are computed once, as a deployment would, so a
+    request costs one embedding;
+  * `reflex-a`: `/v1/systemone`, the request as the state, the tools as the
+    options of a `choice` question, ranked by the model's verdict score;
+  * `reflex-b`: the catalog as the state, the request inside the question,
+    the options the tool names alone. With the same catalog on every
+    request the state is read once and reused, so a request costs its
+    question and the names.
+"""
+
+import json
+import math
+import re
+import time
+import urllib.error
+import urllib.request
+
+NONE = "none"  # the option that says no tool is needed
+
+
+class Ranking:
+    def __init__(self, order, ms, none_score=None, best_score=None, server=None):
+        self.order = order  # candidate names, most likely needed first
+        self.ms = ms  # wall time of the decision, as the client sees it
+        self.none_score = none_score  # Reflex's score for "no tool", if asked
+        self.best_score = best_score  # Reflex's score for the first tool
+        self.server = server or {}  # tokens and timings reported by EuLLM
+
+    def abstains(self):
+        """Reflex found "no tool" likelier than any tool."""
+        return self.none_score is not None and (
+            self.best_score is None or self.none_score > self.best_score
+        )
+
+
+def post(url, payload, api_key, timeout):
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(url, data=json.dumps(payload).encode(), headers=headers)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        raise ServerError(e.code, e.read().decode(errors="replace")) from None
+
+
+class ServerError(Exception):
+    def __init__(self, code, detail):
+        super().__init__(f"HTTP {code}: {detail}")
+        self.code, self.detail = code, detail
+
+
+# --- BM25 -----------------------------------------------------------------
+
+
+def words(text):
+    """Lower-case words, with camelCase and snake_case names split apart."""
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text)
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+class BM25:
+    """Okapi BM25, document frequencies from every tool of the set."""
+
+    name = "bm25"
+
+    def __init__(self, dataset, k1=1.5, b=0.75):
+        self.k1, self.b = k1, b
+        docs = {}
+        for item in dataset.items:
+            for tool in item.candidates:
+                docs.setdefault(tool.name + "\0" + tool.description, tool)
+        self.n = len(docs)
+        self.df = {}
+        lengths = []
+        for tool in docs.values():
+            terms = words(tool.name + " " + tool.description)
+            lengths.append(len(terms))
+            for term in set(terms):
+                self.df[term] = self.df.get(term, 0) + 1
+        self.avg = sum(lengths) / max(1, len(lengths))
+
+    def idf(self, term):
+        df = self.df.get(term, 0)
+        return math.log(1 + (self.n - df + 0.5) / (df + 0.5))
+
+    def rank(self, item):
+        started = time.perf_counter()
+        query = words(item.request)
+        scored = []
+        for tool in item.candidates:
+            terms = words(tool.name + " " + tool.description)
+            tf = {}
+            for term in terms:
+                tf[term] = tf.get(term, 0) + 1
+            norm = self.k1 * (1 - self.b + self.b * len(terms) / self.avg)
+            score = sum(
+                self.idf(q) * tf[q] * (self.k1 + 1) / (tf[q] + norm) for q in query if q in tf
+            )
+            scored.append((score, tool.name))
+        scored.sort(key=lambda s: -s[0])
+        return Ranking([n for _, n in scored], (time.perf_counter() - started) * 1000)
+
+
+# --- Embeddings ------------------------------------------------------------
+
+
+class Embeddings:
+    """Cosine similarity between the request and each tool, embedded by
+    EuLLM with the embedding model named. `query_prefix` goes before each
+    request, for the models trained with an instruction on the query side
+    only, such as Qwen3-Embedding."""
+
+    name = "embed"
+    # Tool vectors by model and text, shared by every set of a run: MetaTool's
+    # catalog is embedded once, not once per set.
+    seen = {}
+
+    def __init__(self, url, model, api_key, timeout, query_prefix=""):
+        self.url = url.rstrip("/") + "/v1/embeddings"
+        self.model, self.api_key, self.timeout = model, api_key, timeout
+        self.query_prefix = query_prefix
+
+    def embed(self, texts):
+        body = post(
+            self.url,
+            {"model": self.model, "input": texts},
+            self.api_key,
+            self.timeout,
+        )
+        return [row["embedding"] for row in sorted(body["data"], key=lambda r: r["index"])]
+
+    def vectors(self, tools):
+        texts = [f"{t.name}: {t.description}" for t in tools]
+        missing = [x for x in dict.fromkeys(texts) if (self.model, x) not in self.seen]
+        for start in range(0, len(missing), 32):
+            batch = missing[start : start + 32]
+            for text, vector in zip(batch, self.embed(batch)):
+                self.seen[(self.model, text)] = unit(vector)
+        return [self.seen[(self.model, x)] for x in texts]
+
+    def rank(self, item):
+        tools = self.vectors(item.candidates)  # once per tool, not timed
+        started = time.perf_counter()
+        query = unit(self.embed([self.query_prefix + item.request])[0])
+        ms = (time.perf_counter() - started) * 1000
+        scored = sorted(
+            (
+                (sum(a * b for a, b in zip(query, v)), t.name)
+                for t, v in zip(item.candidates, tools)
+            ),
+            key=lambda s: -s[0],
+        )
+        return Ranking([n for _, n in scored], ms)
+
+
+def unit(vector):
+    norm = math.sqrt(sum(x * x for x in vector)) or 1.0
+    return [x / norm for x in vector]
+
+
+# --- Reflex ---------------------------------------------------------------
+
+QUESTION_A = "Which tool is needed to handle this request?"
+QUESTION_B = 'Which of the tools listed does this request need? The request: "{request}"'
+NONE_TEXT = "none of these tools: the request can be handled without any"
+
+
+class Reflex:
+    """`/v1/systemone`, in layout A or B.
+
+    A question lists 2 to 255 options, and the Jev-Style 0.8B allows 2,048
+    tokens for a question with its options, read twice. The tools start as
+    one question; when the server says a question is too long, they are
+    split over twice as many, and so on, up to 64 questions per request.
+    The verdict scores of all of them, one per option, give the ranking —
+    compared as they are, although each option was read next to the other
+    options of its own question only."""
+
+    def __init__(self, url, layout, model, api_key, timeout, abstain):
+        self.url = url.rstrip("/") + "/v1/systemone"
+        self.layout, self.model = layout, model
+        self.api_key, self.timeout, self.abstain = api_key, timeout, abstain
+        self.name = f"reflex-{layout.lower()}"
+        # Tools per question, lowered as the server asks. With "none" among
+        # the options one tool makes a question; without it, parts of at
+        # least 3 tools keep every question at 2 options or more.
+        self.chunk = 254 if abstain else 255
+        self.fewest = 1 if abstain else 3
+
+    def state_and_questions(self, item, chunks):
+        if self.layout == "A":
+            state = item.request
+            instructions = QUESTION_A
+            describe = lambda t: t.description or None  # noqa: E731
+        else:
+            state = "The tools available:\n" + "\n".join(
+                f"- {t.name}: {t.description}" for t in item.candidates
+            )
+            instructions = QUESTION_B.format(request=item.request)
+            describe = lambda t: None  # noqa: E731  (the name alone)
+        questions = {}
+        for n, chunk in enumerate(chunks):
+            criteria = {t.name: describe(t) for t in chunk}
+            if self.abstain:
+                criteria[NONE] = NONE_TEXT
+            questions[f"tools_{n}"] = {
+                "type": "choice",
+                "instructions": instructions,
+                "criteria": criteria,
+            }
+        return state, questions
+
+    def rank(self, item):
+        names = [t.name for t in item.candidates]
+        if self.abstain and NONE in names:
+            raise ValueError(f"{item.id}: a tool is named {NONE!r}")
+        if len(names) == 1 and not self.abstain:
+            # One tool and no "none" to weigh it against: nothing to decide.
+            return Ranking(names, 0.0, server={"questions": 0})
+        while True:
+            chunks = split(item.candidates, self.chunk)
+            if len(chunks) > 64:
+                raise ValueError(f"{item.id}: {len(names)} tools need over 64 questions")
+            state, questions = self.state_and_questions(item, chunks)
+            payload = {"state": state, "questions": questions}
+            if self.model:
+                payload["model"] = self.model
+            started = time.perf_counter()
+            try:
+                body = post(self.url, payload, self.api_key, self.timeout)
+            except ServerError as e:
+                too_long = e.code == 400 and "nothing was truncated" in e.detail
+                if too_long and self.chunk > self.fewest:
+                    # The size that fits carries over to the next items.
+                    self.chunk = max(self.fewest, min(self.chunk, len(names)) // 2)
+                    continue
+                raise
+            ms = (time.perf_counter() - started) * 1000
+            break
+        scores, none_score = {}, None
+        for answer in body["answers"].values():
+            raw = (answer.get("eullm") or {}).get("scores")
+            if raw is None:
+                raise ValueError(
+                    "the decision model does not report verdict scores: "
+                    "ReflexBench ranks with a Jev-Style model"
+                )
+            for name, score in raw.items():
+                if name == NONE:
+                    none_score = score if none_score is None else max(none_score, score)
+                else:
+                    scores[name] = score
+        order = sorted(names, key=lambda n: -scores[n])
+        info = body.get("eullm", {})
+        server = {
+            "evaluated_tokens": info.get("evaluated_tokens"),
+            "prompt_tokens": info.get("prompt_tokens"),
+            "prefix_reused": info.get("prefix_reused"),
+            "request_ms": info.get("request_ms"),
+            "questions": len(questions),
+        }
+        best = scores[order[0]] if order else None
+        return Ranking(order, ms, none_score, best, server)
+
+
+def split(tools, size):
+    """`tools` over as few questions of at most `size` as it takes, as even
+    as they can be: 199 in questions of 99 make 67, 66 and 66, not 99, 99
+    and 1."""
+    n = math.ceil(len(tools) / size)
+    each, extra = divmod(len(tools), n)
+    parts, start = [], 0
+    for i in range(n):
+        end = start + each + (i < extra)
+        parts.append(tools[start:end])
+        start = end
+    return parts

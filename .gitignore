@@ -74,3 +74,6 @@ _progress.json
 # Engine binaries downloaded from GitHub releases
 /eullm
 /eullm-tq
+
+# ReflexBench reports written where it is run (bench/reflexbench/)
+reflexbench-*.json
