@@ -15,6 +15,7 @@ import pytest
 
 from eullm_forge.eval import NormIndex, keyword_coverage
 from eullm_forge.eval.norm_exam import (
+    _deadline_keyword,
     articles_from_records,
     build_exam,
     retrieval_hits,
@@ -99,6 +100,43 @@ def test_a_deadline_question_is_scored_on_the_deadline_in_digits_or_words(exam):
     assert keyword_coverage("Entro 60 giorni.", it.keywords) == 1.0
     assert keyword_coverage("Entro sessanta giorni.", it.keywords) == 1.0
     assert keyword_coverage("Entro trenta giorni.", it.keywords) == 0.0
+
+
+# A deadline of one unit used to be unwinnable: the unit arrives pluralised, so
+# the keyword was "1 anni" and neither "un anno" nor "1 anno" contains it. The
+# correct answer scored zero and an invented deadline scored the same.
+@pytest.mark.parametrize("n,unit,keyword", [
+    (1, "anni", "1 anno|un anno"),
+    (1, "giorni", "1 giorno|un giorno"),
+    (1, "ore", "1 ora|un ora"),
+    (1, "mesi", "1 mese|un mese"),
+    (2, "anni", "2 anni|due anni"),
+])
+def test_a_one_unit_deadline_is_named_the_way_it_is_written(n, unit, keyword):
+    assert _deadline_keyword(n, unit) == keyword
+
+
+@pytest.mark.parametrize("answer", ["entro un anno", "entro 1 anno"])
+def test_a_one_unit_deadline_answer_is_scored(answer):
+    assert keyword_coverage(answer, [_deadline_keyword(1, "anni")]) == 1.0
+
+
+def test_the_elided_feminine_is_scored_too():
+    # "un'ora" normalises to "un ora", which is what the keyword looks for.
+    assert keyword_coverage("entro un'ora dalla segnalazione",
+                            [_deadline_keyword(1, "ore")]) == 1.0
+
+
+def test_a_one_unit_deadline_item_is_winnable_end_to_end():
+    art = rec("codice_consumo", "Art. 7. \n \n (Diritto di recesso). \n \n Il consumatore "
+              "puo' esercitare il diritto di recesso entro un anno dalla data di "
+              "conclusione del contratto." + FILLER)
+    it = next(i for i in build_exam([art], per_code=2, seed=4)
+              if i.metadata["tipo"] == "termine")
+    assert keyword_coverage("Il diritto di recesso si esercita entro un anno dalla "
+                            "conclusione del contratto.", it.keywords) == 1.0
+    assert keyword_coverage("Il diritto di recesso si esercita entro trenta giorni.",
+                            it.keywords) == 0.0
 
 
 RATE_RECORD = rec("codice_civile",
