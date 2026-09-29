@@ -4,7 +4,9 @@
 #   docker build -t eullm-engine --build-arg FEATURES=cuda .
 
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:1.83-bookworm AS builder
+# rust:1, not a pinned minor: Cargo.toml declares edition 2024, which needs
+# cargo 1.85 or newer, and 1.83 could not parse the manifest at all.
+FROM rust:1-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     cmake \

@@ -126,6 +126,26 @@ jobs:
 
           echo "No AI attribution found in the new commits."
 
+      # Nothing in CI builds the container images, so a toolchain too old to
+      # read a Cargo.toml is invisible until someone follows the documented
+      # `docker build` and it dies before compiling anything. Both images
+      # pinned rust 1.83 while both manifests declare edition 2024, which
+      # needs 1.85.
+      - name: The container images can read the manifests they build
+        run: |
+          set -euo pipefail
+          # 1.0-1.84: 1.0, 1.10-1.79, 1.80-1.84. 1.85 and anything newer, and
+          # a bare `rust:1` or `rust:bookworm`, are accepted -- the tag has to
+          # be able to follow whatever the manifests end up declaring.
+          stale='^FROM rust:1\.(0|[1-7][0-9]|8[0-4])'
+          for f in hub/Dockerfile engine/Dockerfile; do
+            if grep -qE "$stale" "$f"; then
+              echo "::error::$f pins a Rust older than 1.85, which cannot parse edition = 2024. Use rust:1-bookworm."
+              exit 1
+            fi
+            echo "$f: $(grep -m1 -E '^FROM rust:' "$f")"
+          done
+
   # ── Detect which components changed ──────────────────────────────────
   changes:
     name: Detect changes

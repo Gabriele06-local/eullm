@@ -3,7 +3,11 @@
 #   docker build -t eullm-hub .
 
 # ── Stage 1: Build ──────────────────────────────────────────────
-FROM rust:1.83-bookworm AS builder
+# rust:1, not a pinned minor: Cargo.toml declares edition 2024, which needs
+# cargo 1.85 or newer, and 1.83 could not parse the manifest at all. Pinning
+# the minor is what let that rot unnoticed -- no CI job builds this image, and
+# the tag below tracks whatever the manifests end up needing.
+FROM rust:1-bookworm AS builder
 
 RUN apt-get update && apt-get install -y \
     cmake \
