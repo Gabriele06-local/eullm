@@ -262,3 +262,76 @@ def test_a_named_article_that_is_not_there_is_said_so(real):
     assert real.missing_article_note("Che cos'è il danno ingiusto?") == ""
     prompt = open_book_prompt("Q?", [], note=note)
     assert prompt.startswith(note) and "nessun testo pertinente" in prompt
+
+
+# --- the rubrica: read in each real format, and weighted in the ranking ------
+
+def test_the_rubrica_is_read_in_every_real_format():
+    from eullm_forge.eval.retrieval import record_heading
+    assert record_heading(REAL[1]) == "Risarcimento per fatto illecito"
+    assert record_heading(REAL[4]) == "Conclusione del procedimento"
+    assert record_heading(REAL[7]) == "Azione di annullamento"
+    assert record_heading(REAL[3]) == ""          # no rubrica, the text starts
+    assert record_heading(REAL[6]) == ""          # the index is not an article
+
+
+def test_a_continuation_chunk_keeps_its_articles_rubrica():
+    index = NormIndex(REAL)
+    assert index._headings[8] == "Azione di annullamento"
+
+
+def _cpc(num, body):
+    return {"code": "codice_procedura_civile", "article_num": "", "chunk_index": 0,
+            "text": f"Art. {num}. \n \n {body}"}
+
+
+# The shape of the failure: the target's rubrica holds the words, its long
+# body does not repeat them; a short neighbour repeats them in its body.
+CITAZIONE = [
+    _cpc(163, "(Contenuto della citazione). \n \n La domanda si propone mediante atto "
+              "scritto notificato al convenuto, con l'indicazione del tribunale, delle "
+              "parti, dell'oggetto, dei fatti e degli elementi di diritto, e con l'invito "
+              "a costituirsi settanta giorni prima dell'udienza." + " Il presidente del "
+              "tribunale designa il giudice istruttore e fissa l'udienza." * 6),
+    _cpc(164, "(Nullita' dell'atto introduttivo). \n \n Se il contenuto della citazione "
+              "e' incompleto, la citazione e' nulla."),
+] + [_cpc(n, f"(Disposizione {n}). \n \n Il giudice provvede con ordinanza sulle istanze "
+                f"delle parti nel caso numero {n}.") for n in range(200, 206)]
+
+
+def test_a_topic_question_in_the_rubricas_words_finds_that_article_first():
+    """Asked by topic, plain BM25 ranked first the article whose body repeats
+    the words, not the one titled with them."""
+    q = ("Nel codice di procedura civile, in materia di «Contenuto della citazione», "
+         "qual è il termine previsto?")
+    plain = NormIndex(CITAZIONE, heading_boost=0).search(q, 1)[0]
+    boosted = NormIndex(CITAZIONE, heading_boost=3).search(q, 1)[0]
+    assert "Art. 164." in plain["text"]
+    assert "Art. 163." in boosted["text"]
+
+
+def test_the_retrieval_check_prints_counts_per_boost_and_no_question(tmp_path, capsys):
+    from eullm_forge.eval import EvalItem, save_eval_set
+
+    norms = tmp_path / "legislazione_cpc.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in CITAZIONE) + "\n")
+    exam = tmp_path / "dev.jsonl"
+    save_eval_set([EvalItem(
+        id="norm-termine_argomento-codice_procedura_civile-163", domain="legal", lang="it",
+        question="Nel codice di procedura civile, in materia di «Contenuto della citazione», "
+                 "qual è il termine previsto?",
+        metadata={"tipo": "termine_argomento", "code": "codice_procedura_civile",
+                  "articolo": "163"})], exam)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_retrieval.py"
+    spec = importlib.util.spec_from_file_location("check_retrieval", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main([str(exam), "--norms", str(norms), "--boost", "0", "3"]) == 0
+    out = capsys.readouterr().out
+    assert "boost=0   termine_argomento  n=1    top1=0.00" in out
+    assert "boost=3   termine_argomento  n=1    top1=1.00" in out
+    assert "Contenuto della citazione" not in out
+
+
+def test_the_default_ranking_is_unchanged_until_a_boost_is_chosen():
+    assert NormIndex(REAL).heading_boost == 0
