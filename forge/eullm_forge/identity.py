@@ -677,10 +677,13 @@ def merge_identity_adapter(
     logger.info("  Adapter: %s", adapter_path)
     logger.info("  Output:  %s", out)
 
-    # `device_map=None` + default dtype keeps this a CPU-only operation: the
-    # merge is a weight-space addition, so it does not need the GPU and can run
-    # on the export box alongside the GGUF conversion.
-    base = AutoModelForCausalLM.from_pretrained(base_model_path)
+    # `device_map=None` keeps this a CPU-only operation: the merge is a
+    # weight-space addition, so it does not need the GPU and can run on the
+    # export box alongside the GGUF conversion. dtype="auto" keeps the weights
+    # in the dtype they are stored in (bf16 for every Qwen3): the default is
+    # float32, which doubles the memory, and an 8B model in float32 is 32 GB —
+    # more than the 30 GB a serial-partition job may have.
+    base = AutoModelForCausalLM.from_pretrained(base_model_path, dtype="auto")
     merged = PeftModel.from_pretrained(base, adapter_path).merge_and_unload()
 
     Path(out).mkdir(parents=True, exist_ok=True)

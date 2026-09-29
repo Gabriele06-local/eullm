@@ -389,3 +389,34 @@ def test_the_trainable_rows_reach_the_output_head_tied_or_not():
     assert trainable_token_target(tiny(False), [30, 31]) == {
         "embed_tokens": [30, 31], "lm_head": [30, 31],
     }
+
+
+def test_the_merge_keeps_the_dtype_the_weights_are_stored_in(tmp_path):
+    """Loaded in the default float32, an 8B model is 32 GB: more than a
+    serial-partition job may have, for a merge that is only an addition."""
+    pytest.importorskip("peft")
+    from pathlib import Path
+
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from safetensors import safe_open
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from eullm_forge.identity import merge_identity_adapter
+
+    base = tmp_path / "base"
+    tok = make_tokenizer(all_text(DOMAIN_PAIRS))
+    tok.save_pretrained(base)
+    model = Qwen3ForCausalLM(Qwen3Config(
+        vocab_size=len(tok), hidden_size=16, intermediate_size=32,
+        num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1,
+        head_dim=8, max_position_embeddings=256,
+    )).to(torch.bfloat16)
+    model.save_pretrained(base)
+    adapter = tmp_path / "adapter"
+    get_peft_model(model, LoraConfig(r=2, target_modules=["q_proj"])).save_pretrained(adapter)
+
+    merged = Path(merge_identity_adapter(str(base), str(adapter), str(tmp_path / "merged")))
+    with safe_open(str(merged / "model.safetensors"), "pt") as f:
+        dtypes = {f.get_tensor(k).dtype for k in f.keys()}
+    assert dtypes == {torch.bfloat16}
