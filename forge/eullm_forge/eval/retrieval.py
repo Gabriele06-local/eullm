@@ -120,6 +120,39 @@ def record_articles(record: dict) -> list[str]:
     return [_article_key(n, sfx) for n, sfx in _HEADER.findall(record.get("text", ""))]
 
 
+_PAREN_TITLE = re.compile(r"\(+\s*([^()]+?)\s*\)+\.?")
+
+
+def record_heading(record: dict) -> str:
+    """The rubrica of the article a record starts, or "".
+
+    The three ways the files write it, right after the header:
+    "Art. 2043. \\n (Risarcimento per fatto illecito).", "Art. Art. 2.
+    ((Conclusione del procedimento))" on the header's own line, and the c.p.a.
+    style "Art. 29 \\n Azione di annullamento \\n 1. L'azione ...". A title
+    starts with a capital: words between double parentheses are also how
+    Normattiva marks text an amendment inserted.
+    """
+    text = record.get("text", "")
+    m = _HEADER.search(text)
+    if not m:
+        return ""
+    rest = text[m.end():m.end() + 300].lstrip(" .\t")
+    lines = [ln.strip() for ln in rest.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    first = lines[0]
+    title = _PAREN_TITLE.match(first)
+    if title:
+        cand = title.group(1).strip()
+    elif not first.startswith("(") and not first[:1].isdigit() and not first.endswith(
+            (".", ";", ":", ",")) and len(first) < 100:
+        cand = first                      # the c.p.a. style: a bare title line
+    else:
+        return ""
+    return cand if cand[:1].isupper() and len(cand) < 120 else ""
+
+
 def named_articles(text: str) -> list[str]:
     """Article numbers a question names, as the records spell them."""
     return [_article_key(num, suffix) for num, suffix in _ARTICLE.findall(normalize_text(text))]
@@ -132,6 +165,14 @@ class NormIndex:
     records: list[dict]
     k1: float = 1.5
     b: float = 0.75
+    # How many times the words of an article's rubrica count, on top of their
+    # place in the text. People ask by topic in the rubrica's words ("il
+    # contenuto della citazione"), and in plain BM25 a long article's body
+    # outweighs its own title. The usual fix is a field weight. 0 — off — is
+    # the default until a setting is chosen on the development sets
+    # (scripts/check_retrieval.py): changing it changes what every model is
+    # shown, so scores from before and after are not comparable.
+    heading_boost: int = 0
     _docs: list[Counter] = field(default_factory=list, repr=False)
     _df: Counter = field(default_factory=Counter, repr=False)
     _avg: float = 0.0
@@ -141,16 +182,27 @@ class NormIndex:
         # own continues the previous record of the same code: articles are
         # written in order, a long one as consecutive chunks.
         self._arts: list[list[str]] = []
+        self._headings: list[str] = []
         last: dict[str, str] = {}
+        last_heading: dict[str, str] = {}
         for r in self.records:
             arts = record_articles(r)
             code = r.get("code") or ""
+            heading = record_heading(r)
             if arts:
                 last[code] = arts[-1]
+                last_heading[code] = heading
             elif r.get("chunk_index", 0) and code in last:
                 arts = [last[code]]
+                heading = last_heading.get(code, "")
             self._arts.append(arts)
-        self._docs = [Counter(tokens(r.get("text", ""))) for r in self.records]
+            self._headings.append(heading)
+        self._docs = []
+        for r, heading in zip(self.records, self._headings):
+            doc = Counter(tokens(r.get("text", "")))
+            for w in tokens(heading) * self.heading_boost:
+                doc[w] += 1
+            self._docs.append(doc)
         for d in self._docs:
             self._df.update(d.keys())
         self._avg = sum(sum(d.values()) for d in self._docs) / max(1, len(self._docs))
