@@ -67,6 +67,68 @@ def test_a_number_used_twice_in_one_code_is_dropped_as_ambiguous():
     assert ("codice_processo_amministrativo", "29") not in arts
 
 
+# The real c.p.a. file, as copied from Leonardo into test_eval_retrieval.py: the
+# first chunk is the table of contents, one line per article, and the articles
+# themselves follow.
+CPA_INDEX = rec("codice_processo_amministrativo",
+                "INDICE GENERALE \n Art. 27 - Contraddittorio \n Art. 28 - Intervento \n "
+                "Art. 29 - Azione di annullamento \n Art. 30 - Azione di condanna \n "
+                "Art. 31 - Silenzio")
+CPA_ART29 = rec("codice_processo_amministrativo",
+                "Art. 29 \n Azione di annullamento \n 1. L'azione di annullamento per "
+                "violazione di legge si propone nel termine di decadenza di sessanta "
+                "giorni. 2. Il ricorso e' proponibile anche in via amministrativa." + FILLER,
+                chunk_index=1)
+
+
+def test_the_index_of_a_code_is_not_its_articles():
+    """Reading the index at face value leaves a stub under every number it
+    lists, and the real article then looks like a second occurrence of a number
+    that is already there -- so it is dropped as ambiguous, and the flagship
+    administrative code contributes nothing to the exam without saying so."""
+    arts = articles_from_records([CPA_INDEX, CPA_ART29])
+    assert [k[1] for k in arts] == ["29"]
+    assert "sessanta giorni" in arts[("codice_processo_amministrativo", "29")].text
+    exam = build_exam([CPA_INDEX, CPA_ART29], per_code=2, seed=1)
+    assert [it for it in exam if it.metadata["code"] == "codice_processo_amministrativo"]
+
+
+def test_a_rubrica_called_indice_is_still_an_article():
+    one = rec("codice_civile",
+              "Art. 5. \n \n (Indice delle materie). \n \n Le materie sono elencate "
+              "nell'atto seguente, che qui riportiamo per esteso." + FILLER)
+    assert ("codice_civile", "5") in articles_from_records([one])
+
+
+def test_an_index_longer_than_one_chunk_is_dropped_whole():
+    """The real index is longer than a chunk and only its first chunk says
+    INDICE; the next one, and one where the index ends and the articles
+    begin, must lose their index lines too."""
+    first = rec("codice_processo_amministrativo",
+                "INDICE GENERALE \n Art. 1 - Effettivita' \n Art. 2 - Giusto processo \n "
+                "Art. 3 - Dovere di motivazione")
+    second = rec("codice_processo_amministrativo",
+                 "Art. 4 - Rinvio esterno \n Art. 5 - Ricorso \n Art. 6 - Consiglio di Stato",
+                 chunk_index=1)
+    mixed = rec("codice_processo_amministrativo",
+                "Art. 7 - Giurisdizione \n Art. 8 - Cognizione incidentale \n "
+                "Art. 1 \n Effettivita' \n 1. La giurisdizione amministrativa assicura una "
+                "tutela piena ed effettiva secondo i principi della Costituzione." + FILLER,
+                chunk_index=2)
+    art5 = rec("codice_processo_amministrativo",
+               "Art. 5 \n Ricorso \n 1. Il ricorso si propone entro sessanta giorni dalla "
+               "notificazione dell'atto." + FILLER, chunk_index=3)
+    tail = rec("codice_processo_amministrativo",
+               "Art. 9 - Competenza \n Art. 10 - Rilievo dell'incompetenza", chunk_index=4)
+    art9 = rec("codice_processo_amministrativo",
+               "Art. 9 \n Competenza \n 1. Il difetto di competenza e' rilevato d'ufficio "
+               "entro trenta giorni." + FILLER, chunk_index=5)
+    arts = articles_from_records([first, second, mixed, art5, tail, art9])
+    assert sorted(k[1] for k in arts) == ["1", "5", "9"]
+    assert "Rinvio esterno" not in arts[("codice_processo_amministrativo", "1")].text
+    assert "sessanta giorni" in arts[("codice_processo_amministrativo", "5")].text
+
+
 def test_the_heading_is_read_in_both_styles():
     arts = articles_from_records(RECORDS)
     assert arts[("codice_civile", "2")].heading == "Termine di prova"

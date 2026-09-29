@@ -128,6 +128,41 @@ def strip_notes(text: str) -> str:
     return _INLINE_MARKERS.sub("", text).strip()
 
 
+# A line of a table of contents: a header and a title, nothing else. Real
+# articles have a body; one shorter than this could never be asked about
+# anyway (`_usable` wants 150 characters).
+_INDEX_LINE_CHARS = 150
+
+
+def _drop_index_lines(text: str, marks: list) -> tuple[str, list]:
+    """The record without the lines of a table of contents, and its headers.
+
+    The legislation files open the administrative codes with one: a heading
+    reading ``INDICE GENERALE`` and a line per article, each a number and a
+    title with no text of its own. Read at face value, every line leaves a stub
+    under its number, and the real article then looks like a second, ambiguous
+    occurrence of a number already there -- so it is dropped, and the code
+    contributes nothing. The index is recognised by its shape, not by its
+    heading, because it is longer than one chunk and only the first one begins
+    with ``INDICE``: in a record with several headers, a stretch from one
+    header to the next that is shorter than `_INDEX_LINE_CHARS` is blanked out
+    (same length, so every position stays where it was) and the headers are
+    read again. A record with a single header is left alone, so a real
+    article whose rubrica is "Indice delle materie" is still an article, and
+    the last two lines of an index, alone in a chunk, are still caught.
+    """
+    if len(marks) < 2:
+        return text, marks
+    bounds = [m.start() for m in marks] + [len(text)]
+    out = text
+    for a, b in zip(bounds, bounds[1:]):
+        if len(" ".join(text[a:b].split())) < _INDEX_LINE_CHARS:
+            out = out[:a] + " " * (b - a) + out[b:]
+    if out == text:
+        return text, marks
+    return out, list(_HEADER.finditer(out))
+
+
 def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]:
     """Split legislation records into whole articles, keyed by (code, number).
 
@@ -144,6 +179,8 @@ def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]
     for r in records:
         code, text = r.get("code") or "", r.get("text", "")
         marks = list(_HEADER.finditer(text))
+        # A table of contents is not the articles (see `_drop_index_lines`).
+        text, marks = _drop_index_lines(text, marks)
         lead = text[: marks[0].start()] if marks else text
         if lead.strip() and code in last and r.get("chunk_index", 0):
             parts[(code, last[code])].append(lead)
