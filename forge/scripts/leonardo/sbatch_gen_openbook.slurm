@@ -14,7 +14,10 @@
 #   OB_LIMIT   pairs attempted (default 4000; ~15% are absent-article pairs)
 #   OB_OUT     output JSONL (default $WORK/eullm_runs/stage3/openbook-pairs.jsonl)
 #   OB_NORMS   legislation files (default $WORK/norms/legislazione_*.chunks.jsonl)
-#   OB_EXAM    held-out exam (default $WORK/eval/norm-exam.jsonl)
+#   OB_EXAM    held-out exam(s) and dev sets, space-separated (default
+#              $WORK/eval/norm-exam.jsonl); all their articles are left out
+#   OB_ARGS    extra generate_openbook_pairs.py options, e.g.
+#              "--per-article 4 --shard 0/3 --seed 1"
 #   OB_REPO    checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-gen-openbook
@@ -61,8 +64,11 @@ echo "[ob] norms  ${#NORMS[@]} files"
 if [ "$EXAM" = "none" ]; then
     EXAM_ARGS=(--no-exam)
 else
-    [ -s "$EXAM" ] || { echo "[ob] no exam at $EXAM (OB_EXAM=none if there is none)" >&2; exit 1; }
-    EXAM_ARGS=(--exclude-exam "$EXAM")
+    for f in $EXAM; do
+        [ -s "$f" ] || { echo "[ob] no exam at $f (OB_EXAM=none if there is none)" >&2; exit 1; }
+    done
+    # shellcheck disable=SC2206
+    EXAM_ARGS=(--exclude-exam $EXAM)
 fi
 mkdir -p "$(dirname "$OUT")"
 
@@ -70,6 +76,7 @@ mkdir -p "$(dirname "$OUT")"
 source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
+# shellcheck disable=SC2086
 python "$REPO/forge/scripts/generate_openbook_pairs.py" \
     --norms "${NORMS[@]}" "${EXAM_ARGS[@]}" --out "$OUT" --model "$MODEL" \
-    --limit "$LIMIT" --stop-after-min 110
+    --limit "$LIMIT" --stop-after-min 110 ${OB_ARGS:-}

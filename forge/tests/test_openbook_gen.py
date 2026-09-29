@@ -163,3 +163,52 @@ def test_the_done_marker_appears_only_when_no_job_is_left(tmp_path):
     assert mod.main(args) == 0
     # submit_when_ready.sh tests with -s: an empty marker counts as missing
     assert out.with_name("o.jsonl.done").stat().st_size > 0
+
+
+# --- more than one question per article, and jobs in parallel ----------------
+
+def test_one_pair_per_article_is_the_original_draw(index):
+    old = make_openbook_jobs(index, 20, seed=5)
+    same = make_openbook_jobs(index, 20, seed=5, per_article=1)
+    assert [j.key for j in old] == [j.key for j in same]
+
+
+def test_several_questions_per_article_have_their_own_keys_and_focus(index):
+    from eullm_forge.datasets.openbook_gen import build_messages
+    jobs = [j for j in make_openbook_jobs(index, 24, seed=1, per_article=3,
+                                          missing_share=0) if j.kind == "grounded"]
+    keys = [j.key for j in jobs]
+    assert len(keys) == len(set(keys)) == 24
+    by_article = {}
+    for j in jobs:
+        by_article.setdefault(j.number, []).append(j)
+    assert all(len(v) == 3 for v in by_article.values())
+    prompts = {build_messages(j)[1]["content"] for j in by_article[next(iter(by_article))]}
+    assert len(prompts) == 3                     # greedy teacher, three different asks
+
+
+def test_shards_split_one_draw_without_overlap(index):
+    whole = make_openbook_jobs(index, 30, seed=2, per_article=2)
+    parts = [make_openbook_jobs(index, 30, seed=2, per_article=2, shard=(k, 3))
+             for k in range(3)]
+    keys = [j.key for p in parts for j in p]
+    assert sorted(keys) == sorted(j.key for j in whole) and len(keys) == len(set(keys))
+
+
+def test_a_second_question_still_counts_as_the_same_trained_article():
+    from eullm_forge.eval.norm_exam import trained_articles
+    assert trained_articles([{"key": "ob-g-codice_civile-2-bis-v2"},
+                             {"key": "ob-g-codice_civile-41"}]) == {
+        ("codice_civile", "2-bis"), ("codice_civile", "41")}
+
+
+def test_the_driver_excludes_every_exam_it_is_given(tmp_path, capsys):
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    a, b = tmp_path / "v3.jsonl", tmp_path / "dev.jsonl"
+    a.write_text(json.dumps(exam_item("codice_civile", "3").to_dict()) + "\n")
+    b.write_text(json.dumps(exam_item("codice_civile", "4").to_dict()) + "\n")
+    assert load_script().main(["--norms", str(norms), "--exclude-exam", str(a), str(b),
+                               "--out", str(tmp_path / "o.jsonl"), "--limit", "10",
+                               "--per-article", "2", "--shard", "1/2", "--dry-run"]) == 0
+    assert "2 exam articles left out" in capsys.readouterr().out

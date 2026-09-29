@@ -52,14 +52,19 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--norms", nargs="+", type=Path, required=True)
-    ap.add_argument("--exclude-exam", type=Path,
-                    help="held-out exam JSONL whose articles must not be trained on")
+    ap.add_argument("--exclude-exam", type=Path, nargs="+", default=[],
+                    help="held-out exam(s) and development sets whose articles "
+                         "must not be trained on")
     ap.add_argument("--no-exam", action="store_true",
                     help="confirm there is no exam to exclude (otherwise refused)")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--limit", type=int, required=True)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--per-article", type=int, default=1,
+                    help="different questions per article (1-4, see FOCUS)")
+    ap.add_argument("--shard", default="0/1",
+                    help="k/n: this job's share of the draw, for n jobs in parallel")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--max-new-tokens", type=int, default=700)
     ap.add_argument("--stop-after-min", type=float, default=0)
@@ -74,8 +79,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     start = time.time()
     index = NormIndex.from_files(args.norms)
-    exclude = exam_exclusions(load_eval_set(args.exclude_exam)) if args.exclude_exam else set()
-    jobs = make_openbook_jobs(index, args.limit, seed=args.seed, exclude=exclude)
+    exclude: set[tuple[str, str]] = set()
+    for path in args.exclude_exam:
+        exclude |= exam_exclusions(load_eval_set(path))
+    k, _, n = args.shard.partition("/")
+    jobs = make_openbook_jobs(index, args.limit, seed=args.seed, exclude=exclude,
+                              per_article=args.per_article, shard=(int(k), int(n or 1)))
     rejected_path = args.out.with_name(args.out.name + ".rejected.jsonl")
     done = done_keys(args.out, rejected_path)
     todo = [j for j in jobs if j.key not in done]

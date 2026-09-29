@@ -66,6 +66,20 @@ NAMING = {
            "codice o la legge ({of}).",
 }
 
+# More than one pair per article, each asking about something else: the
+# teacher is greedy, so the same prompt would give the same pair. Variant 0 is
+# the original prompt (and key), so a run with one pair per article is the
+# run of 2026-09-27 exactly.
+FOCUS = [
+    "",
+    "Questa volta la domanda riguarda un termine, una condizione o un'eccezione "
+    "prevista dall'articolo (se l'articolo non ne prevede, un altro aspetto preciso).",
+    "Questa volta la domanda descrive un caso concreto, come lo racconterebbe un "
+    "cittadino o un'impresa, a cui l'articolo si applica.",
+    "Questa volta la domanda riguarda chi: il soggetto obbligato, competente o "
+    "tutelato secondo l'articolo, e con quali effetti.",
+]
+
 MISSING_QUESTIONS = [
     "Che cosa prevede l'art. {n} {of}?",
     "Mi spieghi cosa stabilisce l'art. {n} {of}?",
@@ -105,8 +119,17 @@ def exam_exclusions(items) -> set[tuple[str, str]]:
 
 def make_openbook_jobs(index: NormIndex, limit: int, *, seed: int = 0,
                        exclude: set[tuple[str, str]] = frozenset(),
-                       missing_share: float = 0.15, max_chars: int = 3000) -> list[OpenBookJob]:
-    """Draw ``limit`` jobs, ``missing_share`` of them about absent articles."""
+                       missing_share: float = 0.15, max_chars: int = 3000,
+                       per_article: int = 1, shard: tuple[int, int] = (0, 1)
+                       ) -> list[OpenBookJob]:
+    """Draw ``limit`` jobs, ``missing_share`` of them about absent articles.
+
+    ``per_article`` asks up to that many different questions of each drawn
+    article (see `FOCUS`); ``shard=(k, n)`` keeps every n-th job from the k-th,
+    so n generation jobs can share one draw without writing the same pair.
+    """
+    if not 1 <= per_article <= len(FOCUS):
+        raise ValueError(f"per_article must be 1..{len(FOCUS)}")
     rng = random.Random(seed)
     arts = [a for (code, num), a in sorted(articles_from_records(index.records).items())
             if code in CODE_LABELS and (code, num) not in exclude
@@ -115,10 +138,15 @@ def make_openbook_jobs(index: NormIndex, limit: int, *, seed: int = 0,
     for a in arts:
         by_code.setdefault(a.code, []).append(a)
     n_missing = int(round(limit * missing_share))
-    grounded = rng.sample(arts, min(limit - n_missing, len(arts)))
-    jobs = [OpenBookJob(key=f"ob-g-{a.code}-{a.number}", kind="grounded", code=a.code,
-                        number=a.number, text=a.text[:max_chars], named=rng.random() < 0.5)
-            for a in grounded]
+    n_articles = -(-(limit - n_missing) // per_article)
+    grounded = rng.sample(arts, min(n_articles, len(arts)))
+    jobs = []
+    for a in grounded:
+        for v in range(per_article):
+            jobs.append(OpenBookJob(
+                key=f"ob-g-{a.code}-{a.number}" + (f"-v{v}" if v else ""), kind="grounded",
+                code=a.code, number=a.number, text=a.text[:max_chars],
+                named=rng.random() < 0.5, meta={"focus": v} if v else {}))
     codes = sorted(by_code)
     for i in range(n_missing):
         code = codes[i % len(codes)]
@@ -130,18 +158,22 @@ def make_openbook_jobs(index: NormIndex, limit: int, *, seed: int = 0,
         jobs.append(OpenBookJob(key=f"ob-m-{code}-{fake}-{i}", kind="missing", code=code,
                                 number=fake, meta={"template": i % len(MISSING_QUESTIONS)}))
     rng.shuffle(jobs)
-    return jobs
+    k, n = shard
+    return [j for i, j in enumerate(jobs) if i % n == k]
 
 
 def build_messages(job: OpenBookJob) -> list[dict[str, str]]:
     """The teacher prompt for a grounded job."""
     of, _ = CODE_LABELS[job.code]
     where = f"art. {job.number} {of}"
+    task = TEACHER_TASK.format(where=where, text=job.text, number=job.number, of=of,
+                               naming=NAMING[job.named].format(of=of))
+    focus = FOCUS[job.meta.get("focus", 0)]
+    if focus:
+        task += "\n\n" + focus
     return [
         {"role": "system", "content": TEACHER_SYSTEM},
-        {"role": "user", "content": TEACHER_TASK.format(
-            where=where, text=job.text, number=job.number, of=of,
-            naming=NAMING[job.named].format(of=of))},
+        {"role": "user", "content": task},
     ]
 
 
