@@ -118,3 +118,11 @@ def test_a_development_round_shares_no_article_with_the_held_out_exam(leonardo):
     assert any(json.loads(x)["metadata"]["tipo"] == "contenuto"
                for x in dev.read_text().splitlines())
     assert not arts(dev) & arts(held)
+
+
+def test_a_round_asks_for_more_gpus_for_a_big_model(leonardo):
+    run, _ = leonardo
+    r, calls = run(ROUND_GPUS="2")
+    assert r.returncode == 0, r.stdout + r.stderr
+    exam = calls.splitlines()[0]
+    assert "--gres=gpu:2" in exam and "--mem=240G" in exam and "--cpus-per-task=16" in exam

@@ -136,3 +136,36 @@ def test_a_hybrid_model_is_asked_with_thinking_off():
 def test_a_template_without_the_switch_is_unchanged():
     prompt = legal_eval.chat_prompt(_tokenizer(PLAIN), "Domanda?")
     assert prompt == "<|im_start|>user\nDomanda?<|im_end|>\n<|im_start|>assistant\n"
+
+
+# --- loading: one GPU, several, or none --------------------------------------
+
+class _Auto:
+    calls: list = []
+
+    @classmethod
+    def from_pretrained(cls, path, **kw):
+        cls.calls.append(kw)
+        return cls()
+
+    def to(self, device):
+        _Auto.calls.append({"to": device})
+        return self
+
+
+def test_a_model_too_big_for_one_gpu_is_spread_over_several():
+    __import__("pytest").importorskip("torch")
+    _Auto.calls = []
+    legal_eval.load_model(_Auto, "m", 2)
+    assert _Auto.calls[0].get("device_map") == "auto"
+    assert not any("to" in c for c in _Auto.calls)
+
+
+def test_one_gpu_or_none_loads_as_before():
+    __import__("pytest").importorskip("torch")
+    _Auto.calls = []
+    legal_eval.load_model(_Auto, "m", 1)
+    assert "device_map" not in _Auto.calls[0] and {"to": "cuda"} in _Auto.calls
+    _Auto.calls = []
+    legal_eval.load_model(_Auto, "m", 0)
+    assert _Auto.calls == [_Auto.calls[0]] and "device_map" not in _Auto.calls[0]

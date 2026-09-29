@@ -28,6 +28,8 @@
 #   ROUND_NORMS   legislation files (default $WORK/norms/legislazione_*.chunks.jsonl)
 #   ROUND_EXCLUDE_EXAM  another exam whose articles are not drawn — set it to the
 #                 held-out exam when drawing a readable development set
+#   ROUND_GPUS    GPUs for the exam job (default 1). 2 or more for models that
+#                 do not fit one 64 GB A100 in bf16 (27B dense, 35B MoE)
 #   ROUND_QUIET   1 (default) grades without printing items; 0 only for a
 #                 development set, never for the held-out exam
 #   ROUND_REPO    checkout to run (default: the one this file was submitted from)
@@ -99,7 +101,10 @@ fi
 mkdir -p "$OUT" logs
 export EXAM_MODELS="$ROUND_MODELS" EXAM_ITEMS="$ITEMS" EXAM_OUT="$OUT"
 export EXAM_NORMS="${NORMS[*]}" EXAM_REPO="$REPO"
-exam=$(sbatch --parsable --export=ALL "$LEO/sbatch_norm_exam.slurm") ||
+GPUS="${ROUND_GPUS:-1}"
+case "$GPUS" in ''|*[!0-9]*) echo "[round] ROUND_GPUS must be a number" >&2; exit 1 ;; esac
+exam=$(sbatch --parsable --export=ALL --gres="gpu:$GPUS" --mem="$((GPUS * 120))G" \
+       --cpus-per-task="$((GPUS * 8))" "$LEO/sbatch_norm_exam.slurm") ||
     { echo "[round] could not submit the exam" >&2; exit 1; }
 exam="${exam%%;*}"
 echo "[round] exam submitted: $exam"

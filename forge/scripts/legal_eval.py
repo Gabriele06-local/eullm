@@ -100,6 +100,21 @@ def append_csv_row(path: Path, row: list[str]) -> None:
         f.flush()
 
 
+def load_model(auto_cls, path: str, n_gpus: int):
+    """The model in bf16: on its one GPU, or spread over several.
+
+    A 27B dense model is 54 GB in bf16 and a 35B MoE 70 GB, more than one
+    64 GB A100 holds once the cache for a batch is added; with more than one
+    GPU visible the layers are split across them (device_map="auto").
+    """
+    import torch
+
+    if n_gpus > 1:
+        return auto_cls.from_pretrained(path, dtype=torch.bfloat16, device_map="auto")
+    model = auto_cls.from_pretrained(path, dtype=torch.bfloat16)
+    return model.to("cuda") if n_gpus == 1 else model
+
+
 def chat_prompt(tok, content: str) -> str:
     """One user turn in the model's chat format, with thinking switched off.
 
@@ -174,9 +189,7 @@ def main() -> int:
               f"{args.k} per question", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     cuda = torch.cuda.is_available()
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
-    if cuda:
-        model.to("cuda")
+    model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count())
     model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
