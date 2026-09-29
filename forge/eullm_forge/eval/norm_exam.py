@@ -119,6 +119,25 @@ def strip_notes(text: str) -> str:
     return _MARKERS.sub("", _NOTES.sub("", text)).strip()
 
 
+_INDEX_HEADING = re.compile(r"^indice\b", re.IGNORECASE)
+
+
+def _is_index(text: str, marks: list) -> bool:
+    """Whether a record is a table of contents rather than any of its articles.
+
+    The legislation files open the administrative codes with one: a heading
+    reading ``INDICE GENERALE`` and then a line per article, each a number and
+    a title with no text of its own. Two conditions, so that a real article
+    whose rubrica happens to be called "Indice delle materie" is not mistaken
+    for one: the heading has to be the first thing in the record, and an index
+    lists several articles by definition.
+    """
+    if len(marks) < 3:
+        return False
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip()), "")
+    return bool(_INDEX_HEADING.match(first))
+
+
 def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]:
     """Split legislation records into whole articles, keyed by (code, number).
 
@@ -135,6 +154,13 @@ def articles_from_records(records: list[dict]) -> dict[tuple[str, str], Article]
     for r in records:
         code, text = r.get("code") or "", r.get("text", "")
         marks = list(_HEADER.finditer(text))
+        if _is_index(text, marks):
+            # The table of contents is not the articles: taking its headers at
+            # face value leaves a stub under every number it lists, and the
+            # real article then looks like a second, ambiguous occurrence of a
+            # number that is already there -- so it is dropped, and a code
+            # whose file opens with an index contributes nothing at all.
+            continue
         lead = text[: marks[0].start()] if marks else text
         if lead.strip() and code in last and r.get("chunk_index", 0):
             parts[(code, last[code])].append(lead)
