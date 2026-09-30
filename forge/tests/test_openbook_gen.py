@@ -212,3 +212,51 @@ def test_the_driver_excludes_every_exam_it_is_given(tmp_path, capsys):
                                "--out", str(tmp_path / "o.jsonl"), "--limit", "10",
                                "--per-article", "2", "--shard", "1/2", "--dry-run"]) == 0
     assert "2 exam articles left out" in capsys.readouterr().out
+
+
+# --- RAFT: the same topic question without its article ------------------------
+
+def _topic_pair(index, number="41", named=False):
+    q = ("Entro quanto agisce il creditore secondo l'art. 41 del codice civile?" if named
+         else "Nel codice civile, entro quanto deve agire il creditore?")
+    pair = parse_openbook(gen(q, ANSWER), grounded_job(named=named, number=number), index)
+    return pair | {"key": f"ob-g-codice_civile-{number}"}
+
+
+def test_an_absent_context_pair_leaves_out_the_article_and_says_so(index):
+    from eullm_forge.datasets.openbook_gen import absent_context_pair
+    pair = _topic_pair(index)
+    assert "entro sessanta giorni" in pair["instruction"]
+    absent = absent_context_pair(pair, index)
+    assert absent["task"] == "openbook_absent" and absent["key"].endswith("-absent")
+    assert "entro sessanta giorni" not in absent["instruction"]
+    assert "Domanda: Nel codice civile, entro quanto deve agire il creditore?" \
+        in absent["instruction"]
+    assert "non trovo la disposizione" in absent["output"]
+    assert "del codice civile" in absent["output"]
+
+
+def test_a_question_that_names_its_article_is_never_turned(index):
+    from eullm_forge.datasets.openbook_gen import absent_context_pair
+    assert absent_context_pair(_topic_pair(index, named=True), index) is None
+
+
+def test_the_raft_script_keeps_every_original_and_adds_the_share(tmp_path, index):
+    import importlib.util
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+    pairs = [_topic_pair(index) | {"key": f"ob-g-codice_civile-41-v{i}" if i else
+                                   "ob-g-codice_civile-41"} for i in range(4)]
+    pairs.append(_topic_pair(index, named=True))
+    src = tmp_path / "v04.jsonl"
+    src.write_text("\n".join(json.dumps(p, ensure_ascii=False) for p in pairs) + "\n")
+    out = tmp_path / "v05.jsonl"
+    spec = importlib.util.spec_from_file_location(
+        "make_raft_absent", Path(__file__).resolve().parents[1] / "scripts" / "make_raft_absent.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main([str(src), "--norms", str(norms), "--share", "0.5", "--out", str(out)]) == 0
+    rows = [json.loads(x) for x in out.read_text().splitlines()]
+    assert len(rows) == 5 + 2
+    assert sum(r["task"] == "openbook_absent" for r in rows) == 2
+    assert mod.main([str(src), "--norms", str(norms), "--out", str(src)]) == 2

@@ -232,3 +232,35 @@ def parse_openbook(raw: str, job: OpenBookJob, index: NormIndex, k: int = 3,
     return {"instruction": open_book_prompt(q, found, note=note), "output": a,
             "task": "openbook_grounded", "source": job.code, "key": job.key,
             "named": job.named}
+
+
+# RAFT's other half (Zhang et al. 2024): examples where the retrieved texts do
+# not hold the answer, so the model learns to say so instead of stretching a
+# neighbouring article to fit. Only for questions asked by topic: a question
+# that names an existing article always gets that article from `by_article`,
+# so for it the situation never arises.
+ABSENT_ANSWER = (
+    "Tra i testi normativi riportati non trovo la disposizione che risponde alla "
+    "domanda: gli articoli {of} che ho davanti riguardano altro. Non posso quindi "
+    "risponderti con certezza. Se mi indichi il numero dell'articolo, o riformuli la "
+    "domanda con altri termini, posso cercare il testo pertinente."
+)
+
+
+def absent_context_pair(pair: dict, index: NormIndex, k: int = 3) -> dict | None:
+    """A grounded by-topic pair with its own article taken out of the context,
+    answered by saying the texts do not contain the answer; None when the
+    pair names its article or is not a grounded one."""
+    key = str(pair.get("key", ""))
+    if pair.get("task") != "openbook_grounded" or pair.get("named", True) \
+            or not key.startswith("ob-g-"):
+        return None
+    code, _, number = key[len("ob-g-"):].partition("-")
+    number = re.sub(r"-v\d+$", "", number)
+    question = pair["instruction"].rsplit("Domanda: ", 1)[-1].strip()
+    found = [r for r in index.search(question, k + 6)
+             if not (r.get("code") == code and number in record_articles(r))][:k]
+    of, _ = CODE_LABELS.get(code, ("della norma", "nella norma"))
+    return {"instruction": open_book_prompt(question, found),
+            "output": ABSENT_ANSWER.format(of=of),
+            "task": "openbook_absent", "source": code, "key": key + "-absent"}
