@@ -627,18 +627,23 @@ fn refuse_control_text(
     state: &str,
     questions: &[Question],
 ) -> Result<(), DecisionError> {
+    // The state first, then question `i` as text `i + 1`.
     let texts = std::iter::once(state.to_string()).chain(questions.iter().map(question_text));
-    for text in texts {
+    for (i, text) in texts.enumerate() {
         if tokenize(&text, AddBos::Never, Specials::Parsed)?
             != tokenize(&text, AddBos::Never, Specials::AsText)?
         {
-            return Err(DecisionError::Invalid(
+            let refused = DecisionError::Invalid(
                 "the request contains the text of one of this model's control tokens (a chat \
                  template's turn marker, for instance), and this model's template cannot be \
                  tokenized with it kept as text: refused rather than let it change where the \
                  prompt's turns begin and end"
                     .to_string(),
-            ));
+            );
+            return Err(match i.checked_sub(1) {
+                Some(question) => DecisionError::Question(question, Box::new(refused)),
+                None => refused,
+            });
         }
     }
     Ok(())
@@ -1008,8 +1013,9 @@ pub struct DecideOptions {
 }
 
 /// Why a decision could not be made. The split is the one the API maps to
-/// status codes: the first two are the request's to fix (400), the last is
-/// ours (500).
+/// error codes: `Invalid` is a request the client must change, `TooLong`
+/// and `OverBudget` one too long to read whole, `Runtime` our failure; and
+/// `Question` says which question it was, when it was one question's.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DecisionError {
     /// Not answerable as asked: a limit, an empty field, a code this model's
@@ -1017,20 +1023,34 @@ pub enum DecisionError {
     Invalid(String),
     /// More KV cells than one request may use.
     TooLong { needed: usize, limit: usize },
+    /// More tokens than the model itself reads: a Jev-Style model's input
+    /// budgets, or the context it was trained on. Refused, never truncated.
+    OverBudget(String),
+    /// The error of the question at this index, in the order the request
+    /// asked them.
+    Question(usize, Box<DecisionError>),
     /// llama.cpp failed.
     Runtime(String),
+}
+
+impl DecisionError {
+    /// This error, as the one of question `index`.
+    fn in_question(index: usize) -> impl FnOnce(Self) -> Self {
+        move |e| Self::Question(index, Box::new(e))
+    }
 }
 
 impl std::fmt::Display for DecisionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Invalid(msg) | Self::Runtime(msg) => f.write_str(msg),
+            Self::Invalid(msg) | Self::OverBudget(msg) | Self::Runtime(msg) => f.write_str(msg),
             Self::TooLong { needed, limit } => write!(
                 f,
                 "this request needs {needed} tokens of context but the decision model allows \
                  {limit} per request (--decision-ctx): shorten the state or the longest \
                  question, or in \"batched\" mode ask fewer questions at once"
             ),
+            Self::Question(_, e) => e.fmt(f),
         }
     }
 }
@@ -1247,19 +1267,23 @@ impl DecisionModel {
                 "\"state\" must not contain NUL characters".to_string(),
             ));
         }
-        for question in questions {
-            question.validate().map_err(DecisionError::Invalid)?;
+        for (i, question) in questions.iter().enumerate() {
+            question
+                .validate()
+                .map_err(DecisionError::Invalid)
+                .map_err(DecisionError::in_question(i))?;
         }
         let code = match &self.readout {
             ModelReadout::Codes(code) => code,
             ModelReadout::Verdict(v) => return self.decide_verdict(v, state, questions, options),
         };
         let mut classes = Vec::with_capacity(questions.len());
-        for question in questions {
+        for (i, question) in questions.iter().enumerate() {
             classes.push(
                 code.codes
                     .classes(question.kind(), question.n_classes())
-                    .map_err(DecisionError::Invalid)?,
+                    .map_err(DecisionError::Invalid)
+                    .map_err(DecisionError::in_question(i))?,
             );
         }
         let (prompts, state_prefix) = self.prompts(code, state, questions)?;
@@ -1354,7 +1378,10 @@ impl DecisionModel {
         let prefix = verdict::prefix(&encode, state)?;
         let rendered = questions
             .iter()
-            .map(|q| verdict::render(v, &encode, &prefix, q))
+            .enumerate()
+            .map(|(i, q)| {
+                verdict::render(v, &encode, &prefix, q).map_err(DecisionError::in_question(i))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let p = prefix.len();
         // The whole state is decoded once. With render v2, whose input is
@@ -1536,7 +1563,7 @@ impl DecisionModel {
             && n_ctx_train > 0
             && longest > n_ctx_train
         {
-            return Err(DecisionError::Invalid(format!(
+            return Err(DecisionError::OverBudget(format!(
                 "a prompt of {longest} tokens is longer than the {n_ctx_train} this model was \
                  trained on: shorten the state"
             )));
@@ -2177,11 +2204,17 @@ mod tests {
             )
             .unwrap()
         );
-        // Without a cut, such a request is refused.
-        assert!(refuse_control_text(&tokenize_with_control, "x<c>", &[]).is_err());
-        assert!(
-            refuse_control_text(&tokenize_with_control, "x", &[Question::noul("<c>?")]).is_err()
-        );
+        // Without a cut, such a request is refused, naming the question
+        // when the text was a question's.
+        assert!(matches!(
+            refuse_control_text(&tokenize_with_control, "x<c>", &[]),
+            Err(DecisionError::Invalid(_))
+        ));
+        let questions = [Question::noul("Fine?"), Question::noul("<c>?")];
+        assert!(matches!(
+            refuse_control_text(&tokenize_with_control, "x", &questions),
+            Err(DecisionError::Question(1, _))
+        ));
         assert!(refuse_control_text(&tokenize_with_control, "x <c", &[]).is_ok());
     }
 

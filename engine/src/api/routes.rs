@@ -276,7 +276,10 @@ pub fn openai_routes() -> Router<S> {
         // System One-compatible decisions (TypeSafe's Jev API shape): typed
         // answers read from a decision model's logits. Under /v1 because
         // that is where System One clients look for it.
-        .route("/systemone", post(super::systemone::systemone))
+        .route(
+            "/systemone",
+            post(super::systemone::systemone).fallback(super::systemone::method_not_allowed),
+        )
 }
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────

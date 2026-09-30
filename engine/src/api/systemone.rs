@@ -34,6 +34,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::{SerializeMap, SerializeSeq};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -48,9 +49,118 @@ use crate::inference::decision::{
 
 type S = Arc<AppState>;
 
+/// Where the endpoint is served: the middleware answers requests to it with
+/// [`ApiError`]'s body.
+pub(crate) const PATH: &str = "/v1/systemone";
+
 /// Highest `temperature` accepted. Temperature scaling fitted on real data
 /// lands around 0.5–3; anything past this is a mistake, not a calibration.
 const MAX_TEMPERATURE: f64 = 100.0;
+
+/// A `/v1/systemone` error as the System One API's clients and jev-style's
+/// read it: an HTTP status, and the body
+/// `{"error": {"code": …, "message": …, "question": …}}`, `question` naming
+/// the question at fault when one is. The bare `{"error": "<message>"}` of
+/// EuLLM's other endpoints made jev-style's MCP server and guard fail on
+/// `err.get(…)`, so a client saw "Error executing tool" instead of what was
+/// wrong.
+///
+/// The codes and their statuses are jev-style's where it has one:
+/// `invalid_json`, `invalid_request`, `invalid_question` and
+/// `input_budget_exceeded` with 422 — the status the System One API gives a
+/// request that fails validation — `unauthorized` (401), `not_found` (404),
+/// `method_not_allowed` (405) and `internal_error` (500). The rest are for
+/// what jev-style's server never refuses: `model_not_loaded` (400),
+/// `forbidden` (403), `payload_too_large` (413), `unsupported_media_type`
+/// (415) and `too_many_requests` (429).
+#[derive(Debug)]
+pub(crate) struct ApiError {
+    status: StatusCode,
+    code: &'static str,
+    message: String,
+    question: Option<String>,
+}
+
+impl ApiError {
+    pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            code,
+            message: message.into(),
+            question: None,
+        }
+    }
+
+    /// The request as a whole fails validation.
+    fn invalid_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
+    }
+
+    /// Question `id` fails validation.
+    fn invalid_question(id: &str, message: impl Into<String>) -> Self {
+        Self::invalid_request(message).in_question(id)
+    }
+
+    /// This error as question `id`'s: named in `question`, and an invalid
+    /// request narrowed to an invalid question.
+    fn in_question(mut self, id: &str) -> Self {
+        if self.code == "invalid_request" {
+            self.code = "invalid_question";
+        }
+        self.question = Some(id.to_string());
+        self
+    }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
+    }
+
+    fn body(&self) -> Value {
+        let mut error = json!({ "code": self.code, "message": self.message });
+        if let Some(question) = &self.question {
+            error["question"] = json!(question);
+        }
+        json!({ "error": error })
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.status, Json(self.body())).into_response()
+    }
+}
+
+/// A body axum could not read as a request: not JSON is `invalid_json`, the
+/// wrong shape an `invalid_request`, both 422 as for any other validation
+/// failure.
+fn rejection(e: JsonRejection) -> ApiError {
+    let message = e.body_text();
+    match e {
+        JsonRejection::JsonSyntaxError(_) => {
+            ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_json", message)
+        }
+        JsonRejection::JsonDataError(_) => ApiError::invalid_request(message),
+        JsonRejection::MissingJsonContentType(_) => ApiError::new(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "unsupported_media_type",
+            message,
+        ),
+        other if other.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", message)
+        }
+        other => ApiError::new(other.status(), "invalid_request", message),
+    }
+}
+
+/// Any method but `POST` on the endpoint: the 405 axum answers, with the
+/// body the endpoint's clients read.
+pub(super) async fn method_not_allowed() -> ApiError {
+    ApiError::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "method_not_allowed",
+        format!("{PATH} accepts POST only"),
+    )
+}
 
 /// A JSON object kept in its original key order. `serde_json`'s own map
 /// sorts its keys — this crate does not enable `preserve_order`, which would
@@ -300,21 +410,56 @@ pub(crate) struct SystemOneRequest {
     model: Option<String>,
     #[serde(default)]
     state: Option<OrderedJson>,
-    questions: OrderedMap<QuestionSpec>,
+    /// Each question as it was written, read by [`QuestionSpec::read`]:
+    /// whatever is wrong inside one is then that question's error, named
+    /// in the response's `question`.
+    questions: OrderedMap<OrderedJson>,
     #[serde(default)]
     keep_alive: Option<Value>,
     #[serde(default)]
     eullm: Option<RequestOptions>,
 }
 
-#[derive(Debug, Deserialize)]
+/// One question as the request wrote it.
+#[derive(Debug)]
 struct QuestionSpec {
-    #[serde(rename = "type")]
     kind: String,
-    #[serde(default)]
-    instructions: Option<String>,
-    #[serde(default)]
+    instructions: Option<OrderedJson>,
     criteria: Option<OrderedJson>,
+}
+
+impl QuestionSpec {
+    /// The fields of a question object. Any other key is ignored, as the
+    /// System One API and jev-style ignore it.
+    fn read(question: OrderedJson) -> Result<Self, String> {
+        let OrderedJson::Object(fields) = question else {
+            return Err("a question must be an object with \"type\" and \"instructions\"".into());
+        };
+        let (mut kind, mut instructions, mut criteria) = (None, None, None);
+        for (key, value) in fields.0 {
+            let field = match key.as_str() {
+                "type" => &mut kind,
+                "instructions" => &mut instructions,
+                "criteria" => &mut criteria,
+                _ => continue,
+            };
+            if field.replace(value).is_some() {
+                return Err(format!("duplicate field \"{key}\""));
+            }
+        }
+        let kind = match kind {
+            Some(OrderedJson::String(kind)) => kind,
+            None | Some(OrderedJson::Null) => {
+                return Err("\"type\" is required: \"noul\", \"choice\" or \"score\"".into());
+            }
+            Some(_) => return Err("\"type\" must be \"noul\", \"choice\" or \"score\"".into()),
+        };
+        Ok(Self {
+            kind,
+            instructions,
+            criteria,
+        })
+    }
 }
 
 /// The request's `eullm` object. Unknown keys are refused, so a typo in an
@@ -369,42 +514,46 @@ struct ParsedRequest {
     keep_alive: KeepAlive,
 }
 
-fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
+fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
     let model = request
         .model
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty() && !m.to_ascii_lowercase().starts_with("jev"));
 
     let (state, state_line) = match request.state {
-        None => return Err("\"state\" is required".to_string()),
+        None => return Err(ApiError::invalid_request("\"state\" is required")),
         Some(OrderedJson::String(s)) => (s.clone(), s),
         Some(other) => (
-            serde_json::to_string_pretty(&other).map_err(|e| e.to_string())?,
+            serde_json::to_string_pretty(&other).map_err(|e| ApiError::internal(e.to_string()))?,
             other.python_json(),
         ),
     };
 
     let specs = request.questions.0;
     if specs.is_empty() {
-        return Err("\"questions\" must contain at least one question".to_string());
+        return Err(ApiError::invalid_request(
+            "\"questions\" must contain at least one question",
+        ));
     }
     if specs.len() > decision::MAX_QUESTIONS {
-        return Err(format!(
+        return Err(ApiError::invalid_request(format!(
             "at most {} questions per request, got {}",
             decision::MAX_QUESTIONS,
             specs.len()
-        ));
+        )));
     }
     let mut ids = Vec::with_capacity(specs.len());
     let mut questions = Vec::with_capacity(specs.len());
     for (id, spec) in specs {
         if id.trim().is_empty() {
-            return Err("question ids must not be empty".to_string());
+            return Err(ApiError::invalid_request("question ids must not be empty"));
         }
         if ids.contains(&id) {
-            return Err(format!("duplicate question id \"{id}\""));
+            return Err(ApiError::invalid_question(&id, "duplicate question id"));
         }
-        let question = parse_question(spec).map_err(|e| format!("question \"{id}\": {e}"))?;
+        let question = QuestionSpec::read(spec)
+            .and_then(parse_question)
+            .map_err(|e| ApiError::invalid_question(&id, e))?;
         ids.push(id);
         questions.push(question);
     }
@@ -414,25 +563,25 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
         None | Some("none") => Calibration::None,
         Some("content_free") => Calibration::ContentFree,
         Some(other) => {
-            return Err(format!(
+            return Err(ApiError::invalid_request(format!(
                 "unknown calibration \"{other}\": expected \"none\" or \"content_free\""
-            ));
+            )));
         }
     };
     let temperature = options.temperature;
     if temperature.is_some_and(|t| !(t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE)) {
-        return Err(format!(
+        return Err(ApiError::invalid_request(format!(
             "\"temperature\" must be greater than 0 and at most {MAX_TEMPERATURE}"
-        ));
+        )));
     }
     let mode = match options.mode.as_deref() {
         None | Some("shared_prefix") => EvalMode::SharedPrefix,
         Some("batched") => EvalMode::Batched,
         Some("separate") => EvalMode::Separate,
         Some(other) => {
-            return Err(format!(
+            return Err(ApiError::invalid_request(format!(
                 "unknown mode \"{other}\": expected \"shared_prefix\", \"batched\" or \"separate\""
-            ));
+            )));
         }
     };
 
@@ -450,9 +599,11 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, String> {
 }
 
 fn parse_question(spec: QuestionSpec) -> Result<Question, String> {
-    let instructions = spec
-        .instructions
-        .ok_or_else(|| "\"instructions\" is required".to_string())?;
+    let instructions = match spec.instructions {
+        None | Some(OrderedJson::Null) => return Err("\"instructions\" is required".to_string()),
+        Some(OrderedJson::String(instructions)) => instructions,
+        Some(_) => return Err("\"instructions\" must be a string".to_string()),
+    };
     let question = match spec.kind.as_str() {
         "noul" => {
             let (mut true_means, mut false_means) = (String::new(), String::new());
@@ -768,16 +919,27 @@ fn build_answers(
     (OrderedMap(answers), records)
 }
 
-fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<Value>) {
-    (status, Json(json!({ "error": message.into() })))
-}
-
-fn decision_error(e: DecisionError) -> (StatusCode, Json<Value>) {
-    let status = match e {
-        DecisionError::Invalid(_) | DecisionError::TooLong { .. } => StatusCode::BAD_REQUEST,
-        DecisionError::Runtime(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    error(status, e.to_string())
+/// Why the engine could not decide, as the API reports it; `ids` names the
+/// question when the error was one question's. Input over a budget is
+/// `input_budget_exceeded`, as jev-style reports it: the request was not
+/// cut to fit, and says what to shorten.
+fn decision_error(e: DecisionError, ids: &[String]) -> ApiError {
+    match e {
+        DecisionError::Question(i, e) => {
+            let error = decision_error(*e, ids);
+            match ids.get(i) {
+                Some(id) => error.in_question(id),
+                None => error,
+            }
+        }
+        DecisionError::Invalid(message) => ApiError::invalid_request(message),
+        e @ (DecisionError::TooLong { .. } | DecisionError::OverBudget(_)) => ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "input_budget_exceeded",
+            e.to_string(),
+        ),
+        DecisionError::Runtime(message) => ApiError::internal(message),
+    }
 }
 
 fn sha256_hex(text: &str) -> String {
@@ -794,10 +956,10 @@ pub(super) async fn systemone(
     // identity when no keys are configured.
     axum::Extension(identity): axum::Extension<super::Identity>,
     body: Result<Json<SystemOneRequest>, JsonRejection>,
-) -> Result<Json<SystemOneResponse>, (StatusCode, Json<Value>)> {
+) -> Result<Json<SystemOneResponse>, ApiError> {
     let started = Instant::now();
-    let Json(request) = body.map_err(|e| error(e.status(), e.body_text()))?;
-    let parsed = parse_request(request).map_err(|e| error(StatusCode::BAD_REQUEST, e))?;
+    let Json(request) = body.map_err(rejection)?;
+    let parsed = parse_request(request)?;
 
     let (model_name, model) = match parsed.model.as_deref() {
         Some(name) => {
@@ -805,18 +967,22 @@ pub(super) async fn systemone(
                 .ensure_decision_model(name)
                 .await
                 .map_err(|e| match e {
-                    super::ModelError::NotFound(msg) => error(StatusCode::NOT_FOUND, msg),
-                    super::ModelError::LoadFailed(msg) => {
-                        error(StatusCode::INTERNAL_SERVER_ERROR, msg)
+                    super::ModelError::NotFound(msg) => {
+                        ApiError::new(StatusCode::NOT_FOUND, "not_found", msg)
                     }
+                    super::ModelError::LoadFailed(msg) => ApiError::internal(msg),
                 })?;
             (name.to_string(), model)
         }
         None => {
             let slot = state.decision.read().await;
             let Some(slot) = slot.as_ref() else {
-                return Err(error(
+                // Not a validation failure: the request is well formed and
+                // names, or implies, the decision model the server was
+                // meant to have — 400, which a System One SDK does not retry.
+                return Err(ApiError::new(
                     StatusCode::BAD_REQUEST,
+                    "model_not_loaded",
                     "no decision model is loaded: start the server with --decision-model, \
                      or name a model in \"model\"",
                 ));
@@ -844,13 +1010,8 @@ pub(super) async fn systemone(
         (parsed, decision)
     })
     .await
-    .map_err(|e| {
-        error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Decision task failed: {e}"),
-        )
-    })?;
-    let decision = decision.map_err(decision_error)?;
+    .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))?;
+    let decision = decision.map_err(|e| decision_error(e, &parsed.ids))?;
 
     let (answers, records) = build_answers(&parsed, &decision, readout, temperature);
     let prior_tokens = decision
@@ -913,9 +1074,11 @@ mod tests {
     use super::*;
     use crate::inference::decision::QuestionOutcome;
 
-    fn parse(body: Value) -> Result<ParsedRequest, String> {
-        let request: SystemOneRequest =
-            serde_json::from_value(body).map_err(|e| format!("deserialize: {e}"))?;
+    /// A request as the handler reads it: a body that does not deserialize
+    /// is the `invalid_request` axum's rejection becomes.
+    fn parse(body: Value) -> Result<ParsedRequest, ApiError> {
+        let request: SystemOneRequest = serde_json::from_value(body)
+            .map_err(|e| ApiError::invalid_request(format!("deserialize: {e}")))?;
         parse_request(request)
     }
 
@@ -1097,67 +1260,181 @@ mod tests {
                 r#"{{ "state": "x", "questions": {{ "q": {{ "type": "noul", "instructions": "?", "criteria": {bad} }} }} }}"#
             );
             let err = parse_request(serde_json::from_str(&text).unwrap()).unwrap_err();
-            assert!(err.contains("criteria"), "{err}");
+            assert!(err.message.contains("criteria"), "{err:?}");
         }
     }
 
     #[test]
     fn client_mistakes_are_named() {
+        // (body, code, the question named, what the message says)
+        let q = Some("q");
         let cases = [
             (
                 json!({"questions": {"q": {"type": "noul", "instructions": "?"}}}),
+                "invalid_request",
+                None,
                 "\"state\" is required",
             ),
             (
                 json!({"state": "x", "questions": {}}),
+                "invalid_request",
+                None,
                 "at least one question",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "maybe", "instructions": "?"}}}),
+                "invalid_question",
+                q,
                 "unknown question type",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "noul"}}}),
+                "invalid_question",
+                q,
                 "\"instructions\" is required",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "choice", "instructions": "?", "criteria": ["a", "b"]}}}),
+                "invalid_question",
+                q,
                 "needs \"criteria\": an object",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "score", "instructions": "?", "criteria": {"a": "b"}}}}),
+                "invalid_question",
+                q,
                 "needs \"criteria\": an array",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "score", "instructions": "?", "criteria": ["only one"]}}}),
+                "invalid_question",
+                q,
                 "2 to 10 levels",
             ),
             (
+                json!({"state": "x", "questions": {"q": "Is it urgent?"}}),
+                "invalid_question",
+                q,
+                "must be an object",
+            ),
+            (
+                json!({"state": "x", "questions": {"q": {"type": 1, "instructions": "?"}}}),
+                "invalid_question",
+                q,
+                "\"type\" must be",
+            ),
+            (
                 json!({"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}, "eullm": {"calibration": "platt"}}),
+                "invalid_request",
+                None,
                 "unknown calibration",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}, "eullm": {"mode": "fast"}}),
+                "invalid_request",
+                None,
                 "unknown mode",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}, "eullm": {"temperature": 0}}),
+                "invalid_request",
+                None,
                 "\"temperature\"",
             ),
             (
                 json!({"state": "x", "questions": {"q": {"type": "noul", "instructions": "?"}}, "eullm": {"temprature": 2}}),
+                "invalid_request",
+                None,
                 "unknown field",
             ),
         ];
-        for (body, expected) in cases {
+        for (body, code, question, expected) in cases {
             let err = parse(body.clone()).unwrap_err();
-            assert!(err.contains(expected), "{body}: {err}");
+            assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+            assert_eq!(
+                (err.code, err.question.as_deref()),
+                (code, question),
+                "{body}"
+            );
+            assert!(err.message.contains(expected), "{body}: {err:?}");
         }
-        // The question's id leads its own error, so a long request says
-        // which question is wrong.
+        // The question at fault is named beside the message, not inside it,
+        // where jev-style's clients would repeat it.
         let err =
             parse(json!({"state": "x", "questions": {"routing": {"type": "noul"}}})).unwrap_err();
-        assert!(err.starts_with("question \"routing\""), "{err}");
+        assert_eq!(err.question.as_deref(), Some("routing"));
+        assert!(!err.message.contains("routing"), "{err:?}");
+    }
+
+    /// The error body jev-style's MCP server, guard and client read, key
+    /// for key.
+    #[test]
+    fn errors_have_the_body_system_one_clients_parse() {
+        let err = ApiError::invalid_question("team", "a choice question needs 2 to 255 options");
+        assert_eq!(
+            err.body(),
+            json!({"error": {"code": "invalid_question", "question": "team",
+                             "message": "a choice question needs 2 to 255 options"}})
+        );
+        // No question: no `question` key at all, not a null one.
+        let err = ApiError::invalid_request("\"state\" is required");
+        assert!(err.body()["error"].get("question").is_none());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn engine_errors_become_the_codes_jev_style_uses() {
+        let ids = ["urgent".to_string(), "team".to_string()];
+        let over = DecisionError::Question(
+            1,
+            Box::new(DecisionError::OverBudget(
+                "question, options and readout need 2100 tokens; the model allows 2048 — \
+                 nothing was truncated"
+                    .into(),
+            )),
+        );
+        let err = decision_error(over, &ids);
+        assert_eq!(
+            (err.status, err.code, err.question.as_deref()),
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "input_budget_exceeded",
+                Some("team")
+            )
+        );
+        // ReflexBench retries a question that did not fit on this phrase.
+        assert!(err.message.contains("nothing was truncated"), "{err:?}");
+
+        let too_long = DecisionError::TooLong {
+            needed: 9000,
+            limit: 8192,
+        };
+        let err = decision_error(too_long, &ids);
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("input_budget_exceeded", None)
+        );
+        assert!(err.message.contains("--decision-ctx"), "{err:?}");
+
+        let err = decision_error(
+            DecisionError::Question(0, Box::new(DecisionError::Invalid("no code".into()))),
+            &ids,
+        );
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("invalid_question", Some("urgent"))
+        );
+        let err = decision_error(DecisionError::Invalid("bad state".into()), &ids);
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("invalid_request", None)
+        );
+        let err = decision_error(DecisionError::Runtime("decode failed".into()), &ids);
+        assert_eq!(
+            (err.status, err.code),
+            (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+        );
     }
 
     #[test]
@@ -1171,7 +1448,8 @@ mod tests {
             })
             .collect();
         let err = parse(json!({"state": "x", "questions": questions})).unwrap_err();
-        assert!(err.contains("at most 64"), "{err}");
+        assert_eq!(err.code, "invalid_request");
+        assert!(err.message.contains("at most 64"), "{err:?}");
     }
 
     #[test]
@@ -1180,11 +1458,12 @@ mod tests {
             "q": { "type": "noul", "instructions": "One?" },
             "q": { "type": "noul", "instructions": "Two?" } } }"#;
         let request: SystemOneRequest = serde_json::from_str(text).unwrap();
-        assert!(
-            parse_request(request)
-                .unwrap_err()
-                .contains("duplicate question id")
+        let err = parse_request(request).unwrap_err();
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("invalid_question", Some("q"))
         );
+        assert!(err.message.contains("duplicate question id"), "{err:?}");
     }
 
     /// A decision whose log-probabilities put `p` (renormalized) on the

@@ -1943,11 +1943,16 @@ async fn enforce_ip_allowlist(
         next.run(req).await
     } else {
         tracing::warn!("Rejected request from disallowed IP {}", addr.ip());
-        (
-            axum::http::StatusCode::FORBIDDEN,
-            "source IP not in the configured allowlist",
-        )
-            .into_response()
+        let message = "source IP not in the configured allowlist";
+        if req.uri().path() == systemone::PATH {
+            return systemone::ApiError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                "forbidden",
+                message,
+            )
+            .into_response();
+        }
+        (axum::http::StatusCode::FORBIDDEN, message).into_response()
     }
 }
 
@@ -1970,6 +1975,9 @@ async fn enforce_auth(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let presented = extract_token(&req, allow_query_token);
+    // `/v1/systemone` refusals carry the body its clients parse (see
+    // `systemone::ApiError`); every other endpoint keeps the one it had.
+    let structured = req.uri().path() == systemone::PATH;
     match state.api_keys.authenticate(presented.as_deref()) {
         Ok(identity) => {
             req.extensions_mut().insert(identity);
@@ -1977,27 +1985,32 @@ async fn enforce_auth(
         }
         Err(auth::AuthError::Missing) => unauthorized(
             "missing API key — send it as `Authorization: Bearer <key>` or `X-Api-Key: <key>`",
+            structured,
         ),
         Err(auth::AuthError::Invalid) => {
             // No key id to name: logging the presented token would write a
             // credential into the log file, and it may be a valid key for a
             // *different* deployment.
             tracing::warn!("Rejected request with an invalid API key");
-            unauthorized("invalid API key")
+            unauthorized("invalid API key", structured)
         }
         Err(auth::AuthError::RateLimited {
             key_id,
             retry_after_s,
         }) => {
             tracing::warn!("Key '{key_id}' is over its per-minute quota");
+            let message =
+                format!("rate limit exceeded for key '{key_id}' — retry in {retry_after_s}s");
+            let retry_after = [(axum::http::header::RETRY_AFTER, retry_after_s.to_string())];
+            if structured {
+                let status = axum::http::StatusCode::TOO_MANY_REQUESTS;
+                let error = systemone::ApiError::new(status, "too_many_requests", message);
+                return (retry_after, error).into_response();
+            }
             (
                 axum::http::StatusCode::TOO_MANY_REQUESTS,
-                [(axum::http::header::RETRY_AFTER, retry_after_s.to_string())],
-                axum::Json(serde_json::json!({
-                    "error": format!(
-                        "rate limit exceeded for key '{key_id}' — retry in {retry_after_s}s"
-                    )
-                })),
+                retry_after,
+                axum::Json(serde_json::json!({ "error": message })),
             )
                 .into_response()
         }
@@ -2005,14 +2018,24 @@ async fn enforce_auth(
 }
 
 /// 401 with the `WWW-Authenticate` challenge, so a client library can tell an
-/// authentication failure from a generic refusal.
-fn unauthorized(message: &str) -> axum::response::Response {
+/// authentication failure from a generic refusal. `structured`: the body of
+/// a `/v1/systemone` error.
+fn unauthorized(message: &str, structured: bool) -> axum::response::Response {
+    let challenge = [(
+        axum::http::header::WWW_AUTHENTICATE,
+        "Bearer realm=\"eullm\"",
+    )];
+    if structured {
+        let status = axum::http::StatusCode::UNAUTHORIZED;
+        return (
+            challenge,
+            systemone::ApiError::new(status, "unauthorized", message),
+        )
+            .into_response();
+    }
     (
         axum::http::StatusCode::UNAUTHORIZED,
-        [(
-            axum::http::header::WWW_AUTHENTICATE,
-            "Bearer realm=\"eullm\"",
-        )],
+        challenge,
         axum::Json(serde_json::json!({ "error": message })),
     )
         .into_response()
@@ -2084,12 +2107,19 @@ async fn enforce_origin(
             method,
             crate::audit::sanitize_for_log(origin)
         );
+        let message = "request origin is not allowed — set EULLM_ALLOWED_ORIGINS \
+                       if this frontend should be permitted";
+        if req.uri().path() == systemone::PATH {
+            return systemone::ApiError::new(
+                axum::http::StatusCode::FORBIDDEN,
+                "forbidden",
+                message,
+            )
+            .into_response();
+        }
         return (
             axum::http::StatusCode::FORBIDDEN,
-            axum::Json(serde_json::json!({
-                "error": "request origin is not allowed — set EULLM_ALLOWED_ORIGINS \
-                          if this frontend should be permitted"
-            })),
+            axum::Json(serde_json::json!({ "error": message })),
         )
             .into_response();
     }
@@ -2256,6 +2286,16 @@ mod http_tests {
         // A path that does not exist, so the perimeter types fall back to
         // their defaults instead of reading a developer's real `.env`.
         let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        spawn_with_keys(
+            store,
+            auth::ApiKeys::load(absent).expect("no keys configured"),
+        )
+        .await
+    }
+
+    /// `spawn`, with API keys configured.
+    async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
         let state = Arc::new(AppState {
             backend: test_backend(),
             fallback_mmproj: None,
@@ -2286,7 +2326,7 @@ mod http_tests {
             api_port: 0,
             store,
             ip_allowlist: ip_allowlist::IpAllowlist::load(absent),
-            api_keys: Arc::new(auth::ApiKeys::load(absent).expect("no keys configured")),
+            api_keys: Arc::new(api_keys),
             allowed_origins: origin::AllowedOrigins::load(absent),
             web_policy: crate::tools::guard::WebPolicy::from_env(),
             allow_model_paths: false,
@@ -2521,9 +2561,19 @@ mod http_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    /// `/v1/systemone` on a server with no decision model: the three ways a
+    /// The `error` object of a `/v1/systemone` error body: the shape its
+    /// clients parse, `{"error": {"code", "message", "question"?}}`.
+    fn systemone_error(body: &str) -> serde_json::Value {
+        let body: serde_json::Value = serde_json::from_str(body).expect("a JSON body");
+        let error = body["error"].clone();
+        assert!(error["code"].is_string(), "{body}");
+        assert!(error["message"].is_string(), "{body}");
+        error
+    }
+
+    /// `/v1/systemone` on a server with no decision model: the ways a
     /// request can fail before any model runs must each read as the
-    /// client's mistake it is, with a JSON body naming it.
+    /// client's mistake it is, with the body System One clients parse.
     #[tokio::test]
     async fn systemone_refuses_what_it_cannot_answer_as_client_errors() {
         let tmp = std::env::temp_dir().join(format!("eullm-systemone-{}", std::process::id()));
@@ -2540,6 +2590,8 @@ mod http_tests {
         )
         .await;
         assert_eq!(status, 400, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "model_not_loaded");
         assert!(body.contains("--decision-model"), "{body}");
 
         let (status, body) = post_json(
@@ -2550,6 +2602,7 @@ mod http_tests {
         )
         .await;
         assert_eq!(status, 404, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "not_found");
         assert!(body.contains("this-model-does-not-exist"), "{body}");
 
         // Malformed: refused before any model resolution, not with a 500.
@@ -2558,8 +2611,75 @@ mod http_tests {
             serde_json::json!({ "model": "a-pulled-model", "state": "x", "questions": {} }),
         )
         .await;
-        assert_eq!(status, 400, "{body}");
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "invalid_request");
         assert!(body.contains("at least one question"), "{body}");
+
+        // One question wrong: named in `question`.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "x", "questions": {
+                "fine": { "type": "noul", "instructions": "Urgent?" },
+                "team": { "type": "choice", "instructions": "Which?", "criteria": { "a": null } }
+            } }),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "invalid_question");
+        assert_eq!(error["question"], "team");
+
+        let client = reqwest::Client::new();
+        let r = client
+            .post(&url)
+            .header("content-type", "application/json")
+            .body("{\"state\": ")
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 422);
+        assert_eq!(
+            systemone_error(&r.text().await.unwrap())["code"],
+            "invalid_json"
+        );
+
+        let r = client.get(&url).send().await.expect("request");
+        assert_eq!(r.status(), 405);
+        assert_eq!(
+            systemone_error(&r.text().await.unwrap())["code"],
+            "method_not_allowed"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The middleware's refusals: in the structured shape on
+    /// `/v1/systemone`, unchanged everywhere else, where Ollama and OpenAI
+    /// clients read `{"error": "<message>"}`.
+    #[tokio::test]
+    async fn systemone_refusals_from_the_middleware_are_structured_there_only() {
+        let tmp = std::env::temp_dir().join(format!("eullm-systemone-auth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let keys = auth::ApiKeys::from_spec("ci:0123456789abcdef01").expect("keys");
+        let base = spawn_with_keys(ModelStore::at(tmp.clone()), keys).await;
+
+        let (status, body) = post_json(
+            &format!("{base}/v1/systemone"),
+            serde_json::json!({ "state": "x", "questions": {} }),
+        )
+        .await;
+        assert_eq!(status, 401, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "unauthorized");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("missing API key")
+        );
+
+        let (status, body) = get_json(&format!("{base}/api/tags")).await;
+        assert_eq!(status, 401);
+        assert!(body["error"].is_string(), "{body}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

@@ -340,7 +340,7 @@ where
                 suffix.extend(&newline);
             }
             if suffix.len() > HEAD_MAX_V1 {
-                return Err(DecisionError::Invalid(format!(
+                return Err(DecisionError::OverBudget(format!(
                     "question, options and readout need {} tokens; {} allows {HEAD_MAX_V1} — \
                      nothing was truncated: shorten the question or the options, or split the \
                      options over several questions",
@@ -395,7 +395,7 @@ where
     };
     let total = p + ids.len();
     if total > MAX_LEN {
-        return Err(DecisionError::Invalid(format!(
+        return Err(DecisionError::OverBudget(format!(
             "the input needs {total} tokens (state {p} + question and options {}); {} allows \
              {MAX_LEN} — nothing was truncated: shorten the state, the question or the options",
             ids.len(),
@@ -548,9 +548,11 @@ mod tests {
         };
         let small = prefix(&encode, "s").unwrap();
         let err = render(&model(Render::V1), &encode, &small, &q).unwrap_err();
+        assert!(matches!(err, DecisionError::OverBudget(_)), "{err:?}");
         assert!(err.to_string().contains("nothing was truncated"), "{err}");
         let huge = prefix(&encode, &"s".repeat(MAX_LEN)).unwrap();
         let err = render(&model(Render::V2), &encode, &huge, &choice()).unwrap_err();
+        assert!(matches!(err, DecisionError::OverBudget(_)), "{err:?}");
         assert!(err.to_string().contains("shorten the state"), "{err}");
     }
 

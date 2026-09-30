@@ -570,7 +570,7 @@ chat template's own turn markers inside it (`<|im_end|>`,
 writing the rest of the prompt. Only the template's text is read for control
 tokens; for the rare template that cannot be tokenized in those pieces
 exactly as it is whole, a request containing such a marker is refused with
-a 400. A model trained for this endpoint reads its answers differently — see
+a 422. A model trained for this endpoint reads its answers differently — see
 [Jev-Style decision models](#jev-style-decision-models) — and the response
 says which readout was used in `eullm.readout` (`codes` or `verdict`).
 
@@ -675,7 +675,28 @@ will serve.
 **Limits:** 64 questions per request, 26 options per `choice` (255 with a
 Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
 context per request (default 8192). A request over the context limit is
-refused with a 400 that says how many tokens it needed.
+refused with a 422 `input_budget_exceeded` that says how many tokens it
+needed; nothing is truncated.
+
+**Errors** come back in the shape System One clients and
+[jev-style](https://github.com/lawrence3699/jev-style)'s parse — a
+status and `{"error": {"code": "…", "message": "…", "question": "…"}}`, with
+`question` present when one question is at fault — so its MCP server, CLI
+and guard show EuLLM's message instead of failing on the body:
+
+| Status | `code` | When |
+|---|---|---|
+| 422 | `invalid_json` | The body is not JSON |
+| 422 | `invalid_request` | The request as a whole fails validation: no `state`, no questions, more than 64, an unknown `eullm` option |
+| 422 | `invalid_question` | One question fails validation — an unknown `type`, one option, 11 levels; `question` names it |
+| 422 | `input_budget_exceeded` | Longer than `--decision-ctx`, or than a Jev-Style model's budgets; `question` names the question when it was one question's. Nothing was truncated |
+| 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
+| 404 | `not_found` | `model` names a model the server does not have |
+| 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
+| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, not `Content-Type: application/json` |
+| 500 | `internal_error` | The model failed to load, or llama.cpp failed |
+
+The other endpoints keep the error bodies Ollama and OpenAI clients read.
 
 **Which model.** Preferably one trained for this endpoint, a
 [Jev-Style model](#jev-style-decision-models): calibrated by its authors, up
@@ -716,7 +737,7 @@ The `model` field may name any model the server can load (it then loads into
 the decision slot). Left out, or set to a System One model name such as
 `jev-latest`, it means the decision model already loaded — so a Jev client
 works unchanged. With no decision model loaded the request is refused with a
-400 saying so.
+400 `model_not_loaded` saying so.
 
 Every request is written to the audit trail with `request_type: "systemone"`
 and a `decision` record: each answer with its log-probabilities and its
