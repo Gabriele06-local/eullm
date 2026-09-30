@@ -18,7 +18,8 @@ The methods (see rb_methods.py): `bm25`, keyword matching; `embed`, EuLLM's
 own embeddings (needs --embed-model); `reflex-a`, the request as the
 decision state and the tools as options; `reflex-b`, the tool catalog as the
 state, read once and reused while it stays the same, the request in the
-question and the tool names as options.
+question and the tool names as options; `two-stage`, the embeddings keep
+--shortlist tools and `reflex-a` ranks those.
 
 The sets (see rb_data.py) are downloaded on first use to
 ~/.cache/reflexbench ($REFLEXBENCH_CACHE); `--data` takes a set of your own.
@@ -27,7 +28,7 @@ catalog, writing its audit trail somewhere of its own — a run is thousands
 of decisions:
 
     EULLM_AUDIT_DIR=/tmp/reflexbench-audit \\
-      eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m --decision-ctx 16384
+      eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m --decision-ctx 25600
     python bench/reflexbench/reflexbench.py --limit 200
 
 Only the Python standard library is needed.
@@ -49,32 +50,39 @@ import rb_metrics  # noqa: E402
 DEFAULT_SETS = "metatool-single,metatool-multi,bfcl-live-multiple,bfcl-live-irrelevance"
 
 
-def build_methods(args, dataset, abstain):
+METHODS = ("bm25", "embed", "reflex-a", "reflex-b", "two-stage")
+
+
+def build_methods(args, dataset):
+    abstain = args.abstain == "on"
+
+    def embeddings():
+        return rb_methods.Embeddings(
+            args.url,
+            args.embed_model,
+            args.api_key,
+            args.timeout,
+            args.embed_query_prefix.replace("\\n", "\n"),
+        )
+
+    def reflex(layout):
+        return rb_methods.Reflex(args.url, layout, args.model, args.api_key, args.timeout, abstain)
+
     methods = []
     for name in args.methods.split(","):
         name = name.strip()
-        if name == "bm25":
+        if name in ("embed", "two-stage") and not args.embed_model:
+            print(f"  {name} skipped: no --embed-model", file=sys.stderr)
+        elif name == "bm25":
             methods.append(rb_methods.BM25(dataset))
         elif name == "embed":
-            if not args.embed_model:
-                print("  embed skipped: no --embed-model", file=sys.stderr)
-                continue
-            methods.append(
-                rb_methods.Embeddings(
-                    args.url,
-                    args.embed_model,
-                    args.api_key,
-                    args.timeout,
-                    args.embed_query_prefix.replace("\\n", "\n"),
-                )
-            )
+            methods.append(embeddings())
         elif name in ("reflex-a", "reflex-b"):
-            layout = name[-1].upper()
-            methods.append(
-                rb_methods.Reflex(args.url, layout, args.model, args.api_key, args.timeout, abstain)
-            )
+            methods.append(reflex(name[-1].upper()))
+        elif name == "two-stage":
+            methods.append(rb_methods.TwoStage(embeddings(), reflex("A"), args.shortlist))
         elif name:
-            raise SystemExit(f"unknown method {name!r}: bm25, embed, reflex-a, reflex-b")
+            raise SystemExit(f"unknown method {name!r}: {', '.join(METHODS)}")
     return methods
 
 
@@ -173,7 +181,13 @@ def main():
     parser.add_argument(
         "--data", action="append", default=[], help="a JSONL set of your own (repeatable)"
     )
-    parser.add_argument("--methods", default="bm25,embed,reflex-a,reflex-b")
+    parser.add_argument("--methods", default=",".join(METHODS))
+    parser.add_argument(
+        "--shortlist",
+        type=int,
+        default=20,
+        help="tools the embeddings keep for Reflex in `two-stage`",
+    )
     parser.add_argument("--limit", type=int, default=100, help="items per set (0: all)")
     parser.add_argument(
         "--catalog-size",
@@ -184,9 +198,10 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument(
         "--abstain",
-        choices=["auto", "on", "off"],
-        default="auto",
-        help='offer Reflex a "no tool" option (auto: on sets where no tool fits)',
+        choices=["on", "off"],
+        default="on",
+        help='offer Reflex a "no tool" option on every set: it should win where no tool '
+        "fits, and lose everywhere else",
     )
     parser.add_argument("--timeout", type=float, default=300.0, help="per-request timeout, seconds")
     parser.add_argument("--out", default=None, help="the report, as JSON")
@@ -206,10 +221,8 @@ def main():
     results = []
     try:
         for dataset in datasets:
-            no_tool = any(not item.needed for item in dataset.items)
-            abstain = args.abstain == "on" or (args.abstain == "auto" and no_tool)
             print(f"{dataset.name}: {len(dataset.items)} requests", file=sys.stderr, flush=True)
-            for method in build_methods(args, dataset, abstain):
+            for method in build_methods(args, dataset):
                 print(f"  {method.name}", file=sys.stderr, flush=True)
                 rankings = run(method, dataset, details)
                 results.append(
@@ -217,7 +230,7 @@ def main():
                         "set": dataset.name,
                         "method": method.name,
                         "fixed_catalog": dataset.fixed_catalog,
-                        "abstain_asked": abstain and method.name.startswith("reflex"),
+                        "abstain_asked": getattr(method, "abstain", False),
                         "metrics": rb_metrics.summarize(dataset.items, rankings),
                     }
                 )
@@ -232,6 +245,8 @@ def main():
             "embed_query_prefix": args.embed_query_prefix,
             "limit": args.limit,
             "catalog_size": args.catalog_size,
+            "shortlist": args.shortlist,
+            "abstain": args.abstain,
             "seed": args.seed,
             "results": results,
         }

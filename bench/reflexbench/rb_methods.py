@@ -13,7 +13,8 @@ found that no tool is needed at all.
   * `reflex-b`: the catalog as the state, the request inside the question,
     the options the tool names alone. With the same catalog on every
     request the state is read once and reused, so a request costs its
-    question and the names.
+    question and the names;
+  * `two-stage`: the embeddings keep a shortlist, `reflex-a` ranks it.
 """
 
 import json
@@ -22,6 +23,8 @@ import re
 import time
 import urllib.error
 import urllib.request
+
+import rb_data
 
 NONE = "none"  # the option that says no tool is needed
 
@@ -271,6 +274,34 @@ class Reflex:
         }
         best = scores[order[0]] if order else None
         return Ranking(order, ms, none_score, best, server)
+
+
+# --- Two stages ------------------------------------------------------------
+
+
+class TwoStage:
+    """The embeddings keep the `shortlist` tools likeliest for the request,
+    Reflex ranks those, and the others follow in the embeddings' order: the
+    shape a deployment takes when its catalog is too large to read on every
+    request. The shortlist goes to Reflex in the catalog's order, not the
+    embeddings', so that Reflex judges it on its own. Its cost is both
+    stages together."""
+
+    name = "two-stage"
+
+    def __init__(self, embeddings, reflex, shortlist):
+        self.embeddings, self.reflex, self.shortlist = embeddings, reflex, shortlist
+        self.abstain = reflex.abstain
+
+    def rank(self, item):
+        first = self.embeddings.rank(item)
+        kept = set(first.order[: self.shortlist])
+        short = [t for t in item.candidates if t.name in kept]
+        second = self.reflex.rank(rb_data.Item(item.id, item.request, short, item.needed))
+        order = second.order + first.order[self.shortlist :]
+        return Ranking(
+            order, first.ms + second.ms, second.none_score, second.best_score, second.server
+        )
 
 
 def split(tools, size):
