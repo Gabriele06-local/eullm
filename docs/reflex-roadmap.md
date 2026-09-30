@@ -1,7 +1,7 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0 done — Reflex does not replace embeddings for picking a tool;
-it helps where several tools are needed or none is · 30 September 2026
+**Status:** MVP 0 done; MVP 1, the RAG gate: Reflex stops half again as many
+insufficient contexts as embeddings, once calibrated · 30 September 2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -204,10 +204,42 @@ is the candidate there, not yet measured.
     them; the embeddings' best similarity, the signal a RAG system already
     has, against Reflex's choice and a yes/no; thresholds fitted on a dev
     half, every method scored on the test half.
-  - [🔧 now] The first run on the GPU, Jev-Style 2B and 0.8B.
+  - [✅ done] The first run on the GPU: see the results below.
+  - [🆕 next] The ceiling: a larger instruction-tuned model asked the same
+    yes/no through the code readout, to tell a small model's limit from
+    the task's.
   - [🆕 next] An Italian set: questions on the legislation Forge already
     prepares, the articles retrieved for them, and whether the one that
     answers is among them.
+
+### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
+
+30 September 2026. MuSiQue, 1,000 questions, 3,000 cases of five passages;
+thresholds fitted on 500 questions, every number below on the other 500.
+Of the cases whose passages do not suffice, the share each method stops
+when it may stop at most about one sufficient case in ten:
+
+| Method | Stopped: all | one passage missing | nothing relevant | Sufficient stopped | AUROC | Within a question | p50 |
+|---|---|---|---|---|---|---|---|
+| Embeddings, best similarity | 33.3% | 18.0% | 48.6% | 8.2% | 0.704 | 0.754 | 55 ms |
+| Reflex, choice among three | 48.1% | 29.0% | 67.2% | 9.6% | 0.769 | 0.815 | 49 ms |
+| Reflex, yes/no | 47.9% | 27.8% | 68.0% | 9.4% | 0.763 | 0.794 | 50 ms |
+
+- **Reflex is the better gate:** at the same price in good answers lost it
+  stops about half again as many insufficient contexts as the embeddings,
+  in the same time on a GPU (about 770 tokens a decision).
+- **Only with a threshold calibrated on the domain's own cases.** Left to
+  its own decision the 2B is far too cautious: it stops 90% of the
+  insufficient cases but 65% (choice) to 75% (yes/no) of the sufficient
+  ones. The rule on thresholds holds: 500 labelled questions made it
+  usable.
+- **The three-way decision does not work yet:** 46% right, no better than
+  the embeddings' two thresholds (47%). A context short of one hop is
+  mostly taken for one that holds nothing, and that is the hard case for
+  every method.
+- MuSiQue's questions take two to four hops; most questions put to a
+  company's documents take one. The Italian set is what says how the gate
+  does on those.
 
 ## MVP 2 — adapters, not a runtime  [🆕 next]
 
