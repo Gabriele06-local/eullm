@@ -60,10 +60,11 @@ hours.
 | `--api-key` | `$EULLM_API_KEY` | when the server requires one |
 | `--sets` | `metatool-single,metatool-multi,bfcl-live-multiple,bfcl-live-irrelevance` | public sets, below |
 | `--data` | none | a set of your own, repeatable |
-| `--methods` | `bm25,embed,reflex-a,reflex-b` | methods, below |
+| `--methods` | `bm25,embed,reflex-a,reflex-b,two-stage` | methods, below |
+| `--shortlist` | 20 | tools the embeddings keep for Reflex in `two-stage` |
 | `--limit` | 100 | requests per set, 0 for all |
 | `--catalog-size` | 0 (all) | offer each request at most this many tools, its own among them |
-| `--abstain` | `auto` | offer Reflex a "no tool" option: `on`, `off`, or `auto`, on sets with requests no tool fits |
+| `--abstain` | `on` | offer Reflex a "no tool" option on every set: it should win on requests no tool fits and lose on the others; `off` for rankings alone |
 | `--seed` | 1 | the order requests are drawn in |
 
 ## The sets
@@ -91,6 +92,7 @@ which has no schemas.
 | `embed` | cosine similarity of EuLLM embeddings; the tools are embedded once, so a request costs one embedding |
 | `reflex-a` | `/v1/systemone`: the request is the state, the tools with their descriptions are the options of a `choice` question |
 | `reflex-b` | the catalog is the state, the request goes in the question, the options are the tool names alone. The same catalog on every request is read once and reused |
+| `two-stage` | the embeddings keep `--shortlist` tools, `reflex-a` ranks them, the others follow in the embeddings' order. Its cost is both stages |
 
 Reflex ranks by each option's verdict score. A question has at most 255
 options, and the Jev-Style 0.8B reads a question with its options in 2,048
@@ -105,7 +107,7 @@ over to the next requests.
 | R@k | share of the requests with every tool they need among the first k |
 | k95, k99 | the smallest k that keeps 95% and 99% of the requests whole |
 | specs kept @k95 | share of the tool-spec characters still sent at k95 — the rest is prompt saved |
-| abstain ok | on requests no tool fits, how often "no tool" beat every tool (Reflex only) |
+| abstain ok | on requests no tool fits, how often "no tool" beat every tool (Reflex only: the others cannot say it without a threshold, and a threshold needs calibrating) |
 | false abstain | on requests that need a tool, how often "no tool" won anyway |
 | p50 ms, p95 ms | decision latency as the client sees it; each run starts with one untimed request, so a cold start is not counted |
 | tokens/decision | tokens the decision model read (`eullm.evaluated_tokens`): with a reused state, the catalog is not among them |

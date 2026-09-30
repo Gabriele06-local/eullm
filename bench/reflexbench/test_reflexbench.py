@@ -5,11 +5,13 @@ model:
     python3 -m unittest discover -s bench/reflexbench
 """
 
+import io
 import json
 import os
 import pathlib
 import sys
 import tempfile
+import types
 import unittest
 from unittest import mock
 
@@ -337,6 +339,66 @@ class ReflexTest(unittest.TestCase):
         with mock.patch.object(rb_methods, "post", post):
             with self.assertRaises(ValueError):
                 reflex.rank(self.item)
+
+
+class TwoStageTest(unittest.TestCase):
+    def test_reflex_ranks_the_shortlist_and_the_rest_follow(self):
+        item = rb_data.Item("1", "r", tools("a", "b", "c", "d", "e"), ["d"])
+        shown = []
+
+        class Embeddings:
+            def rank(self, item):
+                return rb_methods.Ranking(["e", "d", "a", "b", "c"], 5.0)
+
+        class Reflex:
+            abstain = True
+
+            def rank(self, item):
+                shown.append([t.name for t in item.candidates])
+                return rb_methods.Ranking(["d", "a", "e"], 20.0, -1.0, 2.0, {"questions": 1})
+
+        ranking = rb_methods.TwoStage(Embeddings(), Reflex(), shortlist=3).rank(item)
+        # The shortlist in the catalog's order, not the embeddings'.
+        self.assertEqual(shown, [["a", "d", "e"]])
+        self.assertEqual(ranking.order, ["d", "a", "e", "b", "c"])
+        self.assertEqual(ranking.ms, 25.0)
+        self.assertEqual((ranking.none_score, ranking.best_score), (-1.0, 2.0))
+
+
+class BuildMethodsTest(unittest.TestCase):
+    dataset = rb_data.Dataset("t", [rb_data.Item("1", "r", tools("a", "b"), ["a"])], True)
+
+    def args(self, **changes):
+        args = dict(
+            methods="bm25,two-stage",
+            embed_model=None,
+            embed_query_prefix="Q:\\n",
+            url="http://x",
+            api_key=None,
+            timeout=1,
+            model=None,
+            abstain="on",
+            shortlist=20,
+        )
+        args.update(changes)
+        return types.SimpleNamespace(**args)
+
+    def test_embeddings_are_needed_for_two_stages(self):
+        with mock.patch("sys.stderr", io.StringIO()):
+            methods = reflexbench.build_methods(self.args(), self.dataset)
+        self.assertEqual([m.name for m in methods], ["bm25"])
+
+    def test_two_stage(self):
+        methods = reflexbench.build_methods(self.args(embed_model="e"), self.dataset)
+        self.assertEqual([m.name for m in methods], ["bm25", "two-stage"])
+        two = methods[1]
+        self.assertTrue(two.abstain)
+        self.assertEqual((two.reflex.layout, two.shortlist), ("A", 20))
+        self.assertEqual(two.embeddings.query_prefix, "Q:\n")
+
+    def test_unknown_method(self):
+        with self.assertRaises(SystemExit):
+            reflexbench.build_methods(self.args(methods="nope"), self.dataset)
 
 
 class TableTest(unittest.TestCase):
