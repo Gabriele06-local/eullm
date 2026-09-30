@@ -12,7 +12,7 @@
 //! the currently loaded one, the server automatically swaps to the new model.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -1234,6 +1234,9 @@ async fn embeddings_openai(
 /// cores left no worker for anything at all. Four 1,162-token requests at
 /// once on a 4-core CPU kept `/api/version` from answering for up to 25.7 s;
 /// on the blocking pool it answers within 35 ms while they run.
+///
+/// At most [`EMBEDDING_SLOTS`] run at once; the others wait for a slot
+/// without holding a thread.
 async fn embed_on_a_blocking_thread(
     model: Arc<EmbeddingModel>,
     inputs: Vec<String>,
@@ -1244,11 +1247,33 @@ async fn embed_on_a_blocking_thread(
             Json(json!({ "error": format!("Embedding failed: {e}") })),
         )
     };
-    tokio::task::spawn_blocking(move || model.embed(&inputs))
+    let slot = EMBEDDING_SLOTS
+        .acquire()
         .await
-        .map_err(|e| failed(e.to_string()))?
-        .map_err(failed)
+        .map_err(|e| failed(e.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        // Held until the embedding is done, not until the handler is: a
+        // client that disconnects does not free a slot its request is still
+        // running in.
+        let _slot = slot;
+        model.embed(&inputs)
+    })
+    .await
+    .map_err(|e| failed(e.to_string()))?
+    .map_err(failed)
 }
+
+/// How many embeddings may run at once: one per core, the number that could
+/// when each one held a runtime worker thread. The blocking pool alone
+/// would allow hundreds, and every embedding builds a context of its own,
+/// sized to its input — for a decoder-based embedder a logits row per
+/// token, 1.2 GB at 2048 tokens of Qwen3-Embedding — so a burst of
+/// requests would multiply the memory, on a GPU past its VRAM, where the
+/// one-per-core bound kept it before. Running more would not be faster
+/// either: each already uses every core, or the one GPU.
+static EMBEDDING_SLOTS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(4, |n| n.get()))
+});
 
 /// The `/v1/embeddings` response, in OpenAI's shape.
 ///
