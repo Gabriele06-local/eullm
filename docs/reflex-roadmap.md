@@ -1,7 +1,7 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0, GPU results for the 2B and 0.8B, CPU for the 2B · 30 September 2026 ·
-`feat/reflexbench`
+**Status:** MVP 0 done — Reflex does not replace embeddings for picking a tool;
+it helps where several tools are needed or none is · 30 September 2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -65,7 +65,7 @@ model.
 
 ---
 
-## MVP 0 — ReflexBench, the evaluator  [🔧 now]
+## MVP 0 — ReflexBench, the evaluator  [✅ done]
 
 One harness to measure any decision against a labelled set and against the
 simpler ways of making it. Its first job is tool selection (MVP 1), and it
@@ -135,26 +135,38 @@ instruction. One tool needed out of MetaTool's 199:
 | Embeddings | 75.4% | 94.6% | 11 | 51 ms | — |
 | Reflex, layout A | 73.4% | 93.2% | 17 | 439 ms | 7,151 |
 | Reflex, layout B | 60.8% | 87.8% | 20 | 116 ms | 1,463 |
+| Two stages: the 2B ranks the embeddings' 20 | 74.4% | 95.2% | 10 | 109 ms | 613 |
 
 - **Alone, Reflex does not beat the embeddings** on one tool out of 199:
   slightly less recall for nine times the latency (A), or clearly less
   (B). By the kill criterion of MVP 1, Reflex does not replace embeddings
   for tool selection.
-- **The two miss different requests.** Where the embeddings do not rank the
-  right tool first (123 requests of 500), Reflex A does 36 times; fusing
-  the two rankings by reciprocal rank gives 78.2% first and 98.6% within
-  20. With two tools needed (MetaTool multi), Reflex B keeps 95% of the
-  requests at k = 31, the embeddings at 40.
+- **Nor does it in two stages.** The two miss different requests — where
+  the embeddings do not rank the right tool first (123 of 500), Reflex A
+  does 36 times — but neither says when it is the one to trust. The 2B
+  ranking the embeddings' shortlist of 20 puts the right tool first 74.4%
+  of the time; fusing the two rankings by reciprocal rank, 73.0%. An
+  earlier estimate of 78.2% for the fusion counted every tie between the
+  two rankings in the right tool's favour, and was wrong.
+- **Where several tools are needed, it helps.** With two tools of 199
+  (MetaTool multi), the two stages have both within the first 3 for 49.7%
+  of the requests and within 10 for 80.7%, against 35.6% and 71.6% for the
+  embeddings; Reflex B keeps 95% of the requests at k = 30, the embeddings
+  at 40.
 - **Few tools, BFCL live (2–37 a request):** Reflex ranks the right one
   first 93–95% of the time, the embeddings 91%, in 26–28 ms against
   109 ms — though the engine's embeddings pay for a context created on
   every request, a cost it could avoid.
-- **"No tool":** Reflex A says it for 69% of the requests no function fits
-  (B: 48%). How often it says it wrongly was not measured, since the
-  option was only offered where no tool fits; it is now on every set.
-- **What this leaves open:** the two stages, where Reflex only reads the
-  embeddings' shortlist, and whether a tool is needed at all. Both run on
-  the next GPU pass.
+- **"No tool":** on BFCL live, Reflex A says it for 69% of the requests no
+  function fits and wrongly for 2.0% of those one does (B: 48% and 0.8%) —
+  a decision the embeddings cannot make without a calibrated threshold. On
+  MetaTool's 199 generic plugins it says it wrongly for 13.8% of the
+  requests (two stages: 19.8%): a gate for a small, well-described set of
+  tools, not for a large catalog.
+- **Verdict for MVP 1:** the kill criterion is met for picking one tool out
+  of a large catalog — the embeddings do it as well at a fraction of the
+  cost. What Reflex adds is the judgement on few options: which of a
+  handful, several at once, or none of them.
 
 **The 0.8B on the same GPU** (500 requests a set, "no tool" offered on
 every set) reads MetaTool's catalog in 9 questions, about 10,200 tokens, in
@@ -171,18 +183,21 @@ not fit its question at all.
 requests a set — a decision costs 76 s reading MetaTool's 199 tools in
 layout A and 20 s in layout B, 1.5–1.8 s on BFCL's few, against 0.3–0.4 s
 for an embedding: 55 to 170 times the GPU's latency for Reflex, 8 times for
-the embeddings. The 2B is not a reflex on a CPU; the 0.8B and the two
-stages are what a CPU gets measured on next.
+the embeddings. The 2B is not a reflex on a CPU; for few options the 0.8B
+is the candidate there, not yet measured.
 
 ## MVP 1 — tool selection, then a RAG sufficiency gate  [🆕 next]
 
-- Tool selection with the best layout ReflexBench finds, and the prompt
-  size it saves measured on a real tool-calling model.
+- [✅ measured] Tool selection with the best layout ReflexBench finds.
 - **Kill criterion:** if embeddings reach the same recall at the working k
   for a small fraction of the cost, Reflex is not the answer to tool
   selection. That is a result, not a failure: move to the next use case.
-- Next use case: a **RAG sufficiency gate** — answer, retrieve more, or
-  abstain — with RAG Enterprise as its first consumer.
+  **Met** for one tool out of a large catalog (see the MVP 0 results): the
+  embeddings choose the shortlist. Reflex keeps the judgement on few
+  options — which of a handful, several at once, or none of them.
+- [🆕 next] A **RAG sufficiency gate** — answer, retrieve more, or abstain —
+  with RAG Enterprise as its first consumer: a judgement on few options,
+  the kind the benchmark found Reflex good at.
 
 ## MVP 2 — adapters, not a runtime  [🆕 next]
 
