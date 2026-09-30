@@ -799,7 +799,25 @@ pub(crate) struct SystemOneResponse {
     model: String,
     answers: OrderedMap<Answer>,
     usage: Usage,
+    timing: ResponseTiming,
     eullm: ResponseExtension,
+}
+
+/// The response's `timing`, as jev-style's server reports it and its MCP
+/// tools and guard read it (`total_ms`, shown next to every answer).
+#[derive(Debug, Serialize)]
+struct ResponseTiming {
+    /// The request's wall time: `eullm.request_ms`, to the 0.1 ms
+    /// jev-style rounds it to.
+    total_ms: f64,
+}
+
+impl ResponseTiming {
+    fn new(request_ms: f64) -> Self {
+        Self {
+            total_ms: (request_ms * 10.0).round() / 10.0,
+        }
+    }
 }
 
 /// One answer: the System One fields, then `eullm`.
@@ -1156,6 +1174,7 @@ pub(super) async fn systemone(
             input_tokens,
             output_tokens: 0,
         },
+        timing: ResponseTiming::new(request_ms),
         eullm: ResponseExtension {
             readout: readout.as_str(),
             mode: decision.stats.mode.as_str(),
@@ -1809,6 +1828,13 @@ mod tests {
             text.starts_with(r#"{"zeta":{"type":"noul","noul":"#),
             "{text}"
         );
+    }
+
+    #[test]
+    fn the_total_time_is_the_request_time_to_a_tenth_of_a_millisecond() {
+        let timing = serde_json::to_value(ResponseTiming::new(975.714984)).unwrap();
+        assert_eq!(timing, json!({ "total_ms": 975.7 }));
+        assert_eq!(ResponseTiming::new(0.04).total_ms, 0.0);
     }
 
     #[test]

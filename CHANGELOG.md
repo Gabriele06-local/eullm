@@ -15,6 +15,9 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Added
+- **`timing.total_ms` in `/v1/systemone` responses.** jev-style's MCP tools and its guard show the server's time for every decision from `timing.total_ms`, which EuLLM did not send, so they showed `null`. The response now carries it: the request's wall time, `eullm.request_ms` to 0.1 ms.
+
 ### Fixed
 - **No more `←[32m`-style codes in the Windows console.** In the classic Windows PowerShell or Command Prompt window, every log line, the model picker and the terminal chat showed the escape codes behind their colours as text (Windows Terminal was not affected). EuLLM now turns colour support on in the console when it starts, and writes plain log lines when it cannot, for example when the output goes to a file.
 - **The CPU build no longer tells you to rebuild it.** Every `eullm run` on a CPU build printed a boxed warning that a GPU was requested and suggested `cargo build --features cuda`, although nobody had asked for a GPU: offloading to it is simply the default. It now prints one line saying it runs on the CPU and where the GPU builds are. The warning box remains for an explicit `--gpu-layers` on a CPU build, and now points to the ready-made GPU downloads first.

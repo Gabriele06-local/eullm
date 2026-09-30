@@ -548,10 +548,16 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
                   "confidence": 0.32, "eullm": { ... } }
   },
   "usage": { "input_tokens": 312, "output_tokens": 0 },
+  "timing": { "total_ms": 187.4 },
   "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
-             "evaluated_tokens": 312, "timings_ms": { ... }, ... }
+             "evaluated_tokens": 312, "timings_ms": { ... }, "request_ms": 187.43, ... }
 }
 ```
+
+`timing.total_ms` is the request's wall time, model resolution included, as
+jev-style's server reports it and its MCP tools and guard show it:
+`eullm.request_ms` to 0.1 ms. `eullm.timings_ms` splits the decode into its
+phases.
 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
