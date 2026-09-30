@@ -164,12 +164,27 @@ function Get-EuLLMVariant {
     return 'cuda'
 }
 
+function Set-EuLLMUserPath {
+    param([string[]]$Entries)
+    # REG_EXPAND_SZ, which is what Windows itself keeps a user PATH as, and
+    # what [Environment]::SetEnvironmentVariable does NOT write: it creates a
+    # plain REG_SZ, keeping the text but losing the expansion. On a machine
+    # whose user PATH holds %USERPROFILE%\bin, %GOPATH%\bin or
+    # %LOCALAPPDATA%\Programs\..., installing EuLLM silently froze those
+    # entries, and from the next logon the composed environment contains
+    # directories literally named "%USERPROFILE%\bin" — so pip, go and java
+    # break for that user, with nothing in the installer's output to show for
+    # it. Writing through the registry keeps the type the value already had.
+    Set-ItemProperty -Path HKCU:\Environment -Name Path -Type ExpandString `
+        -Value ($Entries -join ';')
+}
+
 function Add-EuLLMToPath {
     param([string]$Dir)
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @($userPath -split ';' | Where-Object { $_ })
     if ($entries -notcontains $Dir) {
-        [Environment]::SetEnvironmentVariable('Path', (($entries + $Dir) -join ';'), 'User')
+        Set-EuLLMUserPath -Entries ($entries + $Dir)
         Write-Host "Added $Dir to your user PATH"
     }
     # The registry change only reaches new processes; make `eullm` work in
@@ -187,8 +202,14 @@ function Uninstall-EuLLM {
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     $entries = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $InstallDir })
-    [Environment]::SetEnvironmentVariable('Path', ($entries -join ';'), 'User')
-    Write-Host 'Removed EuLLM from your user PATH. Downloaded models and the audit log are kept in %USERPROFILE%\.eullm.'
+    # Only when there was something to remove: an uninstall on a machine that
+    # never had EuLLM should not rewrite the user's PATH at all.
+    if ($entries.Count -lt @($userPath -split ';' | Where-Object { $_ }).Count) {
+        Set-EuLLMUserPath -Entries $entries
+        Write-Host 'Removed EuLLM from your user PATH. Downloaded models and the audit log are kept in %USERPROFILE%\.eullm.'
+    } else {
+        Write-Host 'EuLLM was not in your user PATH, left it alone.'
+    }
 }
 
 Install-EuLLM

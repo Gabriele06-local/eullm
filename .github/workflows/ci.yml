@@ -597,17 +597,44 @@ jobs:
           EULLM_VERSION: 0.7.9
           EULLM_VARIANT: cpu
         run: |
-          $env:EULLM_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'eullm'
-          Get-Content installer\install.ps1 -Raw | Invoke-Expression
-          $exe = Join-Path $env:EULLM_INSTALL_DIR 'eullm.exe'
-          if (-not (Test-Path $exe)) { throw "install.ps1 did not install $exe" }
-          $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-          if (@($userPath -split ';') -notcontains $env:EULLM_INSTALL_DIR) { throw 'install.ps1 did not add the install dir to the user PATH' }
-          & eullm --version
-          if ($LASTEXITCODE -ne 0) { throw "eullm --version failed with exit code $LASTEXITCODE" }
-          $env:EULLM_UNINSTALL = '1'
-          Get-Content installer\install.ps1 -Raw | Invoke-Expression
-          if (Test-Path $env:EULLM_INSTALL_DIR) { throw 'uninstall left the install dir behind' }
+          # Windows keeps a user PATH as REG_EXPAND_SZ so entries can hold
+          # %VAR%, and [Environment]::SetEnvironmentVariable writes a plain
+          # REG_SZ instead: same text, expansion gone. Seed the runner's PATH
+          # with a %VAR% entry as ExpandString, run the installer for real, and
+          # check the type and the entry survived — the runner's
+          # HKCU\Environment is disposable, which is the only reason this is
+          # safe to assert on.
+          $key = 'HKCU:\Environment'
+          $original = (Get-Item $key).GetValue('Path', $null)
+          $originalKind = (Get-Item $key).GetValueKind('Path')
+          try {
+            Set-ItemProperty -Path $key -Name Path -Type ExpandString `
+              -Value "%USERPROFILE%\eullm-probe;$original"
+            $env:EULLM_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'eullm'
+            Get-Content installer\install.ps1 -Raw | Invoke-Expression
+            $exe = Join-Path $env:EULLM_INSTALL_DIR 'eullm.exe'
+            if (-not (Test-Path $exe)) { throw "install.ps1 did not install $exe" }
+            $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+            if (@($userPath -split ';') -notcontains $env:EULLM_INSTALL_DIR) { throw 'install.ps1 did not add the install dir to the user PATH' }
+            $kind = (Get-Item $key).GetValueKind('Path')
+            if ($kind -ne 'ExpandString') { throw "install.ps1 rewrote the user PATH as $kind, not ExpandString: %VAR% entries stop being expanded" }
+            # The raw value, not [Environment]::GetEnvironmentVariable, which
+            # hands back the already-expanded text and would pass whatever the
+            # installer had done to the %VAR% entries.
+            $raw = (Get-Item $key).GetValue('Path', $null, 'DoNotExpandEnvironmentNames')
+            if ($raw -notlike '*%USERPROFILE%\eullm-probe*') { throw "install.ps1 dropped or froze the %VAR% entry: $raw" }
+            Write-Host "user PATH is still $kind and kept its %VAR% entry"
+
+            & eullm --version
+            if ($LASTEXITCODE -ne 0) { throw "eullm --version failed with exit code $LASTEXITCODE" }
+            $env:EULLM_UNINSTALL = '1'
+            Get-Content installer\install.ps1 -Raw | Invoke-Expression
+            if (Test-Path $env:EULLM_INSTALL_DIR) { throw 'uninstall left the install dir behind' }
+            if ((Get-Item $key).GetValueKind('Path') -ne 'ExpandString') { throw 'uninstall rewrote the user PATH as a plain String' }
+            if ((Get-Item $key).GetValue('Path', $null, 'DoNotExpandEnvironmentNames') -notlike '*%USERPROFILE%\eullm-probe*') { throw 'uninstall dropped the %VAR% entry' }
+          } finally {
+            Set-ItemProperty -Path $key -Name Path -Type $originalKind -Value $original
+          }
 
   # ── Windows installer pre-flight (FAST, <2 min, runs on every push) ──
   # Installer preflight removed in v0.5.7 alongside the installer build
