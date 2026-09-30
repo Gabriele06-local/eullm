@@ -28,7 +28,9 @@ python3 bench/reflexbench/reflexbench.py --limit 200 \
   --out rb-2b.json --details rb-2b.jsonl
 ```
 
-It prints a Markdown table and writes the full report as JSON (`--out`);
+It says which decision model answers before counting its decisions — check
+it is the one you meant — then prints a Markdown table and writes the full
+report as JSON (`--out`);
 `--details` keeps every ranking, one JSON line each. The sets are downloaded
 on first use to `~/.cache/reflexbench` (`$REFLEXBENCH_CACHE`), never into
 the repository.

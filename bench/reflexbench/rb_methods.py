@@ -282,6 +282,7 @@ class Reflex:
             "prefix_reused": info.get("prefix_reused"),
             "request_ms": info.get("request_ms"),
             "questions": len(questions),
+            "model": body.get("model"),  # the decision model that answered
         }
         best = scores[order[0]]
         return Ranking(order, ms, nones.get(question_of[order[0]]), best, server)
