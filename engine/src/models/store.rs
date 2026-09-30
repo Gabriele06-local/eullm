@@ -35,6 +35,152 @@ pub struct ModelManifest {
     /// models, and silently ignored by text-only engine builds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj_file: Option<String>,
+    /// The HuggingFace repository the weights were downloaded from. With
+    /// `hf_filename`, the same two fields a catalog entry names its download
+    /// by, and what lets a later pull of the same file under another id find
+    /// it here instead of downloading it a second time
+    /// (`models::pull::reuse_stored_weights`).
+    ///
+    /// Absent for weights that did not come from HuggingFace (a plain URL,
+    /// an Ollama import) and in manifests written before the field existed.
+    /// Those older manifests are still recognised, from what they did record:
+    /// see `ModelManifest::holds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_repo: Option<String>,
+    /// Path of the GGUF inside `hf_repo`, as the Hub lists it; for a split
+    /// model, its first shard. Not the same as `gguf_file`, which is only the
+    /// name the file is stored under: a repo that keeps each quantization in
+    /// its own directory (`UD-Q4_K_XL/…-00001-of-00004.gguf`) loses that
+    /// directory on the way to disk, and it is part of which file this is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hf_filename: Option<String>,
+}
+
+/// A file in a HuggingFace repository: what a pull downloads, and what two
+/// pulls have to agree on to be the same download.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HfFile {
+    /// `owner/repo`.
+    pub repo: String,
+    /// Path inside the repository, as the Hub lists it.
+    pub path: String,
+}
+
+impl HfFile {
+    pub fn new(repo: &str, path: &str) -> Self {
+        Self {
+            repo: repo.to_string(),
+            path: path.to_string(),
+        }
+    }
+
+    /// The name the file is stored under locally: the path's last component.
+    pub fn file_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+}
+
+/// Whether two repository ids name the same repository. Without regard to
+/// case, because the Hub resolves them that way: `unsloth/qwen3-8b-gguf` is
+/// `unsloth/Qwen3-8B-GGUF`, and no two repositories may differ only in case.
+/// Paths inside a repository are git paths and stay case-sensitive.
+fn same_repo(a: &str, b: &str) -> bool {
+    a.eq_ignore_ascii_case(b)
+}
+
+/// The description `write_external_manifest` writes, up to the source.
+/// Shared with the reader in `ModelManifest::recorded_hf_file`, which gets
+/// the repository of an `hf.co` pull back out of it for manifests written
+/// before `hf_repo` existed, so the two cannot drift apart.
+const EXTERNAL_SOURCE_PREFIX: &str = "External model pulled from ";
+
+/// Which HuggingFace file a manifest's weights are, as far as it says.
+struct RecordedHfFile {
+    repo: String,
+    /// The path inside the repository, or only the file's name when
+    /// `name_only`: all an `hf.co` pull recorded before `hf_filename`
+    /// existed was the name it stored the file under.
+    path: String,
+    name_only: bool,
+}
+
+impl RecordedHfFile {
+    fn is(&self, wanted: &HfFile) -> bool {
+        same_repo(&self.repo, &wanted.repo)
+            && if self.name_only {
+                self.path == wanted.file_name()
+            } else {
+                self.path == wanted.path
+            }
+    }
+}
+
+impl ModelManifest {
+    /// Whether these weights are the HuggingFace file `wanted` — asked of
+    /// every stored model before a pull downloads anything.
+    pub fn holds(&self, wanted: &HfFile) -> bool {
+        self.recorded_hf_file()
+            .is_some_and(|recorded| recorded.is(wanted))
+    }
+
+    /// Whether this model's projector is the HuggingFace file `wanted`.
+    ///
+    /// A projector is taken to live in the repository its weights came from,
+    /// because both ways of pulling one put it there: an `hf.co` pull fetches
+    /// it from the repository it resolved the weights in, and every catalog
+    /// entry that declares a projector declares it beside its weights
+    /// (`catalog::tests::every_projector_lives_beside_its_weights` holds the
+    /// catalog to that). Only the name is compared, since the name is all a
+    /// manifest keeps of it.
+    pub fn projector_is(&self, wanted: &HfFile) -> bool {
+        self.mmproj_file.as_deref() == Some(wanted.file_name())
+            && self
+                .recorded_hf_file()
+                .is_some_and(|recorded| same_repo(&recorded.repo, &wanted.repo))
+    }
+
+    /// Which HuggingFace file the weights are. Recorded in `hf_repo` and
+    /// `hf_filename` by every pull since those fields exist; for a manifest
+    /// written before, worked out from what it did record, and only where
+    /// that is certain enough to share a file on the strength of it:
+    ///
+    /// - a catalog pull recorded its catalog id and the catalog's SHA-256 of
+    ///   the file, which the download was verified against. When the catalog
+    ///   entry still carries that digest, it names the very bytes on disk.
+    ///   A catalog that has moved on since names a different file, and the
+    ///   manifest is then not taken for it;
+    /// - an `hf.co` pull recorded its ref in the description and the file's
+    ///   name in `gguf_file`, but not the directory the repository kept it
+    ///   in. Its name is therefore compared on its own.
+    fn recorded_hf_file(&self) -> Option<RecordedHfFile> {
+        if let (Some(repo), Some(path)) = (&self.hf_repo, &self.hf_filename) {
+            return Some(RecordedHfFile {
+                repo: repo.clone(),
+                path: path.clone(),
+                name_only: false,
+            });
+        }
+        let gguf_file = self.gguf_file.as_deref()?;
+        if let Some(entry) = super::catalog::EU_CATALOG.iter().find(|e| e.id == self.id)
+            && !entry.hf_repo.is_empty()
+            && !entry.digest.is_empty()
+            && entry.digest == self.digest
+            && entry.hf_filename == gguf_file
+        {
+            return Some(RecordedHfFile {
+                repo: entry.hf_repo.clone(),
+                path: entry.hf_filename.clone(),
+                name_only: false,
+            });
+        }
+        let source = self.description.strip_prefix(EXTERNAL_SOURCE_PREFIX)?;
+        let hf = crate::registry::parse_hf_ref(source)?;
+        Some(RecordedHfFile {
+            repo: hf.repo,
+            path: gguf_file.to_string(),
+            name_only: true,
+        })
+    }
 }
 
 /// Whether `name` is safe to join onto a model directory as a single filename.
@@ -175,12 +321,18 @@ impl ModelStore {
     /// The on-disk directory is keyed by the catalog `id` (filesystem-safe,
     /// stable across catalog revisions). The manifest still records the
     /// human `name` for display.
+    ///
+    /// `hf_file` is the file the weights are, when the caller knows: the one
+    /// it just downloaded or linked. It is not derived from `entry`, because
+    /// a manifest rewritten for a model pulled under an older catalog would
+    /// then claim the current catalog's file for weights that may predate it.
     pub fn write_manifest(
         &self,
         entry: &CatalogEntry,
         status: &str,
         gguf_file: Option<&str>,
         mmproj_file: Option<&str>,
+        hf_file: Option<&HfFile>,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let model_dir = self.root.join(&entry.id);
         create_model_dir(&model_dir).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
@@ -199,6 +351,8 @@ impl ModelStore {
             status: status.into(),
             gguf_file: gguf_file.map(String::from),
             mmproj_file: mmproj_file.map(String::from),
+            hf_repo: hf_file.map(|f| f.repo.clone()),
+            hf_filename: hf_file.map(|f| f.path.clone()),
         };
 
         let manifest_path = model_dir.join("manifest.json");
@@ -215,7 +369,8 @@ impl ModelStore {
     ///
     /// `id` is the filesystem-safe directory key; `gguf_file` is the GGUF
     /// filename inside that directory; `source` is the URL/repo it came from,
-    /// recorded as the description for provenance.
+    /// recorded as the description for provenance; `hf_file` is the file the
+    /// weights are on HuggingFace, when they came from there.
     pub fn write_external_manifest(
         &self,
         id: &str,
@@ -223,6 +378,7 @@ impl ModelStore {
         source: &str,
         size_bytes: u64,
         mmproj_file: Option<&str>,
+        hf_file: Option<&HfFile>,
     ) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let model_dir = self.root.join(id);
         create_model_dir(&model_dir).map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
@@ -230,7 +386,7 @@ impl ModelStore {
         let manifest = ModelManifest {
             id: id.to_string(),
             name: id.to_string(),
-            description: format!("External model pulled from {source}"),
+            description: format!("{EXTERNAL_SOURCE_PREFIX}{source}"),
             languages: Vec::new(),
             base: id.to_string(),
             vram_gb: 0,
@@ -241,6 +397,8 @@ impl ModelStore {
             status: "ready".into(),
             gguf_file: Some(gguf_file.to_string()),
             mmproj_file: mmproj_file.map(String::from),
+            hf_repo: hf_file.map(|f| f.repo.clone()),
+            hf_filename: hf_file.map(|f| f.path.clone()),
         };
 
         let manifest_path = model_dir.join("manifest.json");
@@ -537,10 +695,14 @@ impl ModelStore {
 
     /// Remove a model's entire directory from disk.
     ///
-    /// Returns `Ok(Some(bytes_freed))` if the directory existed and was
-    /// removed, `Ok(None)` if there was nothing to remove. Errors only on
-    /// real filesystem failures.
-    pub fn delete(&self, name: &str) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    /// Returns `Ok(Some(removed))` if the directory existed and was removed,
+    /// `Ok(None)` if there was nothing to remove. Errors only on real
+    /// filesystem failures.
+    ///
+    /// Weights shared with another id through `link_files` stay usable there:
+    /// removing a directory removes one name for them, and the data goes only
+    /// with the last name.
+    pub fn delete(&self, name: &str) -> Result<Option<Removed>, Box<dyn std::error::Error>> {
         // Never let a crafted name steer `remove_dir_all` outside the store —
         // this is the most destructive of the store lookups.
         let Some(model_dir) = self.safe_model_dir(name) else {
@@ -549,10 +711,91 @@ impl ModelStore {
         if !model_dir.exists() {
             return Ok(None);
         }
-        let size = dir_size(&model_dir).unwrap_or(0);
+        let removed = removal_size(&model_dir).unwrap_or_default();
         fs::remove_dir_all(&model_dir)?;
-        Ok(Some(size))
+        Ok(Some(removed))
     }
+
+    /// Give model `to` the files `files` of model `from`, as hard links: one
+    /// copy on disk under two ids.
+    ///
+    /// A link and not a copy, because the disk space is the point: these are
+    /// multi-gigabyte files, and the caller has established they are the same
+    /// download. A hard link and not a symlink, because each id has to survive
+    /// the other's `eullm rm` — removing a directory drops one name for the
+    /// data, which goes only with the last name, where a symlink would be left
+    /// pointing at nothing.
+    ///
+    /// All or nothing. Every file is checked to be there before anything is
+    /// linked, and when a link fails — the two directories on different
+    /// filesystems, or a filesystem without hard links such as FAT32 or exFAT
+    /// — the links already made are removed again, and so is `to`'s directory
+    /// if this call created it. Half a split model under a new id would list
+    /// as present and fail to load.
+    ///
+    /// `link` makes one link: `std::fs::hard_link` outside the tests, which
+    /// need a link that fails.
+    pub fn link_files(
+        &self,
+        from: &str,
+        to: &str,
+        files: &[String],
+        link: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        use std::io::{Error, ErrorKind};
+        let src_dir = self.safe_model_dir(from).ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidInput,
+                format!("invalid model id {from:?}"),
+            )
+        })?;
+        let dst_dir = self.safe_model_dir(to).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput, format!("invalid model id {to:?}"))
+        })?;
+        for name in files {
+            if !is_safe_filename(name) {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("unsafe file name {name:?}"),
+                ));
+            }
+            if !src_dir.join(name).is_file() {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    format!("{name} is not in {}", src_dir.display()),
+                ));
+            }
+        }
+        let created = !dst_dir.exists();
+        create_model_dir(&dst_dir).map_err(Error::other)?;
+        let mut made = Vec::with_capacity(files.len());
+        for name in files {
+            let dst = dst_dir.join(name);
+            if let Err(e) = link(&src_dir.join(name), &dst) {
+                for path in &made {
+                    let _ = fs::remove_file(path);
+                }
+                if created {
+                    let _ = fs::remove_dir(&dst_dir);
+                }
+                return Err(e);
+            }
+            made.push(dst);
+        }
+        Ok(())
+    }
+}
+
+/// What `ModelStore::delete` removed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Removed {
+    /// Bytes given back to the filesystem.
+    pub freed: u64,
+    /// Bytes that stay on disk because another hard link keeps them: weights
+    /// a pull shared with another model id (`ModelStore::link_files`). Always
+    /// 0 where the link count cannot be read, which is Windows: it is then
+    /// counted as freed, as it always was.
+    pub shared: u64,
 }
 
 /// Create a model directory (and its parents, including the store root),
@@ -587,20 +830,41 @@ pub(crate) fn create_model_dir(
     })
 }
 
-/// Recursively sum the byte sizes of every regular file under `path`.
-/// Used for reporting how much disk space a `rm` actually freed.
-fn dir_size(path: &std::path::Path) -> Result<u64, Box<dyn std::error::Error>> {
-    let mut total: u64 = 0;
+/// What removing everything under `path` gives back, for reporting what a
+/// `rm` actually freed. A file with another hard link stays on disk under
+/// that other name, so it counts as shared rather than freed: once a pull can
+/// link the same weights into a second id, "5.0 GB freed" for a removal that
+/// frees nothing would be a false statement about the user's disk.
+fn removal_size(path: &std::path::Path) -> Result<Removed, Box<dyn std::error::Error>> {
+    let mut total = Removed::default();
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let meta = entry.metadata()?;
         if meta.is_dir() {
-            total += dir_size(&entry.path())?;
+            let sub = removal_size(&entry.path())?;
+            total.freed += sub.freed;
+            total.shared += sub.shared;
+        } else if has_other_links(&meta) {
+            total.shared += meta.len();
         } else {
-            total += meta.len();
+            total.freed += meta.len();
         }
     }
     Ok(total)
+}
+
+#[cfg(unix)]
+fn has_other_links(meta: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink() > 1
+}
+
+/// The standard library has no stable way to read a link count on Windows
+/// (`MetadataExt::number_of_links` is still unstable), so a shared file is
+/// reported as freed there. Only the message is affected, not the removal.
+#[cfg(not(unix))]
+fn has_other_links(_meta: &fs::Metadata) -> bool {
+    false
 }
 
 #[cfg(test)]
@@ -789,7 +1053,14 @@ mod tests {
     fn external_manifest_records_id() {
         let (store, root) = temp_store();
         store
-            .write_external_manifest("my-model", "weights.gguf", "https://x/y.gguf", 123, None)
+            .write_external_manifest(
+                "my-model",
+                "weights.gguf",
+                "https://x/y.gguf",
+                123,
+                None,
+                None,
+            )
             .unwrap();
         let listed = store.list().unwrap();
         assert_eq!(listed[0].id, "my-model");
@@ -1159,5 +1430,126 @@ mod store_lookup_tests {
         let (root, source) = store.root_with_source();
         assert_eq!(root, s.0.as_path());
         assert!(matches!(source, "EULLM_MODELS_DIR" | "default"));
+    }
+}
+
+#[cfg(test)]
+mod hf_file_tests {
+    use super::*;
+
+    fn manifest(extra: serde_json::Value) -> ModelManifest {
+        let mut m = serde_json::json!({
+            "id": "some-model", "name": "some-model", "description": "",
+            "languages": [], "base": "", "vram_gb": 0, "size_bytes": 1,
+            "license": "unknown", "digest": "", "pulled_at": "", "status": "ready",
+        });
+        for (k, v) in extra.as_object().expect("an object") {
+            m[k] = v.clone();
+        }
+        serde_json::from_value(m).expect("a valid manifest")
+    }
+
+    #[test]
+    fn a_recorded_file_matches_by_its_whole_path() {
+        let m = manifest(serde_json::json!({
+            "gguf_file": "M-UD-Q4_K_XL-00001-of-00002.gguf",
+            "hf_repo": "someone/M-GGUF",
+            "hf_filename": "UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf",
+        }));
+        assert!(m.holds(&HfFile::new(
+            "someone/M-GGUF",
+            "UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf"
+        )));
+        assert!(!m.holds(&HfFile::new(
+            "someone/M-GGUF",
+            "old/M-UD-Q4_K_XL-00001-of-00002.gguf"
+        )));
+        assert!(
+            !m.holds(&HfFile::new(
+                "someone/M-GGUF",
+                "ud-q4_k_xl/m-ud-q4_k_xl-00001-of-00002.gguf"
+            )),
+            "a path inside a repository is case-sensitive"
+        );
+    }
+
+    // All an `hf.co` pull used to record was the ref and the stored name,
+    // which has lost the directory. The name is then all there is to compare.
+    #[test]
+    fn an_older_hub_pull_is_matched_by_the_name_it_stored() {
+        let m = manifest(serde_json::json!({
+            "description": "External model pulled from hf.co/someone/M-GGUF:UD-Q4_K_XL",
+            "gguf_file": "M-UD-Q4_K_XL-00001-of-00002.gguf",
+        }));
+        assert!(m.holds(&HfFile::new(
+            "someone/m-gguf",
+            "UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf"
+        )));
+        assert!(!m.holds(&HfFile::new(
+            "someone/M-GGUF",
+            "Q8_0/M-Q8_0-00001-of-00002.gguf"
+        )));
+        assert!(!m.holds(&HfFile::new(
+            "other/M-GGUF",
+            "UD-Q4_K_XL/M-UD-Q4_K_XL-00001-of-00002.gguf"
+        )));
+    }
+
+    // A plain URL and an Ollama import say nothing about which Hub file they
+    // are, so they must never be linked in as one.
+    #[test]
+    fn a_url_pull_or_an_ollama_import_is_never_a_hub_file() {
+        let wanted = HfFile::new("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf");
+        for description in [
+            "External model pulled from https://huggingface.co/unsloth/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf",
+            "Imported from Ollama: qwen3:8b",
+        ] {
+            let m = manifest(serde_json::json!({
+                "description": description, "gguf_file": "Qwen3-8B-Q4_K_M.gguf",
+            }));
+            assert!(!m.holds(&wanted), "{description}");
+        }
+    }
+
+    // The new fields are written when known and left out otherwise, and a
+    // manifest from before they existed still reads — with them absent.
+    #[test]
+    fn the_file_is_recorded_when_known_and_old_manifests_still_read() {
+        let root = std::env::temp_dir().join(format!("eullm-hffile-{}", uuid::Uuid::new_v4()));
+        let store = ModelStore::at(root.clone());
+        let file = HfFile::new("unsloth/Qwen3-8B-GGUF", "Qwen3-8B-Q4_K_M.gguf");
+        store
+            .write_external_manifest(
+                "from-hub",
+                "Qwen3-8B-Q4_K_M.gguf",
+                "hf.co/x/y",
+                1,
+                None,
+                Some(&file),
+            )
+            .expect("write");
+        store
+            .write_external_manifest(
+                "from-url",
+                "model.gguf",
+                "https://host/model.gguf",
+                1,
+                None,
+                None,
+            )
+            .expect("write");
+
+        let hub = store.get("from-hub").expect("get").expect("manifest");
+        assert_eq!(hub.hf_repo.as_deref(), Some("unsloth/Qwen3-8B-GGUF"));
+        assert_eq!(hub.hf_filename.as_deref(), Some("Qwen3-8B-Q4_K_M.gguf"));
+        let raw = fs::read_to_string(root.join("from-url").join("manifest.json")).expect("read");
+        assert!(
+            !raw.contains("hf_repo") && !raw.contains("hf_filename"),
+            "{raw}"
+        );
+
+        let old = manifest(serde_json::json!({ "gguf_file": "model.gguf" }));
+        assert_eq!((old.hf_repo, old.hf_filename), (None, None));
+        let _ = fs::remove_dir_all(&root);
     }
 }

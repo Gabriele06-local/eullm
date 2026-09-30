@@ -24,7 +24,7 @@ use futures_util::stream::Stream;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::inference::embedding::DEFAULT_EMBEDDING_CTX;
+use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded};
 
 use super::AppState;
 use crate::audit::{AuditEntry, AuditLogger};
@@ -1128,11 +1128,13 @@ fn parse_embedding_input(body: &Value) -> Result<Vec<String>, (StatusCode, Json<
 /// `POST /api/embed` — Ollama-compatible.
 ///
 /// Request: `{"model": "...", "input": "text" | ["text", ...], "keep_alive": ...}`.
-/// Response: `{"model": "...", "embeddings": [[...], ...]}`.
+/// Response: `{"model": "...", "embeddings": [[...], ...], "total_duration": ns,
+/// "load_duration": ns, "prompt_eval_count": tokens}` — see `ollama_embed_response`.
 async fn embed(
     State(state): State<S>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let started = std::time::Instant::now();
     let requested = body.get("model").and_then(|v| v.as_str()).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
@@ -1148,23 +1150,47 @@ async fn embed(
         .unwrap_or(DEFAULT_EMBEDDING_CTX);
 
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
+    let loading = std::time::Instant::now();
     let model = state
         .ensure_embedding_model(requested, n_ctx)
         .await
         .map_err(embedding_model_error)?;
+    let load_duration = loading.elapsed();
     state.touch_embedding_slot(keep_alive).await;
 
-    let embeddings = model.embed(&inputs).map_err(|e| {
+    let embedded = model.embed(&inputs).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Embedding failed: {e}") })),
         )
     })?;
 
-    Ok(Json(json!({
-        "model": requested,
-        "embeddings": embeddings,
-    })))
+    Ok(Json(ollama_embed_response(
+        requested,
+        embedded,
+        load_duration,
+        started.elapsed(),
+    )))
+}
+
+/// The `/api/embed` response, in Ollama's shape: the vectors, the tokens
+/// read as `prompt_eval_count`, and the durations in nanoseconds —
+/// `load_duration` the time spent getting the model into its slot (close to
+/// nothing when it was already there), `total_duration` the whole request.
+fn ollama_embed_response(
+    model: &str,
+    embedded: Embedded,
+    load_duration: std::time::Duration,
+    total_duration: std::time::Duration,
+) -> Value {
+    let nanos = |d: std::time::Duration| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX);
+    json!({
+        "model": model,
+        "embeddings": embedded.vectors,
+        "total_duration": nanos(total_duration),
+        "load_duration": nanos(load_duration),
+        "prompt_eval_count": embedded.prompt_tokens,
+    })
 }
 
 /// `POST /v1/embeddings` — OpenAI-compatible.
@@ -1196,29 +1222,39 @@ async fn embeddings_openai(
         .map_err(embedding_model_error)?;
     state.touch_embedding_slot(keep_alive).await;
 
-    let embeddings = model.embed(&inputs).map_err(|e| {
+    let embedded = model.embed(&inputs).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Embedding failed: {e}") })),
         )
     })?;
 
-    let data: Vec<Value> = embeddings
+    Ok(Json(openai_embeddings_response(requested, embedded)))
+}
+
+/// The `/v1/embeddings` response, in OpenAI's shape.
+///
+/// `usage` counts the tokens the model read, after truncation to the
+/// embedder's context. It used to be a fixed 0 because `embed` did not
+/// return a count, which is exactly what a client billing or rate-limiting
+/// by `usage` cannot tell apart from an empty request. An embedding request
+/// generates nothing, so the total is the prompt.
+fn openai_embeddings_response(model: &str, embedded: Embedded) -> Value {
+    let data: Vec<Value> = embedded
+        .vectors
         .into_iter()
         .enumerate()
         .map(|(i, v)| json!({ "object": "embedding", "embedding": v, "index": i }))
         .collect();
-
-    Ok(Json(json!({
+    json!({
         "object": "list",
         "data": data,
-        "model": requested,
-        // No tokenizer count is surfaced by `EmbeddingModel::embed` today —
-        // an honest 0 rather than a fabricated token count. Ollama's own
-        // `/api/embed` has the same gap; OpenAI clients that only check the
-        // response shape (not the count) are unaffected.
-        "usage": { "prompt_tokens": 0, "total_tokens": 0 },
-    })))
+        "model": model,
+        "usage": {
+            "prompt_tokens": embedded.prompt_tokens,
+            "total_tokens": embedded.prompt_tokens,
+        },
+    })
 }
 
 /// `ModelError` → the same 404-vs-500 split `ensure_model` uses (see its
@@ -1271,6 +1307,38 @@ mod embedding_input_tests {
     fn a_wrong_shaped_input_is_rejected() {
         let body = json!({ "input": 42 });
         assert!(parse_embedding_input(&body).is_err());
+    }
+
+    fn two_vectors() -> Embedded {
+        Embedded {
+            vectors: vec![vec![1.0, 0.0], vec![0.0, 1.0]],
+            prompt_tokens: 7,
+        }
+    }
+
+    // `usage` was a fixed 0 whatever the request held.
+    #[test]
+    fn the_openai_usage_counts_the_tokens_read() {
+        let r = openai_embeddings_response("m", two_vectors());
+        assert_eq!(r["usage"]["prompt_tokens"], 7);
+        assert_eq!(r["usage"]["total_tokens"], 7);
+        assert_eq!(r["data"][1]["index"], 1);
+        assert_eq!(r["data"][1]["embedding"], json!([0.0, 1.0]));
+    }
+
+    // Ollama's own client reads these three next to the vectors.
+    #[test]
+    fn api_embed_reports_the_same_count_and_its_durations() {
+        let r = ollama_embed_response(
+            "m",
+            two_vectors(),
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_millis(30),
+        );
+        assert_eq!(r["prompt_eval_count"], 7);
+        assert_eq!(r["load_duration"], 2_000_000);
+        assert_eq!(r["total_duration"], 30_000_000);
+        assert_eq!(r["embeddings"], json!([[1.0, 0.0], [0.0, 1.0]]));
     }
 }
 

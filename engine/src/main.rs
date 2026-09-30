@@ -1060,11 +1060,15 @@ async fn cmd_pull_maybe(store: &ModelStore, model: Option<&str>) {
         return;
     }
     match picker::pick(store).await {
-        Some(picker::Picked::Catalog(entry)) => cmd_pull(store, &entry.id).await,
+        Some(picker::Picked::Catalog(entry)) => {
+            cmd_pull(store, &entry.id).await;
+        }
         Some(picker::Picked::Local(p)) => {
             println!("That model is already local: {}", p.display());
         }
-        Some(picker::Picked::Url(url)) => cmd_pull_url(store, &url).await,
+        Some(picker::Picked::Url(url)) => {
+            cmd_pull_url(store, &url).await;
+        }
         Some(picker::Picked::Quit) => {}
         None => {
             eprintln!("Error: missing <MODEL> argument.");
@@ -1111,7 +1115,11 @@ fn local_quants_of_repo(store: &ModelStore, hf: &registry::HfRef) -> Vec<String>
 /// The sequence itself lives in `models::pull`, shared with `POST /api/pull`,
 /// so a repo layout the download path learns to handle is learned by both at
 /// once. All this adds is printing.
-async fn cmd_pull_hf(store: &ModelStore, hf: &registry::HfRef) {
+///
+/// Returns the id the model can be run as: the ref's own, or — when the same
+/// file was already stored under another id and could not be linked — that
+/// other id.
+async fn cmd_pull_hf(store: &ModelStore, hf: &registry::HfRef) -> String {
     use crate::models::pull::{PullEvent, pull_from_huggingface};
 
     let id = hf_ref_to_model_id(hf);
@@ -1120,7 +1128,7 @@ async fn cmd_pull_hf(store: &ModelStore, hf: &registry::HfRef) {
         println!("Model '{id}' is already downloaded.");
         println!("  GGUF: {}", gguf.display());
         println!("\nRun with: eullm run {id}");
-        return;
+        return id;
     }
 
     println!("  Storing as: {id}");
@@ -1160,9 +1168,12 @@ async fn cmd_pull_hf(store: &ModelStore, hf: &registry::HfRef) {
     let _ = printer.await;
 
     match outcome {
-        Ok(id) => {
-            println!("  Done. Model ready.");
-            println!("\nRun with: eullm run {id}");
+        Ok(stored) => {
+            if stored == id {
+                println!("  Done. Model ready.");
+            }
+            println!("\nRun with: eullm run {stored}");
+            stored
         }
         Err(e) => {
             eprintln!("Pull failed: {e}");
@@ -1220,14 +1231,14 @@ fn url_to_model_id(url: &str) -> (String, String) {
 /// `eullm pull https://host/path/model.gguf` — downloads into the store
 /// under an id derived from the filename, writes an external manifest, and
 /// the model then behaves like any catalog model (`run`, `list`, `rm`).
-async fn cmd_pull_url(store: &ModelStore, url: &str) {
+async fn cmd_pull_url(store: &ModelStore, url: &str) -> String {
     let (id, filename) = url_to_model_id(url);
 
     if let Some(gguf) = store.gguf_path(&id) {
         println!("Model '{id}' is already downloaded.");
         println!("  GGUF: {}", gguf.display());
         println!("\nRun with: eullm run {id}");
-        return;
+        return id;
     }
 
     println!("Pulling from URL: {url}");
@@ -1259,13 +1270,14 @@ async fn cmd_pull_url(store: &ModelStore, url: &str) {
     match result {
         Ok(()) => {
             let size = std::fs::metadata(&gguf_dest).map(|m| m.len()).unwrap_or(0);
-            match store.write_external_manifest(&id, &filename, url, size, None) {
+            match store.write_external_manifest(&id, &filename, url, size, None, None) {
                 Ok(_) => {
                     println!("  Done. Model ready.");
                     println!("\nRun with: eullm run {id}");
                 }
                 Err(e) => eprintln!("Warning: download succeeded but manifest write failed: {e}"),
             }
+            id
         }
         Err(e) => {
             eprintln!("Download failed: {e}");
@@ -1277,15 +1289,20 @@ async fn cmd_pull_url(store: &ModelStore, url: &str) {
     }
 }
 
-async fn cmd_pull(store: &ModelStore, model: &str) {
+/// `eullm pull <catalog-id | hf.co/… | https://…>`.
+///
+/// Returns the id the model can be run as. That is the one asked for, except
+/// when the same file was already stored under another id and could not be
+/// linked (see `models::pull::reuse_stored_weights`): nothing is downloaded
+/// then, and the id returned is the one that has it — which is what lets
+/// `eullm run` go on to load it instead of failing on an id with no weights.
+async fn cmd_pull(store: &ModelStore, model: &str) -> String {
     if is_url(model) {
-        cmd_pull_url(store, model).await;
-        return;
+        return cmd_pull_url(store, model).await;
     }
 
     if let Some(hf) = registry::parse_hf_ref(model) {
-        cmd_pull_hf(store, &hf).await;
-        return;
+        return cmd_pull_hf(store, &hf).await;
     }
 
     let entry = match catalog::find_model(model) {
@@ -1316,17 +1333,30 @@ async fn cmd_pull(store: &ModelStore, model: &str) {
             let model_dir = store.model_path(&entry.id);
             if let Some(mmproj_filename) = download_mmproj(entry, &model_dir).await {
                 // Refresh the manifest so its mmproj_file matches disk reality.
+                // Which file the weights are is carried over as it was, not
+                // taken from today's catalog entry: they may predate it.
                 let gguf_name = gguf.file_name().and_then(|s| s.to_str());
-                if let Err(e) =
-                    store.write_manifest(entry, "ready", gguf_name, Some(&mmproj_filename))
-                {
+                let existing = store.get(&entry.id).ok().flatten();
+                let hf_file = existing.as_ref().and_then(|m| {
+                    m.hf_repo
+                        .as_deref()
+                        .zip(m.hf_filename.as_deref())
+                        .map(|(repo, path)| models::store::HfFile::new(repo, path))
+                });
+                if let Err(e) = store.write_manifest(
+                    entry,
+                    "ready",
+                    gguf_name,
+                    Some(&mmproj_filename),
+                    hf_file.as_ref(),
+                ) {
                     eprintln!("  Warning: mmproj downloaded but manifest update failed: {e}");
                 }
             }
         }
 
         println!("\nRun with: eullm run {model}");
-        return;
+        return entry.id.clone();
     }
 
     println!("Pulling {} ...", entry.name);
@@ -1342,14 +1372,74 @@ async fn cmd_pull(store: &ModelStore, model: &str) {
         println!("  Warning: no download source configured for this model.");
         println!("  Writing manifest only (no GGUF file).");
 
-        match store.write_manifest(entry, "metadata_only", None, None) {
+        match store.write_manifest(entry, "metadata_only", None, None, None) {
             Ok(path) => println!("  Manifest saved to {}", path.display()),
             Err(e) => {
                 eprintln!("Error: {e}");
                 std::process::exit(1);
             }
         }
-        return;
+        return entry.id.clone();
+    }
+
+    // The same file may already be here under another id: pulled as
+    // `hf.co/<its repo>:<its quant>`, which is stored under a name of its own.
+    let weights = models::store::HfFile::new(&entry.hf_repo, &entry.hf_filename);
+    match models::pull::reuse_stored_weights(
+        store,
+        &weights,
+        &entry.id,
+        std::slice::from_ref(&entry.hf_filename),
+    ) {
+        Some(models::pull::AlreadyStored::Linked { from }) => {
+            println!(
+                "  {} is already downloaded as '{from}': linked it as '{}' instead of \
+                 downloading it again (no extra disk space).",
+                entry.hf_filename, entry.id
+            );
+            // The projector comes along when `from` has the same one; when it
+            // does not, `download_mmproj` fetches it as on a fresh pull (and
+            // finds it already there otherwise).
+            if let (Some(repo), Some(file)) = (&entry.mmproj_repo, &entry.mmproj_filename) {
+                models::pull::link_stored_projector(
+                    store,
+                    &from,
+                    &entry.id,
+                    &models::store::HfFile::new(repo, file),
+                );
+            }
+            let mmproj = download_mmproj(entry, &store.model_path(&entry.id)).await;
+            if let Err(e) = store.write_manifest(
+                entry,
+                "ready",
+                Some(&entry.hf_filename),
+                mmproj.as_deref(),
+                Some(&weights),
+            ) {
+                // Only links were made, so undoing them loses nothing.
+                let _ = store.delete(&entry.id);
+                eprintln!(
+                    "Error: could not write the manifest for '{}': {e}",
+                    entry.id
+                );
+                eprintln!("The model is still available as '{from}'.");
+                std::process::exit(1);
+            }
+            println!("  Done. Model ready.");
+            println!("\nRun with: eullm run {}", entry.id);
+            return entry.id.clone();
+        }
+        Some(models::pull::AlreadyStored::Unlinked { from, reason }) => {
+            println!(
+                "  {} is already downloaded as '{from}', but could not be linked as '{}' \
+                 ({reason}).",
+                entry.hf_filename, entry.id
+            );
+            println!("  Nothing was downloaded: it is the same file, use '{from}'.");
+            println!("\nRun with: eullm run {from}");
+            return from;
+        }
+        None => {}
     }
 
     // Download GGUF from HuggingFace
@@ -1433,6 +1523,7 @@ async fn cmd_pull(store: &ModelStore, model: &str) {
                 "ready",
                 Some(&entry_clone.hf_filename),
                 mmproj_filename_stored.as_deref(),
+                Some(&weights),
             ) {
                 Ok(_) => {
                     println!("  Done. Model ready.");
@@ -1442,6 +1533,7 @@ async fn cmd_pull(store: &ModelStore, model: &str) {
                     eprintln!("Warning: download succeeded but manifest write failed: {e}");
                 }
             }
+            entry_clone.id.clone()
         }
         Err(e) => {
             eprintln!("Download failed: {e}");
@@ -1712,10 +1804,17 @@ fn cmd_rm(store: &ModelStore, model: &str, force: bool) {
     }
 
     match store.delete(model) {
-        Ok(Some(freed)) => println!(
+        // Weights a pull linked into a second id stay with that id.
+        Ok(Some(removed)) if removed.shared > 0 => println!(
+            "Removed '{}' ({} freed; {} stays on disk, shared with another model).",
+            manifest.name,
+            format_bytes(removed.freed),
+            format_bytes(removed.shared)
+        ),
+        Ok(Some(removed)) => println!(
             "Removed '{}' ({} freed).",
             manifest.name,
-            format_bytes(freed)
+            format_bytes(removed.freed)
         ),
         Ok(None) => println!("Nothing to remove (already gone)."),
         Err(e) => {
@@ -2106,7 +2205,9 @@ async fn cmd_run(
     };
 
     // Set when a bare HuggingFace repo ref resolves to a quant already on
-    // disk, whose store id differs from the bare-repo id (see below).
+    // disk, whose store id differs from the bare-repo id (see below), and
+    // when the pull found the file already stored under another id that it
+    // could not link (`models::pull::reuse_stored_weights`).
     let mut return_hf_id: Option<String> = None;
     // Try to resolve as a local GGUF file or downloaded model
     let gguf_path = if is_url(model) {
@@ -2136,7 +2237,10 @@ async fn cmd_run(
             match local.as_slice() {
                 [] => {
                     println!("Model not found locally. Pulling from HuggingFace...");
-                    cmd_pull_hf(store, &hf).await;
+                    let stored = cmd_pull_hf(store, &hf).await;
+                    if stored != id {
+                        return_hf_id = Some(stored);
+                    }
                 }
                 [only] => {
                     println!("Using the copy already downloaded: {only}");
@@ -2159,10 +2263,13 @@ async fn cmd_run(
         Some(path)
     } else {
         // Catalog model — try to pull if not available, then load GGUF
+        // from wherever the pull put it: the id asked for, or another id that
+        // already had the same file (see `cmd_pull`).
+        let mut stored_as: Option<String> = None;
         if !store.exists(model) {
             if catalog::find_model(model).is_some() {
                 println!("Model not found locally. Pulling...");
-                cmd_pull(store, model).await;
+                stored_as = Some(cmd_pull(store, model).await);
             } else {
                 eprintln!("Error: model '{model}' not found.");
                 eprintln!();
@@ -2174,7 +2281,7 @@ async fn cmd_run(
                 std::process::exit(1);
             }
         }
-        store.gguf_path(model)
+        store.gguf_path(stored_as.as_deref().unwrap_or(model))
     };
 
     // The batch size actually used, which is not always the one asked for: a
@@ -3184,6 +3291,8 @@ fn cmd_import_ollama(store: &ModelStore, model: &str, ollama_dir: Option<&str>) 
         status: "ready".into(),
         gguf_file: Some(gguf_filename),
         mmproj_file: None,
+        hf_repo: None,
+        hf_filename: None,
     };
 
     let manifest_json = serde_json::to_string_pretty(&manifest).unwrap();
