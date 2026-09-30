@@ -1124,9 +1124,17 @@ curl -X POST http://localhost:11434/api/embed \
 ```json
 {
   "model": "bge-m3",
-  "embeddings": [[0.013, -0.021, ...], [0.008, 0.044, ...]]
+  "embeddings": [[0.013, -0.021, ...], [0.008, 0.044, ...]],
+  "total_duration": 41250000,
+  "load_duration": 120000,
+  "prompt_eval_count": 8
 }
 ```
+
+As in Ollama, `prompt_eval_count` is the tokens the model read, over all
+inputs and after truncation to the embedder's context, and the durations
+are nanoseconds: `load_duration` getting the model into its slot (next to
+nothing when it was already there), `total_duration` the whole request.
 
 ### OpenAI-Compatible API
 
@@ -1231,12 +1239,13 @@ curl -X POST http://localhost:11434/v1/embeddings \
   "object": "list",
   "data": [{"object": "embedding", "embedding": [0.013, -0.021, ...], "index": 0}],
   "model": "bge-m3",
-  "usage": {"prompt_tokens": 0, "total_tokens": 0}
+  "usage": {"prompt_tokens": 4, "total_tokens": 4}
 }
 ```
 
-`usage` is honestly reported as zero rather than a fabricated token count —
-the embedding path does not run a text tokenizer count today.
+`usage` counts the tokens the model read, after truncation to the
+embedder's context; an embedding generates nothing, so the total is the
+prompt.
 
 #### `POST /v1/systemone`
 
