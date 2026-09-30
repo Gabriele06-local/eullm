@@ -54,13 +54,20 @@ while IFS='|' read -r id name state elapsed; do
             flag "$id $name ended $state after $elapsed — log: logs/$name-$id.out" ;;
         COMPLETED*|TIMEOUT*)
             case "$name" in
-                eullm-p*|eullm-stage3|eullm-gen-*)
+                # eullm-s3-*: stage-3 chains submitted under a name of their
+                # own (-J), one per experiment.
+                eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*)
                     if [ "$(secs "$elapsed")" -lt 600 ]; then
-                        # The last link of a generation chain finds nothing
-                        # left and exits in seconds, which is correct.
+                        # The last link of a chain finds nothing left and
+                        # exits in seconds, which is correct. So does a
+                        # stage-3 link that resumed from the final checkpoint
+                        # and only wrote the adapter out (before stage3_sft.py
+                        # learnt to stop when the adapter is already there).
                         log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
                         if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
                             echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
+                        elif [ -n "$log" ] && grep -q "^\[stage3\] adapter /" "$log"; then
+                            echo "   $id $name: ended in $elapsed, training finished (fine)"
                         else
                             flag "$id $name ended $state after only $elapsed — a link that short did no work"
                         fi

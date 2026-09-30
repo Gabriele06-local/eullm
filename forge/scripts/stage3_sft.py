@@ -19,6 +19,9 @@ and the measurement are CPU work and run on the serial partition afterwards
         --out    $WORK/eullm_runs/stage3/sft-step12600
 
 Resumable: a rerun with the same --out continues from its last checkpoint.
+A rerun whose --out already holds the adapter stops at once: training
+finished, and the chain's spare links must not load the model only to write
+the same adapter again — perhaps while the package job is reading it.
 """
 
 from __future__ import annotations
@@ -33,7 +36,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from eullm_forge.identity import IdentityConfig, fine_tune_identity  # noqa: E402
 
 
-def main() -> int:
+def finished_adapter(out: str | Path) -> Path | None:
+    """The adapter a finished run left in ``out``, or None while training is
+    still owed. `fine_tune_identity` writes it only after the last step."""
+    config = Path(out) / "adapter" / "adapter_config.json"
+    return config if config.is_file() and config.stat().st_size > 0 else None
+
+
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", required=True, help="merged HF directory of the distilled student")
@@ -58,7 +68,18 @@ def main() -> int:
     # and without them it never learns to stop (legal-it v0.1).
     ap.add_argument("--no-format-tokens", action="store_true",
                     help="do not train the chat-format token rows (instruct bases)")
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
+
+    # A chain has spare links in case training needs them. When it did not,
+    # the next link used to resume from the final checkpoint, train zero
+    # steps and save the adapter again: three GPU minutes, a rewrite under a
+    # package job that may be merging it, and a "link that short did no
+    # work" alarm in status.sh (2026-09-30).
+    done = finished_adapter(args.out)
+    if done:
+        print(f"[stage3] adapter already at {done.parent}: training finished, "
+              "nothing left to do (move it away to train again)", flush=True)
+        return 0
 
     pairs = args.pairs[0]
     if len(args.pairs) > 1:
