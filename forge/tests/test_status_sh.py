@@ -110,3 +110,30 @@ def test_the_real_problems_are_flagged(tmp_path, runs):
     assert "eullm-stage3 ended FAILED" in out
     assert "ended OUT_OF_MEMORY" in out
     assert "5 thing(s) above need a look" in out
+
+
+def test_a_stage3_link_after_training_finished_is_not_an_alarm(tmp_path, runs):
+    """2026-09-30: the v0.4 chain's spare link resumed from the final
+    checkpoint, saved the adapter again and ended in 2:43 — flagged as a
+    link that did no work, when the work had been done by the link before."""
+    (runs / "logs" / "eullm-stage3-59054377.out").write_text(
+        "[s3] out    /w/sft-v04\n[stage3] adapter /w/sft-v04/adapter\n")
+    (runs / "logs" / "eullm-s3-it4b-v05-60.out").write_text(
+        "[stage3] adapter already at /w/sft-it4b-v05/adapter: training finished, "
+        "nothing left to do (move it away to train again)\n")
+    out = run_status(tmp_path, queue=[],
+                     ended=[("59054377", "eullm-stage3", "COMPLETED", "00:02:43"),
+                            ("60", "eullm-s3-it4b-v05", "COMPLETED", "00:00:40")])
+    assert "[!!]" not in out, out
+    assert "training finished (fine)" in out
+    assert "60 eullm-s3-it4b-v05: ended in 00:00:40 with nothing left to do" in out
+
+
+def test_a_named_stage3_link_that_did_nothing_is_flagged(tmp_path, runs):
+    """A chain renamed with -J is still a training chain: a three-minute link
+    that never reached the end of training needs a human."""
+    (runs / "logs" / "eullm-s3-q35-9b-v04-61.out").write_text(
+        "[s3] base   /w/Qwen3.5-9B\nTraceback (most recent call last):\n")
+    out = run_status(tmp_path, queue=[],
+                     ended=[("61", "eullm-s3-q35-9b-v04", "COMPLETED", "00:03:00")])
+    assert "61 eullm-s3-q35-9b-v04 ended COMPLETED after only 00:03:00" in out
