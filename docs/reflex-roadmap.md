@@ -205,14 +205,17 @@ is the candidate there, not yet measured.
     has, against Reflex's choice and a yes/no; thresholds fitted on a dev
     half, every method scored on the test half.
   - [✅ done] The first run on the GPU: see the results below.
-  - [🆕 next] The ceiling: a larger instruction-tuned model asked the same
-    yes/no through the code readout, to tell a small model's limit from
-    the task's.
+  - [✅ done] The ceiling: Qwen3-8B, four times the size and not trained
+    for decisions, asked the same questions through the code readout. It
+    does no better — see the results below: MuSiQue's limit is the task,
+    not the 2B's size.
   - [🔧 now] An Italian set: `rg_openbook.py` writes it from Forge's
     open-book pairs — each question asked by topic about an article of
     Italian law, with the articles retrieval finds, its own among them or
     left out, the two contexts Forge trains the legal model on. Written
-    where the pairs are; its run is next.
+    where the pairs are; while the cluster is down, `--by-heading` asks by
+    each article's rubrica from the legislation records alone. Its run is
+    next.
 
 ### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
 
@@ -239,6 +242,14 @@ when it may stop at most about one sufficient case in ten:
   the embeddings' two thresholds (47%). A context short of one hop is
   mostly taken for one that holds nothing, and that is the hard case for
   every method.
+- **A larger model is not the answer.** Qwen3-8B, asked the same two
+  questions: AUROC 0.765 (choice) and 0.772 (yes/no) against the 2B's
+  0.769 and 0.763, the same balanced accuracy at a fitted threshold (0.70),
+  in 134–139 ms against 49–50 ms. It follows the passages better within a
+  question (0.83–0.86 against 0.79–0.82), and its own yes/no is less
+  cautious — it stops 62% of the insufficient cases and 22% of the
+  sufficient ones without any threshold — but calibrated, the 2B does as
+  well at a third of the latency.
 - MuSiQue's questions take two to four hops; most questions put to a
   company's documents take one. The Italian set is what says how the gate
   does on those.
@@ -247,7 +258,9 @@ when it may stop at most about one sufficient case in ten:
 
 - An MCP server exposing `decide` and `select_tools` over `/v1/systemone`,
   so that any MCP client — an IDE agent, a desktop assistant — can use
-  Reflex without code of ours in its loop.
+  Reflex without code of ours in its loop. The `jev-style` package
+  (Apache-2.0) already ships an MCP server and a client that take any
+  `/v1/systemone` base URL: to be tried against EuLLM before writing ours.
 - Examples for LangGraph and n8n.
 - A server-side policy: options filtered before the model sees them, and a
   deny list. Configured through `EULLM_*` environment variables, like every
@@ -294,6 +307,12 @@ when it may stop at most about one sufficient case in ten:
   of the cost. ReflexBench exists to find that out early and cheaply.
 - **Dependency.** The Jev-Style models are a third party's (Apache-2.0).
   MVP 4, decision models of our own from Forge, is the long-term answer.
+  As of 30 September 2026 the series stops at 2B (v3, 27 September): 73.6%
+  on JevBench's public items against 64.1% for the 0.8B and 86.6% for the
+  hosted Jev, which is an API and not an option here. The 2B was trained on
+  60M tokens and no training code is published, so a larger or better one
+  is ours to train. Nothing larger to try in the meantime: the RAG gate's
+  ceiling run found a generic 8B no better than the 2B.
 - **CPU cost.** Reading a large tool catalog on every request may take tens
   of seconds on a CPU. Layout B and the two-stage variant exist to bring that
   down, and the benchmark measures it instead of guessing.
