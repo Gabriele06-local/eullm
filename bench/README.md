@@ -98,8 +98,9 @@ python bench/decision_calibration.py labelled.jsonl --url http://localhost:11434
 MVP 0 of the [Reflex roadmap](../docs/reflex-roadmap.md): on MetaTool and
 BFCL, how many tools a method can drop without losing the one needed, how
 much of the tool-calling model's prompt that saves, and what the decision
-costs — `/v1/systemone` in two layouts against BM25 and embeddings. See
-[`reflexbench/README.md`](reflexbench/README.md).
+costs — `/v1/systemone` in two layouts against BM25 and embeddings; and
+`ragbench.py`, whether the passages a RAG system retrieved suffice to
+answer. See [`reflexbench/README.md`](reflexbench/README.md).
 
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 

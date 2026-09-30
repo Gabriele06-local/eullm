@@ -195,9 +195,19 @@ is the candidate there, not yet measured.
   **Met** for one tool out of a large catalog (see the MVP 0 results): the
   embeddings choose the shortlist. Reflex keeps the judgement on few
   options — which of a handful, several at once, or none of them.
-- [🆕 next] A **RAG sufficiency gate** — answer, retrieve more, or abstain —
+- [🔧 now] A **RAG sufficiency gate** — answer, retrieve more, or abstain —
   with RAG Enterprise as its first consumer: a judgement on few options,
   the kind the benchmark found Reflex good at.
+  - [✅ done] Its evaluator, [`ragbench.py`](../bench/reflexbench/README.md#the-rag-gate-ragbenchpy):
+    MuSiQue (CC BY 4.0), three contexts a question that differ only in
+    what they hold — every passage the answer needs, all but one, none of
+    them; the embeddings' best similarity, the signal a RAG system already
+    has, against Reflex's choice and a yes/no; thresholds fitted on a dev
+    half, every method scored on the test half.
+  - [🔧 now] The first run on the GPU, Jev-Style 2B and 0.8B.
+  - [🆕 next] An Italian set: questions on the legislation Forge already
+    prepares, the articles retrieved for them, and whether the one that
+    answers is among them.
 
 ## MVP 2 — adapters, not a runtime  [🆕 next]
 

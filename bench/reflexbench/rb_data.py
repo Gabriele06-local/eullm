@@ -18,11 +18,14 @@ spec is what selecting fewer tools keeps out of that prompt.
 """
 
 import csv
+import http.client
 import io
 import json
 import os
 import pathlib
 import random
+import time
+import urllib.error
 import urllib.request
 
 # The revisions the reports are made on: MetaTool's master and the BFCL
@@ -78,14 +81,35 @@ def cache_dir():
     return path
 
 
-def fetch(url):
-    """The file at `url`, downloaded once."""
+def fetch(url, attempts=5):
+    """The file at `url`, downloaded once. A transfer cut short is taken up
+    where it stopped, a few times, and nothing incomplete is kept."""
     path = cache_dir() / url.split("//", 1)[1].replace("/", "_")
-    if not path.exists():
-        with urllib.request.urlopen(url, timeout=120) as response:
-            data = response.read()
-        path.write_bytes(data)
-    return path.read_bytes()
+    if path.exists():
+        return path.read_bytes()
+    data = b""
+    for attempt in range(attempts):
+        headers = {"Range": f"bytes={len(data)}-"} if data else {}
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(url, headers=headers), timeout=120
+            ) as r:
+                if data and r.status != 206:
+                    data = b""  # the whole file again, not the rest of it
+                data += r.read()
+            break
+        except http.client.IncompleteRead as e:
+            data += e.partial
+        except (urllib.error.URLError, ConnectionError, TimeoutError):
+            if attempt == attempts - 1:
+                raise
+        time.sleep(2**attempt)
+    else:
+        raise OSError(f"{url}: the download kept being cut short")
+    part = path.with_name(path.name + ".part")
+    part.write_bytes(data)
+    part.replace(path)
+    return data
 
 
 def metatool_tools():
