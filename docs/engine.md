@@ -769,10 +769,21 @@ the decision slot). Left out, or set to a System One model name such as
 works unchanged. With no decision model loaded the request is refused with a
 400 `model_not_loaded` saying so.
 
-Every request is written to the audit trail with `request_type: "systemone"`
-and a `decision` record: each answer with its log-probabilities and its
-probabilities before and after calibration. The state itself is not stored,
-only its SHA-256.
+Every decision is written to the audit trail with `request_type:
+"systemone"` and a `decision` record: each answer with its log-probabilities
+and its probabilities before and after calibration. The state itself is not
+stored, only its SHA-256.
+
+**A client that disconnects.** The record is written by the thread that
+computed the decision, not by the connection that asked for it, so every
+decision the model computes is recorded — one whose client disconnected
+before its answers were ready with `client_disconnected: true`, since they
+were never sent. A request whose client disconnects before that stops at its
+next question, or before it starts if it was still waiting for the model, so
+the next request does not wait behind work nobody will read. It decided
+nothing and, like a request refused as invalid or one llama.cpp failed on, is
+not recorded; the server log says it was abandoned. A single question is not
+interrupted once it is being decoded.
 
 ### Jev-Style decision models
 
@@ -1148,7 +1159,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
-| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 

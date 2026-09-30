@@ -32,7 +32,9 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 
-use super::{DecisionError, EvalMode, EvalStats, KV_WINDOW_STEP, ms_since, runtime, score_rows};
+use super::{
+    Cancel, DecisionError, EvalMode, EvalStats, KV_WINDOW_STEP, ms_since, runtime, score_rows,
+};
 
 /// Fewest cells a context is created with: below this, growing it again on
 /// the next slightly longer request would cost more than the memory saved.
@@ -97,6 +99,11 @@ pub(super) struct Job {
     pub mode: EvalMode,
     /// F32 KV cache and no flash attention (`DecisionModel::exact`).
     pub exact: bool,
+    /// Read before the job starts, between the calls that decode the shared
+    /// part and between questions: where the cache holds only whole
+    /// sequences, and a job stopped there leaves the next one a context it
+    /// can use (see [`Cancel`]).
+    pub cancel: Cancel,
 }
 
 /// Per prompt: the class log-probabilities (`Readout::Classes`) or one
@@ -259,6 +266,7 @@ impl<'m> Worker<'m> {
     }
 
     fn evaluate(&mut self, job: &Job) -> JobResult {
+        job.cancel.check()?;
         let blocks = self.config.protocol.blocks;
         match job.mode {
             EvalMode::Separate if blocks => self.separate_blocks(job),
@@ -377,10 +385,15 @@ impl<'m> Worker<'m> {
     /// block protocol, in batch-sized calls otherwise — and nothing else in
     /// the cache. Kept as it is when it already does. Returns the
     /// milliseconds spent and whether it was kept.
+    ///
+    /// Stops between calls once `cancel` is set: a long state is many
+    /// calls. Sequence 0 is then part of a prefix, and marked as holding
+    /// none, so the next request clears it.
     fn prefix(
         &mut self,
         prefix: &[LlamaToken],
         blocks: &[(usize, usize)],
+        cancel: &Cancel,
     ) -> Result<(f64, bool), DecisionError> {
         let started = Instant::now();
         let batch_size = self.config.protocol.batch as usize;
@@ -407,6 +420,7 @@ impl<'m> Worker<'m> {
         };
         let mut batch = LlamaBatch::new(batch_size, 1);
         for (a, b) in spans {
+            cancel.check()?;
             batch.clear();
             for (pos, &token) in prefix.iter().enumerate().take(b).skip(a) {
                 batch
@@ -519,9 +533,12 @@ impl<'m> Worker<'m> {
             clear(&mut self.cached().ctx)?;
         } else {
             fused = false;
-            (prefix_ms, prefix_reused) = self.prefix(prefix, &[])?;
+            (prefix_ms, prefix_reused) = self.prefix(prefix, &[], &job.cancel)?;
             questions_started = Instant::now();
             for i in 0..n {
+                // Sequence 1 is gone: what is left is the whole prefix,
+                // kept for the next request.
+                job.cancel.check()?;
                 if shared > 0 {
                     self.cached()
                         .ctx
@@ -604,7 +621,8 @@ impl<'m> Worker<'m> {
             u32::try_from(group + 1).unwrap_or(u32::MAX),
             u32::try_from(n_outputs).unwrap_or(u32::MAX),
         )?;
-        let (prefix_ms, prefix_reused) = self.prefix(&job.prompts[0][..shared], &[])?;
+        let (prefix_ms, prefix_reused) =
+            self.prefix(&job.prompts[0][..shared], &[], &job.cancel)?;
 
         let questions_started = Instant::now();
         let batch_size = self.config.protocol.batch as usize;
@@ -612,6 +630,7 @@ impl<'m> Worker<'m> {
         let mut batch = LlamaBatch::new(batch_size, 1);
         let mut outputs: Vec<Vec<Read>> = (0..n).map(|_| Vec::new()).collect();
         for round in &rounds {
+            job.cancel.check()?;
             if shared > 0 {
                 for k in 1..=round.len() {
                     self.cached()
@@ -709,6 +728,9 @@ impl<'m> Worker<'m> {
         let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
         let mut outputs = Vec::with_capacity(job.prompts.len());
         for i in 0..job.prompts.len() {
+            // Nothing is kept (`prefix` is `None`): the next request clears
+            // whatever this one leaves.
+            job.cancel.check()?;
             clear(&mut self.cached().ctx)?;
             let mut out = Vec::with_capacity(job.reads[i].len());
             let len = job.prompts[i].len();
@@ -755,12 +777,14 @@ impl<'m> Worker<'m> {
             .copied()
             .filter(|&(_, b)| b <= shared)
             .collect();
-        let (prefix_ms, prefix_reused) = self.prefix(&job.prompts[0][..shared], &shared_blocks)?;
+        let (prefix_ms, prefix_reused) =
+            self.prefix(&job.prompts[0][..shared], &shared_blocks, &job.cancel)?;
 
         let questions_started = Instant::now();
         let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
         let mut outputs = Vec::with_capacity(n);
         for i in 0..n {
+            job.cancel.check()?;
             if shared > 0 {
                 self.cached()
                     .ctx
@@ -811,6 +835,7 @@ impl<'m> Worker<'m> {
         let mut batch = LlamaBatch::new(self.config.protocol.batch as usize, 1);
         let mut outputs = Vec::with_capacity(job.prompts.len());
         for i in 0..job.prompts.len() {
+            job.cancel.check()?;
             clear(&mut self.cached().ctx)?;
             let mut out = Vec::with_capacity(job.reads[i].len());
             for &(a, b) in &job.blocks[i] {

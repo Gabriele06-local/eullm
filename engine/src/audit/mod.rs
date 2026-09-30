@@ -85,6 +85,11 @@ pub struct DecisionRecord {
     /// written before that became the definition, `normalized_entropy`.
     #[serde(default = "entropy_confidence")]
     pub confidence_method: String,
+    /// The client had disconnected by the time these answers were ready:
+    /// they were computed, and are recorded, but were never sent. Written
+    /// only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub client_disconnected: bool,
     pub answers: Vec<DecisionAnswerRecord>,
 }
 
@@ -415,6 +420,7 @@ mod tests {
             calibration: "none".into(),
             temperature: 1.0,
             confidence_method: "normalized_max_probability".into(),
+            client_disconnected: false,
             answers: vec![DecisionAnswerRecord {
                 id: "area".into(),
                 kind: "choice".into(),
@@ -430,6 +436,8 @@ mod tests {
         });
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""type":"choice""#), "{json}");
+        // Delivered, as nearly every decision is: no flag on the line.
+        assert!(!json.contains("client_disconnected"), "{json}");
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         let decision = parsed.decision.unwrap();
         assert_eq!(decision.confidence_method, "normalized_max_probability");

@@ -42,6 +42,7 @@ mod verdict;
 use std::collections::HashMap;
 use std::path::Path;
 use std::pin::pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -1019,6 +1020,37 @@ pub struct DecideOptions {
     pub content_free: bool,
 }
 
+/// Set when the request a decision is for is abandoned — its client has
+/// disconnected — so the work stops instead of occupying the model to the
+/// end while the next request waits behind it. Clones share one flag.
+///
+/// It is read where the kept context is in a state the next request can
+/// build on: before a request starts (a request that waited for the model
+/// while its client left never starts), between the calls that decode the
+/// state, and between questions — never in the middle of one, whose cells
+/// would be left behind in the next one's way. A request stopped this way
+/// ends in [`DecisionError::Cancelled`], with no answers.
+#[derive(Debug, Clone, Default)]
+pub struct Cancel(Arc<AtomicBool>);
+
+impl Cancel {
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    /// `Err(Cancelled)` once the request has been abandoned.
+    fn check(&self) -> Result<(), DecisionError> {
+        if self.is_cancelled() {
+            return Err(DecisionError::Cancelled);
+        }
+        Ok(())
+    }
+}
+
 /// Why a decision could not be made. The split is the one the API maps to
 /// error codes: `Invalid` is a request the client must change, `TooLong`
 /// and `OverBudget` one too long to read whole, `Runtime` our failure; and
@@ -1036,6 +1068,9 @@ pub enum DecisionError {
     /// The error of the question at this index, in the order the request
     /// asked them.
     Question(usize, Box<DecisionError>),
+    /// The request was abandoned ([`Cancel`]) and stopped before its
+    /// answers were complete.
+    Cancelled,
     /// llama.cpp failed.
     Runtime(String),
 }
@@ -1058,6 +1093,10 @@ impl std::fmt::Display for DecisionError {
                  question, or in \"batched\" mode ask fewer questions at once"
             ),
             Self::Question(_, e) => e.fmt(f),
+            Self::Cancelled => f.write_str(
+                "the request was abandoned by its client and stopped before its answers were \
+                 complete",
+            ),
         }
     }
 }
@@ -1251,12 +1290,14 @@ impl DecisionModel {
     /// Answer every question about `state`: per class per question, the
     /// full-vocabulary log-probability of its code — and optionally the same
     /// measured on [`CONTENT_FREE_STATE`] — or, for a verdict model, its
-    /// option's score.
+    /// option's score. Stops with [`DecisionError::Cancelled`] at the next
+    /// question once `cancel` is set.
     pub fn decide(
         &self,
         state: &str,
         questions: &[Question],
         options: DecideOptions,
+        cancel: &Cancel,
     ) -> Result<Decision, DecisionError> {
         if questions.is_empty() {
             return Err(DecisionError::Invalid(
@@ -1282,7 +1323,9 @@ impl DecisionModel {
         }
         let code = match &self.readout {
             ModelReadout::Codes(code) => code,
-            ModelReadout::Verdict(v) => return self.decide_verdict(v, state, questions, options),
+            ModelReadout::Verdict(v) => {
+                return self.decide_verdict(v, state, questions, options, cancel);
+            }
         };
         let mut classes = Vec::with_capacity(questions.len());
         for (i, question) in questions.iter().enumerate() {
@@ -1299,6 +1342,8 @@ impl DecisionModel {
             .eval_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // Abandoned while it waited for the request before it.
+        cancel.check()?;
 
         // The priors first: the worker keeps the state it decoded last, and
         // the next request is far likelier to ask about this one than about
@@ -1325,8 +1370,13 @@ impl DecisionModel {
                     missing.iter().map(|&i| cf_prompts[i].clone()).collect();
                 let missing_classes: Vec<&[Vec<LlamaToken>]> =
                     missing.iter().map(|&i| classes[i]).collect();
-                let (measured, cf_stats) =
-                    self.evaluate(missing_prompts, cf_prefix, &missing_classes, options.mode)?;
+                let (measured, cf_stats) = self.evaluate(
+                    missing_prompts,
+                    cf_prefix,
+                    &missing_classes,
+                    options.mode,
+                    cancel,
+                )?;
                 let mut cache = self
                     .prior_cache
                     .lock()
@@ -1343,7 +1393,8 @@ impl DecisionModel {
             priors = Some(found.into_iter().map(Option::unwrap_or_default).collect());
         }
 
-        let (logprobs, stats) = self.evaluate(prompts, state_prefix, &classes, options.mode)?;
+        let (logprobs, stats) =
+            self.evaluate(prompts, state_prefix, &classes, options.mode, cancel)?;
 
         let outcomes = logprobs
             .into_iter()
@@ -1368,6 +1419,7 @@ impl DecisionModel {
         state: &str,
         questions: &[Question],
         options: DecideOptions,
+        cancel: &Cancel,
     ) -> Result<Decision, DecisionError> {
         if options.content_free {
             return Err(DecisionError::Invalid(format!(
@@ -1406,6 +1458,7 @@ impl DecisionModel {
             .eval_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        cancel.check()?;
         let (scores, stats) = self.engine.evaluate(engine::Job {
             reads: rendered.iter().map(|r| r.slots.clone()).collect(),
             blocks: rendered.iter().map(|r| r.blocks.clone()).collect(),
@@ -1417,6 +1470,7 @@ impl DecisionModel {
             },
             mode: options.mode,
             exact: self.exact,
+            cancel: cancel.clone(),
         })?;
         let outcomes = scores
             .into_iter()
@@ -1564,6 +1618,7 @@ impl DecisionModel {
         state_prefix: usize,
         classes: &[&[Vec<LlamaToken>]],
         mode: EvalMode,
+        cancel: &Cancel,
     ) -> Result<(Vec<Vec<f64>>, EvalStats), DecisionError> {
         let n_ctx_train = self.model.n_ctx_train() as usize;
         if let Some(longest) = prompts.iter().map(Vec::len).max()
@@ -1594,6 +1649,7 @@ impl DecisionModel {
             readout: engine::Readout::Classes(classes.iter().map(|c| c.to_vec()).collect()),
             mode,
             exact: self.exact,
+            cancel: cancel.clone(),
         })
     }
 }
@@ -2310,6 +2366,19 @@ mod tests {
     }
 
     #[test]
+    fn a_cancel_is_shared_by_its_clones_and_stops_at_the_next_check() {
+        let cancel = Cancel::default();
+        let seen_by_the_worker = cancel.clone();
+        assert!(!seen_by_the_worker.is_cancelled());
+        assert_eq!(seen_by_the_worker.check(), Ok(()));
+        cancel.cancel();
+        assert!(seen_by_the_worker.is_cancelled());
+        assert_eq!(seen_by_the_worker.check(), Err(DecisionError::Cancelled));
+        // Once set, it stays set: a later check stops too.
+        assert_eq!(cancel.check(), Err(DecisionError::Cancelled));
+    }
+
+    #[test]
     fn too_long_names_the_flag_to_raise() {
         let msg = DecisionError::TooLong {
             needed: 9000,
@@ -2400,6 +2469,65 @@ mod tests {
         questions
     }
 
+    /// A request abandoned before it starts does nothing, one abandoned
+    /// while it runs stops before its end, and neither leaves the kept
+    /// context in a state that changes the next request's answers.
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_an_abandoned_request_stops_and_changes_no_later_answer() {
+        let model = load_test_model();
+        let questions = test_questions(&model);
+        let options = DecideOptions {
+            mode: EvalMode::SharedPrefix,
+            content_free: false,
+        };
+        let fresh = model
+            .decide(TEST_STATE, &questions, options, &Cancel::default())
+            .expect("decision");
+
+        let before = Cancel::default();
+        before.cancel();
+        assert_eq!(
+            model
+                .decide(TEST_STATE, &questions, options, &before)
+                .unwrap_err(),
+            DecisionError::Cancelled
+        );
+
+        // Many questions, abandoned from another thread once the first
+        // ones are under way.
+        let many: Vec<Question> = questions.iter().cycle().take(64).cloned().collect();
+        let whole = Instant::now();
+        model
+            .decide(TEST_STATE, &many, options, &Cancel::default())
+            .expect("decision");
+        let whole = whole.elapsed();
+        let during = Cancel::default();
+        let stopped = std::thread::scope(|scope| {
+            let cancel = during.clone();
+            scope.spawn(move || {
+                std::thread::sleep(whole / 4);
+                cancel.cancel();
+            });
+            let started = Instant::now();
+            let result = model.decide(TEST_STATE, &many, options, &during);
+            (result, started.elapsed())
+        });
+        eprintln!(
+            "64 questions: {whole:?} whole, stopped after {:?}",
+            stopped.1
+        );
+        assert_eq!(stopped.0.unwrap_err(), DecisionError::Cancelled);
+        assert!(stopped.1 < whole * 3 / 4, "{:?} of {whole:?}", stopped.1);
+
+        let after = model
+            .decide(TEST_STATE, &questions, options, &Cancel::default())
+            .expect("decision");
+        for (a, b) in after.outcomes.iter().zip(&fresh.outcomes) {
+            assert_eq!(a.logprobs, b.logprobs);
+        }
+    }
+
     /// Every mode must give every question the answer it gets on its own.
     /// A mistake in positions, sequence ids or cell sharing does not fail
     /// loudly — a question attending to another's tokens still yields a
@@ -2444,7 +2572,12 @@ mod tests {
 
         let decide = |mode, content_free| {
             model
-                .decide(TEST_STATE, &questions, DecideOptions { mode, content_free })
+                .decide(
+                    TEST_STATE,
+                    &questions,
+                    DecideOptions { mode, content_free },
+                    &Cancel::default(),
+                )
                 .expect("decision")
         };
         let separate = decide(EvalMode::Separate, false);
@@ -2522,6 +2655,7 @@ mod tests {
                             mode: EvalMode::SharedPrefix,
                             content_free: false,
                         },
+                        &Cancel::default(),
                     )
                     .expect("decision")
             };
@@ -2568,6 +2702,7 @@ mod tests {
                         mode,
                         content_free: false,
                     },
+                    &Cancel::default(),
                 )
                 .expect("decision")
         };
@@ -2825,7 +2960,7 @@ mod tests {
             };
             let want: Vec<f64> = decide.iter().map(|x| x.as_f64().unwrap()).collect();
             let got = model
-                .decide(&state, std::slice::from_ref(&q), exact)
+                .decide(&state, std::slice::from_ref(&q), exact, &Cancel::default())
                 .unwrap_or_else(|e| panic!("{} q{}: {e}", c["state"], c["question"]));
             let want = in_class_order(&q, want);
             for (a, b) in got.outcomes[0].logprobs.iter().zip(&want) {
@@ -2851,8 +2986,9 @@ mod tests {
         let mut worst_shared_p: f64 = 0.0;
         for (state, list) in &by_state {
             let questions: Vec<Question> = list.iter().map(|(q, _)| q.clone()).collect();
-            let separate = model.decide(state, &questions, exact).unwrap();
-            let once = model.decide(state, &questions, shared).unwrap();
+            let never = Cancel::default();
+            let separate = model.decide(state, &questions, exact, &never).unwrap();
+            let once = model.decide(state, &questions, shared, &never).unwrap();
             eprintln!("{} questions together: {:?}", questions.len(), once.stats);
             for ((a, s), (_, want)) in separate.outcomes.iter().zip(&once.outcomes).zip(list) {
                 for ((x, y), w) in a.logprobs.iter().zip(&s.logprobs).zip(want) {

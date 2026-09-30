@@ -44,8 +44,8 @@ use sha2::{Digest, Sha256};
 use super::{AppState, KeepAlive};
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
-    self, DecideOptions, Decision, DecisionError, EvalMode, EvalStats, Question, QuestionKind,
-    ReadoutKind,
+    self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, EvalMode, EvalStats,
+    Question, QuestionKind, ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -1079,6 +1079,11 @@ fn decision_error(e: DecisionError, ids: &[String]) -> ApiError {
             e.to_string(),
         ),
         DecisionError::Runtime(message) => ApiError::internal(message),
+        // Only a request whose client has disconnected is cancelled, so no
+        // one receives this.
+        e @ DecisionError::Cancelled => {
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "cancelled", e.to_string())
+        }
     }
 }
 
@@ -1141,43 +1146,33 @@ pub(super) async fn systemone(
     let temperature = parsed
         .temperature
         .unwrap_or_else(|| model.default_temperature());
-    let (parsed, decision) = tokio::task::spawn_blocking(move || {
-        let state = match readout {
-            ReadoutKind::Codes => &parsed.state,
-            ReadoutKind::Verdict => &parsed.state_line,
-        };
-        let decision = model.decide(state, &parsed.questions, options);
-        (parsed, decision)
-    })
-    .await
-    .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))?;
-    let decision = decision.map_err(|e| decision_error(e, &parsed.ids))?;
-
-    let (answers, records) = build_answers(&parsed, &decision, readout, temperature);
+    let cancel = Cancel::default();
+    // axum drops this future when the client disconnects; the guard then
+    // tells the decision, running on its own thread, to stop.
+    let _cancel_when_abandoned = CancelOnDrop(cancel.clone());
+    let job = DecisionJob {
+        parsed,
+        model,
+        model_name: model_name.clone(),
+        user_id: identity.key_id().map(str::to_string),
+        options,
+        temperature,
+        started,
+        cancel,
+    };
+    let Decided {
+        parsed,
+        decision,
+        answers,
+        input_tokens,
+        request_ms,
+    } = tokio::task::spawn_blocking(move || job.run())
+        .await
+        .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))??;
     let prior_tokens = decision
         .prior_stats
         .as_ref()
         .map_or(0, |s| s.evaluated_tokens);
-    let input_tokens = decision.stats.evaluated_tokens + prior_tokens;
-    let request_ms = started.elapsed().as_secs_f64() * 1000.0;
-
-    let mut audit = AuditEntry::new(model_name.clone(), "systemone".to_string());
-    audit.input_tokens = u32::try_from(input_tokens).unwrap_or(u32::MAX);
-    audit.duration_ms = request_ms as u64;
-    audit.user_id = identity.key_id().map(str::to_string);
-    audit.decision = Some(DecisionRecord {
-        state_sha256: sha256_hex(match readout {
-            ReadoutKind::Codes => &parsed.state,
-            ReadoutKind::Verdict => &parsed.state_line,
-        }),
-        readout: readout.as_str().to_string(),
-        mode: decision.stats.mode.as_str().to_string(),
-        calibration: parsed.calibration.as_str().to_string(),
-        temperature,
-        confidence_method: decision::CONFIDENCE_METHOD.to_string(),
-        answers: records,
-    });
-    AuditLogger::new().log(&audit);
 
     Ok(Json(SystemOneResponse {
         model: model_name,
@@ -1209,6 +1204,122 @@ pub(super) async fn systemone(
             request_ms,
         },
     }))
+}
+
+/// Cancels a decision when dropped. The handler holds one while its
+/// decision runs; axum drops the handler's future — and with it this —
+/// when the client disconnects, and the decision stops at its next
+/// question instead of occupying the model to the end.
+struct CancelOnDrop(Cancel);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// One request's decision, as run on a blocking thread: everything the
+/// decision and its audit record need, owned, so the work does not depend
+/// on the handler that started it still being there.
+struct DecisionJob {
+    parsed: ParsedRequest,
+    model: Arc<DecisionModel>,
+    model_name: String,
+    user_id: Option<String>,
+    options: DecideOptions,
+    temperature: f64,
+    started: Instant,
+    cancel: Cancel,
+}
+
+/// What a decided request's response is built from.
+struct Decided {
+    parsed: ParsedRequest,
+    decision: Decision,
+    answers: OrderedMap<Answer>,
+    input_tokens: usize,
+    request_ms: f64,
+}
+
+impl DecisionJob {
+    /// Decide, then write the audit record, on the thread the decision ran
+    /// on. The record used to be written by the handler after it awaited
+    /// the decision, so a client that went away first — jev-style's guard
+    /// gives up after 8 seconds — took the record with it: the handler was
+    /// dropped mid-await, the decision ran to its end on the blocking
+    /// thread regardless, and the only trace of an automated decision that
+    /// was made was the time the model spent on it. Every decision that is
+    /// computed is now recorded, its client still there or not; one that
+    /// completes after its client disconnected says so
+    /// (`client_disconnected`), since its answers were never sent.
+    ///
+    /// A request abandoned before its answers were complete stops at the
+    /// next question (`Cancel`) and is not recorded: nothing was decided,
+    /// and the audit trail records what was decided, as it leaves out a
+    /// request refused as invalid or failed in llama.cpp. The server's log
+    /// says it was abandoned.
+    fn run(self) -> Result<Decided, ApiError> {
+        let Self {
+            parsed,
+            model,
+            model_name,
+            user_id,
+            options,
+            temperature,
+            started,
+            cancel,
+        } = self;
+        let readout = model.readout();
+        let state = match readout {
+            ReadoutKind::Codes => &parsed.state,
+            ReadoutKind::Verdict => &parsed.state_line,
+        };
+        let decision = match model.decide(state, &parsed.questions, options, &cancel) {
+            Ok(decision) => decision,
+            Err(DecisionError::Cancelled) => {
+                tracing::info!(
+                    "Decision request on {} abandoned by its client after {:.0} ms: stopped \
+                     before its answers were complete, nothing decided or audited",
+                    crate::audit::sanitize_for_log(&model_name),
+                    started.elapsed().as_secs_f64() * 1000.0
+                );
+                return Err(decision_error(DecisionError::Cancelled, &parsed.ids));
+            }
+            Err(e) => return Err(decision_error(e, &parsed.ids)),
+        };
+
+        let (answers, records) = build_answers(&parsed, &decision, readout, temperature);
+        let prior_tokens = decision
+            .prior_stats
+            .as_ref()
+            .map_or(0, |s| s.evaluated_tokens);
+        let input_tokens = decision.stats.evaluated_tokens + prior_tokens;
+        let request_ms = started.elapsed().as_secs_f64() * 1000.0;
+
+        let mut audit = AuditEntry::new(model_name, "systemone".to_string());
+        audit.input_tokens = u32::try_from(input_tokens).unwrap_or(u32::MAX);
+        audit.duration_ms = request_ms as u64;
+        audit.user_id = user_id;
+        audit.decision = Some(DecisionRecord {
+            state_sha256: sha256_hex(state),
+            readout: readout.as_str().to_string(),
+            mode: decision.stats.mode.as_str().to_string(),
+            calibration: parsed.calibration.as_str().to_string(),
+            temperature,
+            confidence_method: decision::CONFIDENCE_METHOD.to_string(),
+            client_disconnected: cancel.is_cancelled(),
+            answers: records,
+        });
+        AuditLogger::new().log(&audit);
+
+        Ok(Decided {
+            parsed,
+            decision,
+            answers,
+            input_tokens,
+            request_ms,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1853,6 +1964,38 @@ mod tests {
         let timing = serde_json::to_value(ResponseTiming::new(975.714984)).unwrap();
         assert_eq!(timing, json!({ "total_ms": 975.7 }));
         assert_eq!(ResponseTiming::new(0.04).total_ms, 0.0);
+    }
+
+    #[test]
+    fn a_decision_is_cancelled_when_its_handler_is_dropped() {
+        let cancel = Cancel::default();
+        let guard = CancelOnDrop(cancel.clone());
+        assert!(!cancel.is_cancelled());
+        drop(guard);
+        assert!(cancel.is_cancelled());
+    }
+
+    /// What axum does to the handler of a client that disconnects: its
+    /// future is dropped mid-await, and the decision it started is told.
+    #[tokio::test]
+    async fn a_handler_dropped_mid_await_cancels_its_decision() {
+        let cancel = Cancel::default();
+        let seen = cancel.clone();
+        let (started, running) = tokio::sync::oneshot::channel();
+        let handler = tokio::spawn(async move {
+            let _cancel_when_abandoned = CancelOnDrop(cancel);
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        running.await.unwrap();
+        assert!(!seen.is_cancelled());
+        handler.abort();
+        let _ = handler.await;
+        assert!(seen.is_cancelled());
+        // No client receives the error of a cancelled decision; it still
+        // has a body of its own.
+        let err = decision_error(DecisionError::Cancelled, &[]);
+        assert_eq!(err.code, "cancelled");
     }
 
     #[test]
