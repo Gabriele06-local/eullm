@@ -208,9 +208,11 @@ is the candidate there, not yet measured.
   - [🆕 next] The ceiling: a larger instruction-tuned model asked the same
     yes/no through the code readout, to tell a small model's limit from
     the task's.
-  - [🆕 next] An Italian set: questions on the legislation Forge already
-    prepares, the articles retrieved for them, and whether the one that
-    answers is among them.
+  - [🔧 now] An Italian set: `rg_openbook.py` writes it from Forge's
+    open-book pairs — each question asked by topic about an article of
+    Italian law, with the articles retrieval finds, its own among them or
+    left out, the two contexts Forge trains the legal model on. Written
+    where the pairs are; its run is next.
 
 ### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
 
