@@ -100,18 +100,30 @@ def append_csv_row(path: Path, row: list[str]) -> None:
         f.flush()
 
 
-def load_model(auto_cls, path: str, n_gpus: int):
+def load_model(auto_cls, path: str, n_gpus: int, fallback_cls=None):
     """The model in bf16: on its one GPU, or spread over several.
 
     A 27B dense model is 54 GB in bf16 and a 35B MoE 70 GB, more than one
     64 GB A100 holds once the cache for a batch is added; with more than one
     GPU visible the layers are split across them (device_map="auto").
+
+    ``fallback_cls`` is tried when ``auto_cls`` does not know the model's
+    configuration: Ministral 3 ships only as an image-and-text model
+    (Mistral3ForConditionalGeneration), which AutoModelForCausalLM refuses
+    -- the exam of 2026-09-29 died on it after answering with two other
+    models. It answers text prompts all the same.
     """
     import torch
 
+    kwargs = {"dtype": torch.bfloat16}
     if n_gpus > 1:
-        return auto_cls.from_pretrained(path, dtype=torch.bfloat16, device_map="auto")
-    model = auto_cls.from_pretrained(path, dtype=torch.bfloat16)
+        kwargs["device_map"] = "auto"
+    try:
+        model = auto_cls.from_pretrained(path, **kwargs)
+    except ValueError as exc:
+        if fallback_cls is None or "Unrecognized configuration class" not in str(exc):
+            raise
+        model = fallback_cls.from_pretrained(path, **kwargs)
     return model.to("cuda") if n_gpus == 1 else model
 
 
@@ -180,7 +192,7 @@ def main() -> int:
     args = ap.parse_args()
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 
     items = load_eval_set(args.items) if args.items else load_seed()
     index = NormIndex.from_files(args.norms) if args.norms else None
@@ -189,7 +201,8 @@ def main() -> int:
               f"{args.k} per question", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     cuda = torch.cuda.is_available()
-    model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count())
+    model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count(),
+                       fallback_cls=AutoModelForImageTextToText)
     model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]

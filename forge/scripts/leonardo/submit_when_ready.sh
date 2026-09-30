@@ -12,7 +12,9 @@
 #        --need $WORK/datasets/legal_it_amm/val.jsonl \
 #        -- sbatch_phase2_amm.slurm 20
 #
-# Everything after `--` is handed to submit_chain.sh unchanged.
+# Everything after `--` is handed to submit_chain.sh unchanged. --name gives
+# the chain its own job name (sbatch -J), for scripts run as several
+# different chains, like one exam round per model.
 #
 # WHAT IT DOES. Every --need file present: submit the chain, done. Anything
 # missing: say what, and queue ITSELF on the serial partition to look again
@@ -34,9 +36,11 @@ set -euo pipefail
 NEED=()
 EVERY=30
 TRIES=144
+NAME=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --need)  NEED+=("${2:?--need takes a path}"); shift 2 ;;
+        --name)  NAME="${2:?--name takes a job name}"; shift 2 ;;
         --every) EVERY="${2:?--every takes minutes}"; shift 2 ;;
         --tries) TRIES="${2:?--tries takes a count}"; shift 2 ;;
         --)      shift; break ;;
@@ -65,6 +69,16 @@ SCRIPT="$(cd "$(dirname "$SCRIPT")" && pwd)/$(basename "$SCRIPT")"
 shift
 
 CHAIN="$(sed -n 's/^#SBATCH --job-name=//p' "$SCRIPT" | head -1)"
+# --name gives this chain a job name of its own. Two different chains of
+# the same script share its job name otherwise, and "already in the queue"
+# cannot tell them apart: on 2026-09-29 the watcher of the 8B exam round saw
+# another model's round queued under eullm-exam-round, took it for its own
+# and gave up, and the 8B was never examined.
+NAMEARGS=()
+if [ -n "$NAME" ]; then
+    CHAIN="$NAME"
+    NAMEARGS=(--name "$NAME")
+fi
 [ -n "$CHAIN" ] || { echo "[wait] $SCRIPT has no --job-name to check the queue by" >&2; exit 1; }
 WATCHER="wait-$CHAIN"
 now() { date '+%F %T'; }
@@ -87,6 +101,11 @@ what() { if [ -e "$1" ]; then echo "present but EMPTY (counts as missing): $1"; 
 
 if [ "${#missing[@]}" -eq 0 ]; then
     echo "[wait] $(now) everything is there — submitting $CHAIN"
+    if [ -n "$NAME" ]; then
+        COUNT="${1:-1}"
+        [ $# -gt 0 ] && shift
+        exec bash "$HERE/submit_chain.sh" "$SCRIPT" "$COUNT" "$@" -J "$NAME"
+    fi
     exec bash "$HERE/submit_chain.sh" "$SCRIPT" "$@"
 fi
 
@@ -111,6 +130,7 @@ for f in "${NEED[@]}"; do again+=(--need "$f"); done
 jid=$(sbatch --parsable -J "$WATCHER" -p lrd_all_serial -c 1 --mem=1G -t 00:05:00 \
       --begin="now+${EVERY}minutes" -o "logs/$WATCHER-%j.out" \
       --export=ALL,WAIT_HOME="$HERE" \
-      "$SELF" "${again[@]}" --every "$EVERY" --tries $((TRIES - 1)) -- "$SCRIPT" "$@")
+      "$SELF" "${again[@]}" ${NAMEARGS[@]+"${NAMEARGS[@]}"} --every "$EVERY" \
+      --tries $((TRIES - 1)) -- "$SCRIPT" "$@")
 echo "[wait] $(now) will look again in $EVERY minutes (job ${jid%%;*}, $((TRIES - 1)) tries left)"
 echo "[wait]   cancel with: scancel -n $WATCHER"

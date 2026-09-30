@@ -180,3 +180,24 @@ def test_one_gpu_or_none_loads_as_before():
     _Auto.calls = []
     legal_eval.load_model(_Auto, "m", 0)
     assert _Auto.calls == [_Auto.calls[0]] and "device_map" not in _Auto.calls[0]
+
+
+class _TextOnly(_Auto):
+    @classmethod
+    def from_pretrained(cls, path, **kw):
+        raise ValueError("Unrecognized configuration class <class 'Mistral3Config'> "
+                         "for this kind of AutoModel: AutoModelForCausalLM.")
+
+
+def test_an_image_and_text_model_is_loaded_by_the_fallback_class():
+    __import__("pytest").importorskip("torch")
+    _Auto.calls = []
+    legal_eval.load_model(_TextOnly, "ministral", 2, fallback_cls=_Auto)
+    assert _Auto.calls[0].get("device_map") == "auto"
+
+
+def test_other_load_errors_are_not_swallowed():
+    pytest = __import__("pytest")
+    pytest.importorskip("torch")
+    with pytest.raises(ValueError, match="Unrecognized"):
+        legal_eval.load_model(_TextOnly, "ministral", 1)       # no fallback given

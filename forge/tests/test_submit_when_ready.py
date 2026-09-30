@@ -48,17 +48,21 @@ def cluster(tmp_path):
     (home / "sbatch_stage3.slurm").write_text("#!/bin/bash\n#SBATCH --job-name=eullm-stage3\n")
     bin_ = tmp_path / "bin"
     bin_.mkdir()
-    _exe(bin_ / "squeue", "#!/usr/bin/env bash\nexit 0\n")
+    # The queue holds whatever $QUEUED names, as `squeue -n X -o %i` would.
+    _exe(bin_ / "squeue", '#!/usr/bin/env bash\nfor a in "$@"; do\n'
+                          '  [ "$prev" = "-n" ] && [ "$a" = "${QUEUED:-}" ] && echo 777\n'
+                          '  prev="$a"\ndone\nexit 0\n')
     _exe(bin_ / "sbatch", '#!/usr/bin/env bash\necho "$*" >> "$CALLS.sbatch"\necho 4242\n')
     calls = tmp_path / "calls"
     env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "CALLS": str(calls),
            "WAIT_HOME": str(home)}
 
-    def watch(*need: Path) -> tuple[subprocess.CompletedProcess, str, str]:
-        args = [a for f in need for a in ("--need", str(f))]
+    def watch(*need: Path, name: str = "") -> tuple[subprocess.CompletedProcess, str, str]:
+        args = [a for f in need for a in ("--need", str(f))] + (["--name", name] if name else [])
+        now = {**env, **({"QUEUED": os.environ["QUEUED"]} if "QUEUED" in os.environ else {})}
         run = subprocess.run(["bash", str(home / "submit_when_ready.sh"), *args, "--",
                               "sbatch_stage3.slurm", "2"],
-                             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60)
+                             cwd=tmp_path, env=now, capture_output=True, text=True, timeout=60)
         chain = Path(f"{calls}.chain")
         queued = Path(f"{calls}.sbatch")
         return (run, chain.read_text() if chain.exists() else "",
@@ -114,3 +118,27 @@ def test_a_file_that_never_appeared_is_not_yet(tmp_path, cluster):
     run, chain, _ = cluster(tmp_path / "nothing.done")
     assert "not yet:" in run.stdout and "EMPTY" not in run.stdout
     assert not chain
+
+
+def test_a_named_chain_is_not_mistaken_for_another_of_the_same_script(tmp_path, cluster,
+                                                                   monkeypatch):
+    """Another model's exam round is queued under the script's job name; a
+    round with a name of its own is still submitted, under that name."""
+    marker = _generate_until_done(tmp_path)
+    monkeypatch.setenv("QUEUED", "eullm-stage3")
+    run, chain, _ = cluster(marker, name="eullm-stage3-8b")
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert "submitting eullm-stage3-8b" in run.stdout
+    assert "sbatch_stage3.slurm 2 -J eullm-stage3-8b" in chain
+
+
+def test_an_unnamed_chain_still_defers_to_its_script_name(tmp_path, cluster, monkeypatch):
+    marker = _generate_until_done(tmp_path)
+    monkeypatch.setenv("QUEUED", "eullm-stage3")
+    run, chain, _ = cluster(marker)
+    assert "already in the queue" in run.stdout and not chain
+
+
+def test_a_named_watcher_queues_itself_with_its_name(tmp_path, cluster):
+    run, _, queued = cluster(tmp_path / "nothing.done", name="eullm-stage3-8b")
+    assert "-J wait-eullm-stage3-8b" in queued and "--name eullm-stage3-8b" in queued
