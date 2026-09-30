@@ -96,14 +96,19 @@ which has no schemas.
 
 Reflex ranks by each option's verdict score. A question has at most 255
 options, and the Jev-Style 0.8B reads a question with its options in 2,048
-tokens; when the server refuses a question as too long, the options are
-split over several questions of one request, and the size that fits carries
-over to the next requests.
+tokens: each request starts with its tools in one question, and when the
+server refuses it as too long they are split over several questions of the
+same request. "No tool", offered in each of them, is weighed against the
+best tool in that tool's own question. A request the model cannot read even
+beside a single tool — with the 0.8B, a request of some 2,000 tokens inside
+a layout-B question — is refused, as the server refuses it rather than
+truncate it: it ranks nothing and counts as keeping every tool.
 
 ## Reading the report
 
 | Column | |
 |---|---|
+| refused | requests the decision model could not take; they count as keeping every tool |
 | R@k | share of the requests with every tool they need among the first k |
 | k95, k99 | the smallest k that keeps 95% and 99% of the requests whole |
 | specs kept @k95 | share of the tool-spec characters still sent at k95 — the rest is prompt saved |

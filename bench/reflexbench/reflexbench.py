@@ -111,6 +111,7 @@ def run(method, dataset, details):
                         "needed_ranks": [ranking.order.index(n) + 1 for n in item.needed],
                         "candidates": len(item.candidates),
                         "top": ranking.order[:20],
+                        "refused": ranking.refused,
                         "none_score": ranking.none_score,
                         "best_score": ranking.best_score,
                         "ms": round(ranking.ms, 2),
@@ -132,7 +133,7 @@ def run(method, dataset, details):
 def table(results):
     """The report as Markdown."""
     head = (
-        "| set | method | items | R@1 | R@3 | R@5 | R@10 | k95 | k99 | "
+        "| set | method | items | refused | R@1 | R@3 | R@5 | R@10 | k95 | k99 | "
         "specs kept @k95 | abstain ok | false abstain | p50 ms | p95 ms | tokens/decision |"
     )
     lines = [head, "|---" * (head.count("|") - 1) + "|"]
@@ -148,7 +149,7 @@ def table(results):
         recall = m.get("recall_at", {})
         lat = m["latency_ms"]
         lines.append(
-            f"| {r['set']} | {r['method']} | {m['items']} | "
+            f"| {r['set']} | {r['method']} | {m['items']} | {m.get('refused', 0)} | "
             + " | ".join(pct(recall.get(k)) for k in ("1", "3", "5", "10"))
             + f" | {m.get('k95', '—')} | {m.get('k99', '—')} | "
             f"{pct(m.get('spec_kept_at_k95'))} | {pct(m.get('abstain_accuracy'))} | "

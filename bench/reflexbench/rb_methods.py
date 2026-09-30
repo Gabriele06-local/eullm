@@ -30,12 +30,13 @@ NONE = "none"  # the option that says no tool is needed
 
 
 class Ranking:
-    def __init__(self, order, ms, none_score=None, best_score=None, server=None):
+    def __init__(self, order, ms, none_score=None, best_score=None, server=None, refused=False):
         self.order = order  # candidate names, most likely needed first
         self.ms = ms  # wall time of the decision, as the client sees it
         self.none_score = none_score  # Reflex's score for "no tool", if asked
         self.best_score = best_score  # Reflex's score for the first tool
         self.server = server or {}  # tokens and timings reported by EuLLM
+        self.refused = refused  # the decision model could not take the request
 
     def abstains(self):
         """Reflex found "no tool" likelier than any tool."""
@@ -182,23 +183,29 @@ class Reflex:
     """`/v1/systemone`, in layout A or B.
 
     A question lists 2 to 255 options, and the Jev-Style 0.8B allows 2,048
-    tokens for a question with its options, read twice. The tools start as
-    one question; when the server says a question is too long, they are
-    split over twice as many, and so on, up to 64 questions per request.
+    tokens for a question with its options, read twice. Each request starts
+    with its tools in one question; when the server says a question is too
+    long, they are split over twice as many, and so on, up to 64 questions.
     The verdict scores of all of them, one per option, give the ranking —
     compared as they are, although each option was read next to the other
-    options of its own question only."""
+    options of its own question only. "No tool" is offered in every
+    question, and weighed against the best tool in that tool's question.
+
+    A request the model cannot read even beside a single tool — a long
+    request inside a layout-B question, say — is refused, as the server
+    refuses it rather than truncate it, and ranks nothing."""
 
     def __init__(self, url, layout, model, api_key, timeout, abstain):
         self.url = url.rstrip("/") + "/v1/systemone"
         self.layout, self.model = layout, model
         self.api_key, self.timeout, self.abstain = api_key, timeout, abstain
         self.name = f"reflex-{layout.lower()}"
-        # Tools per question, lowered as the server asks. With "none" among
-        # the options one tool makes a question; without it, parts of at
-        # least 3 tools keep every question at 2 options or more.
-        self.chunk = 254 if abstain else 255
+        # With "none" among the options one tool makes a question; without
+        # it, parts of at least 3 tools keep every question at 2 options or
+        # more.
+        self.largest = 254 if abstain else 255
         self.fewest = 1 if abstain else 3
+        self.chunk = self.largest  # tools per question in the last request
 
     def state_and_questions(self, item, chunks):
         if self.layout == "A":
@@ -230,10 +237,13 @@ class Reflex:
         if len(names) == 1 and not self.abstain:
             # One tool and no "none" to weigh it against: nothing to decide.
             return Ranking(names, 0.0, server={"questions": 0})
+        # Every request starts from the largest questions: the size a long
+        # request needed says nothing about the next one.
+        chunk = self.largest
         while True:
-            chunks = split(item.candidates, self.chunk)
+            chunks = split(item.candidates, chunk)
             if len(chunks) > 64:
-                raise ValueError(f"{item.id}: {len(names)} tools need over 64 questions")
+                return Ranking([], 0.0, server={"questions": 0}, refused=True)
             state, questions = self.state_and_questions(item, chunks)
             payload = {"state": state, "questions": questions}
             if self.model:
@@ -242,16 +252,17 @@ class Reflex:
             try:
                 body = post(self.url, payload, self.api_key, self.timeout)
             except ServerError as e:
-                too_long = e.code == 400 and "nothing was truncated" in e.detail
-                if too_long and self.chunk > self.fewest:
-                    # The size that fits carries over to the next items.
-                    self.chunk = max(self.fewest, min(self.chunk, len(names)) // 2)
+                if e.code != 400 or "nothing was truncated" not in e.detail:
+                    raise
+                if chunk > self.fewest:
+                    chunk = max(self.fewest, min(chunk, len(names)) // 2)
                     continue
-                raise
+                return Ranking([], 0.0, server={"questions": 0}, refused=True)
             ms = (time.perf_counter() - started) * 1000
             break
-        scores, none_score = {}, None
-        for answer in body["answers"].values():
+        self.chunk = chunk
+        scores, question_of, nones = {}, {}, {}
+        for question, answer in body["answers"].items():
             raw = (answer.get("eullm") or {}).get("scores")
             if raw is None:
                 raise ValueError(
@@ -260,9 +271,9 @@ class Reflex:
                 )
             for name, score in raw.items():
                 if name == NONE:
-                    none_score = score if none_score is None else max(none_score, score)
+                    nones[question] = score
                 else:
-                    scores[name] = score
+                    scores[name], question_of[name] = score, question
         order = sorted(names, key=lambda n: -scores[n])
         info = body.get("eullm", {})
         server = {
@@ -272,8 +283,8 @@ class Reflex:
             "request_ms": info.get("request_ms"),
             "questions": len(questions),
         }
-        best = scores[order[0]] if order else None
-        return Ranking(order, ms, none_score, best, server)
+        best = scores[order[0]]
+        return Ranking(order, ms, nones.get(question_of[order[0]]), best, server)
 
 
 # --- Two stages ------------------------------------------------------------
@@ -298,6 +309,9 @@ class TwoStage:
         kept = set(first.order[: self.shortlist])
         short = [t for t in item.candidates if t.name in kept]
         second = self.reflex.rank(rb_data.Item(item.id, item.request, short, item.needed))
+        if second.refused:
+            # Reflex could not read the shortlist: the embeddings' order stands.
+            return Ranking(first.order, first.ms, server=second.server, refused=True)
         order = second.order + first.order[self.shortlist :]
         return Ranking(
             order, first.ms + second.ms, second.none_score, second.best_score, second.server

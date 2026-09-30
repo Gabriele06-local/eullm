@@ -1,6 +1,6 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0, first GPU and CPU results in (Jev-Style 2B) · 30 September 2026 ·
+**Status:** MVP 0, GPU results for the 2B and 0.8B, CPU for the 2B · 30 September 2026 ·
 `feat/reflexbench`
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
@@ -155,6 +155,17 @@ instruction. One tool needed out of MetaTool's 199:
 - **What this leaves open:** the two stages, where Reflex only reads the
   embeddings' shortlist, and whether a tool is needed at all. Both run on
   the next GPU pass.
+
+**The 0.8B on the same GPU** (500 requests a set, "no tool" offered on
+every set) reads MetaTool's catalog in 9 questions, about 10,200 tokens, in
+414 ms — no faster than the 2B — and ranks the right tool first 65.6% of the
+time (2B: 73.4%). In two stages it ranks the embeddings' shortlist of 20
+worse than they do: 70.4% first against 75.4%. Where it earns its place is
+"no tool" on few tools: on BFCL live it says it for 66.6% of the requests no
+function fits and for only 1.8% of those one does, a decision the
+embeddings cannot make without a calibrated threshold. In layout B it barely
+knows a tool by its name (20.8% first), and a request of 2,000 tokens does
+not fit its question at all.
 
 **On a CPU** — the same 2B, release binary v0.7.20 (x86-64-v3), 20
 requests a set — a decision costs 76 s reading MetaTool's 199 tools in
