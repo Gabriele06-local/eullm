@@ -210,6 +210,25 @@ mod tests {
         assert_eq!(q.base(), "qwen3");
     }
 
+    /// A pull that finds the weights already stored under another id links
+    /// that id's projector too, and it recognises the projector by its name
+    /// and the repository its weights came from
+    /// (`ModelManifest::projector_is`). That holds only while every catalog
+    /// projector sits in the same repository as its weights. An entry that
+    /// takes its projector from elsewhere needs that check extended first.
+    #[test]
+    fn every_projector_lives_beside_its_weights() {
+        for m in EU_CATALOG.iter() {
+            if let Some(repo) = &m.mmproj_repo {
+                assert_eq!(
+                    repo, &m.hf_repo,
+                    "`{}` takes its projector from another repository",
+                    m.id
+                );
+            }
+        }
+    }
+
     /// Every catalog entry's id must resolve through `find_model` — this is
     /// the contract the API and CLI rely on, since `/api/tags`, `/v1/models`,
     /// `eullm list` and `eullm run` all use the id as the addressable name.
