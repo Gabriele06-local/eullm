@@ -62,7 +62,7 @@ def test_report_only_leaves_the_file_untouched(tmp_path):
     _write_jsonl(src, [{"text": "il ricorrente [PERSONA_1] (RRNMSM70S21G273H) deduce"}])
     before = src.read_bytes()
 
-    counts, changed = mod.sweep_file(
+    counts, changed, _ = mod.sweep_file(
         src,
         config=mod.build_config(list(mod.DEFAULT_LAYERS)),
         prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
@@ -88,7 +88,7 @@ def test_apply_redacts_and_keeps_a_backup(tmp_path):
         ],
     )
 
-    counts, changed = mod.sweep_file(
+    counts, changed, _ = mod.sweep_file(
         src,
         config=mod.build_config(list(mod.DEFAULT_LAYERS)),
         prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
@@ -123,7 +123,7 @@ def test_sweep_is_idempotent(tmp_path):
     mod.sweep_file(src, config=cfg, prefilter=pre, field="text", apply=True, show=False)
     first = src.read_text(encoding="utf-8")
 
-    counts, changed = mod.sweep_file(
+    counts, changed, _ = mod.sweep_file(
         src, config=cfg, prefilter=pre, field="text", apply=True, show=False
     )
 
@@ -136,7 +136,7 @@ def test_records_without_the_text_field_survive(tmp_path):
     src = tmp_path / "train.jsonl"
     _write_jsonl(src, [{"content": "VLFABL75P66G273N"}, {"text": 42}])
 
-    counts, changed = mod.sweep_file(
+    counts, changed, _ = mod.sweep_file(
         src,
         config=mod.build_config(list(mod.DEFAULT_LAYERS)),
         prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
@@ -232,7 +232,7 @@ def test_prefilter_hit_outside_the_text_field_changes_nothing(tmp_path):
     )
     before = src.read_bytes()
 
-    counts, changed = mod.sweep_file(
+    counts, changed, _ = mod.sweep_file(
         src,
         config=mod.build_config(list(mod.DEFAULT_LAYERS)),
         prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
@@ -261,6 +261,68 @@ def test_cli_reports_and_exits_nonzero_when_dirty(tmp_path, capsys):
 
 def test_cli_exits_zero_on_a_clean_corpus(tmp_path):
     src = tmp_path / "val.jsonl"
+    _write_jsonl(src, [{"text": "la Corte rigetta il ricorso"}])
+
+    assert mod.main([str(src)]) == 0
+
+
+# --- a line this sweep cannot read is not a line it has cleared --------------
+
+def _broken_line(src: Path, body: str) -> None:
+    """A record that matched the prefilter but will not parse: a truncated
+    write, or a stray control character inside the JSON."""
+    src.write_text(body + "\n", encoding="utf-8")
+
+
+def test_a_malformed_line_is_redacted_rather_than_passed_through(tmp_path):
+    src = tmp_path / "train.jsonl"
+    _broken_line(src, '{"text": "contatto mario.rossi@example.it", broken')
+
+    counts, _changed, uninspectable = mod.sweep_file(
+        src,
+        config=mod.build_config(list(mod.DEFAULT_LAYERS)),
+        prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
+        field="text",
+        apply=True,
+        show=False,
+    )
+
+    assert uninspectable == 1
+    assert sum(counts.values()) == 1
+    assert "mario.rossi@example.it" not in src.read_text(encoding="utf-8")
+
+
+def test_a_malformed_line_without_a_prefilter_match_is_left_alone(tmp_path):
+    src = tmp_path / "train.jsonl"
+    src.write_text('{"text": "la Corte rigetta" oops\n', encoding="utf-8")
+
+    _counts, _changed, uninspectable = mod.sweep_file(
+        src,
+        config=mod.build_config(list(mod.DEFAULT_LAYERS)),
+        prefilter=mod.build_prefilter(list(mod.DEFAULT_LAYERS)),
+        field="text",
+        apply=True,
+        show=False,
+    )
+
+    # Nothing here could have matched a layer, so there is nothing to report.
+    assert uninspectable == 0
+
+
+def test_the_cli_does_not_call_a_file_clean_it_could_not_read(tmp_path, capsys):
+    src = tmp_path / "train.jsonl"
+    _broken_line(src, '{"text": "scrivi a mario.rossi@example.it", broken')
+
+    rc = mod.main([str(src)])
+    out = capsys.readouterr().out
+
+    assert rc == 1
+    assert "not inspectable" in out or "not be parsed" in out
+    assert "No structured PII found." not in out
+
+
+def test_the_cli_still_exits_zero_when_every_line_parses(tmp_path):
+    src = tmp_path / "train.jsonl"
     _write_jsonl(src, [{"text": "la Corte rigetta il ricorso"}])
 
     assert mod.main([str(src)]) == 0

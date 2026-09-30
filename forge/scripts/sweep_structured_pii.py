@@ -147,17 +147,24 @@ def sweep_file(
 ) -> tuple[Counter, int]:
     """Sweep one JSONL file.
 
-    Returns ``(category_counts, records_changed)``. With ``apply`` the file is
-    rewritten atomically: output goes to ``<path>.tmp``, the original is moved
-    to ``<path>.bak``, then the temp file takes its place. A crash mid-run
-    therefore never leaves a truncated corpus behind.
+    Returns ``(category_counts, records_changed, lines_uninspectable)``. With
+    ``apply`` the file is rewritten atomically: output goes to ``<path>.tmp``,
+    the original is moved to ``<path>.bak``, then the temp file takes its
+    place. A crash mid-run therefore never leaves a truncated corpus behind.
 
     Lines the ``prefilter`` clears are never parsed, and in ``apply`` mode are
     copied through byte for byte — so a clean corpus comes out of ``--apply``
     identical to what went in, not merely equivalent after a JSON round-trip.
+
+    ``lines_uninspectable`` counts lines that matched the prefilter and would
+    not parse as JSON. Those are redacted as raw text rather than passed
+    through, because a line this safety net cannot read must not leave it
+    looking clean; the count is what lets the caller say so instead of
+    printing that nothing was found.
     """
     counts: Counter = Counter()
     changed = 0
+    uninspectable = 0
     tmp = path.with_suffix(path.suffix + ".tmp")
     out_f = tmp.open("w", encoding="utf-8") if apply else None
 
@@ -186,12 +193,29 @@ def sweep_file(
                 try:
                     rec = json.loads(stripped)
                 except json.JSONDecodeError as exc:
+                    # This line matched the prefilter, so it carries a token one
+                    # of the enabled layers looks at, and it cannot be read as
+                    # JSON. Passing it through untouched used to leave a line the
+                    # safety net knows nothing about in the corpus, and — when no
+                    # layer's pattern actually matched — to print "No structured
+                    # PII found." about a file it had not managed to inspect.
+                    #
+                    # The layers are context-free regexes, so they still apply to
+                    # the raw text: redacting it beats passing it through, and
+                    # dropping the line would lose text the corpus is supposed to
+                    # keep. Counted, and the count is reported.
                     print(
-                        f"[WARN] {path.name}:{lineno} malformed JSON: {exc}",
+                        f"[WARN] {path.name}:{lineno} malformed JSON on a line that "
+                        f"matched the PII prefilter ({exc}) — redacting the raw text",
                         file=sys.stderr,
                     )
+                    uninspectable += 1
+                    new_raw, stats = anonymize_text(stripped, config=config)
+                    for k, v in stats.to_dict().items():
+                        if v:
+                            counts[k] += v
                     if out_f is not None:
-                        out_f.write(raw)
+                        out_f.write(new_raw + "\n")
                     continue
 
                 text = rec.get(field)
@@ -232,7 +256,7 @@ def sweep_file(
     if progress:
         _tick(path, seen_bytes, total_bytes, lineno, sum(counts.values()), t0, final=True)
 
-    return counts, changed
+    return counts, changed, uninspectable
 
 
 def _tick(
@@ -349,8 +373,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     grand: Counter = Counter()
+    grand_uninspectable = 0
     for path in args.files:
-        counts, changed = sweep_file(
+        counts, changed, uninspectable = sweep_file(
             path,
             config=config,
             prefilter=prefilter,
@@ -360,21 +385,31 @@ def main(argv: list[str] | None = None) -> int:
             progress=not args.quiet and sys.stderr.isatty(),
         )
         grand.update(counts)
+        grand_uninspectable += uninspectable
         total = sum(counts.values())
         detail = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "clean"
-        print(f"{path.name}: {total} hit(s) in {changed} record(s) — {detail}")
+        unreadable = (f", {uninspectable} line(s) not inspectable as JSON"
+                      if uninspectable else "")
+        print(f"{path.name}: {total} hit(s) in {changed} record(s){unreadable} — {detail}")
 
     total = sum(grand.values())
     print("=" * 64)
+    if grand_uninspectable:
+        # Said before the "nothing found" line, because that line would
+        # otherwise be true of a file this run could not read.
+        print(f"{grand_uninspectable} line(s) matched the PII prefilter and could "
+              f"not be parsed as JSON; they were redacted as raw text, and a "
+              f"prefilter match alone cannot be cleared.")
     if not total:
-        print("No structured PII found.")
-        return 0
+        print("No structured PII found." if not grand_uninspectable
+              else "No structured PII found in the lines that could be parsed.")
+        return 1 if grand_uninspectable else 0
     for k, v in sorted(grand.items(), key=lambda kv: -kv[1]):
         print(f"  {k:>20}: {v:>8,}")
     print("=" * 64)
     if args.apply:
         print("Corpus rewritten. Re-run without --apply to confirm it is clean.")
-        return 0
+        return 1 if grand_uninspectable else 0
     print("Re-run with --apply to redact them.")
     return 1
 
