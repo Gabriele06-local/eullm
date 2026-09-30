@@ -1818,18 +1818,28 @@ jobs:
   # the two ZIPs the jobs above published, so it holds exactly the files
   # users download. Unsigned on purpose: the Store signs it after
   # certification, and uploading it to Partner Center is a manual step
-  # (installer/msix/README.md). Only for stable tags: a pre-release suffix
-  # has no place in the four numeric parts of an MSIX version, and a release
-  # candidate is not something to submit to the Store anyway. The test is
+  # (installer/msix/README.md). Only for stable EuLLM tags: a pre-release
+  # suffix has no place in the four numeric parts of an MSIX version, and a
+  # release candidate is not something to submit to the Store anyway. The test is
   # the same one the release job uses for `prerelease`, not "contains a
-  # dash": every tag starts with `EuLLM-v`, and that dash skipped this job
+  # dash": every EuLLM tag starts with `EuLLM-v`, and that dash skipped this job
   # on 0.7.10, the first release that should have produced the package.
+  #
+  # The `startsWith` is load-bearing, not decoration. The workflow also fires on
+  # `engine-v*` (engine-v.0.2.5 is a real tag), the version below strips only
+  # `^EuLLM-v`, and pack-msix.ps1 refuses anything that is not four numbers — so
+  # on an engine tag this job died at the version check, and because the release
+  # job deliberately tolerates a failed build job ("we never want a single
+  # failing build to nuke a release"), the release still published with a body
+  # announcing an .msix that was never attached. Skipping is the honest answer:
+  # the Store package belongs to the EuLLM release line.
   build-windows-msix:
     needs:
       - build-windows
       - build-windows-cuda
     if: >-
       ${{ github.event_name == 'push'
+          && startsWith(github.ref_name, 'EuLLM-v')
           && !contains(github.ref_name, '-rc')
           && !contains(github.ref_name, '-beta')
           && !contains(github.ref_name, '-alpha')
