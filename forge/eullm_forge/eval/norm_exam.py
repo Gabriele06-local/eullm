@@ -409,12 +409,19 @@ def retrieval_hits(items: list[EvalItem], index, k: int = 3) -> dict[str, dict[s
     Measured on the drawn exam rather than on the ten development questions,
     so an improvement to retrieval has to hold on articles nobody picked.
     ``inesistente`` items have no article to find and are skipped.
+
+    An item with no ``tipo`` is tallied under ``?`` rather than under
+    ``None``. check_retrieval.py takes eval files as arguments without
+    checking where they came from, and the project's own seed set carries no
+    ``tipo`` in any of its items -- which made it die sorting ``None`` against
+    a string, before printing a single row.
     """
     from .retrieval import record_articles
 
     tally: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     for it in items:
-        kind, code, art = (it.metadata.get(x) for x in ("tipo", "code", "articolo"))
+        code, art = it.metadata.get("code"), it.metadata.get("articolo")
+        kind = it.metadata.get("tipo") or "?"
         if kind == "inesistente":
             continue
         found = index.search(it.question, k)

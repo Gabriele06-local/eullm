@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from eullm_forge.eval import NormIndex, keyword_coverage
+from eullm_forge.eval import EvalItem, NormIndex, keyword_coverage
 from eullm_forge.eval.norm_exam import (
     _deadline_keyword,
     articles_from_records,
@@ -290,6 +290,44 @@ def test_retrieval_hits_find_named_articles(exam):
     hits = retrieval_hits(exam, NormIndex(RECORDS))
     assert hits["contenuto"]["top1"] == 1.0
     assert "inesistente" not in hits
+
+
+def test_retrieval_hits_tally_an_item_with_no_tipo():
+    """check_retrieval.py takes eval files as arguments, and the project's own
+    seed set carries no `tipo` in any item — the tally was keyed on None and
+    died sorting it against a string, before printing a row."""
+    untyped = EvalItem(id="u", domain="legal", lang="it", question="art. 1?",
+                       reference="r", keywords=[], metadata={})
+    typed = EvalItem(id="t", domain="legal", lang="it", question="art. 2?",
+                     reference="r", keywords=[],
+                     metadata={"tipo": "contenuto", "code": "codice_civile",
+                               "articolo": "2"})
+    hits = retrieval_hits([untyped, typed], NormIndex(RECORDS))
+    assert set(hits) == {"?", "contenuto"}
+    assert hits["?"]["n"] == 1
+
+
+def test_check_retrieval_runs_on_an_eval_file_without_tipos(tmp_path, capsys):
+    """End to end, on the file that broke it: the seed set."""
+    import json
+
+    spec = importlib.util.spec_from_file_location(
+        "check_retrieval", Path(__file__).resolve().parents[1] / "scripts" / "check_retrieval.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text(
+        json.dumps({"code": "codice_civile", "article_num": "2043",
+                    "text": "Art. 2043. Risarcimento per fatto illecito. " * 4},
+                   ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    seed = (Path(__file__).resolve().parents[1] / "eullm_forge" / "eval" / "data"
+            / "legal_it_heldout.seed.jsonl")
+
+    assert mod.main([str(seed), "--norms", str(norms)]) == 0
+    assert "?" in capsys.readouterr().out
 
 
 def test_no_answer_can_still_score_on_the_exam(exam):
