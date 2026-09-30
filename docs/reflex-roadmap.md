@@ -258,7 +258,9 @@ when it may stop at most about one sufficient case in ten:
 
 - An MCP server exposing `decide` and `select_tools` over `/v1/systemone`,
   so that any MCP client — an IDE agent, a desktop assistant — can use
-  Reflex without code of ours in its loop.
+  Reflex without code of ours in its loop. The `jev-style` package
+  (Apache-2.0) already ships an MCP server and a client that take any
+  `/v1/systemone` base URL: to be tried against EuLLM before writing ours.
 - Examples for LangGraph and n8n.
 - A server-side policy: options filtered before the model sees them, and a
   deny list. Configured through `EULLM_*` environment variables, like every
@@ -305,6 +307,12 @@ when it may stop at most about one sufficient case in ten:
   of the cost. ReflexBench exists to find that out early and cheaply.
 - **Dependency.** The Jev-Style models are a third party's (Apache-2.0).
   MVP 4, decision models of our own from Forge, is the long-term answer.
+  As of 30 September 2026 the series stops at 2B (v3, 27 September): 73.6%
+  on JevBench's public items against 64.1% for the 0.8B and 86.6% for the
+  hosted Jev, which is an API and not an option here. The 2B was trained on
+  60M tokens and no training code is published, so a larger or better one
+  is ours to train. Nothing larger to try in the meantime: the RAG gate's
+  ceiling run found a generic 8B no better than the 2B.
 - **CPU cost.** Reading a large tool catalog on every request may take tens
   of seconds on a CPU. Layout B and the two-stage variant exist to bring that
   down, and the benchmark measures it instead of guessing.
