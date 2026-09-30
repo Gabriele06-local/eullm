@@ -556,6 +556,15 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
 
+`instructions` may be a string, or, as the System One API allows, an object
+or an array — the question in one field and the data it refers to in
+others. The model then reads it as one line of compact JSON, in the order
+it was written, which is what jev-style's server gives its models:
+
+```json
+{"record":{"name":"John Smith","city":"Oakland"},"question":"Is this resume the same person as the record?"}
+```
+
 A score level written as `{"label": "high", "description": "loses data"}` is
 shown to the model as `high: loses data` — the label alone when there is no
 description — and named `high` in the `legend`, as jev-style's own server

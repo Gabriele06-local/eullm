@@ -333,7 +333,8 @@ impl OrderedJson {
     }
 
     /// The same with `separators=(",", ":")`: jev-style's `compact_json`,
-    /// the name its server gives a structured score level in the legend.
+    /// how its server writes structured instructions for the model and
+    /// names a structured score level in the legend.
     fn compact_json(&self) -> String {
         self.json_line(",", ":")
     }
@@ -678,13 +679,31 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
     })
 }
 
+/// Instructions given as an object or an array, as the System One API
+/// allows — the question in one field, the data it refers to in others —
+/// in the text the model reads: compact JSON in the request's key order,
+/// what jev-style's server hands its models (`schema.compact_json`,
+/// `json.dumps(value, ensure_ascii=False, separators=(",", ":"))`).
+fn structured_instructions(value: &OrderedJson) -> Result<String, String> {
+    match value {
+        OrderedJson::Object(OrderedMap(fields)) if fields.is_empty() => {
+            Err("\"instructions\" must not be an empty object".to_string())
+        }
+        OrderedJson::Array(items) if items.is_empty() => {
+            Err("\"instructions\" must not be an empty array".to_string())
+        }
+        OrderedJson::Object(_) | OrderedJson::Array(_) => Ok(value.compact_json()),
+        _ => Err("\"instructions\" must be a string, an object or an array".to_string()),
+    }
+}
+
 /// A question in the engine's terms, and its score levels' names in the
 /// legend (none for the other types).
 fn parse_question(spec: QuestionSpec) -> Result<(Question, Vec<String>), String> {
     let instructions = match spec.instructions {
         None | Some(OrderedJson::Null) => return Err("\"instructions\" is required".to_string()),
         Some(OrderedJson::String(instructions)) => instructions,
-        Some(_) => return Err("\"instructions\" must be a string".to_string()),
+        Some(structured) => structured_instructions(&structured)?,
     };
     let mut legend = Vec::new();
     let question = match spec.kind.as_str() {
@@ -1330,6 +1349,46 @@ mod tests {
         );
         let plain = parse_text("{}");
         assert_eq!(plain.state, plain.state_line);
+    }
+
+    /// Structured instructions reach the model as jev-style's server
+    /// writes them: `json.dumps(v, ensure_ascii=False, separators=(",",
+    /// ":"))`, keys in the order given.
+    #[test]
+    fn instructions_may_be_an_object_or_an_array() {
+        let text = r#"{ "state": "x", "questions": {
+            "dup": { "type": "noul", "instructions": {
+                "potential_duplicate": {"name": "John Smith", "city": "Oakland", "age": 41.0},
+                "question": "Is the resume for the same person as `potential_duplicate`?",
+                "note": "line\nbreak \"quoted\" é" } },
+            "list": { "type": "choice", "instructions": ["Which team?", {"hint": "billing first"}],
+                      "criteria": {"billing": null, "tech": null} } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        assert_eq!(
+            parsed.questions[0].instructions(),
+            r#"{"potential_duplicate":{"name":"John Smith","city":"Oakland","age":41.0},"question":"Is the resume for the same person as `potential_duplicate`?","note":"line\nbreak \"quoted\" é"}"#
+        );
+        assert_eq!(
+            parsed.questions[1].instructions(),
+            r#"["Which team?",{"hint":"billing first"}]"#
+        );
+
+        for (instructions, expected) in [
+            ("{}", "must not be an empty object"),
+            ("[]", "must not be an empty array"),
+            ("5", "must be a string, an object or an array"),
+            ("true", "must be a string, an object or an array"),
+            (r#""  ""#, "must not be empty"),
+            ("null", "is required"),
+        ] {
+            let text = format!(
+                r#"{{ "state": "x", "questions": {{ "q": {{ "type": "noul",
+                    "instructions": {instructions} }} }} }}"#
+            );
+            let err = parse_request(serde_json::from_str(&text).unwrap()).unwrap_err();
+            assert_eq!(err.code, "invalid_question", "{instructions}");
+            assert!(err.message.contains(expected), "{instructions}: {err:?}");
+        }
     }
 
     /// Score levels written as jev-style's guard writes its risk scale:
