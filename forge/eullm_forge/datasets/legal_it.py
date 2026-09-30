@@ -339,8 +339,37 @@ def parse_normattiva_opendata_zip(
                 try:
                     records = _parse_akn_xml(xml_text, sid)
                     if records:
-                        results[sid] = records
-                        logger.info("  OpenData [%s] → %d articles  (%s)", sid, len(records), name)
+                        # One law is spread over several AKN files (a period at
+                        # a time, an allegato of its own), and every .xml entry
+                        # in the ZIP is inspected -- so this has to accumulate.
+                        # Assigning instead kept the last file and dropped the
+                        # rest of the code, silently: the per-file INFO line
+                        # still counted them, and so did the "Total: N articles"
+                        # prepare_legislation.py prints, because it reads the
+                        # dict it was handed.
+                        #
+                        # A number already taken is not appended: the same
+                        # article in two files is the same article, and two
+                        # records for it would chunk into two and then look
+                        # ambiguous to articles_from_records, which drops an
+                        # article whose number it sees twice.
+                        kept = results.setdefault(sid, [])
+                        have = {r.get("article_num") for r in kept}
+                        fresh, repeated = [], []
+                        for rec in records:
+                            (repeated if rec.get("article_num") in have else fresh).append(rec)
+                        kept.extend(fresh)
+                        logger.info(
+                            "  OpenData [%s] → %d new articles%s  (%s)",
+                            sid, len(fresh),
+                            f", {len(repeated)} already seen" if repeated else "", name,
+                        )
+                        for rec in repeated:
+                            logger.warning(
+                                "  %s also carries art. %s, already taken from an "
+                                "earlier file in this ZIP — keeping the first",
+                                name, rec.get("article_num"),
+                            )
                     else:
                         logger.warning("  OpenData [%s]: 0 articles extracted from %s", sid, name)
                 except Exception as exc:

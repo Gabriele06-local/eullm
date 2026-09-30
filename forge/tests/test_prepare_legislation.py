@@ -101,6 +101,78 @@ def _akn(urn):
             f'</FRBRWork></meta></akomaNtoso>')
 
 
+# --- ZIP mode: a law is spread over more than one AKN file -------------------
+
+CC_URN = "urn:nir:stato:regio.decreto:1942-03-16;262"
+COST_URN = "urn:nir:stato:costituzione:1947-12-27;0"
+NS = 'xmlns="http://docs.oasis-open.org/legaldocml/ns/akn/3.0"'
+
+
+def _article_xml(urn, num, title, body):
+    return (f'<akomaNtoso {NS}><act><body><article><content>'
+            f'<p><num>{num}.</num></p><p><heading>{title}</heading></p>'
+            f'<p>{body}</p></content></article></body></act>'
+            f'<meta><FRBRWork><FRBRthis value="{urn}/!main"/></FRBRWork></meta></akomaNtoso>')
+
+
+def _zip(files):
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, text in files.items():
+            zf.writestr(name, text)
+    return buf.getvalue()
+
+
+def test_every_file_of_a_law_reaches_the_corpus():
+    """The OpenData ZIP holds one AKN file per period, and every .xml entry is
+    inspected, so the parser has to accumulate. Assigning kept the last file
+    and dropped the rest of the code — silently, because the per-file log line
+    and prepare_legislation.py's "Total: N articles" both counted what was
+    parsed rather than what was kept."""
+    from eullm_forge.datasets.legal_it import parse_normattiva_opendata_zip
+
+    out = parse_normattiva_opendata_zip(_zip({
+        "codice_civile_vigente.xml": _article_xml(CC_URN, 1, "Fonti",
+                                                  "Sono fonti le leggi." * 6),
+        "codice_civile_1lug1943.xml": _article_xml(CC_URN, 2, "Termine di prova",
+                                                    "La domanda si propone entro "
+                                                    "sessanta giorni." * 6),
+        "costituzione.xml": _article_xml(COST_URN, 3, "Diritti",
+                                         "La Repubblica promuove lo sviluppo." * 6),
+    }), ["codice_civile", "costituzione"])
+    assert [r["article_num"] for r in out["codice_civile"]] == ["1.", "2."]
+    assert len(out["costituzione"]) == 1
+
+
+def test_an_article_in_two_files_is_written_once():
+    """The same number in two files is the same article. Two records would
+    chunk into two, and articles_from_records drops an article whose number it
+    sees twice as ambiguous — so the corpus would lose it instead."""
+    from eullm_forge.datasets.legal_it import parse_normattiva_opendata_zip
+
+    out = parse_normattiva_opendata_zip(_zip({
+        "vigente.xml": _article_xml(CC_URN, 2043, "Risarcimento",
+                                    "Qualunque fatto doloso o colposo." * 6),
+        "1lug1943.xml": _article_xml(CC_URN, 2043, "Risarcimento",
+                                     "Testo anteriore alla riforma." * 6),
+    }), ["codice_civile"])
+    assert [r["article_num"] for r in out["codice_civile"]] == ["2043."]
+    assert "riforma" not in out["codice_civile"][0]["text"]
+
+
+def test_an_unrecognised_or_unwanted_file_changes_nothing():
+    from eullm_forge.datasets.legal_it import parse_normattiva_opendata_zip
+
+    out = parse_normattiva_opendata_zip(_zip({
+        "vigente.xml": _article_xml(CC_URN, 1, "Fonti", "Sono fonti le leggi." * 6),
+        "lettera.xml": _article_xml("urn:nir:stato:legge:1990-08-07;241", 1, "Articolo 1",
+                                    "Testo." * 6),
+    }), ["codice_civile"])
+    assert list(out) == ["codice_civile"]
+
+
 def test_the_administrative_norms_are_recognised_in_an_opendata_zip():
     from eullm_forge.datasets.legal_it import _detect_source_from_akn
 
