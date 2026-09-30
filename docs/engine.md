@@ -519,7 +519,7 @@ question types:
 |---|---|---|
 | `noul` | Is this statement true of the state? (`criteria`, optional: `{"true": "…", "false": "…"}`, what each answer means) | `noul`: P(yes) |
 | `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options; up to 255 with a [Jev-Style model](#jev-style-decision-models)) | `choice`, `probabilities`, `confidence` |
-| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
+| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first; a level may also be `{"label": "…", "description": "…"}`) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
 
 ```bash
 curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
@@ -555,6 +555,12 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
+
+A score level written as `{"label": "high", "description": "loses data"}` is
+shown to the model as `high: loses data` — the label alone when there is no
+description — and named `high` in the `legend`, as jev-style's own server
+does. Any other object or array is shown as one line of JSON and named in the
+legend by its label, when it has one, or by its compact JSON.
 
 **How an answer is computed.** With an instruction-tuned model — the *code
 readout* — each question becomes one chat prompt (the model's own template,

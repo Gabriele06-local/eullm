@@ -206,6 +206,12 @@ impl<V: Serialize> Serialize for OrderedMap<V> {
 }
 
 impl<V> OrderedMap<V> {
+    /// The value of `key`: the last one given, as a JSON parser that keeps
+    /// one value per key reads it.
+    fn get(&self, key: &str) -> Option<&V> {
+        self.0.iter().rev().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
     fn zip<T: Into<V> + Copy>(labels: &[String], values: &[T]) -> Self {
         OrderedMap(
             labels
@@ -323,12 +329,23 @@ impl OrderedJson {
     /// floats as `repr` spells them — which is how Jev-Style models saw
     /// structured states and descriptions in training.
     fn python_json(&self) -> String {
+        self.json_line(", ", ": ")
+    }
+
+    /// The same with `separators=(",", ":")`: jev-style's `compact_json`,
+    /// the name its server gives a structured score level in the legend.
+    fn compact_json(&self) -> String {
+        self.json_line(",", ":")
+    }
+
+    /// One line of JSON with `item` between items and `key` after a key.
+    fn json_line(&self, item: &str, key: &str) -> String {
         let mut out = String::new();
-        self.write_python_json(&mut out);
+        self.write_json(&mut out, item, key);
         out
     }
 
-    fn write_python_json(&self, out: &mut String) {
+    fn write_json(&self, out: &mut String, item: &str, key: &str) {
         match self {
             Self::Null => out.push_str("null"),
             Self::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -338,27 +355,84 @@ impl OrderedJson {
             Self::String(s) => out.push_str(&serde_json::to_string(s).unwrap_or_default()),
             Self::Array(items) => {
                 out.push('[');
-                for (i, item) in items.iter().enumerate() {
+                for (i, value) in items.iter().enumerate() {
                     if i > 0 {
-                        out.push_str(", ");
+                        out.push_str(item);
                     }
-                    item.write_python_json(out);
+                    value.write_json(out, item, key);
                 }
                 out.push(']');
             }
             Self::Object(map) => {
                 out.push('{');
-                for (i, (key, value)) in map.0.iter().enumerate() {
+                for (i, (name, value)) in map.0.iter().enumerate() {
                     if i > 0 {
-                        out.push_str(", ");
+                        out.push_str(item);
                     }
-                    out.push_str(&serde_json::to_string(key).unwrap_or_default());
-                    out.push_str(": ");
-                    value.write_python_json(out);
+                    out.push_str(&serde_json::to_string(name).unwrap_or_default());
+                    out.push_str(key);
+                    value.write_json(out, item, key);
                 }
                 out.push('}');
             }
         }
+    }
+}
+
+/// A score level as the model reads it, and its name in the legend.
+///
+/// A string is both. A `{"label": …, "description": …}` object — how
+/// jev-style's guard writes its risk scale — reads `"label: description"`,
+/// or the label alone without a description, and the legend names it by its
+/// label: what jev-style's own server does (`schema._level_text` and
+/// `_level_label`), and how its training data writes levels. Such an object
+/// with keys of its own besides, or any other object or array, is shown to
+/// the model as JSON, like a structured option; the legend then names it by
+/// its label if it has one, by its compact JSON otherwise. It used to be
+/// JSON everywhere: the model read `{"label": "calm", "description": …}`
+/// and the legend repeated it, where a client looks for `calm`.
+fn score_level(i: usize, level: &OrderedJson) -> Result<(String, String), String> {
+    match level {
+        OrderedJson::String(text) => Ok((text.clone(), text.clone())),
+        OrderedJson::Object(fields) if fields.get("label").is_some() => {
+            let label = match fields.get("label") {
+                Some(OrderedJson::String(label)) if !label.trim().is_empty() => label.clone(),
+                _ => {
+                    return Err(format!(
+                        "score level {i}: \"label\" must be a non-empty string"
+                    ));
+                }
+            };
+            let description = match fields.get("description") {
+                None | Some(OrderedJson::Null) => "",
+                Some(OrderedJson::String(description)) => description.as_str(),
+                Some(_) => {
+                    return Err(format!("score level {i}: \"description\" must be a string"));
+                }
+            };
+            let more = fields
+                .0
+                .iter()
+                .any(|(key, _)| key != "label" && key != "description");
+            let text = if more {
+                level.python_json()
+            } else if description.is_empty() {
+                label.clone()
+            } else {
+                format!("{label}: {description}")
+            };
+            Ok((text, label))
+        }
+        OrderedJson::Object(OrderedMap(fields)) if !fields.is_empty() => {
+            Ok((level.python_json(), level.compact_json()))
+        }
+        OrderedJson::Array(items) if !items.is_empty() => {
+            Ok((level.python_json(), level.compact_json()))
+        }
+        _ => Err(format!(
+            "score level {i} must be a non-empty string, a {{\"label\", \"description\"}} \
+             object, or another non-empty object or array"
+        )),
     }
 }
 
@@ -507,6 +581,9 @@ struct ParsedRequest {
     state_line: String,
     ids: Vec<String>,
     questions: Vec<Question>,
+    /// Per question, what each score level is called in the response's
+    /// `legend`; empty for the other types.
+    legends: Vec<Vec<String>>,
     calibration: Calibration,
     /// `None`: the model's own default (`DecisionModel::default_temperature`).
     temperature: Option<f64>,
@@ -544,6 +621,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
     }
     let mut ids = Vec::with_capacity(specs.len());
     let mut questions = Vec::with_capacity(specs.len());
+    let mut legends = Vec::with_capacity(specs.len());
     for (id, spec) in specs {
         if id.trim().is_empty() {
             return Err(ApiError::invalid_request("question ids must not be empty"));
@@ -551,11 +629,12 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         if ids.contains(&id) {
             return Err(ApiError::invalid_question(&id, "duplicate question id"));
         }
-        let question = QuestionSpec::read(spec)
+        let (question, legend) = QuestionSpec::read(spec)
             .and_then(parse_question)
             .map_err(|e| ApiError::invalid_question(&id, e))?;
         ids.push(id);
         questions.push(question);
+        legends.push(legend);
     }
 
     let options = request.eullm.unwrap_or_default();
@@ -591,6 +670,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         state_line,
         ids,
         questions,
+        legends,
         calibration,
         temperature,
         mode,
@@ -598,12 +678,15 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
     })
 }
 
-fn parse_question(spec: QuestionSpec) -> Result<Question, String> {
+/// A question in the engine's terms, and its score levels' names in the
+/// legend (none for the other types).
+fn parse_question(spec: QuestionSpec) -> Result<(Question, Vec<String>), String> {
     let instructions = match spec.instructions {
         None | Some(OrderedJson::Null) => return Err("\"instructions\" is required".to_string()),
         Some(OrderedJson::String(instructions)) => instructions,
         Some(_) => return Err("\"instructions\" must be a string".to_string()),
     };
+    let mut legend = Vec::new();
     let question = match spec.kind.as_str() {
         "noul" => {
             let (mut true_means, mut false_means) = (String::new(), String::new());
@@ -652,10 +735,18 @@ fn parse_question(spec: QuestionSpec) -> Result<Question, String> {
             }
         },
         "score" => match spec.criteria {
-            Some(OrderedJson::Array(levels)) => Question::Score {
-                instructions,
-                levels: levels.iter().map(OrderedJson::as_description).collect(),
-            },
+            Some(OrderedJson::Array(levels)) => {
+                let (levels, names) = levels
+                    .iter()
+                    .enumerate()
+                    .map(|(i, level)| score_level(i, level))
+                    .collect::<Result<(Vec<_>, Vec<_>), _>>()?;
+                legend = names;
+                Question::Score {
+                    instructions,
+                    levels,
+                }
+            }
             _ => {
                 return Err(
                     "a score question needs \"criteria\": an array of level descriptions, \
@@ -671,7 +762,7 @@ fn parse_question(spec: QuestionSpec) -> Result<Question, String> {
         }
     };
     question.validate()?;
-    Ok(question)
+    Ok((question, legend))
 }
 
 /// The answer labels of a question, in class order: how its probabilities
@@ -818,10 +909,11 @@ fn build_answers(
 ) -> (OrderedMap<Answer>, Vec<DecisionAnswerRecord>) {
     let mut answers = Vec::with_capacity(parsed.questions.len());
     let mut records = Vec::with_capacity(parsed.questions.len());
-    for ((id, question), outcome) in parsed
+    for (((id, question), legend), outcome) in parsed
         .ids
         .iter()
         .zip(&parsed.questions)
+        .zip(&parsed.legends)
         .zip(&decision.outcomes)
     {
         let labels = labels(question);
@@ -879,14 +971,14 @@ fn build_answers(
                     Some(confidence),
                 )
             }
-            Question::Score { levels, .. } => {
+            Question::Score { .. } => {
                 let score = decision::expected_level(&probabilities);
                 let confidence = decision::normalized_entropy_confidence(&probabilities);
                 (
                     Answer::Score {
                         score,
                         legend: OrderedMap(
-                            labels.iter().cloned().zip(levels.iter().cloned()).collect(),
+                            labels.iter().cloned().zip(legend.iter().cloned()).collect(),
                         ),
                         probabilities: OrderedMap::zip(&labels, &probabilities),
                         confidence,
@@ -1238,6 +1330,86 @@ mod tests {
         );
         let plain = parse_text("{}");
         assert_eq!(plain.state, plain.state_line);
+    }
+
+    /// Score levels written as jev-style's guard writes its risk scale:
+    /// the model reads what jev-style's server gives its renderer, and the
+    /// legend names each level as that server's legend does.
+    #[test]
+    fn score_levels_may_be_labels_with_descriptions() {
+        let text = r#"{ "state": "rm -rf build", "questions": { "risk": { "type": "score",
+            "instructions": "How risky is it?",
+            "criteria": [
+                {"label": "none", "description": "read-only"},
+                {"label": "low"},
+                {"label": "moderate", "description": ""},
+                {"label": "high", "description": null},
+                "severe",
+                {"label": "tagged", "description": "d", "weight": 3},
+                {"what": "odd", "n": 1.5},
+                ["a", 2]
+            ] } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let Question::Score { levels, .. } = &parsed.questions[0] else {
+            panic!("not a score");
+        };
+        assert_eq!(
+            levels,
+            &[
+                "none: read-only",
+                "low",
+                "moderate",
+                "high",
+                "severe",
+                r#"{"label": "tagged", "description": "d", "weight": 3}"#,
+                r#"{"what": "odd", "n": 1.5}"#,
+                r#"["a", 2]"#,
+            ]
+        );
+        assert_eq!(
+            parsed.legends[0],
+            [
+                "none",
+                "low",
+                "moderate",
+                "high",
+                "severe",
+                "tagged",
+                r#"{"what":"odd","n":1.5}"#,
+                r#"["a",2]"#,
+            ]
+        );
+
+        let decision = fake_decision(vec![outcome(&[0.125; 8], None)]);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Verdict, 1.0);
+        let legend = &serde_json::to_value(&answers).unwrap()["risk"]["legend"];
+        assert_eq!(legend["0"], "none");
+        assert_eq!(legend["5"], "tagged");
+    }
+
+    #[test]
+    fn a_score_level_that_names_nothing_is_refused() {
+        for (level, expected) in [
+            (r#"{"label": ""}"#, "\"label\" must be a non-empty string"),
+            (r#"{"label": 3}"#, "\"label\" must be a non-empty string"),
+            (
+                r#"{"label": "a", "description": 3}"#,
+                "\"description\" must be a string",
+            ),
+            ("{}", "must be a non-empty string"),
+            ("[]", "must be a non-empty string"),
+            ("3", "must be a non-empty string"),
+            ("null", "must be a non-empty string"),
+            (r#""  ""#, "must not be empty"),
+        ] {
+            let text = format!(
+                r#"{{ "state": "x", "questions": {{ "q": {{ "type": "score", "instructions": "?",
+                    "criteria": ["fine", {level}] }} }} }}"#
+            );
+            let err = parse_request(serde_json::from_str(&text).unwrap()).unwrap_err();
+            assert_eq!(err.code, "invalid_question", "{level}");
+            assert!(err.message.contains(expected), "{level}: {err:?}");
+        }
     }
 
     #[test]
