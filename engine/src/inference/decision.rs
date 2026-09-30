@@ -91,9 +91,16 @@ pub const DEFAULT_DECISION_CTX: u32 = 8192;
 /// anything.
 pub const CONTENT_FREE_STATE: &str = "N/A";
 
-/// How `confidence` is computed, reported next to every answer so a client
-/// can tell which definition a stored number came from if it ever changes.
-pub const CONFIDENCE_METHOD: &str = "normalized_entropy";
+/// How `confidence` is computed ([`max_probability_confidence`]), reported
+/// next to every answer and in every audit record so a client can tell
+/// which definition a stored number came from. Until it was changed to
+/// jev-style's it was [`ENTROPY_CONFIDENCE_METHOD`].
+pub const CONFIDENCE_METHOD: &str = "normalized_max_probability";
+
+/// The name of [`normalized_entropy_confidence`]: `confidence` in responses
+/// and audit records written before [`CONFIDENCE_METHOD`] replaced it, and
+/// `eullm.confidence_entropy` since.
+pub const ENTROPY_CONFIDENCE_METHOD: &str = "normalized_entropy";
 
 /// Most questions one `batched` decode round holds on a recurrent or
 /// hybrid model, which keeps a recurrent state per sequence.
@@ -1753,11 +1760,31 @@ pub fn calibrated_probabilities(
     adjusted.iter().map(|a| (a - norm).exp()).collect()
 }
 
+/// `(K · p_max − 1) / (K − 1)`, clipped to [0, 1]: the top probability's
+/// lead over an even split, as a share of the most it could lead by — 1
+/// when all probability is on one class, 0 when it is spread evenly over
+/// all `K`. It is jev-style's definition (`adapter.confidence`), for a
+/// `choice` and a `score` alike, so the number means the same whether a
+/// client asks jev-style's server or EuLLM; the System One API only says
+/// confidence is "derived from the answer's probability distribution".
+/// With two classes it is `2 · p_max − 1`; with one, 1, as jev-style has
+/// it for a one-option `choice`.
+pub fn max_probability_confidence(probabilities: &[f64]) -> f64 {
+    let k = probabilities.len();
+    if k <= 1 {
+        return 1.0;
+    }
+    let top = probabilities.iter().copied().fold(0.0, f64::max);
+    let k = k as f64;
+    ((k * top - 1.0) / (k - 1.0)).clamp(0.0, 1.0)
+}
+
 /// `1 − H(p) / ln K`: 1 when all probability is on one class, 0 when it is
-/// spread evenly over all `K`. One of several reasonable definitions — the
-/// System One API only says confidence is "computed from how probabilities
-/// is spread" — which is why its name travels with it
-/// ([`CONFIDENCE_METHOD`]).
+/// spread evenly over all `K`. `confidence` until jev-style's
+/// [`max_probability_confidence`] replaced it, and still reported next to
+/// it: it reads every class's probability, not only the top one, so two
+/// answers with the same top probability but a different runner-up tell
+/// apart.
 pub fn normalized_entropy_confidence(probabilities: &[f64]) -> f64 {
     if probabilities.len() < 2 {
         return 1.0;
@@ -1895,10 +1922,40 @@ mod tests {
 
     #[test]
     fn confidence_is_one_for_certainty_and_zero_for_an_even_split() {
-        assert!(close(normalized_entropy_confidence(&[1.0, 0.0, 0.0]), 1.0));
-        assert!(close(normalized_entropy_confidence(&[0.25; 4]), 0.0));
+        for confidence in [max_probability_confidence, normalized_entropy_confidence] {
+            assert!(close(confidence(&[1.0, 0.0, 0.0]), 1.0));
+            assert!(close(confidence(&[0.25; 4]), 0.0));
+            assert!(close(confidence(&[0.5, 0.5]), 0.0));
+        }
         let c = normalized_entropy_confidence(&[0.9, 0.1]);
         assert!(c > 0.5 && c < 1.0);
+    }
+
+    /// The values jev-style's `adapter.confidence` gives, edge cases
+    /// included.
+    #[test]
+    fn confidence_is_jev_styles() {
+        // Two classes: 2 · p_max − 1.
+        assert!(close(max_probability_confidence(&[0.9, 0.1]), 0.8));
+        assert!(close(max_probability_confidence(&[0.25, 0.75]), 0.5));
+        // (3 · 0.6 − 1) / 2.
+        assert!(close(max_probability_confidence(&[0.6, 0.3, 0.1]), 0.4));
+        assert!(close(max_probability_confidence(&[0.1, 0.8, 0.1]), 0.7));
+        // One class, or none: certain.
+        assert_eq!(max_probability_confidence(&[1.0]), 1.0);
+        assert_eq!(max_probability_confidence(&[]), 1.0);
+        // Probabilities that sum to less than one cannot go below 0, nor
+        // rounding above 1.
+        assert_eq!(max_probability_confidence(&[0.2, 0.2, 0.2]), 0.0);
+        assert_eq!(max_probability_confidence(&[1.0 + 1e-12, 0.0]), 1.0);
+        // It reads the top probability only; the entropy tells a close
+        // runner-up from an even rest.
+        let (a, b) = ([0.6, 0.4, 0.0], [0.6, 0.2, 0.2]);
+        assert!(close(
+            max_probability_confidence(&a),
+            max_probability_confidence(&b)
+        ));
+        assert!(normalized_entropy_confidence(&a) > normalized_entropy_confidence(&b));
     }
 
     #[test]

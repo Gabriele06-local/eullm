@@ -80,6 +80,11 @@ pub struct DecisionRecord {
     /// `none` or `content_free`.
     pub calibration: String,
     pub temperature: f64,
+    /// How the answers' `confidence` was computed:
+    /// `normalized_max_probability` (jev-style's definition), or, on a line
+    /// written before that became the definition, `normalized_entropy`.
+    #[serde(default = "entropy_confidence")]
+    pub confidence_method: String,
     pub answers: Vec<DecisionAnswerRecord>,
 }
 
@@ -120,6 +125,12 @@ pub struct DecisionAnswerRecord {
 /// `readout` of a decision record written before verdict models existed.
 fn codes_readout() -> String {
     "codes".to_string()
+}
+
+/// `confidence_method` of a decision record written before it was recorded:
+/// the only definition there was then.
+fn entropy_confidence() -> String {
+    crate::inference::decision::ENTROPY_CONFIDENCE_METHOD.to_string()
 }
 
 /// Strip ASCII control characters (newlines included) from client-controlled
@@ -403,6 +414,7 @@ mod tests {
             mode: "shared_prefix".into(),
             calibration: "none".into(),
             temperature: 1.0,
+            confidence_method: "normalized_max_probability".into(),
             answers: vec![DecisionAnswerRecord {
                 id: "area".into(),
                 kind: "choice".into(),
@@ -419,9 +431,21 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""type":"choice""#), "{json}");
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
-        let answer = &parsed.decision.unwrap().answers[0];
+        let decision = parsed.decision.unwrap();
+        assert_eq!(decision.confidence_method, "normalized_max_probability");
+        let answer = &decision.answers[0];
         assert_eq!(answer.labels, ["civile", "penale"]);
         assert_eq!(answer.answer, "civile");
+    }
+
+    /// A decision line from before the confidence method was recorded still
+    /// reads, and says which definition its confidences follow.
+    #[test]
+    fn a_decision_record_without_its_confidence_method_is_entropy_based() {
+        let old = r#"{"state_sha256":"ab","mode":"shared_prefix","calibration":"none","temperature":1.0,"answers":[]}"#;
+        let record: DecisionRecord = serde_json::from_str(old).unwrap();
+        assert_eq!(record.confidence_method, "normalized_entropy");
+        assert_eq!(record.readout, "codes");
     }
 
     #[test]

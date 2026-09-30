@@ -15,6 +15,9 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Changed
+- **`confidence` in `/v1/systemone` answers now follows jev-style's definition, so its values move.** It was `1 − H(p) / ln K`, one minus the entropy of the probabilities scaled to the number of answers. It is now `(K · p_max − 1) / (K − 1)`, the definition jev-style's server, MCP tools and guard use: how far the top answer's probability stands above an even split, from 0 (all answers equally likely) to 1 (all on one answer), `2 · p_max − 1` with two options. The same answer gets a different number — a choice of three at 0.99 / 0.005 / 0.005 moves from 0.94 to 0.985 — so thresholds tuned on the old value need retuning. The old value is still in every answer, as `eullm.confidence_entropy`, and `eullm.confidence_method` now says `normalized_max_probability`. The audit trail's decision records carry the same `confidence_method`; records written by earlier versions have none and hold the entropy-based value.
+
 ### Added
 - **`timing.total_ms` in `/v1/systemone` responses.** jev-style's MCP tools and its guard show the server's time for every decision from `timing.total_ms`, which EuLLM did not send, so they showed `null`. The response now carries it: the request's wall time, `eullm.request_ms` to 0.1 ms.
 

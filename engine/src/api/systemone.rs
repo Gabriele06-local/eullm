@@ -44,7 +44,8 @@ use sha2::{Digest, Sha256};
 use super::{AppState, KeepAlive};
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
-    self, DecideOptions, Decision, DecisionError, EvalMode, EvalStats, Question, ReadoutKind,
+    self, DecideOptions, Decision, DecisionError, EvalMode, EvalStats, Question, QuestionKind,
+    ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -867,6 +868,11 @@ struct AnswerExtension {
     /// The content-free prior that was divided out (`content_free` only).
     #[serde(skip_serializing_if = "Option::is_none")]
     prior_logprobs: Option<OrderedMap<f64>>,
+    /// `choice` and `score`: `1 − H(p) / ln K` of the same probabilities,
+    /// what `confidence` was before it took jev-style's definition
+    /// (`decision::ENTROPY_CONFIDENCE_METHOD`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    confidence_entropy: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -886,6 +892,8 @@ struct ResponseExtension {
     /// Applied to every answer: the request's, or the model's default —
     /// a verdict model's own calibration, 1 otherwise.
     temperature: f64,
+    /// How every `confidence` was computed: `normalized_max_probability`,
+    /// jev-style's `(K · p_max − 1) / (K − 1)`.
     confidence_method: &'static str,
     /// `auto` or `off` (`--no-flash-attn`): which attention kernels the
     /// numbers below came from, since timings and the last digits of every
@@ -975,6 +983,9 @@ fn build_answers(
             raw_probabilities: OrderedMap::zip(&labels, &raw),
             coverage,
             prior_logprobs: prior.map(|p| OrderedMap::zip(&labels, p)),
+            // System One reports no confidence for a yes/no answer.
+            confidence_entropy: (question.kind() != QuestionKind::Noul)
+                .then(|| decision::normalized_entropy_confidence(&probabilities)),
         };
 
         let (answer, value, confidence) = match question {
@@ -995,7 +1006,7 @@ fn build_answers(
                     .enumerate()
                     .max_by(|a, b| a.1.total_cmp(b.1))
                     .map_or(0, |(i, _)| i);
-                let confidence = decision::normalized_entropy_confidence(&probabilities);
+                let confidence = decision::max_probability_confidence(&probabilities);
                 let choice = labels[best].clone();
                 (
                     Answer::Choice {
@@ -1010,7 +1021,7 @@ fn build_answers(
             }
             Question::Score { .. } => {
                 let score = decision::expected_level(&probabilities);
-                let confidence = decision::normalized_entropy_confidence(&probabilities);
+                let confidence = decision::max_probability_confidence(&probabilities);
                 (
                     Answer::Score {
                         score,
@@ -1163,6 +1174,7 @@ pub(super) async fn systemone(
         mode: decision.stats.mode.as_str().to_string(),
         calibration: parsed.calibration.as_str().to_string(),
         temperature,
+        confidence_method: decision::CONFIDENCE_METHOD.to_string(),
         answers: records,
     });
     AuditLogger::new().log(&audit);
@@ -1772,16 +1784,22 @@ mod tests {
         let team = &json["team"];
         assert_eq!(team["choice"], "billing");
         assert!((team["probabilities"]["billing"].as_f64().unwrap() - 0.8).abs() < 1e-9);
-        assert!(team["confidence"].as_f64().unwrap() > 0.0);
+        // jev-style's confidence, (3 · 0.8 − 1) / 2; the entropy's beside it.
+        assert!((team["confidence"].as_f64().unwrap() - 0.7).abs() < 1e-9);
+        let entropy = decision::normalized_entropy_confidence(&[0.1, 0.8, 0.1]);
+        assert!((team["eullm"]["confidence_entropy"].as_f64().unwrap() - entropy).abs() < 1e-9);
+        assert!(urgent["eullm"].get("confidence_entropy").is_none());
 
         let severity = &json["severity"];
         assert!((severity["score"].as_f64().unwrap() - (0.57 + 2.0 * 0.4299)).abs() < 1e-6);
+        assert!((severity["confidence"].as_f64().unwrap() - 0.355).abs() < 1e-9);
         assert_eq!(severity["legend"]["2"], "Blocking");
         assert!(severity["eullm"].get("prior_logprobs").is_none());
 
         assert_eq!(records.len(), 3);
         assert_eq!(records[1].answer, "billing");
         assert_eq!(records[1].labels, ["tech", "billing", "other"]);
+        assert!((records[1].confidence.unwrap() - 0.7).abs() < 1e-9);
         assert_eq!(records[0].confidence, None);
     }
 

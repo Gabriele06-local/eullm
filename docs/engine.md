@@ -541,11 +541,11 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
     "is_urgent": { "type": "noul", "noul": 0.95, "eullm": { ... } },
     "team": { "type": "choice", "choice": "billing",
               "probabilities": { "billing": 0.91, "tech": 0.07, "other": 0.02 },
-              "confidence": 0.71, "eullm": { ... } },
+              "confidence": 0.865, "eullm": { ... } },
     "severity": { "type": "score", "score": 1.43,
                   "legend": { "0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking" },
                   "probabilities": { "0": 0.0, "1": 0.57, "2": 0.43 },
-                  "confidence": 0.32, "eullm": { ... } }
+                  "confidence": 0.355, "eullm": { ... } }
   },
   "usage": { "input_tokens": 312, "output_tokens": 0 },
   "timing": { "total_ms": 187.4 },
@@ -606,9 +606,18 @@ re-calibrated later:
 | `raw_probabilities` | The same, renormalized over the answers (a softmax of the scores), before calibration and temperature |
 | `coverage` | Code readout: share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
 | `prior_logprobs` | The content-free prior that was divided out (with `content_free` calibration only) |
+| `confidence_entropy` | `choice` and `score`: `1 − H(p) / ln K` of the same probabilities, `confidence` as it was defined up to 0.7.20 |
 
-`confidence` is `1 − H(p) / ln K` — 1 when all probability is on one answer,
-0 when it is spread evenly — and named in `eullm.confidence_method`.
+`confidence` (for `choice` and `score`) is `(K · p_max − 1) / (K − 1)` over
+the `K` answers, clipped to [0, 1]: how far the top answer's probability is
+above an even split, as a share of the most it could be — 1 when all
+probability is on one answer, 0 when it is spread evenly; `2 · p_max − 1`
+for two options. It is jev-style's definition, so a threshold on it means
+the same against jev-style's server and against EuLLM. The response names
+it in `eullm.confidence_method` (`normalized_max_probability`), and each
+answer's `eullm.confidence_entropy` keeps `1 − H(p) / ln K`, the
+entropy-based value `confidence` was up to 0.7.20, which reads the
+runner-up answers too.
 
 **Calibration is not a solved problem here, and nothing is claimed about
 it yet.** The mechanism reproduces with any model; calibrated probabilities
@@ -1139,7 +1148,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
-| `decision` | Object, `systemone` only | `state_sha256`, `mode`, `calibration`, `temperature`, and per answer: `id`, `type`, `labels`, `logprobs`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 
