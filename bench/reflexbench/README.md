@@ -182,6 +182,17 @@ python3 bench/reflexbench/rg_openbook.py $WORK/eullm_runs/stage3/openbook-v04.js
 python3 bench/reflexbench/ragbench.py --sets '' --data rag-legal-it.jsonl ...
 ```
 
+The pairs are written by a large model on the cluster. Without them,
+`--by-heading` asks by an article's rubrica — "Che cosa prevede la legge in
+materia di risarcimento per fatto illecito?" — for the articles whose rubrica
+is theirs alone and names a topic, from the legislation records only:
+plainer questions, the same two contexts.
+
+```bash
+python3 bench/reflexbench/rg_openbook.py --by-heading --limit 1000 \
+  --norms ~/work/corpus/legislazione_*.chunks.jsonl --out rag-legal-it.jsonl
+```
+
 **The methods.**
 
 | Method | Score, and decision |

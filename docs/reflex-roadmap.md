@@ -212,7 +212,9 @@ is the candidate there, not yet measured.
     open-book pairs — each question asked by topic about an article of
     Italian law, with the articles retrieval finds, its own among them or
     left out, the two contexts Forge trains the legal model on. Written
-    where the pairs are; its run is next.
+    where the pairs are; while the cluster is down, `--by-heading` asks by
+    each article's rubrica from the legislation records alone. Its run is
+    next.
 
 ### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
 

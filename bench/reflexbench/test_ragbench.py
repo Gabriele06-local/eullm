@@ -272,6 +272,35 @@ class OpenBookTest(unittest.TestCase):
             loaded = rg_data.from_jsonl(path)
         self.assertEqual([c.sufficient for c in loaded.cases], [True, False])
 
+    def test_questions_by_rubrica_without_the_pairs(self):
+        import rg_openbook
+
+        records = self.records + [
+            {"code": "codice_civile", "article_num": "1", "text": "Art. 1. (Definizioni). ..."},
+            {
+                "code": "codice_civile",
+                "article_num": "2047",
+                "text": "Art. 2047. (Danno cagionato dall'incapace). Il risarcimento è dovuto "
+                "da chi è tenuto alla sorveglianza, salvo che provi di non aver potuto "
+                "impedire il fatto.",
+            },
+        ]
+        index = rg_openbook.NormIndex(records)
+        drawn = rg_openbook.heading_cases(index, k=3)
+        questions = sorted({c["question"] for c in drawn})
+        self.assertIn(
+            "Che cosa prevede la legge in materia di risarcimento per fatto illecito?", questions
+        )
+        # A rubrica that names no topic makes no question.
+        self.assertFalse(any("definizioni" in q for q in questions))
+        self.assertEqual(len(drawn), 2 * len(questions))
+        # "Stato di necessità": retrieval finds nothing else, so there is no
+        # context without the article, and no question.
+        self.assertFalse(any("necessità" in q for q in questions))
+        one = [c for c in drawn if c["group"] == "h-codice_civile-2043"]
+        self.assertEqual([c["label"] for c in one], ["answer", "abstain"])
+        self.assertEqual(len(rg_openbook.heading_cases(index, k=3, limit=1)), 2)
+
     def test_only_questions_asked_by_topic(self):
         import rg_openbook
 
