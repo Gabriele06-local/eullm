@@ -205,9 +205,10 @@ is the candidate there, not yet measured.
     has, against Reflex's choice and a yes/no; thresholds fitted on a dev
     half, every method scored on the test half.
   - [✅ done] The first run on the GPU: see the results below.
-  - [🆕 next] The ceiling: a larger instruction-tuned model asked the same
-    yes/no through the code readout, to tell a small model's limit from
-    the task's.
+  - [✅ done] The ceiling: Qwen3-8B, four times the size and not trained
+    for decisions, asked the same questions through the code readout. It
+    does no better — see the results below: MuSiQue's limit is the task,
+    not the 2B's size.
   - [🔧 now] An Italian set: `rg_openbook.py` writes it from Forge's
     open-book pairs — each question asked by topic about an article of
     Italian law, with the articles retrieval finds, its own among them or
@@ -241,6 +242,14 @@ when it may stop at most about one sufficient case in ten:
   the embeddings' two thresholds (47%). A context short of one hop is
   mostly taken for one that holds nothing, and that is the hard case for
   every method.
+- **A larger model is not the answer.** Qwen3-8B, asked the same two
+  questions: AUROC 0.765 (choice) and 0.772 (yes/no) against the 2B's
+  0.769 and 0.763, the same balanced accuracy at a fitted threshold (0.70),
+  in 134–139 ms against 49–50 ms. It follows the passages better within a
+  question (0.83–0.86 against 0.79–0.82), and its own yes/no is less
+  cautious — it stops 62% of the insufficient cases and 22% of the
+  sufficient ones without any threshold — but calibrated, the 2B does as
+  well at a third of the latency.
 - MuSiQue's questions take two to four hops; most questions put to a
   company's documents take one. The Italian set is what says how the gate
   does on those.
