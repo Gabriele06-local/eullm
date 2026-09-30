@@ -96,7 +96,10 @@ def run(method, dataset, details):
     rankings = []
     started = shown = time.perf_counter()
     if dataset.items:
-        method.rank(dataset.items[-1])
+        model = method.rank(dataset.items[-1]).server.get("model")
+        if model:
+            # Say which model decides before its decisions are counted.
+            print(f"    decision model: {model}", file=sys.stderr, flush=True)
     for n, item in enumerate(dataset.items, 1):
         ranking = method.rank(item)
         rankings.append(ranking)
@@ -111,6 +114,7 @@ def run(method, dataset, details):
                         "needed_ranks": [ranking.order.index(n) + 1 for n in item.needed],
                         "candidates": len(item.candidates),
                         "top": ranking.order[:20],
+                        "refused": ranking.refused,
                         "none_score": ranking.none_score,
                         "best_score": ranking.best_score,
                         "ms": round(ranking.ms, 2),
@@ -132,7 +136,7 @@ def run(method, dataset, details):
 def table(results):
     """The report as Markdown."""
     head = (
-        "| set | method | items | R@1 | R@3 | R@5 | R@10 | k95 | k99 | "
+        "| set | method | items | refused | R@1 | R@3 | R@5 | R@10 | k95 | k99 | "
         "specs kept @k95 | abstain ok | false abstain | p50 ms | p95 ms | tokens/decision |"
     )
     lines = [head, "|---" * (head.count("|") - 1) + "|"]
@@ -148,7 +152,7 @@ def table(results):
         recall = m.get("recall_at", {})
         lat = m["latency_ms"]
         lines.append(
-            f"| {r['set']} | {r['method']} | {m['items']} | "
+            f"| {r['set']} | {r['method']} | {m['items']} | {m.get('refused', 0)} | "
             + " | ".join(pct(recall.get(k)) for k in ("1", "3", "5", "10"))
             + f" | {m.get('k95', '—')} | {m.get('k99', '—')} | "
             f"{pct(m.get('spec_kept_at_k95'))} | {pct(m.get('abstain_accuracy'))} | "
@@ -225,10 +229,12 @@ def main():
             for method in build_methods(args, dataset):
                 print(f"  {method.name}", file=sys.stderr, flush=True)
                 rankings = run(method, dataset, details)
+                served = sorted({r.server["model"] for r in rankings if r.server.get("model")})
                 results.append(
                     {
                         "set": dataset.name,
                         "method": method.name,
+                        "decision_model": ", ".join(served) or None,
                         "fixed_catalog": dataset.fixed_catalog,
                         "abstain_asked": getattr(method, "abstain", False),
                         "metrics": rb_metrics.summarize(dataset.items, rankings),
@@ -240,7 +246,8 @@ def main():
         report = {
             "when": stamp,
             "url": args.url,
-            "decision_model": args.model,
+            "decision_model_asked": args.model,
+            "decision_models": sorted({r["decision_model"] for r in results} - {None}),
             "embed_model": args.embed_model,
             "embed_query_prefix": args.embed_query_prefix,
             "limit": args.limit,
@@ -252,6 +259,8 @@ def main():
         }
         out.write_text(json.dumps(report, indent=2), encoding="utf-8")
         if results:
+            if report["decision_models"]:
+                print(f"decision model: {', '.join(report['decision_models'])}\n")
             print(table(results))
         print(f"\nreport: {out}", file=sys.stderr)
 

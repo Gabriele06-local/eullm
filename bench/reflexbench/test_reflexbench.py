@@ -28,7 +28,25 @@ def tools(*names):
 
 class MetricsTest(unittest.TestCase):
     def test_worst_rank_is_the_needed_tool_ranked_lowest(self):
-        self.assertEqual(rb_metrics.worst_rank(["a", "b", "c"], ["c", "a"]), 3)
+        self.assertEqual(rb_metrics.worst_rank(["a", "b", "c"], ["c", "a"], 3), 3)
+        # A refused request ranks nothing: all the tools offered are kept.
+        self.assertEqual(rb_metrics.worst_rank([], ["a"], 7), 7)
+
+    def test_a_refused_request(self):
+        catalog = tools("a", "b", "c", "d")
+        items = [rb_data.Item("1", "r1", catalog, ["a"]), rb_data.Item("2", "r2", catalog, ["b"])]
+        rankings = [
+            rb_methods.Ranking(["a", "b", "c", "d"], 10.0, server={"evaluated_tokens": 5}),
+            rb_methods.Ranking([], 0.0, server={"questions": 0}, refused=True),
+        ]
+        m = rb_metrics.summarize(items, rankings)
+        self.assertEqual(m["refused"], 1)
+        self.assertEqual(m["recall_at"]["3"], 0.5)
+        self.assertEqual(m["k95"], 4)
+        # The refused request sends every spec; its cost is not a decision's.
+        self.assertAlmostEqual(m["spec_kept_at_k95"], 1.0)
+        self.assertEqual(m["latency_ms"], {"p50": 10.0, "p95": 10.0})
+        self.assertEqual(m["evaluated_tokens_mean"], 5)
 
     def test_k_for_keeps_the_coverage_asked(self):
         ranks = list(range(1, 101))
@@ -317,6 +335,51 @@ class ReflexTest(unittest.TestCase):
         for n in range(2, 60):
             self.assertGreaterEqual(min(sizes(n, 3)), 2, n)
 
+    def test_a_request_too_long_even_alone_is_refused(self):
+        post, sent = server(max_options=1)
+        reflex = rb_methods.Reflex("http://x", "B", None, None, 10, abstain=True)
+        with mock.patch.object(rb_methods, "post", post):
+            ranking = reflex.rank(self.item)
+        self.assertTrue(ranking.refused)
+        self.assertEqual(ranking.order, [])
+        # One question of four tools, then two of two, then four of one.
+        self.assertEqual([len(p["questions"]) for p in sent], [1, 2, 4])
+
+    def test_the_size_one_request_needed_does_not_carry_over(self):
+        reflex = rb_methods.Reflex("http://x", "A", None, None, 10, abstain=True)
+        post, _ = server(max_options=3)
+        with mock.patch.object(rb_methods, "post", post):
+            reflex.rank(self.item)
+        post, sent = server(max_options=10)
+        with mock.patch.object(rb_methods, "post", post):
+            reflex.rank(self.item)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent[0]["questions"]), 1)
+
+    def test_none_is_weighed_in_the_question_of_the_best_tool(self):
+        scores = {
+            "tools_0": {"a": 0.1, "b": -1.0, "none": 5.0},
+            "tools_1": {"c": 2.0, "d": 0.5, "none": -3.0},
+        }
+
+        def post(url, payload, api_key, timeout):
+            if len(payload["questions"]) == 1:
+                raise rb_methods.ServerError(400, "too long: nothing was truncated")
+            return {
+                "answers": {
+                    q: {"eullm": {"scores": {o: scores[q][o] for o in body["criteria"]}}}
+                    for q, body in payload["questions"].items()
+                }
+            }
+
+        reflex = rb_methods.Reflex("http://x", "A", None, None, 10, abstain=True)
+        with mock.patch.object(rb_methods, "post", post):
+            ranking = reflex.rank(self.item)
+        # "None" wins among a and b, where no tool fits, but not beside c.
+        self.assertEqual(ranking.order[0], "c")
+        self.assertEqual((ranking.none_score, ranking.best_score), (-3.0, 2.0))
+        self.assertFalse(ranking.abstains())
+
     def test_abstains_when_no_tool_scores_higher(self):
         self.assertTrue(rb_methods.Ranking(["a"], 1.0, none_score=1.0, best_score=0.5).abstains())
         self.assertFalse(rb_methods.Ranking(["a"], 1.0, best_score=0.5).abstains())
@@ -342,6 +405,24 @@ class ReflexTest(unittest.TestCase):
 
 
 class TwoStageTest(unittest.TestCase):
+    def test_the_embeddings_order_stands_when_reflex_refuses(self):
+        item = rb_data.Item("1", "r", tools("a", "b", "c"), ["b"])
+
+        class Embeddings:
+            def rank(self, item):
+                return rb_methods.Ranking(["b", "a", "c"], 5.0)
+
+        class Reflex:
+            abstain = True
+
+            def rank(self, item):
+                return rb_methods.Ranking([], 0.0, server={"questions": 0}, refused=True)
+
+        ranking = rb_methods.TwoStage(Embeddings(), Reflex(), shortlist=2).rank(item)
+        self.assertTrue(ranking.refused)
+        self.assertEqual((ranking.order, ranking.ms), (["b", "a", "c"], 5.0))
+        self.assertIsNone(ranking.none_score)
+
     def test_reflex_ranks_the_shortlist_and_the_rest_follow(self):
         item = rb_data.Item("1", "r", tools("a", "b", "c", "d", "e"), ["d"])
         shown = []
@@ -415,8 +496,8 @@ class TableTest(unittest.TestCase):
         )
         rows = out.splitlines()
         self.assertEqual(len(rows), 4)
-        self.assertEqual({row.count("|") for row in rows}, {16})
-        self.assertIn("| s | bm25 | 1 | 100.0% |", rows[2])
+        self.assertEqual({row.count("|") for row in rows}, {17})
+        self.assertIn("| s | bm25 | 1 | 0 | 100.0% |", rows[2])
 
 
 if __name__ == "__main__":

@@ -17,11 +17,18 @@ KS = (1, 3, 5, 10, 20)
 COVERAGES = (0.95, 0.99)
 
 
-def worst_rank(order, needed):
-    """1-based position of the needed tool ranked lowest: the k it takes to
-    keep every tool the request needs."""
+def ranks(order, needed, offered):
+    """1-based positions of the needed tools. A request the decision model
+    refused ranks nothing, and its tools count as the last of the `offered`:
+    every one of them would have to be sent."""
     position = {name: i + 1 for i, name in enumerate(order)}
-    return max(position[name] for name in needed)
+    return [position.get(name, offered) for name in needed]
+
+
+def worst_rank(order, needed, offered):
+    """The position of the needed tool ranked lowest: the k it takes to keep
+    every tool the request needs."""
+    return max(ranks(order, needed, offered))
 
 
 def k_for(ranks, coverage):
@@ -48,17 +55,20 @@ def summarize(items, rankings):
     without = [(i, r) for i, r in zip(items, rankings) if not i.needed]
     report = {"items": len(items), "items_needing_tools": len(with_tools)}
     if with_tools:
-        ranks = [worst_rank(r.order, i.needed) for i, r in with_tools]
-        report["recall_at"] = {str(k): sum(rank <= k for rank in ranks) / len(ranks) for k in KS}
+        worst = [worst_rank(r.order, i.needed, len(i.candidates)) for i, r in with_tools]
+        report["recall_at"] = {str(k): sum(rank <= k for rank in worst) / len(worst) for k in KS}
         report["mrr"] = statistics.mean(
-            1 / min(r.order.index(n) + 1 for n in i.needed) for i, r in with_tools
+            1 / min(ranks(r.order, i.needed, len(i.candidates))) for i, r in with_tools
         )
         report["candidates_mean"] = statistics.mean(len(i.candidates) for i, _ in with_tools)
         for coverage in COVERAGES:
-            k = k_for(ranks, coverage)
+            k = k_for(worst, coverage)
+            # A refused request sends every spec.
             kept = [
                 chars([t for t in i.candidates if t.name in r.order[:k]])
                 / max(1, chars(i.candidates))
+                if r.order
+                else 1.0
                 for i, r in with_tools
             ]
             report[f"k{round(coverage * 100)}"] = k
@@ -76,16 +86,17 @@ def summarize(items, rankings):
     if asked:
         # Requests that do need a tool: how often "no tool" won anyway.
         report["false_abstain_rate"] = sum(r.abstains() for _, r in asked) / len(asked)
-    ms = [r.ms for r in rankings]
+    report["refused"] = sum(r.refused for r in rankings)
+    # What deciding cost, over the requests that got a ranking.
+    decided = [r for r in rankings if r.order]
+    ms = [r.ms for r in decided]
     report["latency_ms"] = {"p50": percentile(ms, 0.5), "p95": percentile(ms, 0.95)}
-    evaluated = [
-        r.server.get("evaluated_tokens")
-        for r in rankings
-        if r.server.get("evaluated_tokens") is not None
-    ]
-    if evaluated:
-        report["evaluated_tokens_mean"] = statistics.mean(evaluated)
-        reused = [r.server.get("prefix_reused") for r in rankings]
-        report["prefix_reused_rate"] = sum(bool(x) for x in reused) / len(reused)
-        report["questions_mean"] = statistics.mean(r.server.get("questions", 1) for r in rankings)
+    served = [r for r in decided if r.server.get("evaluated_tokens") is not None]
+    if served:
+        report["evaluated_tokens_mean"] = statistics.mean(
+            r.server["evaluated_tokens"] for r in served
+        )
+        reused = sum(bool(r.server.get("prefix_reused")) for r in served)
+        report["prefix_reused_rate"] = reused / len(served)
+        report["questions_mean"] = statistics.mean(r.server.get("questions", 1) for r in served)
     return report
