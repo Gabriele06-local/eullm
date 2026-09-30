@@ -181,7 +181,9 @@ function Set-EuLLMUserPath {
 
 function Add-EuLLMToPath {
     param([string]$Dir)
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    # The raw text, %VAR% entries as written: GetEnvironmentVariable returns
+    # them expanded, and writing that back would freeze them.
+    $userPath = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     $entries = @($userPath -split ';' | Where-Object { $_ })
     if ($entries -notcontains $Dir) {
         Set-EuLLMUserPath -Entries ($entries + $Dir)
@@ -200,7 +202,7 @@ function Uninstall-EuLLM {
     } else {
         Write-Host "$InstallDir does not exist, nothing to remove"
     }
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $userPath = (Get-Item HKCU:\Environment).GetValue('Path', '', 'DoNotExpandEnvironmentNames')
     $entries = @($userPath -split ';' | Where-Object { $_ -and $_ -ne $InstallDir })
     # Only when there was something to remove: an uninstall on a machine that
     # never had EuLLM should not rewrite the user's PATH at all.
