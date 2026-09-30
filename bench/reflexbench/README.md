@@ -1,5 +1,9 @@
 # ReflexBench — does a decision pick the tools a request needs?
 
+Two benchmarks share this directory: `reflexbench.py`, tool selection (MVP
+0), and `ragbench.py`, whether retrieved passages suffice to answer
+([below](#the-rag-gate-ragbenchpy), MVP 1).
+
 MVP 0 of the [Reflex roadmap](../../docs/reflex-roadmap.md). Before Reflex
 selects tools for anyone, this benchmark measures it on public labelled sets
 against simpler ways of doing the same thing, and answers three questions:
@@ -135,11 +139,64 @@ One JSON object per line; `needed` may be empty, for a request no tool fits:
 (default: the tool's JSON as written). Requests with the same tools in the
 same order share one catalog.
 
+## The RAG gate: `ragbench.py`
+
+MVP 1 of the roadmap. A RAG system retrieves passages and hands them to a
+large model, which answers whether or not the facts it needs are there. A
+gate between the two decides: `answer`, `retrieve_more` (some facts are
+there, one is missing), or `abstain` (nothing there helps).
+
+```bash
+EULLM_AUDIT_DIR=/tmp/ragbench-audit \
+  eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m --decision-ctx 25600 \
+              --embedding-model qwen3-embedding-0.6b-gguf-q8_0
+python3 bench/reflexbench/ragbench.py --limit 1000 \
+  --embed-model qwen3-embedding-0.6b-gguf-q8_0 \
+  --embed-query-prefix 'Instruct: Given a question, retrieve passages that answer it\nQuery:' \
+  --out rag-2b.json --details rag-2b.jsonl
+```
+
+**The set.** [MuSiQue](https://github.com/StonyBrookNLP/musique) (CC BY 4.0)
+gives each question 20 Wikipedia paragraphs: the 2 to 4 it needs, marked,
+and others retrieved for being close to it. Each question makes three cases
+of `--passages` passages (5): every paragraph it needs filled up with others
+(`answer`), all but one (`retrieve_more`), none (`abstain`). The three differ
+in what they hold, not in how the question reads. Read from a copy of the
+v1.0 release on Hugging Face at a fixed revision. `--data` takes a set of
+your own, one JSON object per line:
+
+```json
+{"id": "q1:a", "group": "q1", "question": "Entro quanto si ricorre al TAR?", "passages": ["Art. 29 c.p.a.: ...", "..."], "label": "answer"}
+```
+
+**The methods.**
+
+| Method | Score, and decision |
+|---|---|
+| `embed-max` | the best cosine similarity between the question and a passage, the signal a RAG system has after retrieval; no decision of its own |
+| `reflex-gate` | `/v1/systemone`, the question and passages as the state, one `choice` among the three; score P(`answer`) |
+| `reflex-yesno` | the same state, one `noul`: do the passages hold every fact the answer needs? Score P(yes), a yes above one half lets the model answer |
+
+**The report.** The questions are split in two halves: a threshold on each
+score is fitted on the dev half (the best balanced accuracy there) and every
+method is scored on the test half, the same cases for all.
+
+| Column | |
+|---|---|
+| AUROC | how well the score separates sufficient passages from the rest, before any threshold |
+| AUROC within a question | the same among the three cases of one question, averaged: whether the score follows the passages, whatever the question's difficulty does to its level |
+| caught | of the cases whose passages do not suffice, the share the gate stops: answers not made up from missing facts |
+| blocked | of the cases whose passages suffice, the share it stops anyway: answers lost for nothing |
+| own | at the method's own decision, with no labelled data |
+| fitted | at the threshold fitted on the dev half, what calibrating on a domain's own cases buys |
+| 3-way accuracy, macro-F1 | the decision among the three: Reflex's own choice, the embeddings' two fitted thresholds |
+| ECE | how far Reflex's probability of `answer` is from how often it is right |
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s bench/reflexbench
 ```
 
-Offline: the metrics, BM25, the loaders on made-up files, and the Reflex
-client against a stand-in server.
+Offline: the metrics, BM25, the loaders on made-up files, and both
+benchmarks' methods against a stand-in server.

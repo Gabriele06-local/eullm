@@ -77,3 +77,4 @@ _progress.json
 
 # ReflexBench reports written where it is run (bench/reflexbench/)
 reflexbench-*.json
+ragbench-*.json
