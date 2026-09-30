@@ -169,6 +169,19 @@ your own, one JSON object per line:
 {"id": "q1:a", "group": "q1", "question": "Entro quanto si ricorre al TAR?", "passages": ["Art. 29 c.p.a.: ...", "..."], "label": "answer"}
 ```
 
+**An Italian set.** `rg_openbook.py` writes one from Forge's open-book
+pairs: for each question asked by topic about an article of Italian law,
+the passages retrieval finds with that article among them (`answer`), and
+what it returns once the article is left out (`abstain`) — the same two
+contexts Forge trains the legal model on. It needs the pairs and the
+legislation records Forge prepares, and writes the set where they are:
+
+```bash
+python3 bench/reflexbench/rg_openbook.py $WORK/eullm_runs/stage3/openbook-v04.jsonl \
+  --norms $WORK/norms/legislazione_*.chunks.jsonl --out rag-legal-it.jsonl
+python3 bench/reflexbench/ragbench.py --sets '' --data rag-legal-it.jsonl ...
+```
+
 **The methods.**
 
 | Method | Score, and decision |

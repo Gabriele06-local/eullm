@@ -215,6 +215,73 @@ class MethodsTest(unittest.TestCase):
         self.assertEqual(sorted(asked), sorted(list(vectors) + ["Q: Who wrote it?"] * 2))
 
 
+class OpenBookTest(unittest.TestCase):
+    records = [
+        {
+            "code": "codice_civile",
+            "article_num": "2043",
+            "text": "Art. 2043. (Risarcimento per fatto illecito). Qualunque fatto doloso o "
+            "colposo che cagiona ad altri un danno ingiusto obbliga a risarcire il danno.",
+        },
+        {
+            "code": "codice_civile",
+            "article_num": "2044",
+            "text": "Art. 2044. (Legittima difesa). Non risponde del danno chi lo cagiona "
+            "per legittima difesa.",
+        },
+        {
+            "code": "codice_civile",
+            "article_num": "2045",
+            "text": "Art. 2045. (Stato di necessità). Al danneggiato è dovuta un'indennità "
+            "quando il danno è cagionato per necessità.",
+        },
+        {
+            "code": "codice_penale",
+            "article_num": "52",
+            "text": "Art. 52. (Difesa legittima). Non è punibile chi difende un diritto "
+            "dal pericolo di un'offesa ingiusta, con un danno proporzionato.",
+        },
+    ]
+    pair = {
+        "instruction": "Testi normativi di riferimento:\n\n[1] ...\n\n"
+        "Domanda: Chi deve risarcire un danno ingiusto causato con dolo o colpa?",
+        "output": "Chi lo ha cagionato (art. 2043).",
+        "task": "openbook_grounded",
+        "named": False,
+        "key": "ob-g-codice_civile-2043-v1",
+    }
+
+    def test_the_article_with_and_without(self):
+        import rg_openbook
+
+        index = rg_openbook.NormIndex(self.records)
+        answer, abstain = rg_openbook.cases(self.pair, index, k=3)
+        self.assertEqual(answer["question"], self.pair["instruction"].split("Domanda: ")[1])
+        self.assertEqual((answer["label"], abstain["label"]), ("answer", "abstain"))
+        self.assertEqual(answer["group"], abstain["group"])
+        self.assertEqual(len(answer["passages"]), 3)
+        own = "codice civile, art. 2043\n"
+        self.assertTrue(any(p.startswith(own) for p in answer["passages"]))
+        self.assertTrue(abstain["passages"])
+        self.assertFalse(any(p.startswith(own) for p in abstain["passages"]))
+
+        # What it writes is a set the gate reads.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "legal.jsonl"
+            path.write_text("\n".join(json.dumps(c) for c in (answer, abstain)), "utf-8")
+            loaded = rg_data.from_jsonl(path)
+        self.assertEqual([c.sufficient for c in loaded.cases], [True, False])
+
+    def test_only_questions_asked_by_topic(self):
+        import rg_openbook
+
+        index = rg_openbook.NormIndex(self.records)
+        self.assertEqual(rg_openbook.cases(dict(self.pair, named=True), index), [])
+        self.assertEqual(rg_openbook.cases(dict(self.pair, task="openbook_absent"), index), [])
+        unknown = dict(self.pair, key="ob-g-codice_civile-9999")
+        self.assertEqual(rg_openbook.cases(unknown, index), [])
+
+
 class TableTest(unittest.TestCase):
     def test_every_row_has_every_column(self):
         dev = [case("a", label) for label in rg_metrics.LABELS]
