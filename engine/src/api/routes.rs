@@ -12,7 +12,7 @@
 //! the currently loaded one, the server automatically swaps to the new model.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use axum::body::Body;
 use axum::extract::{Query, State};
@@ -24,7 +24,7 @@ use futures_util::stream::Stream;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded};
+use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded, EmbeddingModel};
 
 use super::AppState;
 use crate::audit::{AuditEntry, AuditLogger};
@@ -276,7 +276,10 @@ pub fn openai_routes() -> Router<S> {
         // System One-compatible decisions (TypeSafe's Jev API shape): typed
         // answers read from a decision model's logits. Under /v1 because
         // that is where System One clients look for it.
-        .route("/systemone", post(super::systemone::systemone))
+        .route(
+            "/systemone",
+            post(super::systemone::systemone).fallback(super::systemone::method_not_allowed),
+        )
 }
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────
@@ -1158,12 +1161,7 @@ async fn embed(
     let load_duration = loading.elapsed();
     state.touch_embedding_slot(keep_alive).await;
 
-    let embedded = model.embed(&inputs).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Embedding failed: {e}") })),
-        )
-    })?;
+    let embedded = embed_on_a_blocking_thread(model, inputs).await?;
 
     Ok(Json(ollama_embed_response(
         requested,
@@ -1222,15 +1220,60 @@ async fn embeddings_openai(
         .map_err(embedding_model_error)?;
     state.touch_embedding_slot(keep_alive).await;
 
-    let embedded = model.embed(&inputs).map_err(|e| {
+    let embedded = embed_on_a_blocking_thread(model, inputs).await?;
+
+    Ok(Json(openai_embeddings_response(requested, embedded)))
+}
+
+/// `EmbeddingModel::embed` on tokio's blocking pool, where the generation
+/// and decision handlers already run their model calls. `embed` is a forward
+/// pass per input — 5.7 s for a 631-token passage on a 4-core CPU — and
+/// called straight from the handler it held one of the runtime's worker
+/// threads, of which there is one per core, for all of it: whatever else
+/// that worker had queued waited, and as many long requests as there are
+/// cores left no worker for anything at all. Four 1,162-token requests at
+/// once on a 4-core CPU kept `/api/version` from answering for up to 25.7 s;
+/// on the blocking pool it answers within 35 ms while they run.
+///
+/// At most [`EMBEDDING_SLOTS`] run at once; the others wait for a slot
+/// without holding a thread.
+async fn embed_on_a_blocking_thread(
+    model: Arc<EmbeddingModel>,
+    inputs: Vec<String>,
+) -> Result<Embedded, (StatusCode, Json<Value>)> {
+    let failed = |e: String| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Embedding failed: {e}") })),
         )
-    })?;
-
-    Ok(Json(openai_embeddings_response(requested, embedded)))
+    };
+    let slot = EMBEDDING_SLOTS
+        .acquire()
+        .await
+        .map_err(|e| failed(e.to_string()))?;
+    tokio::task::spawn_blocking(move || {
+        // Held until the embedding is done, not until the handler is: a
+        // client that disconnects does not free a slot its request is still
+        // running in.
+        let _slot = slot;
+        model.embed(&inputs)
+    })
+    .await
+    .map_err(|e| failed(e.to_string()))?
+    .map_err(failed)
 }
+
+/// How many embeddings may run at once: one per core, the number that could
+/// when each one held a runtime worker thread. The blocking pool alone
+/// would allow hundreds, and every embedding builds a context of its own,
+/// sized to its input — for a decoder-based embedder a logits row per
+/// token, 1.2 GB at 2048 tokens of Qwen3-Embedding — so a burst of
+/// requests would multiply the memory, on a GPU past its VRAM, where the
+/// one-per-core bound kept it before. Running more would not be faster
+/// either: each already uses every core, or the one GPU.
+static EMBEDDING_SLOTS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
+    tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(4, |n| n.get()))
+});
 
 /// The `/v1/embeddings` response, in OpenAI's shape.
 ///
@@ -2136,6 +2179,42 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
         }));
     }
 
+    // The decision model, when one is loaded, for System One clients
+    // (jev-style's `model_info`, the System One SDKs' `models.list()`): its
+    // entry here carries its budgets — added to the one it already has when
+    // it is in the store — and the top-level `models` names it. Without
+    // this the list showed only generation models, none of them the one
+    // `/v1/systemone` answers with. An OpenAI client ignores the extra
+    // fields, and still picks from `data`, where it keeps the place of a
+    // model on this machine.
+    let decision = state
+        .decision
+        .read()
+        .await
+        .as_ref()
+        .map(|slot| (slot.model_name.clone(), slot.model.info()));
+    let mut models = Vec::new();
+    if let Some((name, info)) = decision {
+        let (fields, model) = super::systemone::decision_model_listing(&name, &info);
+        match data.iter_mut().find(|m| m["id"] == name.as_str()) {
+            Some(Value::Object(entry)) => entry.extend(fields),
+            _ => {
+                seen.insert(name.clone());
+                let mut entry = json!({
+                    "id": name,
+                    "object": "model",
+                    "created": 1700000000_u64,
+                    "owned_by": "eullm"
+                });
+                if let Value::Object(entry) = &mut entry {
+                    entry.extend(fields);
+                }
+                data.push(entry);
+            }
+        }
+        models.push(model);
+    }
+
     // The OpenAI `id` field is what clients echo back as the `model` parameter
     // in chat requests, so it has to be the addressable catalog id, not the
     // human display name.
@@ -2153,7 +2232,7 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
             }),
     );
 
-    Json(json!({ "object": "list", "data": data }))
+    Json(json!({ "object": "list", "data": data, "models": models }))
 }
 
 async fn chat_completions(

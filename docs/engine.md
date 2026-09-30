@@ -519,7 +519,7 @@ question types:
 |---|---|---|
 | `noul` | Is this statement true of the state? (`criteria`, optional: `{"true": "…", "false": "…"}`, what each answer means) | `noul`: P(yes) |
 | `choice` | Which of these options? (`criteria`: an object of name → description, 2–26 options; up to 255 with a [Jev-Style model](#jev-style-decision-models)) | `choice`, `probabilities`, `confidence` |
-| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
+| `score` | Which level of this scale? (`criteria`: an array of 2–10 level descriptions, lowest first; a level may also be `{"label": "…", "description": "…"}`) | `score` (Σ level × p), `legend`, `probabilities`, `confidence` |
 
 ```bash
 curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' -d '{
@@ -541,20 +541,41 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
     "is_urgent": { "type": "noul", "noul": 0.95, "eullm": { ... } },
     "team": { "type": "choice", "choice": "billing",
               "probabilities": { "billing": 0.91, "tech": 0.07, "other": 0.02 },
-              "confidence": 0.71, "eullm": { ... } },
+              "confidence": 0.865, "eullm": { ... } },
     "severity": { "type": "score", "score": 1.43,
                   "legend": { "0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking" },
                   "probabilities": { "0": 0.0, "1": 0.57, "2": 0.43 },
-                  "confidence": 0.32, "eullm": { ... } }
+                  "confidence": 0.355, "eullm": { ... } }
   },
   "usage": { "input_tokens": 312, "output_tokens": 0 },
+  "timing": { "total_ms": 187.4 },
   "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
-             "evaluated_tokens": 312, "timings_ms": { ... }, ... }
+             "evaluated_tokens": 312, "timings_ms": { ... }, "request_ms": 187.43, ... }
 }
 ```
 
+`timing.total_ms` is the request's wall time, model resolution included, as
+jev-style's server reports it and its MCP tools and guard show it:
+`eullm.request_ms` to 0.1 ms. `eullm.timings_ms` splits the decode into its
+phases.
+
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
+
+`instructions` may be a string, or, as the System One API allows, an object
+or an array — the question in one field and the data it refers to in
+others. The model then reads it as one line of compact JSON, in the order
+it was written, which is what jev-style's server gives its models:
+
+```json
+{"record":{"name":"John Smith","city":"Oakland"},"question":"Is this resume the same person as the record?"}
+```
+
+A score level written as `{"label": "high", "description": "loses data"}` is
+shown to the model as `high: loses data` — the label alone when there is no
+description — and named `high` in the `legend`, as jev-style's own server
+does. Any other object or array is shown as one line of JSON and named in the
+legend by its label, when it has one, or by its compact JSON.
 
 **How an answer is computed.** With an instruction-tuned model — the *code
 readout* — each question becomes one chat prompt (the model's own template,
@@ -570,7 +591,7 @@ chat template's own turn markers inside it (`<|im_end|>`,
 writing the rest of the prompt. Only the template's text is read for control
 tokens; for the rare template that cannot be tokenized in those pieces
 exactly as it is whole, a request containing such a marker is refused with
-a 400. A model trained for this endpoint reads its answers differently — see
+a 422. A model trained for this endpoint reads its answers differently — see
 [Jev-Style decision models](#jev-style-decision-models) — and the response
 says which readout was used in `eullm.readout` (`codes` or `verdict`).
 
@@ -585,9 +606,18 @@ re-calibrated later:
 | `raw_probabilities` | The same, renormalized over the answers (a softmax of the scores), before calibration and temperature |
 | `coverage` | Code readout: share of the model's probability on a valid code. Near 1: it answered in the format asked for. Low: most of its probability went elsewhere (a thinking tag, a sentence) and the answer describes a minority of what it would have said — check this before trusting an answer |
 | `prior_logprobs` | The content-free prior that was divided out (with `content_free` calibration only) |
+| `confidence_entropy` | `choice` and `score`: `1 − H(p) / ln K` of the same probabilities, `confidence` as it was defined up to 0.7.20 |
 
-`confidence` is `1 − H(p) / ln K` — 1 when all probability is on one answer,
-0 when it is spread evenly — and named in `eullm.confidence_method`.
+`confidence` (for `choice` and `score`) is `(K · p_max − 1) / (K − 1)` over
+the `K` answers, clipped to [0, 1]: how far the top answer's probability is
+above an even split, as a share of the most it could be — 1 when all
+probability is on one answer, 0 when it is spread evenly; `2 · p_max − 1`
+for two options. It is jev-style's definition, so a threshold on it means
+the same against jev-style's server and against EuLLM. The response names
+it in `eullm.confidence_method` (`normalized_max_probability`), and each
+answer's `eullm.confidence_entropy` keeps `1 − H(p) / ln K`, the
+entropy-based value `confidence` was up to 0.7.20, which reads the
+runner-up answers too.
 
 **Calibration is not a solved problem here, and nothing is claimed about
 it yet.** The mechanism reproduces with any model; calibrated probabilities
@@ -672,10 +702,40 @@ still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
 `batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
 will serve.
 
-**Limits:** 64 questions per request, 26 options per `choice` (255 with a
-Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
-context per request (default 8192). A request over the context limit is
-refused with a 400 that says how many tokens it needed.
+**Limits:** 64 questions per request, 2–26 options per `choice` (up to 255
+with a Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens
+of context per request (default 8192). A request over the context limit is
+refused with a 422 `input_budget_exceeded` that says how many tokens it
+needed; nothing is truncated.
+
+**One option is not a choice.** jev-style accepts a `choice` with a single
+option — the System One API documents a maximum of 255 and no minimum — and
+answers it with that option at probability 1 and confidence 1, whatever the
+state says. EuLLM refuses it with a 422 `invalid_question`, and requires two:
+with one option there is nothing to decide, the answer is known before the
+model reads anything, and returning it as a decision would only look like
+one. To ask whether that one option fits, ask a `noul` about it, which
+returns the probability that it does.
+
+**Errors** come back in the shape System One clients and
+[jev-style](https://github.com/lawrence3699/jev-style)'s parse — a
+status and `{"error": {"code": "…", "message": "…", "question": "…"}}`, with
+`question` present when one question is at fault — so its MCP server, CLI
+and guard show EuLLM's message instead of failing on the body:
+
+| Status | `code` | When |
+|---|---|---|
+| 422 | `invalid_json` | The body is not JSON |
+| 422 | `invalid_request` | The request as a whole fails validation: no `state`, no questions, more than 64, an unknown `eullm` option |
+| 422 | `invalid_question` | One question fails validation — an unknown `type`, one option, 11 levels; `question` names it |
+| 422 | `input_budget_exceeded` | Longer than `--decision-ctx`, or than a Jev-Style model's budgets; `question` names the question when it was one question's. Nothing was truncated |
+| 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
+| 404 | `not_found` | `model` names a model the server does not have |
+| 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
+| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, not `Content-Type: application/json` |
+| 500 | `internal_error` | The model failed to load, or llama.cpp failed |
+
+The other endpoints keep the error bodies Ollama and OpenAI clients read.
 
 **Which model.** Preferably one trained for this endpoint, a
 [Jev-Style model](#jev-style-decision-models): calibrated by its authors, up
@@ -716,12 +776,23 @@ The `model` field may name any model the server can load (it then loads into
 the decision slot). Left out, or set to a System One model name such as
 `jev-latest`, it means the decision model already loaded — so a Jev client
 works unchanged. With no decision model loaded the request is refused with a
-400 saying so.
+400 `model_not_loaded` saying so.
 
-Every request is written to the audit trail with `request_type: "systemone"`
-and a `decision` record: each answer with its log-probabilities and its
-probabilities before and after calibration. The state itself is not stored,
-only its SHA-256.
+Every decision is written to the audit trail with `request_type:
+"systemone"` and a `decision` record: each answer with its log-probabilities
+and its probabilities before and after calibration. The state itself is not
+stored, only its SHA-256.
+
+**A client that disconnects.** The record is written by the thread that
+computed the decision, not by the connection that asked for it, so every
+decision the model computes is recorded — one whose client disconnected
+before its answers were ready with `client_disconnected: true`, since they
+were never sent. A request whose client disconnects before that stops at its
+next question, or before it starts if it was still waiting for the model, so
+the next request does not wait behind work nobody will read. It decided
+nothing and, like a request refused as invalid or one llama.cpp failed on, is
+not recorded; the server log says it was abandoned. A single question is not
+interrupted once it is being decoded.
 
 ### Jev-Style decision models
 
@@ -800,6 +871,87 @@ question on its own after it:
   `separate` gives them exactly, at the cost of decoding the state again for
   every question: 64 questions about a 1,024-token state take 0.62 s on an
   RTX 5070 Ti in `shared_prefix` mode, 3.2 s in `separate`.
+
+### jev-style with EuLLM: MCP server, CLI, Python client
+
+[jev-style](https://github.com/lawrence3699/jev-style) (Apache-2.0,
+`pip install jev-style`) is the Jev-Style models' own toolkit: an MCP
+server, a command line, a Python client and a guard for a coding
+agent's tool calls, all of which talk to any server that answers
+`POST /v1/systemone`. Point them at
+EuLLM with `JEV_STYLE_URL`. EuLLM must have a decision model loaded, with
+`--decision-model`: jev-style's guard names its own model
+(`jev-style-0.8b-decision-v3`) and its other tools name none, and EuLLM
+reads both, as it reads every `jev…` name, as the decision model it has
+loaded.
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --port 11500 --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+```
+
+The MCP server gives an agent `decide`, `noul`, `choice`, `score` and
+`model_info` as tools. In Claude Code:
+
+```bash
+claude mcp add jev-style --scope user -e JEV_STYLE_URL=http://localhost:11500 -- uvx jev-style@0.3.0 mcp
+```
+
+In Cursor, Claude Desktop and other clients configured with an
+`mcpServers` block:
+
+```json
+{
+  "mcpServers": {
+    "jev-style": {
+      "command": "uvx",
+      "args": ["jev-style@0.3.0", "mcp"],
+      "env": { "JEV_STYLE_URL": "http://localhost:11500" }
+    }
+  }
+}
+```
+
+When EuLLM requires API keys (`EULLM_API_KEYS`), give one as
+`JEV_STYLE_API_KEY` in the same `env` block (`-e JEV_STYLE_API_KEY=…` with
+`claude mcp add`); jev-style sends it as a bearer token. The MCP server
+talks only to a loopback address unless started with `--allow-remote`.
+
+The command line and the client read the same variables:
+
+```bash
+export JEV_STYLE_URL=http://localhost:11500
+jev-style decide "I was charged twice for March." --noul "This is about billing." \
+  --choice "Which team?::billing,shipping,technical"
+jev-style eval labelled.jsonl        # accuracy and calibration on your own labels
+```
+
+```python
+from jev_style import JevStyle, choice, noul
+js = JevStyle(base_url="http://localhost:11500")
+js.decide("I was charged twice.", {"billing": noul("This is about billing."),
+                                   "team": choice("Which team?", ["billing", "shipping"])})
+```
+
+The guard (`jev-style guard`, a `PreToolUse` hook that checks each tool
+call before it runs) takes the
+server from `JEV_STYLE_GUARD_URL` or `JEV_STYLE_URL`, else from `server_url`
+in its `guard_config.json`. It gives up after `timeout_s` (8 seconds by default)
+and then asks the user instead; on a slow CPU raise it. A request it gives
+up on stops at EuLLM's next question, and a decision already computed is in
+the audit trail with `client_disconnected: true`.
+
+What differs from jev-style's own server:
+
+- **Probabilities** are calibrated with the release's global temperature
+  (0.880 for the 0.8B, 0.828 for the 2B). jev-style's server uses instead
+  the temperature fitted for typed questions of the same kind where the
+  release has one: for the 0.8B, 0.98 to 1.01 for yes/no questions and for
+  choices and scores of 3 to 5 options, whose probabilities it therefore
+  gives a little less sharp; the 2B has none. The scores underneath,
+  `eullm.scores`, are the same.
+- **A `choice` with one option** is refused (see the limits above).
+- **Errors** carry EuLLM's messages, in jev-style's shape.
 
 ## API Reference
 
@@ -972,9 +1124,17 @@ curl -X POST http://localhost:11434/api/embed \
 ```json
 {
   "model": "bge-m3",
-  "embeddings": [[0.013, -0.021, ...], [0.008, 0.044, ...]]
+  "embeddings": [[0.013, -0.021, ...], [0.008, 0.044, ...]],
+  "total_duration": 41250000,
+  "load_duration": 120000,
+  "prompt_eval_count": 8
 }
 ```
+
+As in Ollama, `prompt_eval_count` is the tokens the model read, over all
+inputs and after truncation to the embedder's context, and the durations
+are nanoseconds: `load_duration` getting the model into its slot (next to
+nothing when it was already there), `total_duration` the whole request.
 
 ### OpenAI-Compatible API
 
@@ -986,6 +1146,32 @@ List models in OpenAI format.
 
 ```bash
 curl http://localhost:11434/v1/models
+```
+
+When a decision model is loaded, it is listed for System One clients too —
+jev-style's `model_info` tool and the System One SDKs' `models.list()`.
+Its entry in `data` carries `context_tokens`, the most tokens one
+`/v1/systemone` request may hold (`--decision-ctx`, or less when the model
+itself reads fewer), for a Jev-Style model `head_max_tokens`, what one
+question with its options may take on its own, and `"eullm": {"slot":
+"decision"}`; and the top-level `models`, the list the System One SDKs read,
+names it. With no decision model loaded, `models` is empty.
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "qwen3-4b", "object": "model", "created": 1700000000, "owned_by": "eullm" },
+    { "id": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "object": "model", "created": 1700000000,
+      "owned_by": "eullm", "context_tokens": 8192, "head_max_tokens": 2048,
+      "eullm": { "slot": "decision", "readout": "verdict" } },
+    ...
+  ],
+  "models": [
+    { "name": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "release_date": "2026-09-24",
+      "description": "Jev-Style-0.8B-Decision-v3 on EuLLM: typed decisions (noul / choice / score)" }
+  ]
+}
 ```
 
 #### `POST /v1/chat/completions`
@@ -1053,12 +1239,13 @@ curl -X POST http://localhost:11434/v1/embeddings \
   "object": "list",
   "data": [{"object": "embedding", "embedding": [0.013, -0.021, ...], "index": 0}],
   "model": "bge-m3",
-  "usage": {"prompt_tokens": 0, "total_tokens": 0}
+  "usage": {"prompt_tokens": 4, "total_tokens": 4}
 }
 ```
 
-`usage` is honestly reported as zero rather than a fabricated token count —
-the embedding path does not run a text tokenizer count today.
+`usage` counts the tokens the model read, after truncation to the
+embedder's context; an embedding generates nothing, so the total is the
+prompt.
 
 #### `POST /v1/systemone`
 
@@ -1097,7 +1284,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
-| `decision` | Object, `systemone` only | `state_sha256`, `mode`, `calibration`, `temperature`, and per answer: `id`, `type`, `labels`, `logprobs`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 

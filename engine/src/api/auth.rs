@@ -256,6 +256,13 @@ impl ApiKeys {
         Ok(Self::disabled())
     }
 
+    /// The keys of an `EULLM_API_KEYS` value, whatever the environment holds:
+    /// what the HTTP tests start a server with.
+    #[cfg(test)]
+    pub fn from_spec(spec: &str) -> Result<Self, String> {
+        Self::resolve(Some(spec), None, None, "test")
+    }
+
     /// Whether any key is configured. When false, every request is admitted
     /// with an anonymous [`Identity`] and the IP allowlist is the only control.
     pub fn is_enabled(&self) -> bool {

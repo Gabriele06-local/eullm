@@ -252,7 +252,11 @@ class Reflex:
             try:
                 body = post(self.url, payload, self.api_key, self.timeout)
             except ServerError as e:
-                if e.code != 400 or "nothing was truncated" not in e.detail:
+                # Too long for the model, refused whole: a 422 with the code
+                # `input_budget_exceeded` since EuLLM answers /v1/systemone
+                # errors in the System One shape, a 400 before; the message
+                # says "nothing was truncated" in both.
+                if e.code not in (400, 422) or "nothing was truncated" not in e.detail:
                     raise
                 if chunk > self.fewest:
                     chunk = max(self.fewest, min(chunk, len(names)) // 2)

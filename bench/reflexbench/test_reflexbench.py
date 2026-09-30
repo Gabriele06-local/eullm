@@ -245,7 +245,17 @@ class LoadersTest(unittest.TestCase):
 SCORES = {"a": 0.1, "b": -1.0, "c": 2.0, "d": 0.5, rb_methods.NONE: -3.0}
 
 
-def server(max_options):
+def too_long(status=422):
+    """EuLLM's refusal of a question too long for the model: its body since
+    errors take the System One shape, or, with status 400, before."""
+    message = "question, options and readout need 2100 tokens; the model allows 2048 — nothing was truncated"
+    if status == 400:
+        return rb_methods.ServerError(400, json.dumps({"error": message}))
+    body = {"error": {"code": "input_budget_exceeded", "message": message, "question": "tools_0"}}
+    return rb_methods.ServerError(status, json.dumps(body, ensure_ascii=False))
+
+
+def server(max_options, status=422):
     """A stand-in `/v1/systemone` that refuses a question with more than
     `max_options` options, as EuLLM does one too long for the model."""
     sent = []
@@ -253,7 +263,7 @@ def server(max_options):
     def post(url, payload, api_key, timeout):
         sent.append(payload)
         if any(len(q["criteria"]) > max_options for q in payload["questions"].values()):
-            raise rb_methods.ServerError(400, "question too long: nothing was truncated")
+            raise too_long(status)
         return {
             "answers": {
                 name: {"eullm": {"scores": {o: SCORES[o] for o in q["criteria"]}}}
@@ -290,6 +300,14 @@ class ReflexTest(unittest.TestCase):
         self.assertEqual(list(payload["questions"]["tools_1"]["criteria"]), ["c", "d", "none"])
         self.assertEqual(ranking.server["questions"], 2)
         self.assertEqual(ranking.server["evaluated_tokens"], 42)
+
+    def test_the_400_of_a_server_from_before_the_system_one_errors_splits_too(self):
+        post, sent = server(max_options=3, status=400)
+        reflex = rb_methods.Reflex("http://x/", "A", None, None, 10, abstain=True)
+        with mock.patch.object(rb_methods, "post", post):
+            ranking = reflex.rank(self.item)
+        self.assertEqual(ranking.order, ["c", "d", "a", "b"])
+        self.assertEqual(len(sent), 2)
 
     def test_layout_b_puts_the_catalog_in_the_state(self):
         post, sent = server(max_options=10)
@@ -364,7 +382,7 @@ class ReflexTest(unittest.TestCase):
 
         def post(url, payload, api_key, timeout):
             if len(payload["questions"]) == 1:
-                raise rb_methods.ServerError(400, "too long: nothing was truncated")
+                raise too_long()
             return {
                 "answers": {
                     q: {"eullm": {"scores": {o: scores[q][o] for o in body["criteria"]}}}
@@ -385,14 +403,26 @@ class ReflexTest(unittest.TestCase):
         self.assertFalse(rb_methods.Ranking(["a"], 1.0, best_score=0.5).abstains())
 
     def test_other_errors_are_not_retried(self):
-        def post(url, payload, api_key, timeout):
-            raise rb_methods.ServerError(503, "no decision model loaded")
+        invalid = {
+            "error": {
+                "code": "invalid_question",
+                "message": "duplicate option name",
+                "question": "tools_0",
+            }
+        }
+        for error in (
+            rb_methods.ServerError(503, "no decision model loaded"),
+            rb_methods.ServerError(422, json.dumps(invalid)),
+        ):
 
-        reflex = rb_methods.Reflex("http://x", "A", None, None, 10, abstain=False)
-        with mock.patch.object(rb_methods, "post", post):
-            with self.assertRaises(rb_methods.ServerError):
-                reflex.rank(self.item)
-        self.assertEqual(reflex.chunk, 255)
+            def post(url, payload, api_key, timeout):
+                raise error
+
+            reflex = rb_methods.Reflex("http://x", "A", None, None, 10, abstain=False)
+            with mock.patch.object(rb_methods, "post", post):
+                with self.assertRaises(rb_methods.ServerError):
+                    reflex.rank(self.item)
+            self.assertEqual(reflex.chunk, 255)
 
     def test_a_model_without_verdict_scores_is_refused(self):
         def post(url, payload, api_key, timeout):
