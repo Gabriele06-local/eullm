@@ -702,11 +702,20 @@ still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
 `batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
 will serve.
 
-**Limits:** 64 questions per request, 26 options per `choice` (255 with a
-Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens of
-context per request (default 8192). A request over the context limit is
+**Limits:** 64 questions per request, 2–26 options per `choice` (up to 255
+with a Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens
+of context per request (default 8192). A request over the context limit is
 refused with a 422 `input_budget_exceeded` that says how many tokens it
 needed; nothing is truncated.
+
+**One option is not a choice.** jev-style accepts a `choice` with a single
+option — the System One API documents a maximum of 255 and no minimum — and
+answers it with that option at probability 1 and confidence 1, whatever the
+state says. EuLLM refuses it with a 422 `invalid_question`, and requires two:
+with one option there is nothing to decide, the answer is known before the
+model reads anything, and returning it as a decision would only look like
+one. To ask whether that one option fits, ask a `noul` about it, which
+returns the probability that it does.
 
 **Errors** come back in the shape System One clients and
 [jev-style](https://github.com/lawrence3699/jev-style)'s parse — a
@@ -862,6 +871,87 @@ question on its own after it:
   `separate` gives them exactly, at the cost of decoding the state again for
   every question: 64 questions about a 1,024-token state take 0.62 s on an
   RTX 5070 Ti in `shared_prefix` mode, 3.2 s in `separate`.
+
+### jev-style with EuLLM: MCP server, CLI, Python client
+
+[jev-style](https://github.com/lawrence3699/jev-style) (Apache-2.0,
+`pip install jev-style`) is the Jev-Style models' own toolkit: an MCP
+server, a command line, a Python client and a guard for a coding
+agent's tool calls, all of which talk to any server that answers
+`POST /v1/systemone`. Point them at
+EuLLM with `JEV_STYLE_URL`. EuLLM must have a decision model loaded, with
+`--decision-model`: jev-style's guard names its own model
+(`jev-style-0.8b-decision-v3`) and its other tools name none, and EuLLM
+reads both, as it reads every `jev…` name, as the decision model it has
+loaded.
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
+eullm serve --port 11500 --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+```
+
+The MCP server gives an agent `decide`, `noul`, `choice`, `score` and
+`model_info` as tools. In Claude Code:
+
+```bash
+claude mcp add jev-style --scope user -e JEV_STYLE_URL=http://localhost:11500 -- uvx jev-style@0.3.0 mcp
+```
+
+In Cursor, Claude Desktop and other clients configured with an
+`mcpServers` block:
+
+```json
+{
+  "mcpServers": {
+    "jev-style": {
+      "command": "uvx",
+      "args": ["jev-style@0.3.0", "mcp"],
+      "env": { "JEV_STYLE_URL": "http://localhost:11500" }
+    }
+  }
+}
+```
+
+When EuLLM requires API keys (`EULLM_API_KEYS`), give one as
+`JEV_STYLE_API_KEY` in the same `env` block (`-e JEV_STYLE_API_KEY=…` with
+`claude mcp add`); jev-style sends it as a bearer token. The MCP server
+talks only to a loopback address unless started with `--allow-remote`.
+
+The command line and the client read the same variables:
+
+```bash
+export JEV_STYLE_URL=http://localhost:11500
+jev-style decide "I was charged twice for March." --noul "This is about billing." \
+  --choice "Which team?::billing,shipping,technical"
+jev-style eval labelled.jsonl        # accuracy and calibration on your own labels
+```
+
+```python
+from jev_style import JevStyle, choice, noul
+js = JevStyle(base_url="http://localhost:11500")
+js.decide("I was charged twice.", {"billing": noul("This is about billing."),
+                                   "team": choice("Which team?", ["billing", "shipping"])})
+```
+
+The guard (`jev-style guard`, a `PreToolUse` hook that checks each tool
+call before it runs) takes the
+server from `JEV_STYLE_GUARD_URL` or `JEV_STYLE_URL`, else from `server_url`
+in its `guard_config.json`. It gives up after `timeout_s` (8 seconds by default)
+and then asks the user instead; on a slow CPU raise it. A request it gives
+up on stops at EuLLM's next question, and a decision already computed is in
+the audit trail with `client_disconnected: true`.
+
+What differs from jev-style's own server:
+
+- **Probabilities** are calibrated with the release's global temperature
+  (0.880 for the 0.8B, 0.828 for the 2B). jev-style's server uses instead
+  the temperature fitted for typed questions of the same kind where the
+  release has one: for the 0.8B, 0.98 to 1.01 for yes/no questions and for
+  choices and scores of 3 to 5 options, whose probabilities it therefore
+  gives a little less sharp; the 2B has none. The scores underneath,
+  `eullm.scores`, are the same.
+- **A `choice` with one option** is refused (see the limits above).
+- **Errors** carry EuLLM's messages, in jev-style's shape.
 
 ## API Reference
 
