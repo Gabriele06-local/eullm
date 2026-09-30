@@ -1164,7 +1164,29 @@ pub struct DecisionModel {
     /// instead of to the model's numerical noise. Only the tests set it; it
     /// costs twice the KV memory.
     exact: bool,
+    /// Most KV cells one request may use (`--decision-ctx`).
+    max_ctx: u32,
     engine: engine::Engine,
+}
+
+/// What `GET /v1/models` tells a System One client about the decision
+/// model: the budgets jev-style's server lists with its model
+/// (`context_tokens`, `head_max_tokens`), and what the model is.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecisionModelInfo {
+    /// Most tokens one request may hold, its state and a question with its
+    /// options: `--decision-ctx`, or less when the model itself reads fewer.
+    pub context_tokens: usize,
+    /// The most one question with its options may take on its own, as
+    /// jev-style reports it: a Jev-Style 0.8B's 2,048, or the whole context
+    /// for a model with no budget of its own for a question (jev-style's
+    /// 2B). `None` for a code-readout model.
+    pub head_max_tokens: Option<usize>,
+    pub readout: ReadoutKind,
+    /// A Jev-Style model's release (`general.name`).
+    pub release: Option<String>,
+    /// When that release was published, if it is a known one.
+    pub release_date: Option<&'static str>,
 }
 
 impl DecisionModel {
@@ -1283,8 +1305,40 @@ impl DecisionModel {
             eval_lock: Mutex::new(()),
             prior_cache: Mutex::new(HashMap::new()),
             exact: false,
+            max_ctx,
             engine,
         })
+    }
+
+    /// Its budgets and what it is, for `GET /v1/models`.
+    pub fn info(&self) -> DecisionModelInfo {
+        let max_ctx = self.max_ctx as usize;
+        match &self.readout {
+            ModelReadout::Codes(_) => {
+                let trained = self.model.n_ctx_train() as usize;
+                DecisionModelInfo {
+                    context_tokens: if trained > 0 {
+                        max_ctx.min(trained)
+                    } else {
+                        max_ctx
+                    },
+                    head_max_tokens: None,
+                    readout: ReadoutKind::Codes,
+                    release: None,
+                    release_date: None,
+                }
+            }
+            ModelReadout::Verdict(v) => {
+                let context = max_ctx.min(verdict::MAX_LEN);
+                DecisionModelInfo {
+                    context_tokens: context,
+                    head_max_tokens: Some(v.question_budget().unwrap_or(context).min(context)),
+                    readout: ReadoutKind::Verdict,
+                    release: Some(v.name.clone()),
+                    release_date: v.release_date,
+                }
+            }
+        }
     }
 
     /// Answer every question about `state`: per class per question, the

@@ -44,8 +44,8 @@ use sha2::{Digest, Sha256};
 use super::{AppState, KeepAlive};
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
-    self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, EvalMode, EvalStats,
-    Question, QuestionKind, ReadoutKind,
+    self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, DecisionModelInfo,
+    EvalMode, EvalStats, Question, QuestionKind, ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -151,6 +151,46 @@ fn rejection(e: JsonRejection) -> ApiError {
         }
         other => ApiError::new(other.status(), "invalid_request", message),
     }
+}
+
+/// The decision model as `GET /v1/models` lists it for System One clients,
+/// next to the generation models OpenAI clients pick from.
+///
+/// The first part is the fields its entry in `data` gets: `context_tokens`
+/// and, for a Jev-Style model, `head_max_tokens`, the budgets jev-style's
+/// server lists with its model (and its `model_info` tool shows), and an
+/// `eullm` object saying it is the decision model. The second is its entry
+/// in the top-level `models`, the list the System One SDKs read: `name`,
+/// `description` and `release_date`, all strings, since the SDKs' strict
+/// response models refuse a `null` — an unknown date is empty.
+pub(crate) fn decision_model_listing(
+    name: &str,
+    info: &DecisionModelInfo,
+) -> (serde_json::Map<String, Value>, Value) {
+    let mut fields = serde_json::Map::new();
+    fields.insert("context_tokens".into(), json!(info.context_tokens));
+    if let Some(head) = info.head_max_tokens {
+        fields.insert("head_max_tokens".into(), json!(head));
+    }
+    fields.insert(
+        "eullm".into(),
+        json!({ "slot": "decision", "readout": info.readout.as_str() }),
+    );
+    let description = match &info.release {
+        Some(release) => {
+            format!("{release} on EuLLM: typed decisions (noul / choice / score)")
+        }
+        None => format!(
+            "{name} on EuLLM: typed decisions (noul / choice / score) read from the model's \
+             answer codes"
+        ),
+    };
+    let model = json!({
+        "name": name,
+        "description": description,
+        "release_date": info.release_date.unwrap_or_default(),
+    });
+    (fields, model)
 }
 
 /// Any method but `POST` on the endpoint: the 405 axum answers, with the
@@ -1996,6 +2036,45 @@ mod tests {
         // has a body of its own.
         let err = decision_error(DecisionError::Cancelled, &[]);
         assert_eq!(err.code, "cancelled");
+    }
+
+    /// What jev-style's `model_info` and the System One SDKs read from
+    /// `GET /v1/models` about the decision model.
+    #[test]
+    fn the_decision_model_is_listed_as_system_one_clients_read_it() {
+        let jev = DecisionModelInfo {
+            context_tokens: 8192,
+            head_max_tokens: Some(2048),
+            readout: ReadoutKind::Verdict,
+            release: Some("Jev-Style-0.8B-Decision-v3".into()),
+            release_date: Some("2026-09-24"),
+        };
+        let (fields, model) = decision_model_listing("Jev-Style-0.8B-Decision-v3-Q4_K_M", &jev);
+        assert_eq!(fields["context_tokens"], 8192);
+        assert_eq!(fields["head_max_tokens"], 2048);
+        assert_eq!(fields["eullm"]["slot"], "decision");
+        assert_eq!(model["name"], "Jev-Style-0.8B-Decision-v3-Q4_K_M");
+        assert_eq!(model["release_date"], "2026-09-24");
+        assert!(
+            model["description"]
+                .as_str()
+                .unwrap()
+                .starts_with("Jev-Style-0.8B-Decision-v3")
+        );
+
+        let code = DecisionModelInfo {
+            context_tokens: 8192,
+            head_max_tokens: None,
+            readout: ReadoutKind::Codes,
+            release: None,
+            release_date: None,
+        };
+        let (fields, model) = decision_model_listing("qwen3-4b", &code);
+        assert!(fields.get("head_max_tokens").is_none());
+        assert_eq!(fields["eullm"]["readout"], "codes");
+        // A string, even unknown: the SDKs refuse a null.
+        assert_eq!(model["release_date"], "");
+        assert!(model["description"].is_string());
     }
 
     #[test]

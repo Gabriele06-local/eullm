@@ -2420,6 +2420,10 @@ mod http_tests {
             ids.iter().any(|i| i.contains("a-pulled-model")),
             "a model in the store must appear in /v1/models, got {ids:?}"
         );
+        // Still an OpenAI list; `models`, the System One SDKs' list of
+        // decision models, is there and empty with none loaded.
+        assert_eq!(body["object"], "list");
+        assert_eq!(body["models"], serde_json::json!([]));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

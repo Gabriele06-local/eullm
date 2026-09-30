@@ -45,7 +45,7 @@ pub(super) const HEAD_MAX_V1: usize = 2048;
 pub(super) const BLOCK_V2: usize = 2048;
 
 /// Whole input, both renders.
-const MAX_LEN: usize = 25_600;
+pub(super) const MAX_LEN: usize = 25_600;
 
 /// The protocol a loaded verdict model is run with.
 #[derive(Debug, Clone)]
@@ -59,6 +59,8 @@ pub(super) struct VerdictModel {
     pub temperature: f64,
     /// Where the protocol came from, for the load log.
     pub source: String,
+    /// When the release was published, for a known one.
+    pub release_date: Option<&'static str>,
 }
 
 /// A known release: what its `readout_config.json` says, for a GGUF that
@@ -67,6 +69,9 @@ struct Known {
     name: &'static str,
     render: Render,
     temperature: f64,
+    /// Its publication date, as jev-style's release table gives it
+    /// (`jev_style.models.RELEASES`): what `GET /v1/models` reports.
+    release_date: &'static str,
 }
 
 /// `temperatures.global` of each release's `readout_config.json`.
@@ -75,11 +80,13 @@ const KNOWN: [Known; 2] = [
         name: "Jev-Style-0.8B-Decision-v3",
         render: Render::V1,
         temperature: 0.880_054_682_178_933_2,
+        release_date: "2026-09-24",
     },
     Known {
         name: "Jev-Style-2B-Decision-v3",
         render: Render::V2,
         temperature: 0.827_865_062_094_286_7,
+        release_date: "2026-09-27",
     },
 ];
 
@@ -120,8 +127,9 @@ impl VerdictModel {
             Some(config) => Self::from_file(&config, &name, &config_path)?,
             None => None,
         };
-        let Some(verdict) = from_file.or_else(|| {
-            KNOWN.iter().find(|k| k.name == name).map(|k| Self {
+        let known = KNOWN.iter().find(|k| k.name == name);
+        let Some(mut verdict) = from_file.or_else(|| {
+            known.map(|k| Self {
                 name: name.clone(),
                 render: k.render,
                 yes: LlamaToken(YES),
@@ -129,10 +137,12 @@ impl VerdictModel {
                 arrow: LlamaToken(ARROW),
                 temperature: k.temperature,
                 source: "built-in, from the release's readout_config.json".to_string(),
+                release_date: None,
             })
         }) else {
             return Ok(None);
         };
+        verdict.release_date = known.map(|k| k.release_date);
         for (text, want) in [
             (" yes", verdict.yes),
             (" no", verdict.no),
@@ -210,7 +220,18 @@ impl VerdictModel {
             arrow: token("/slot_tokens/verdict_slot/id")?,
             temperature,
             source: path.display().to_string(),
+            release_date: None,
         })
+    }
+
+    /// The most tokens one question with its options and slots may take:
+    /// render v1's own budget; `None` for render v2, where only the whole
+    /// input has one.
+    pub fn question_budget(&self) -> Option<usize> {
+        match self.render {
+            Render::V1 => Some(HEAD_MAX_V1),
+            Render::V2 => None,
+        }
     }
 
     /// One line for the load log.
@@ -443,6 +464,7 @@ mod tests {
             arrow: LlamaToken(ARROW),
             temperature: 0.9,
             source: "test".into(),
+            release_date: None,
         }
     }
 

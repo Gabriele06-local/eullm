@@ -1050,6 +1050,32 @@ List models in OpenAI format.
 curl http://localhost:11434/v1/models
 ```
 
+When a decision model is loaded, it is listed for System One clients too —
+jev-style's `model_info` tool and the System One SDKs' `models.list()`.
+Its entry in `data` carries `context_tokens`, the most tokens one
+`/v1/systemone` request may hold (`--decision-ctx`, or less when the model
+itself reads fewer), for a Jev-Style model `head_max_tokens`, what one
+question with its options may take on its own, and `"eullm": {"slot":
+"decision"}`; and the top-level `models`, the list the System One SDKs read,
+names it. With no decision model loaded, `models` is empty.
+
+```json
+{
+  "object": "list",
+  "data": [
+    { "id": "qwen3-4b", "object": "model", "created": 1700000000, "owned_by": "eullm" },
+    { "id": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "object": "model", "created": 1700000000,
+      "owned_by": "eullm", "context_tokens": 8192, "head_max_tokens": 2048,
+      "eullm": { "slot": "decision", "readout": "verdict" } },
+    ...
+  ],
+  "models": [
+    { "name": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "release_date": "2026-09-24",
+      "description": "Jev-Style-0.8B-Decision-v3 on EuLLM: typed decisions (noul / choice / score)" }
+  ]
+}
+```
+
 #### `POST /v1/chat/completions`
 
 Chat completion in OpenAI format. Real inference with token counts. Supports `"stream": true` for SSE streaming (OpenAI `chat.completion.chunk` format with `[DONE]` terminator).

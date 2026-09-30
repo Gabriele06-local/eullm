@@ -2154,6 +2154,42 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
         }));
     }
 
+    // The decision model, when one is loaded, for System One clients
+    // (jev-style's `model_info`, the System One SDKs' `models.list()`): its
+    // entry here carries its budgets — added to the one it already has when
+    // it is in the store — and the top-level `models` names it. Without
+    // this the list showed only generation models, none of them the one
+    // `/v1/systemone` answers with. An OpenAI client ignores the extra
+    // fields, and still picks from `data`, where it keeps the place of a
+    // model on this machine.
+    let decision = state
+        .decision
+        .read()
+        .await
+        .as_ref()
+        .map(|slot| (slot.model_name.clone(), slot.model.info()));
+    let mut models = Vec::new();
+    if let Some((name, info)) = decision {
+        let (fields, model) = super::systemone::decision_model_listing(&name, &info);
+        match data.iter_mut().find(|m| m["id"] == name.as_str()) {
+            Some(Value::Object(entry)) => entry.extend(fields),
+            _ => {
+                seen.insert(name.clone());
+                let mut entry = json!({
+                    "id": name,
+                    "object": "model",
+                    "created": 1700000000_u64,
+                    "owned_by": "eullm"
+                });
+                if let Value::Object(entry) = &mut entry {
+                    entry.extend(fields);
+                }
+                data.push(entry);
+            }
+        }
+        models.push(model);
+    }
+
     // The OpenAI `id` field is what clients echo back as the `model` parameter
     // in chat requests, so it has to be the addressable catalog id, not the
     // human display name.
@@ -2171,7 +2207,7 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
             }),
     );
 
-    Json(json!({ "object": "list", "data": data }))
+    Json(json!({ "object": "list", "data": data, "models": models }))
 }
 
 async fn chat_completions(
