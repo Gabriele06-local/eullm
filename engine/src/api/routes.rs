@@ -24,7 +24,7 @@ use futures_util::stream::Stream;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
-use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded};
+use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded, EmbeddingModel};
 
 use super::AppState;
 use crate::audit::{AuditEntry, AuditLogger};
@@ -1158,12 +1158,7 @@ async fn embed(
     let load_duration = loading.elapsed();
     state.touch_embedding_slot(keep_alive).await;
 
-    let embedded = model.embed(&inputs).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Embedding failed: {e}") })),
-        )
-    })?;
+    let embedded = embed_on_a_blocking_thread(model, inputs).await?;
 
     Ok(Json(ollama_embed_response(
         requested,
@@ -1222,14 +1217,34 @@ async fn embeddings_openai(
         .map_err(embedding_model_error)?;
     state.touch_embedding_slot(keep_alive).await;
 
-    let embedded = model.embed(&inputs).map_err(|e| {
+    let embedded = embed_on_a_blocking_thread(model, inputs).await?;
+
+    Ok(Json(openai_embeddings_response(requested, embedded)))
+}
+
+/// `EmbeddingModel::embed` on tokio's blocking pool, where the generation
+/// and decision handlers already run their model calls. `embed` is a forward
+/// pass per input — 5.7 s for a 631-token passage on a 4-core CPU — and
+/// called straight from the handler it held one of the runtime's worker
+/// threads, of which there is one per core, for all of it: whatever else
+/// that worker had queued waited, and as many long requests as there are
+/// cores left no worker for anything at all. Four 1,162-token requests at
+/// once on a 4-core CPU kept `/api/version` from answering for up to 25.7 s;
+/// on the blocking pool it answers within 35 ms while they run.
+async fn embed_on_a_blocking_thread(
+    model: Arc<EmbeddingModel>,
+    inputs: Vec<String>,
+) -> Result<Embedded, (StatusCode, Json<Value>)> {
+    let failed = |e: String| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": format!("Embedding failed: {e}") })),
         )
-    })?;
-
-    Ok(Json(openai_embeddings_response(requested, embedded)))
+    };
+    tokio::task::spawn_blocking(move || model.embed(&inputs))
+        .await
+        .map_err(|e| failed(e.to_string()))?
+        .map_err(failed)
 }
 
 /// The `/v1/embeddings` response, in OpenAI's shape.
