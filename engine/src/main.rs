@@ -1841,6 +1841,56 @@ fn resolve_model_path(model: &str, store: &ModelStore) -> Option<PathBuf> {
     store.gguf_path(model)
 }
 
+/// The name a request would use to ask for a model loaded at launch by
+/// `--embedding-model` or `--decision-model`: what was typed for a store
+/// name, the file name for a path.
+///
+/// The embedder used to take its file name in both cases. A stored model is
+/// asked for by its store name, as `eullm list` shows it, and its file is
+/// named after the release (`Qwen3-Embedding-0.6B-Q8_0.gguf` in
+/// `qwen3-embedding-0.6b-gguf-q8_0`), so the first request naming it found
+/// no model of that name loaded and loaded it again — as a model no longer
+/// reserved, which the next generation load could evict.
+fn launch_companion_name(arg: &str, path: &std::path::Path) -> String {
+    if arg.ends_with(".gguf") || arg.contains(['/', '\\']) {
+        path.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| arg.to_string())
+    } else {
+        arg.to_string()
+    }
+}
+
+#[cfg(test)]
+mod launch_companion_name_tests {
+    use super::launch_companion_name;
+    use std::path::Path;
+
+    #[test]
+    fn a_store_name_is_kept_as_typed() {
+        let path = Path::new(
+            "/home/u/.eullm/models/qwen3-embedding-0.6b-gguf-q8_0/Qwen3-Embedding-0.6B-Q8_0.gguf",
+        );
+        assert_eq!(
+            launch_companion_name("qwen3-embedding-0.6b-gguf-q8_0", path),
+            "qwen3-embedding-0.6b-gguf-q8_0"
+        );
+    }
+
+    #[test]
+    fn a_path_is_named_by_its_file() {
+        let path = Path::new("/models/Qwen3-Embedding-0.6B-Q8_0.gguf");
+        assert_eq!(
+            launch_companion_name("/models/Qwen3-Embedding-0.6B-Q8_0.gguf", path),
+            "Qwen3-Embedding-0.6B-Q8_0"
+        );
+        assert_eq!(
+            launch_companion_name("Qwen3-Embedding-0.6B-Q8_0.gguf", path),
+            "Qwen3-Embedding-0.6B-Q8_0"
+        );
+    }
+}
+
 /// Check what service is running on a given port.
 async fn detect_port_service(port: u16) -> Option<String> {
     use tokio::net::TcpStream;
@@ -2083,10 +2133,7 @@ async fn cmd_run(
         ) {
             Ok(model) => {
                 let weights_bytes = std::fs::metadata(&emb_path).map(|m| m.len()).unwrap_or(0);
-                let emb_name = emb_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| emb_arg.clone());
+                let emb_name = launch_companion_name(emb_arg, &emb_path);
                 // Only the compute-buffer margin is reserved here — the
                 // model is already loaded above, so its weights already
                 // show up as used VRAM in the free-VRAM figure `--fit`
@@ -2808,10 +2855,7 @@ async fn cmd_serve(
             std::process::exit(1);
         });
         let weights_bytes = std::fs::metadata(&emb_path).map(|m| m.len()).unwrap_or(0);
-        let emb_name = emb_path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or(emb_arg);
+        let emb_name = launch_companion_name(&emb_arg, &emb_path);
         println!(
             "Embedding model loaded: {} ({weights_bytes} bytes on GPU, {} MiB kept free for its \
              per-call compute buffer)",
@@ -2914,15 +2958,7 @@ fn load_launch_decision(
                 std::process::exit(1);
             });
     let reserve_bytes = fit::decision_reserve_bytes(&path, decision_ctx);
-    // The name a request would use to ask for it: what was typed for a
-    // store name, the file name for a path.
-    let model_name = if arg.ends_with(".gguf") || arg.contains(['/', '\\']) {
-        path.file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| arg.to_string())
-    } else {
-        arg.to_string()
-    };
+    let model_name = launch_companion_name(arg, &path);
     println!(
         "Decision model loaded: {} (up to {decision_ctx} tokens per request, {} MiB kept free \
          for a request's context)",

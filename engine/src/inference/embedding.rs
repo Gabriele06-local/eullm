@@ -12,7 +12,7 @@
 //! they fit) beats swapping a 20 GB LLM out for a 500 MB embedder and back on
 //! every request.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::sync::Arc;
 
@@ -41,6 +41,9 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 pub struct EmbeddingModel {
     backend: Arc<LlamaBackend>,
     model: LlamaModel,
+    /// The GGUF it was loaded from: the same file asked for under another
+    /// name is this model (`AppState::ensure_embedding_model`).
+    path: PathBuf,
     threads: u32,
     /// Most tokens one input may have. Inputs longer than this are
     /// truncated (see `embed`) rather than rejected — the alternative is a
@@ -136,6 +139,7 @@ impl EmbeddingModel {
         Ok(Self {
             backend,
             model,
+            path: path.to_path_buf(),
             threads,
             n_ctx,
         })
@@ -143,6 +147,11 @@ impl EmbeddingModel {
 
     pub fn n_embd(&self) -> usize {
         usize::try_from(self.model.n_embd()).unwrap_or(0)
+    }
+
+    /// The GGUF this model was loaded from.
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Embed each input text independently, returning one vector per input in

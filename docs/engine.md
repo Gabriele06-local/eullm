@@ -501,6 +501,11 @@ Use this when a companion (e.g. bge-m3 for a RAG pipeline) should always be
 resident alongside the generation model whenever the card has room for both,
 rather than depending on which model happens to be requested first.
 
+Requests name the companion as it was given: by its store name, as `eullm
+list` shows it (`--embedding-model qwen3-embedding-0.6b-gguf-q8_0`), or by
+its file name when it was given as a path. A request naming the same file
+any other way finds it too, and is answered by the model already loaded.
+
 Pooling is read from the model's own GGUF metadata (CLS for BGE, mean for
 E5, and so on) rather than guessed; a model that declares no pooling type
 falls back to mean-pooling its per-token embeddings. Output vectors are
