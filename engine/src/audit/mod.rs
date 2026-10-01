@@ -7,6 +7,7 @@
 //! Each line is a self-contained JSON object that can be queried, exported,
 //! or submitted for compliance reviews.
 
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -14,6 +15,8 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub mod redact;
 
 /// A single audit log entry for an inference request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +93,11 @@ pub struct DecisionRecord {
     /// only when true.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub client_disconnected: bool,
+    /// Per question, the options the server's decision policy removed
+    /// before the model read them; `labels` holds the ones it read. Written
+    /// only when the policy removed something.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub policy_removed: BTreeMap<String, Vec<String>>,
     pub answers: Vec<DecisionAnswerRecord>,
 }
 
@@ -421,6 +429,7 @@ mod tests {
             temperature: 1.0,
             confidence_method: "normalized_max_probability".into(),
             client_disconnected: false,
+            policy_removed: BTreeMap::new(),
             answers: vec![DecisionAnswerRecord {
                 id: "area".into(),
                 kind: "choice".into(),
@@ -436,14 +445,34 @@ mod tests {
         });
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""type":"choice""#), "{json}");
-        // Delivered, as nearly every decision is: no flag on the line.
+        // Delivered, as nearly every decision is: no flag on the line. No
+        // policy removed anything: no key either.
         assert!(!json.contains("client_disconnected"), "{json}");
+        assert!(!json.contains("policy_removed"), "{json}");
         let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
         let decision = parsed.decision.unwrap();
         assert_eq!(decision.confidence_method, "normalized_max_probability");
+        assert!(decision.policy_removed.is_empty());
         let answer = &decision.answers[0];
         assert_eq!(answer.labels, ["civile", "penale"]);
         assert_eq!(answer.answer, "civile");
+
+        // What the policy removed is on the line, next to what the model read.
+        let mut record = entry.decision.clone().unwrap();
+        record
+            .policy_removed
+            .insert("area".into(), vec!["amministrativo".into()]);
+        entry.decision = Some(record);
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            json.contains(r#""policy_removed":{"area":["amministrativo"]}"#),
+            "{json}"
+        );
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            parsed.decision.unwrap().policy_removed["area"],
+            ["amministrativo"]
+        );
     }
 
     /// A decision line from before the confidence method was recorded still

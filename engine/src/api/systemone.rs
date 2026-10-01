@@ -25,6 +25,7 @@
 //! model name (`jev-latest`, `jev-1.13.0`), it means the decision model this
 //! server already has loaded — so a Jev client works without changes.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -41,7 +42,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::decision_policy::DecisionPolicy;
+use super::decision_traces::{DecisionTraces, TRACE_SCHEMA};
 use super::{AppState, KeepAlive};
+use crate::audit::redact::redact;
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
     self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, DecisionModelInfo,
@@ -50,9 +54,17 @@ use crate::inference::decision::{
 
 type S = Arc<AppState>;
 
-/// Where the endpoint is served: the middleware answers requests to it with
-/// [`ApiError`]'s body.
+/// Where the endpoint is served.
 pub(crate) const PATH: &str = "/v1/systemone";
+
+/// Where feedback on its decisions is taken (`decision_traces::feedback`).
+pub(crate) const FEEDBACK_PATH: &str = "/v1/systemone/feedback";
+
+/// Whether the middleware answers a request to `path` with [`ApiError`]'s
+/// body, the one System One clients parse: the endpoint and its feedback.
+pub(crate) fn has_structured_errors(path: &str) -> bool {
+    path == PATH || path == FEEDBACK_PATH
+}
 
 /// Highest `temperature` accepted. Temperature scaling fitted on real data
 /// lands around 0.5–3; anything past this is a mistake, not a calibration.
@@ -73,7 +85,8 @@ const MAX_TEMPERATURE: f64 = 100.0;
 /// `method_not_allowed` (405) and `internal_error` (500). The rest are for
 /// what jev-style's server never refuses: `model_not_loaded` (400),
 /// `forbidden` (403), `payload_too_large` (413), `unsupported_media_type`
-/// (415) and `too_many_requests` (429).
+/// (415), `too_many_requests` (429), and `policy_denied` (422), a question
+/// the server's decision policy leaves without a choice.
 #[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
@@ -93,13 +106,19 @@ impl ApiError {
     }
 
     /// The request as a whole fails validation.
-    fn invalid_request(message: impl Into<String>) -> Self {
+    pub(super) fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
     }
 
     /// Question `id` fails validation.
-    fn invalid_question(id: &str, message: impl Into<String>) -> Self {
+    pub(super) fn invalid_question(id: &str, message: impl Into<String>) -> Self {
         Self::invalid_request(message).in_question(id)
+    }
+
+    /// The server's decision policy leaves question `id` fewer options than
+    /// a choice needs.
+    fn policy_denied(id: &str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "policy_denied", message).in_question(id)
     }
 
     /// This error as question `id`'s: named in `question`, and an invalid
@@ -112,11 +131,12 @@ impl ApiError {
         self
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    pub(super) fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
 
-    fn body(&self) -> Value {
+    /// `{"error": {"code", "message", "question"?}}`.
+    pub(super) fn body(&self) -> Value {
         let mut error = json!({ "code": self.code, "message": self.message });
         if let Some(question) = &self.question {
             error["question"] = json!(question);
@@ -134,7 +154,7 @@ impl IntoResponse for ApiError {
 /// A body axum could not read as a request: not JSON is `invalid_json`, the
 /// wrong shape an `invalid_request`, both 422 as for any other validation
 /// failure.
-fn rejection(e: JsonRejection) -> ApiError {
+pub(super) fn rejection(e: JsonRejection) -> ApiError {
     let message = e.body_text();
     match e {
         JsonRejection::JsonSyntaxError(_) => {
@@ -193,13 +213,20 @@ pub(crate) fn decision_model_listing(
     (fields, model)
 }
 
-/// Any method but `POST` on the endpoint: the 405 axum answers, with the
-/// body the endpoint's clients read.
-pub(super) async fn method_not_allowed() -> ApiError {
+/// Any method but `POST` on the endpoint or its feedback: the 405 axum
+/// answers, with the body the endpoint's clients read.
+pub(super) async fn method_not_allowed(
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+) -> ApiError {
+    let path = if uri.path() == FEEDBACK_PATH {
+        FEEDBACK_PATH
+    } else {
+        PATH
+    };
     ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        format!("{PATH} accepts POST only"),
+        format!("{path} accepts POST only"),
     )
 }
 
@@ -378,6 +405,33 @@ impl OrderedJson {
     /// names a structured score level in the legend.
     fn compact_json(&self) -> String {
         self.json_line(",", ":")
+    }
+
+    /// This value with personal data redacted from every string in it, keys
+    /// included, and from every number: one that held some — a phone number
+    /// written as a number — becomes its placeholder, as a string. Redacting
+    /// the values rather than the JSON text keeps it JSON.
+    fn redacted(&self) -> Self {
+        match self {
+            Self::Null | Self::Bool(_) => self.clone(),
+            Self::Number(n) => {
+                let text = n.to_string();
+                let redacted = redact(&text);
+                if redacted == text {
+                    self.clone()
+                } else {
+                    Self::String(redacted)
+                }
+            }
+            Self::String(s) => Self::String(redact(s)),
+            Self::Array(items) => Self::Array(items.iter().map(Self::redacted).collect()),
+            Self::Object(map) => Self::Object(OrderedMap(
+                map.0
+                    .iter()
+                    .map(|(key, value)| (redact(key), value.redacted()))
+                    .collect(),
+            )),
+        }
     }
 
     /// One line of JSON with `item` between items and `key` after a key.
@@ -621,6 +675,9 @@ struct ParsedRequest {
     /// The state as a verdict model reads it: structured state as the one
     /// line of JSON it was trained on.
     state_line: String,
+    /// A structured state as it was sent, for its decision trace: its
+    /// values are redacted, then it is written as the model read it.
+    structured_state: Option<OrderedJson>,
     ids: Vec<String>,
     questions: Vec<Question>,
     /// Per question, what each score level is called in the response's
@@ -631,6 +688,10 @@ struct ParsedRequest {
     temperature: Option<f64>,
     mode: EvalMode,
     keep_alive: KeepAlive,
+    /// Per question, the options the server's decision policy took out
+    /// before the model read them ([`apply_policy`]); only questions that
+    /// lost one are listed.
+    policy_removed: BTreeMap<String, Vec<String>>,
 }
 
 fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
@@ -639,12 +700,13 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty() && !m.to_ascii_lowercase().starts_with("jev"));
 
-    let (state, state_line) = match request.state {
+    let (state, state_line, structured_state) = match request.state {
         None => return Err(ApiError::invalid_request("\"state\" is required")),
-        Some(OrderedJson::String(s)) => (s.clone(), s),
+        Some(OrderedJson::String(s)) => (s.clone(), s, None),
         Some(other) => (
             serde_json::to_string_pretty(&other).map_err(|e| ApiError::internal(e.to_string()))?,
             other.python_json(),
+            Some(other),
         ),
     };
 
@@ -710,6 +772,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         model,
         state,
         state_line,
+        structured_state,
         ids,
         questions,
         legends,
@@ -717,7 +780,65 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         temperature,
         mode,
         keep_alive: super::parse_keep_alive(request.keep_alive.as_ref()),
+        policy_removed: BTreeMap::new(),
     })
+}
+
+/// Take the options the server's decision policy denies out of every
+/// `choice` question, before any model is loaded or reads them: code
+/// filters, the model judges (see [`DecisionPolicy`]). What was taken out is
+/// kept in `parsed.policy_removed`, for the response and the audit record.
+///
+/// A question left with fewer than two options is refused, naming it: what
+/// remains is not a choice, and answering it would only look like one — the
+/// reason a request with a one-option `choice` is refused too. Runs after
+/// [`parse_request`], so a client's own mistake in a question is still
+/// reported as that, not as the policy's doing.
+fn apply_policy(parsed: &mut ParsedRequest, policy: &DecisionPolicy) -> Result<(), ApiError> {
+    if policy.is_empty() {
+        return Ok(());
+    }
+    for (id, question) in parsed.ids.iter().zip(parsed.questions.iter_mut()) {
+        let Question::Choice { options, .. } = question else {
+            continue;
+        };
+        let offered = options.len();
+        let mut removed = Vec::new();
+        options.retain(|(name, _)| {
+            let denied = policy.denies(name);
+            if denied {
+                removed.push(name.clone());
+            }
+            !denied
+        });
+        if removed.is_empty() {
+            continue;
+        }
+        if options.len() < decision::MIN_OPTIONS {
+            return Err(ApiError::policy_denied(
+                id,
+                format!(
+                    "the server's decision policy denies {}: {} of this question's {offered} \
+                     options {} left, and a choice needs at least {}",
+                    quoted_list(&removed),
+                    options.len(),
+                    if options.len() == 1 { "is" } else { "are" },
+                    decision::MIN_OPTIONS
+                ),
+            ));
+        }
+        parsed.policy_removed.insert(id.clone(), removed);
+    }
+    Ok(())
+}
+
+/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`.
+fn quoted_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => quoted.concat(),
+    }
 }
 
 /// Instructions given as an object or an array, as the System One API
@@ -925,6 +1046,11 @@ struct Usage {
 
 #[derive(Debug, Serialize)]
 struct ResponseExtension {
+    /// The decision's audit record, and its trace when traces are on: what
+    /// `/v1/systemone/feedback` names the decision by. Here and not at the
+    /// top level, where the System One SDKs' strict response models would
+    /// refuse a key they do not know.
+    audit_id: uuid::Uuid,
     /// `codes` or `verdict`: how the model's answers were read.
     readout: &'static str,
     mode: &'static str,
@@ -954,6 +1080,10 @@ struct ResponseExtension {
     content_free: Option<ContentFreeInfo>,
     /// Wall time of the whole request, model resolution included.
     request_ms: f64,
+    /// Per question, the options the server's decision policy removed
+    /// before the model read them. Absent when it removed none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    policy_removed: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1099,6 +1229,190 @@ fn build_answers(
     (OrderedMap(answers), records)
 }
 
+/// One line of `decisions.jsonl` (see `decision_traces`): a decision as a
+/// decision model could be trained on it, with personal data redacted from
+/// every text in it. Read by Forge and documented in docs/engine.md: a
+/// change here is a change to that contract, and one that would break a
+/// reader of this shape needs a new [`TRACE_SCHEMA`].
+#[derive(Debug, Serialize)]
+struct TraceLine<'a> {
+    schema: u32,
+    /// The audit record's `id` — the line is that record's text — and
+    /// what `/v1/systemone/feedback` names the decision by.
+    id: uuid::Uuid,
+    /// The audit record's.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    model: &'a str,
+    readout: &'static str,
+    mode: &'static str,
+    /// The state as the model read it.
+    state: String,
+    /// The questions as the model read them, after the decision policy, in
+    /// the shape a `/v1/systemone` request gives them.
+    questions: OrderedMap<TraceQuestion>,
+    /// The answers as the response returned them, without `eullm`.
+    answers: OrderedMap<TraceAnswer<'a>>,
+    /// Per question, the options the decision policy removed; `{}` for
+    /// none.
+    policy_removed: &'a BTreeMap<String, Vec<String>>,
+    client_disconnected: bool,
+}
+
+/// A question in a trace: `type`, `instructions` and `criteria`, as a
+/// request writes them.
+#[derive(Debug, Serialize)]
+struct TraceQuestion {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    instructions: String,
+    criteria: TraceCriteria,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum TraceCriteria {
+    /// `noul`: what `true` and `false` mean, `""` where the question did
+    /// not say; `choice`: each option's description, `""` for none.
+    Named(OrderedMap<String>),
+    /// `score`: each level as the model read it, lowest first.
+    Levels(Vec<String>),
+}
+
+/// An answer in a trace: the System One fields of [`Answer`].
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum TraceAnswer<'a> {
+    Noul {
+        noul: f64,
+    },
+    Choice {
+        choice: &'a str,
+        probabilities: &'a OrderedMap<f64>,
+        confidence: f64,
+    },
+    Score {
+        score: f64,
+        legend: OrderedMap<String>,
+        probabilities: &'a OrderedMap<f64>,
+        confidence: f64,
+    },
+}
+
+impl<'a> From<&'a Answer> for TraceAnswer<'a> {
+    fn from(answer: &'a Answer) -> Self {
+        match answer {
+            Answer::Noul { noul, .. } => Self::Noul { noul: *noul },
+            Answer::Choice {
+                choice,
+                probabilities,
+                confidence,
+                ..
+            } => Self::Choice {
+                choice,
+                probabilities,
+                confidence: *confidence,
+            },
+            Answer::Score {
+                score,
+                legend,
+                probabilities,
+                confidence,
+                ..
+            } => Self::Score {
+                score: *score,
+                legend: OrderedMap(
+                    legend
+                        .0
+                        .iter()
+                        .map(|(level, name)| (level.clone(), redact(name)))
+                        .collect(),
+                ),
+                probabilities,
+                confidence: *confidence,
+            },
+        }
+    }
+}
+
+/// A decision's trace line. Question ids and option names are written as
+/// they are, like in the audit trail: they are what the answers, and the
+/// feedback, refer to, and redacting them could make two options one.
+fn trace_line<'a>(
+    audit: &'a AuditEntry,
+    parsed: &'a ParsedRequest,
+    readout: ReadoutKind,
+    mode: EvalMode,
+    answers: &'a OrderedMap<Answer>,
+    client_disconnected: bool,
+) -> TraceLine<'a> {
+    TraceLine {
+        schema: TRACE_SCHEMA,
+        id: audit.id,
+        timestamp: audit.timestamp,
+        model: &audit.model,
+        readout: readout.as_str(),
+        mode: mode.as_str(),
+        state: trace_state(parsed, readout),
+        questions: OrderedMap(
+            parsed
+                .ids
+                .iter()
+                .zip(&parsed.questions)
+                .map(|(id, question)| (id.clone(), trace_question(question)))
+                .collect(),
+        ),
+        answers: OrderedMap(
+            answers
+                .0
+                .iter()
+                .map(|(id, answer)| (id.clone(), TraceAnswer::from(answer)))
+                .collect(),
+        ),
+        policy_removed: &parsed.policy_removed,
+        client_disconnected,
+    }
+}
+
+/// The state as the model read it, redacted: text as it is, a structured
+/// state with its values redacted and written as the readout reads it.
+fn trace_state(parsed: &ParsedRequest, readout: ReadoutKind) -> String {
+    let Some(state) = &parsed.structured_state else {
+        return redact(&parsed.state);
+    };
+    let state = state.redacted();
+    match readout {
+        ReadoutKind::Codes => serde_json::to_string_pretty(&state).unwrap_or_default(),
+        ReadoutKind::Verdict => state.python_json(),
+    }
+}
+
+fn trace_question(question: &Question) -> TraceQuestion {
+    let criteria = match question {
+        Question::Noul {
+            true_means,
+            false_means,
+            ..
+        } => TraceCriteria::Named(OrderedMap(vec![
+            ("true".to_string(), redact(true_means)),
+            ("false".to_string(), redact(false_means)),
+        ])),
+        Question::Choice { options, .. } => TraceCriteria::Named(OrderedMap(
+            options
+                .iter()
+                .map(|(name, description)| (name.clone(), redact(description)))
+                .collect(),
+        )),
+        Question::Score { levels, .. } => {
+            TraceCriteria::Levels(levels.iter().map(|level| redact(level)).collect())
+        }
+    };
+    TraceQuestion {
+        kind: question.kind().as_str(),
+        instructions: redact(question.instructions()),
+        criteria,
+    }
+}
+
 /// Why the engine could not decide, as the API reports it; `ids` names the
 /// question when the error was one question's. Input over a budget is
 /// `input_budget_exceeded`, as jev-style reports it: the request was not
@@ -1144,7 +1458,8 @@ pub(super) async fn systemone(
 ) -> Result<Json<SystemOneResponse>, ApiError> {
     let started = Instant::now();
     let Json(request) = body.map_err(rejection)?;
-    let parsed = parse_request(request)?;
+    let mut parsed = parse_request(request)?;
+    apply_policy(&mut parsed, &state.decision_policy)?;
 
     let (model_name, model) = match parsed.model.as_deref() {
         Some(name) => {
@@ -1202,23 +1517,43 @@ pub(super) async fn systemone(
         temperature,
         started,
         cancel,
+        traces: state.decision_traces.clone(),
     };
+    let decided = tokio::task::spawn_blocking(move || job.run())
+        .await
+        .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))??;
+    Ok(Json(response(
+        model_name,
+        decided,
+        readout,
+        temperature,
+        flash_attn,
+    )))
+}
+
+/// The response to a decided request.
+fn response(
+    model: String,
+    decided: Decided,
+    readout: ReadoutKind,
+    temperature: f64,
+    flash_attn: &'static str,
+) -> SystemOneResponse {
     let Decided {
         parsed,
         decision,
         answers,
         input_tokens,
         request_ms,
-    } = tokio::task::spawn_blocking(move || job.run())
-        .await
-        .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))??;
+        audit_id,
+    } = decided;
     let prior_tokens = decision
         .prior_stats
         .as_ref()
         .map_or(0, |s| s.evaluated_tokens);
 
-    Ok(Json(SystemOneResponse {
-        model: model_name,
+    SystemOneResponse {
+        model,
         answers,
         usage: Usage {
             input_tokens,
@@ -1226,6 +1561,7 @@ pub(super) async fn systemone(
         },
         timing: ResponseTiming::new(request_ms),
         eullm: ResponseExtension {
+            audit_id,
             readout: readout.as_str(),
             mode: decision.stats.mode.as_str(),
             calibration: parsed.calibration.as_str(),
@@ -1245,8 +1581,9 @@ pub(super) async fn systemone(
                 }
             }),
             request_ms,
+            policy_removed: parsed.policy_removed,
         },
-    }))
+    }
 }
 
 /// Cancels a decision when dropped. The handler holds one while its
@@ -1273,6 +1610,8 @@ struct DecisionJob {
     temperature: f64,
     started: Instant,
     cancel: Cancel,
+    /// Where the decision's trace goes, when traces are on.
+    traces: Option<Arc<DecisionTraces>>,
 }
 
 /// What a decided request's response is built from.
@@ -1282,6 +1621,8 @@ struct Decided {
     answers: OrderedMap<Answer>,
     input_tokens: usize,
     request_ms: f64,
+    /// The decision's audit record.
+    audit_id: uuid::Uuid,
 }
 
 impl DecisionJob {
@@ -1301,6 +1642,11 @@ impl DecisionJob {
     /// and the audit trail records what was decided, as it leaves out a
     /// request refused as invalid or failed in llama.cpp. The server's log
     /// says it was abandoned.
+    ///
+    /// With traces on, every decision the audit trail records also gets its
+    /// trace line, here, for the same reason. A trace that cannot be written
+    /// is logged and the decision goes on: it was made, it is audited, and
+    /// the client is owed its answers.
     fn run(self) -> Result<Decided, ApiError> {
         let Self {
             parsed,
@@ -1311,6 +1657,7 @@ impl DecisionJob {
             temperature,
             started,
             cancel,
+            traces,
         } = self;
         let readout = model.readout();
         let state = match readout {
@@ -1339,6 +1686,7 @@ impl DecisionJob {
         let input_tokens = decision.stats.evaluated_tokens + prior_tokens;
         let request_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+        let client_disconnected = cancel.is_cancelled();
         let mut audit = AuditEntry::new(model_name, "systemone".to_string());
         audit.input_tokens = u32::try_from(input_tokens).unwrap_or(u32::MAX);
         audit.duration_ms = request_ms as u64;
@@ -1350,10 +1698,28 @@ impl DecisionJob {
             calibration: parsed.calibration.as_str().to_string(),
             temperature,
             confidence_method: decision::CONFIDENCE_METHOD.to_string(),
-            client_disconnected: cancel.is_cancelled(),
+            client_disconnected,
+            policy_removed: parsed.policy_removed.clone(),
             answers: records,
         });
         AuditLogger::new().log(&audit);
+
+        if let Some(traces) = &traces {
+            let line = trace_line(
+                &audit,
+                &parsed,
+                readout,
+                decision.stats.mode,
+                &answers,
+                client_disconnected,
+            );
+            if let Err(e) = traces.append_decision(&line) {
+                tracing::warn!(
+                    "Decision trace of audit record {} not written, the decision stands: {e}",
+                    audit.id
+                );
+            }
+        }
 
         Ok(Decided {
             parsed,
@@ -1361,6 +1727,7 @@ impl DecisionJob {
             answers,
             input_tokens,
             request_ms,
+            audit_id: audit.id,
         })
     }
 }
@@ -1866,6 +2233,328 @@ mod tests {
         let err = parse(json!({"state": "x", "questions": questions})).unwrap_err();
         assert_eq!(err.code, "invalid_request");
         assert!(err.message.contains("at most 64"), "{err:?}");
+    }
+
+    fn deny(patterns: &str) -> DecisionPolicy {
+        DecisionPolicy::parse(
+            &format!(r#"{{"version": 1, "deny_options": [{patterns}]}}"#),
+            "test".to_string(),
+        )
+        .expect("policy")
+    }
+
+    /// The policy takes denied options out of the question the model reads,
+    /// in the order the others were listed, and says what it took.
+    #[test]
+    fn the_policy_removes_denied_options_before_the_model_reads_them() {
+        let text = r#"{ "state": "x", "questions": {
+            "urgent": { "type": "noul", "instructions": "Urgent?" },
+            "action": { "type": "choice", "instructions": "Which?",
+                        "criteria": { "reply": "Answer", "delete_all": "Wipe", "escalate": "Ask",
+                                      "DELETE_ONE": "Wipe one", "refund": "Pay back" } },
+            "level": { "type": "score", "instructions": "How bad?",
+                       "criteria": ["delete_low", "delete_high"] } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""delete_*""#)).unwrap();
+
+        let Question::Choice { options, .. } = &parsed.questions[1] else {
+            panic!("not a choice");
+        };
+        let names: Vec<&str> = options.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["reply", "escalate", "refund"]);
+        assert_eq!(options[1].1, "Ask", "descriptions travel with their option");
+        assert_eq!(
+            parsed.policy_removed,
+            BTreeMap::from([(
+                "action".to_string(),
+                vec!["delete_all".to_string(), "DELETE_ONE".to_string()]
+            )])
+        );
+        // Score levels and yes/no questions have no options to deny.
+        let Question::Score { levels, .. } = &parsed.questions[2] else {
+            panic!("not a score");
+        };
+        assert_eq!(levels.len(), 2);
+
+        // What the response and the audit record are built from.
+        let decision = fake_decision(vec![
+            outcome(&[0.5, 0.5], None),
+            outcome(&[0.6, 0.3, 0.1], None),
+            outcome(&[0.5, 0.5], None),
+        ]);
+        let (answers, records) = build_answers(&parsed, &decision, ReadoutKind::Verdict, 1.0);
+        assert_eq!(records[1].labels, ["reply", "escalate", "refund"]);
+        let json = serde_json::to_value(&answers).unwrap();
+        assert!(json["action"]["probabilities"].get("delete_all").is_none());
+        assert_eq!(json["action"]["choice"], "reply");
+    }
+
+    #[test]
+    fn a_question_the_policy_leaves_without_a_choice_is_refused_by_name() {
+        let text = r#"{ "state": "x", "questions": {
+            "fine": { "type": "choice", "instructions": "?", "criteria": { "a": null, "b": null } },
+            "action": { "type": "choice", "instructions": "Which?",
+                        "criteria": { "drop_db": null, "drop_table": null, "noop": null } } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let err = apply_policy(&mut parsed, &deny(r#""drop_*""#)).unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("policy_denied", Some("action"))
+        );
+        assert_eq!(
+            err.message,
+            "the server's decision policy denies \"drop_db\" and \"drop_table\": 1 of this \
+             question's 3 options is left, and a choice needs at least 2"
+        );
+
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let err = apply_policy(&mut parsed, &deny(r#""*""#)).unwrap_err();
+        // The first question it empties is the one named.
+        assert_eq!(err.question.as_deref(), Some("fine"));
+        assert!(
+            err.message
+                .contains("0 of this question's 2 options are left"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn no_policy_changes_nothing() {
+        let mut parsed = parse_text("{}");
+        let before = parsed.questions.clone();
+        apply_policy(&mut parsed, &DecisionPolicy::none()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""nothing_like_these""#)).unwrap();
+        assert_eq!(parsed.questions, before);
+        assert!(parsed.policy_removed.is_empty());
+    }
+
+    fn close(value: &Value, expected: f64) -> bool {
+        value.as_f64().is_some_and(|v| (v - expected).abs() < 1e-9)
+    }
+
+    /// A decision's trace line, key by key: the contract Forge reads.
+    #[test]
+    fn a_trace_line_holds_the_decision_with_personal_data_redacted() {
+        let text = r#"{ "state": "Sono Mario, scrivete a mario@example.com o al 333 1234567.",
+            "questions": {
+                "urgent": { "type": "noul", "instructions": "Urgent? If unsure call 06 1234 5678." },
+                "team": { "type": "choice", "instructions": "Which team?",
+                          "criteria": { "billing": "Refunds to IT60X0542811101000000123456",
+                                        "delete_all": "Wipe everything", "tech": null } },
+                "severity": { "type": "score", "instructions": "How bad?",
+                              "criteria": [ {"label": "low", "description": "art. 2043 c.c."},
+                                            "mario@example.com is angry" ] } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""delete_*""#)).unwrap();
+        let decision = fake_decision(vec![
+            outcome(&[0.8, 0.2], None),
+            outcome(&[0.7, 0.3], None),
+            outcome(&[0.4, 0.6], None),
+        ]);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Verdict, 1.0);
+        let audit = AuditEntry::new("jev-style-0.8b".into(), "systemone".into());
+        let line = trace_line(
+            &audit,
+            &parsed,
+            ReadoutKind::Verdict,
+            EvalMode::SharedPrefix,
+            &answers,
+            false,
+        );
+        let text = serde_json::to_string(&line).unwrap();
+        assert!(!text.contains('\n'), "one line: {text}");
+
+        // Every key, in the documented order.
+        let keys: OrderedMap<Value> = serde_json::from_str(&text).unwrap();
+        let keys: Vec<&str> = keys.0.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "schema",
+                "id",
+                "timestamp",
+                "model",
+                "readout",
+                "mode",
+                "state",
+                "questions",
+                "answers",
+                "policy_removed",
+                "client_disconnected"
+            ]
+        );
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["id"], audit.id.to_string());
+        assert_eq!(
+            json["timestamp"],
+            serde_json::to_value(audit.timestamp).unwrap()
+        );
+        assert_eq!(json["model"], "jev-style-0.8b");
+        assert_eq!(json["readout"], "verdict");
+        assert_eq!(json["mode"], "shared_prefix");
+        assert_eq!(
+            json["state"],
+            "Sono Mario, scrivete a [EMAIL] o al [PHONE]."
+        );
+
+        // The questions as the model read them, after the policy, in the
+        // shape of a request; text redacted, names as they are.
+        assert_eq!(
+            json["questions"]["urgent"],
+            json!({ "type": "noul", "instructions": "Urgent? If unsure call [PHONE].",
+                    "criteria": { "true": "", "false": "" } })
+        );
+        assert_eq!(json["questions"]["team"]["type"], "choice");
+        assert_eq!(
+            json["questions"]["team"]["criteria"],
+            json!({ "billing": "Refunds to [IBAN]", "tech": "" })
+        );
+        assert_eq!(
+            json["questions"]["severity"]["criteria"],
+            json!(["low: art. 2043 c.c.", "[EMAIL] is angry"])
+        );
+
+        // The answers as returned, without `eullm`.
+        let urgent = &json["answers"]["urgent"];
+        assert_eq!(urgent["type"], "noul");
+        assert!(close(&urgent["noul"], 0.8), "{urgent}");
+        assert_eq!(urgent.as_object().unwrap().len(), 2, "{urgent}");
+        let team = &json["answers"]["team"];
+        assert_eq!(team["choice"], "billing");
+        assert!(close(&team["probabilities"]["tech"], 0.3), "{team}");
+        assert!(close(&team["confidence"], 0.4), "{team}");
+        assert!(team.get("eullm").is_none());
+        let severity = &json["answers"]["severity"];
+        assert!(close(&severity["score"], 0.6), "{severity}");
+        assert_eq!(
+            severity["legend"],
+            json!({ "0": "low", "1": "[EMAIL] is angry" })
+        );
+        assert!(close(&severity["probabilities"]["1"], 0.6), "{severity}");
+
+        assert_eq!(json["policy_removed"], json!({ "team": ["delete_all"] }));
+        assert_eq!(json["client_disconnected"], false);
+        assert!(!text.contains("mario@"), "{text}");
+    }
+
+    /// Every response names its audit record in `eullm.audit_id`, the id
+    /// feedback is given under, and keeps its top level to System One's
+    /// keys: the System One SDKs' strict response models refuse any other.
+    #[test]
+    fn a_response_names_its_audit_record_inside_eullm() {
+        let audit_id = uuid::Uuid::new_v4();
+        let respond = |policy_removed: BTreeMap<String, Vec<String>>| {
+            let mut parsed = parse_text("{}");
+            parsed.policy_removed = policy_removed;
+            let decision = fake_decision(vec![
+                outcome(&[0.95, 0.05], None),
+                outcome(&[0.1, 0.8, 0.1], None),
+                outcome(&[0.2, 0.5, 0.3], None),
+            ]);
+            let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
+            let decided = Decided {
+                parsed,
+                decision,
+                answers,
+                input_tokens: 160,
+                request_ms: 12.34,
+                audit_id,
+            };
+            let response = response(
+                "qwen3-1.7b".into(),
+                decided,
+                ReadoutKind::Codes,
+                1.0,
+                "auto",
+            );
+            serde_json::to_value(response).unwrap()
+        };
+
+        let json = respond(BTreeMap::new());
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["answers", "eullm", "model", "timing", "usage"]);
+        assert_eq!(json["eullm"]["audit_id"], audit_id.to_string());
+        assert_eq!(json["answers"]["team"]["choice"], "billing");
+        // Nothing removed by a policy: no key for it.
+        assert!(json["eullm"].get("policy_removed").is_none(), "{json}");
+
+        let removed = BTreeMap::from([("team".to_string(), vec!["delete_all".to_string()])]);
+        let json = respond(removed);
+        assert_eq!(
+            json["eullm"]["policy_removed"],
+            json!({ "team": ["delete_all"] })
+        );
+    }
+
+    /// Nothing removed, a decision computed after its client left: the keys
+    /// are there all the same.
+    #[test]
+    fn a_trace_line_has_every_key_when_there_is_nothing_to_say() {
+        let parsed = parse_text("{}");
+        let decision = fake_decision(vec![
+            outcome(&[0.95, 0.05], None),
+            outcome(&[0.1, 0.8, 0.1], None),
+            outcome(&[0.2, 0.5, 0.3], None),
+        ]);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
+        let audit = AuditEntry::new("qwen3-1.7b".into(), "systemone".into());
+        let json = serde_json::to_value(trace_line(
+            &audit,
+            &parsed,
+            ReadoutKind::Codes,
+            EvalMode::Separate,
+            &answers,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(json["readout"], "codes");
+        assert_eq!(json["mode"], "separate");
+        assert_eq!(json["state"], parsed.state, "nothing to redact");
+        assert_eq!(json["policy_removed"], json!({}));
+        assert_eq!(json["client_disconnected"], true);
+        assert_eq!(
+            json["questions"]["team"]["criteria"],
+            json!({ "tech": "Bugs", "billing": "Payments and payouts", "other": "" })
+        );
+        assert_eq!(json["answers"]["team"]["choice"], "billing");
+    }
+
+    /// A structured state's values are redacted, not its JSON text, so it
+    /// is still JSON, written the way each readout reads it.
+    #[test]
+    fn a_structured_state_is_traced_as_the_model_read_it_with_its_values_redacted() {
+        let text = r#"{ "state": { "from": "mario@example.com", "tel": 3331234567,
+                                   "amount": 12.5, "note": "art. 2043 c.c.",
+                                   "accounts": [ { "iban": "IT60X0542811101000000123456" } ],
+                                   "mario.rossi@example.com": true },
+                        "questions": { "q": { "type": "noul", "instructions": "Refund?" } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        assert_eq!(
+            trace_state(&parsed, ReadoutKind::Verdict),
+            r#"{"from": "[EMAIL]", "tel": "[PHONE]", "amount": 12.5, "note": "art. 2043 c.c.", "accounts": [{"iban": "[IBAN]"}], "[EMAIL]": true}"#
+        );
+        let codes = trace_state(&parsed, ReadoutKind::Codes);
+        assert!(codes.contains("\n  \"from\": \"[EMAIL]\""), "{codes}");
+        let value: Value = serde_json::from_str(&codes).expect("still JSON");
+        assert_eq!(value["tel"], "[PHONE]");
+        assert_eq!(value["amount"], 12.5);
+        assert!(!codes.contains("3331234567"), "{codes}");
+    }
+
+    #[test]
+    fn names_are_listed_as_a_sentence_would() {
+        let names = |n: &[&str]| quoted_list(&n.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(names(&["a"]), "\"a\"");
+        assert_eq!(names(&["a", "b"]), "\"a\" and \"b\"");
+        assert_eq!(names(&["a", "b", "c"]), "\"a\", \"b\" and \"c\"");
     }
 
     #[test]
