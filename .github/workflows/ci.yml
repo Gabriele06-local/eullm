@@ -593,8 +593,11 @@ jobs:
         shell: pwsh
         env:
           # Pinned, so this checks the installer rather than whatever the
-          # latest release happens to contain.
-          EULLM_VERSION: 0.7.9
+          # latest release happens to contain. 0.7.10 is the first release
+          # that publishes eullm-windows-x64.zip; pinning 0.7.9 tested a
+          # different branch of the installer altogether (see the assertion
+          # below, which is what would have caught it).
+          EULLM_VERSION: 0.7.10
           EULLM_VARIANT: cpu
         run: |
           # Windows keeps a user PATH as REG_EXPAND_SZ so entries can hold
@@ -614,6 +617,18 @@ jobs:
             Get-Content installer\install.ps1 -Raw | Invoke-Expression
             $exe = Join-Path $env:EULLM_INSTALL_DIR 'eullm.exe'
             if (-not (Test-Path $exe)) { throw "install.ps1 did not install $exe" }
+            # The installer's cpu candidates are the ZIP first, then the bare
+            # exe, and it installs whichever the release lists. The pinned
+            # release before this one did not publish the ZIP at all, so the
+            # test silently took the exe branch: Expand-Archive and the
+            # multi-file copy had never run in CI, on the path every Windows
+            # user takes. Assert the runtime is actually next to the exe --
+            # only the ZIP carries it, which is the whole point of the bundle
+            # (3da6f40) -- and the pin cannot be moved back without this
+            # failing.
+            if (-not (Test-Path (Join-Path $env:EULLM_INSTALL_DIR 'msvcp140.dll'))) {
+              throw "install.ps1 did not install the CPU ZIP: no msvcp140.dll next to eullm.exe. The release pinned in EULLM_VERSION may predate it, and the exe branch is untested."
+            }
             $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
             if (@($userPath -split ';') -notcontains $env:EULLM_INSTALL_DIR) { throw 'install.ps1 did not add the install dir to the user PATH' }
             $kind = (Get-Item $key).GetValueKind('Path')
