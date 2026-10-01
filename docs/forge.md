@@ -430,7 +430,18 @@ In this order, the first that has one:
    called as `label(state, question_id, question, record)` with the question
    in the API's shape and the decision as a dict; it returns the right
    answer, or None where it has nothing to say. An answer the question
-   cannot have is an error in the rule, and stops the build;
+   cannot have is an error in the rule, and stops the build:
+
+   ```python
+   # my_rules.py
+   def label(state, question_id, question, record):
+       if question_id == "team" and "fattura" in state.lower():
+           return "billing"          # an option's name
+       if question_id == "is_urgent" and "entro oggi" in state.lower():
+           return True               # a noul: true or false
+       return None                   # nothing to say: the next teacher decides
+   ```
+
 3. **`--teacher-url URL --teacher-model NAME`**: a large model behind any
    OpenAI-compatible chat endpoint — EuLLM serving a large chat model, say —
    asked exactly the prompt the decision model will be asked, at
