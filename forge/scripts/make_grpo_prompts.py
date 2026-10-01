@@ -76,6 +76,17 @@ def prompt_row(item, index: NormIndex, k: int, absent: bool = False) -> dict | N
             "code": code, "articolo": art}
 
 
+def cap_share(rows: list[dict], tipo: str, share: float, rng: random.Random) -> list[dict]:
+    """``rows`` with at most ``share`` of the result of kind ``tipo``,
+    dropping a random sample of that kind and nothing else."""
+    kind = [r for r in rows if r["tipo"] == tipo]
+    other = [r for r in rows if r["tipo"] != tipo]
+    if not 0 <= share < 1:
+        raise ValueError(f"share must be in [0, 1), got {share}")
+    keep = min(len(kind), int(share * len(other) / (1 - share)))
+    return other + rng.sample(kind, keep)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -86,6 +97,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="questions of each kind per code; a code with fewer gives all it has")
     ap.add_argument("--absent-share", type=float, default=0.3,
                     help="share of by-topic deadline questions also asked without their article")
+    ap.add_argument("--inesistente-share", type=float, default=0.2,
+                    help="largest share of the prompts that may ask about a nonexistent article")
     ap.add_argument("-k", type=int, default=3, help="retrieved texts per question, as the exam")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
@@ -102,6 +115,13 @@ def main(argv: list[str] | None = None) -> int:
     for it in rng.sample(topic, int(round(len(topic) * args.absent_share))):
         if row := prompt_row(it, index, args.k, absent=True):
             rows.append(row)
+    # The exam builder makes per_code // 5 nonexistent articles in every code
+    # but a deadline question only for an article with exactly one deadline,
+    # so left alone the nonexistent ones were 61% of the first prompts file
+    # (2026-10-01). Models already answer them right every time: a group of
+    # eight right answers teaches nothing and costs a full generation, and a
+    # file that is mostly "say it is not there" pushes towards refusing.
+    rows = cap_share(rows, "inesistente", args.inesistente_share, rng)
     rng.shuffle(rows)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
