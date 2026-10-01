@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.identity import load_text_model, lora_target_modules  # noqa: E402
 from eullm_forge.rl import answer_reward  # noqa: E402
+from eullm_forge.rl.guard import RunGuard  # noqa: E402
 
 
 def load_prompts(path: Path) -> list[dict]:
@@ -115,8 +116,24 @@ def main(argv: list[str] | None = None) -> int:
     )
     peft_config = LoraConfig(r=args.rank, lora_alpha=2 * args.rank, lora_dropout=0.0,
                              target_modules=lora_target_modules(model), task_type="CAUSAL_LM")
+    from transformers import TrainerCallback
+
+    guard = RunGuard(max_steps=args.max_steps)
+
+    class Guard(TrainerCallback):
+        """Prints progress and stops a run whose signal is broken or gone."""
+
+        def on_log(self, _args, state, control, logs=None, **_):
+            logs = logs or {}
+            line = guard.progress(state.global_step, logs)
+            if line and state.is_world_process_zero:
+                print(line, flush=True)
+            if guard.observe(state.global_step, logs):
+                control.should_training_stop = True
+
     trainer = GRPOTrainer(model=model, reward_funcs=[answer_reward], args=config,
-                          train_dataset=dataset, processing_class=tok, peft_config=peft_config)
+                          train_dataset=dataset, processing_class=tok, peft_config=peft_config,
+                          callbacks=[Guard()])
 
     last = get_last_checkpoint(str(args.out)) if args.out.is_dir() else None
     if last:
@@ -124,6 +141,17 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[grpo] {len(dataset)} prompts, {args.num_generations} answers each, "
           f"up to {args.max_steps} steps", flush=True)
     trainer.train(resume_from_checkpoint=last)
+
+    if guard.stopped and trainer.accelerator.is_main_process:
+        print(f"[grpo] STOP: {guard.stopped}", flush=True)
+        (args.out / "STOPPED").write_text(guard.stopped + "\n", encoding="utf-8")
+    if guard.broken:
+        # No adapter: broken weights are not a model to package, and their
+        # absence keeps the package and exam jobs behind this one from
+        # grading one. The exit status makes the job FAILED, which status.sh
+        # flags along with the STOP line. A saturated run falls through and
+        # saves what it learnt.
+        return 1
 
     if trainer.accelerator.is_main_process:
         trainer.model.save_pretrained(str(args.out / "adapter"))
