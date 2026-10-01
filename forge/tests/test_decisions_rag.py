@@ -321,6 +321,11 @@ def test_what_import_rag_refuses(tmp_path):
     twin = write_set(tmp_path / "again" / "gate.jsonl", [case_row("x", "answer")])
     with pytest.raises(ValueError, match="named gate"):
         rag.import_rag(str(tmp_path / "out"), data=data + (str(twin),))
+    # An empty set — rg_openbook.py given no legislation — is a mistake upstream.
+    (tmp_path / "empty.jsonl").write_text("", encoding="utf-8")
+    with pytest.raises(ValueError, match="holds no case"):
+        rag.import_rag(str(tmp_path / "out"), data=data + (str(tmp_path / "empty.jsonl"),))
+    assert not (tmp_path / "out").exists()
     # Its own output it writes again, and leaves no held-out file behind.
     rag.import_rag(str(tmp_path / "out"), data=data, test_share=0.9, dev_share=0.0)
     assert (tmp_path / "out" / "rag-test" / "gate.jsonl").exists()

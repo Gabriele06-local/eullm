@@ -166,6 +166,11 @@ def import_rag(
         twice = ", ".join(name for name, n in names.items() if n > 1)
         raise ValueError(f"two sets are named {twice}: a set is named after its file, so "
                          "rename one")
+    for (_, source), dataset in zip(sources, datasets):
+        if not dataset.cases:
+            # A set asked for and empty is a mistake upstream — rg_openbook.py
+            # given no legislation, say — not a set to train without.
+            raise ValueError(f"{source} holds no case")
 
     methods = [rg_methods.REFLEX[name] for name in questions]
     for m in methods:
@@ -238,8 +243,6 @@ def import_rag(
             "documents": len({d for d in (case_document(c, rg_openbook)
                                           for c in dataset.cases) if d}),
         })
-    if not decisions:
-        raise ValueError("the sets hold no case")
 
     out.mkdir(parents=True, exist_ok=True)
     _write_jsonl(out / "decisions.jsonl", decisions)
