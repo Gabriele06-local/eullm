@@ -62,9 +62,9 @@ def shared_paragraphs(rows):
     MuSiQue composes its questions from single-hop ones, and reuses them:
     two questions built on the same single-hop question share the paragraph
     that answers it. Nine held-out questions in ten share one with a
-    question trained on, when the set is split by question alone — so a
-    split that keeps these groups apart (`import-rag`, by `document`) is
-    the one that holds out what a model has not read."""
+    question trained on, when the set is split by question alone; a split
+    that keeps these groups apart (`import-rag`, by `document`) holds out
+    every single-hop question along with the questions built on it."""
     parent = {}
 
     def find(x):
