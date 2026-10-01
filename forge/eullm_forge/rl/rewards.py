@@ -77,6 +77,22 @@ def mentioned_deadlines(answer: str) -> set[tuple[int, str]]:
     return found
 
 
+def _keyword_deadline(keyword: str) -> tuple[int, str] | None:
+    """The deadline a keyword from the exam stands for, or None.
+
+    The keyword comes from `norm_exam._deadline_keyword`, which builds it from
+    the article's own number and unit ("20 giorni|venti giorni"), so it is
+    read back with the same pattern used on an answer. None means the
+    keyword is not a deadline in this shape, and the caller falls back to
+    the coverage test rather than assuming a number.
+    """
+    for num, unit in _ANY_DEADLINE.findall(keyword):
+        n = _number_of(num)
+        if n:
+            return n, _UNITS[unit.lower()]
+    return None
+
+
 def abstains(answer: str) -> bool:
     """Whether the answer says the article or the answer is not there."""
     return bool(_ABSTAIN.search(answer.lower()))
@@ -98,6 +114,18 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
             raise ValueError(f"a {tipo} question needs its deadline keyword")
         if refuses(answer) or len(mentioned_deadlines(answer)) > MAX_DEADLINES:
             return 0.0
+        # Compared as a number, not as a substring. The keyword is a
+        # normalised substring test, so "20 giorni" is inside "120 giorni"
+        # and "sessanta giorni" inside "centosessanta giorni": every wrong
+        # deadline in the corpus that ends in the right one scored 1.0. The
+        # number the answer names is already parsed by the check above, so
+        # the question is whether it is the right number.
+        wanted = [_keyword_deadline(kw) for kw in keywords]
+        if all(w is not None for w in wanted):
+            named = mentioned_deadlines(answer)
+            return 1.0 if all(w in named for w in wanted) else 0.0
+        # A keyword that is not a deadline in this shape: fall back to the
+        # coverage test rather than invent a number to check it against.
         return 1.0 if keyword_coverage(answer, keywords) == 1.0 else 0.0
     if tipo in ABSTAIN_TYPES:
         return 1.0 if abstains(answer) and not mentioned_deadlines(answer) else 0.0
