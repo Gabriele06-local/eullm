@@ -5,6 +5,10 @@ inference. This step converts a PyTorch/SafeTensors model to GGUF with
 optional quantization applied during conversion.
 
 This is fast (minutes) and runs on CPU.
+
+Metadata the converter cannot know — a decision model's fitted temperature —
+is written into the finished GGUF afterwards (`ExportConfig.metadata`,
+through `gguf_metadata`).
 """
 
 from __future__ import annotations
@@ -13,8 +17,10 @@ import logging
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+from .gguf_metadata import encode_updates, set_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +41,16 @@ class ExportConfig:
         output_path: Output GGUF file path.
         quantization: GGUF quantization type (e.g., 'q4_k_m').
         format: Output format (only 'gguf' supported currently).
+        metadata: Written into the GGUF once it is converted and quantized:
+            key → `(type, value)`, such as `("float32", 1.37)`, or None to
+            make sure a key is not there (see `gguf_metadata.set_metadata`).
     """
 
     model_path: str = ""
     output_path: str = ""
     quantization: str = QUANT_Q4_K_M
     format: str = "gguf"
+    metadata: dict = field(default_factory=dict)
 
 
 def estimate_gguf_size(params_billions: float, quantization: str = QUANT_Q4_K_M) -> float:
@@ -150,6 +160,7 @@ def export_gguf(config: ExportConfig) -> str:
     1. Convert PyTorch/SafeTensors -> GGUF F16
     2. Quantize GGUF F16 -> target quantization (e.g., Q4_K_M)
     3. Validate the output file
+    4. Write `config.metadata` into it
 
     CPU requirements only. Takes 5-30 minutes depending on model size.
 
@@ -161,6 +172,9 @@ def export_gguf(config: ExportConfig) -> str:
     """
     if not config.model_path:
         raise ValueError("model_path is required for GGUF export")
+    # Checked before the conversion, not after it: a value the GGUF cannot
+    # hold would otherwise fail the export at its last step.
+    encode_updates(config.metadata)
 
     model_path = Path(config.model_path)
     if not model_path.exists():
@@ -219,40 +233,44 @@ def export_gguf(config: ExportConfig) -> str:
         # Just rename F16 output
         f16_output.rename(output_path)
         logger.info("  F16 output (no quantization): %s", output_path)
-        return str(output_path)
+    else:
+        quantize_bin = _find_quantize_binary(llama_cpp)
+        if quantize_bin is None:
+            raise RuntimeError(
+                f"llama-quantize binary not found in {llama_cpp}. "
+                "Build llama.cpp with: cd llama.cpp && make"
+            )
 
-    quantize_bin = _find_quantize_binary(llama_cpp)
-    if quantize_bin is None:
-        raise RuntimeError(
-            f"llama-quantize binary not found in {llama_cpp}. "
-            "Build llama.cpp with: cd llama.cpp && make"
-        )
+        quant_type = config.quantization.upper().replace("_", "_")
+        logger.info("Step 2: Quantizing to %s...", quant_type)
 
-    quant_type = config.quantization.upper().replace("_", "_")
-    logger.info("Step 2: Quantizing to %s...", quant_type)
+        quantize_cmd = [
+            str(quantize_bin),
+            str(f16_output),
+            str(output_path),
+            quant_type,
+        ]
+        logger.info("  Running: %s", " ".join(quantize_cmd))
 
-    quantize_cmd = [
-        str(quantize_bin),
-        str(f16_output),
-        str(output_path),
-        quant_type,
-    ]
-    logger.info("  Running: %s", " ".join(quantize_cmd))
+        result = subprocess.run(quantize_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"Quantization failed:\n{result.stderr}"
+            )
 
-    result = subprocess.run(quantize_cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"Quantization failed:\n{result.stderr}"
-        )
-
-    # Cleanup F16 intermediate
-    if f16_output.exists():
-        f16_output.unlink()
-        logger.info("  Cleaned up intermediate F16 file")
+        # Cleanup F16 intermediate
+        if f16_output.exists():
+            f16_output.unlink()
+            logger.info("  Cleaned up intermediate F16 file")
 
     # Validate
     if not output_path.exists():
         raise RuntimeError(f"Expected output file not found: {output_path}")
+
+    if config.metadata:
+        set_metadata(output_path, config.metadata)
+        for key, update in config.metadata.items():
+            logger.info("  Metadata: %s", f"{key} = {update[1]!r}" if update else f"no {key}")
 
     size_gb = output_path.stat().st_size / (1024 ** 3)
     logger.info("  GGUF export complete: %s (%.2f GB)", output_path, size_gb)

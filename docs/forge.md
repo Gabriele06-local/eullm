@@ -144,6 +144,13 @@ eullm-forge export ./my-model -o ./my-model.gguf --quant q4_k_m
 | `--output, -o` | — | Output GGUF file path |
 | `--quant` | `q4_k_m` | Quantization type |
 
+### `eullm-forge decisions import-rag | build | train | export`
+
+A decision model of your own, trained on the decisions a server traced and
+the feedback on them, for `eullm serve --decision-model`; `import-rag`
+writes the RAG gate's labelled sets as such traces. See
+[Decision models trained on your decisions](#decision-models-trained-on-your-decisions).
+
 ## Pipeline Stages
 
 All five stages are implemented with real PyTorch/Transformers code. Each stage requires appropriate GPU hardware to execute.
@@ -385,6 +392,420 @@ llama.cpp/build/bin/llama-quantize ./eullm-legal-it-4b-merged/model.gguf \
 eullm run ./eullm-legal-it-4b-Q4_K_M.gguf
 ```
 
+## Decision models trained on your decisions
+
+MVP 4 of the [Reflex roadmap](reflex-roadmap.md). `/v1/systemone` answers
+typed questions about a state with a small decision model — today a
+third party's Jev-Style models. `eullm-forge decisions` trains one of your
+own, from your own decisions, in three steps:
+
+```bash
+eullm-forge decisions build  ~/traces -o ~/decisions/data --rules my_rules.py:label
+eullm-forge decisions train  ~/decisions/data -o ~/decisions/run1
+eullm-forge decisions export ~/decisions/run1 -o ~/models/decide-q8_0.gguf
+eullm serve --decision-model ~/models/decide-q8_0.gguf
+```
+
+and whether it may replace the model in service is for the qualification
+test to say: [`bench/reflexbench/qualify.py`](../bench/reflexbench/README.md#the-qualification-test-qualifypy).
+The RAG gate's cases are labelled already, so a gate model needs no traces
+of a server's: [a first RAG-gate model, step by step](#a-first-rag-gate-model-on-the-rtx-5070-ti-step-by-step).
+
+### The traces
+
+A server started with `EULLM_DECISION_TRACES=<dir>` writes, locally and
+with personal data redacted, every decision it computes to
+`<dir>/decisions.jsonl` — the state, the questions as evaluated, the
+answers — and `<dir>/feedback.jsonl` holds what the right answers turned
+out to be: `{"kind": "feedback", "id": <the decision's audit id>,
+"answers": {question: option name | true/false | level number}, "source":
+"user" | "rule" | "teacher"}`, written by whoever learns it. Both are read
+tolerantly: unknown fields are ignored, a line that is not a JSON object is
+skipped and counted, rotated files beside the two are read too, and a later
+feedback line on a question corrects an earlier one.
+
+### `import-rag`: the RAG gate's labelled cases
+
+The [RAG gate](../bench/reflexbench/README.md#the-rag-gate-ragbenchpy) asks
+a decision model whether the passages retrieved for a question are enough
+to answer it, and its sets are labelled already: MuSiQue's questions with
+every passage they need, all but one, or none, and the Italian open-book
+set `rg_openbook.py` writes. `import-rag` writes them as traces, each
+case's label as a person's feedback (`source: "user"`), so that `build`,
+`train` and `export` make a RAG-gate model with nothing else to label:
+
+```bash
+eullm-forge decisions import-rag --sets musique --data ~/rag-gate/rag-legal-it.jsonl \
+    -o ~/rag-gate/traces
+eullm-forge decisions build ~/rag-gate/traces -o ~/rag-gate/data
+```
+
+**The prompt is the gate's own.** Every case becomes one decision whose
+state and questions are built by the gate's code — `rg_methods.request`
+and each method's `question`, the very body `ragbench.py` posts — never by a
+copy of it: a model trained on a prompt off by a space is trained for one it
+is never shown, and nothing fails. `tests/test_decisions_rag.py` takes the
+body the gate's client sends and the example `build` makes of the same case
+and compares them byte for byte, on a case with spaces at both ends,
+newlines, tabs, non-ASCII and a template's own turn markers. Each case is
+asked both of the gate's questions, by the name of the method that asks
+them: `reflex-gate`, the choice among `answer`, `retrieve_more` and
+`abstain`, and `reflex-yesno`, yes only when the passages hold every fact
+the answer needs (`--questions` for one of them). The states are written as
+they are, not redacted as a server's traces are: they are public text, and
+the prompt must be the one the gate sends.
+
+**The split is by question, and by document.** The three contexts of a
+MuSiQue question differ only in their passages, and the open-book pairs ask
+up to four questions of one article: split by state, as `build` splits a
+server's traces, a model would be tested on questions — and articles — it
+was trained on. So every question falls on one side with every other
+question about the same document, chosen by a hash with `--split-seed`:
+converted again, with more questions, a set keeps every held-out question
+held out. The sides go in `splits.jsonl`, which `build` follows in place of
+its own split. A case's document is the set's own word for it:
+
+- **open-book:** the article the question was written from
+  (`codice_civile/2043`), which `rg_openbook.py` writes; for a set written
+  before it did, the article the case's key names;
+- **MuSiQue:** the questions resting on one supporting paragraph, directly
+  or through others. MuSiQue composes its questions from single-hop ones
+  and reuses them, and two questions built on the same one share the
+  paragraph that answers it: split by question alone, 89% of the held-out
+  questions share a single-hop question with one trained on. Grouped, none
+  does — 528 groups of 1 to 84 questions over the 2,417.
+
+`--dev-share` and `--test-share` (10% each) are shares of documents, so the
+share of questions varies with their size: at the default seed MuSiQue
+holds out 127 questions for test and 211 for dev, 381 and 633 cases.
+
+| File | |
+|---|---|
+| `decisions.jsonl`, `feedback.jsonl` | a decision per case, every key a server writes; `model`, `readout` and `mode` are `null` and `answers` empty, since no model decided it |
+| `splits.jsonl` | each decision's side, with the set, case, question and document it came from |
+| `rag-test/<set>.jsonl` | the test side's cases, in `ragbench.py --data`'s own format |
+| `import.json` | the sets read, the questions asked, the settings, and how many cases, questions and documents went to each side |
+
+`--sets musique` reads the set as `ragbench.py` does, downloaded on first
+use, with the same `--passages` (5) and `--seed` (1) and a `--limit` of
+questions that here defaults to 0, all 2,417; `--data` takes a file in
+`ragbench.py --data`'s format, repeatable. A directory a server writes
+traces to is never overwritten: `import-rag` writes again only a directory
+it wrote itself.
+
+### `build`: the label of every question
+
+In this order, the first that has one:
+
+1. **feedback** on that decision;
+2. **`--rules FILE.py:FUNCTION`** (or `MODULE:FUNCTION`): your function,
+   called as `label(state, question_id, question, record)` with the question
+   in the API's shape and the decision as a dict; it returns the right
+   answer, or None where it has nothing to say. An answer the question
+   cannot have is an error in the rule, and stops the build:
+
+   ```python
+   # my_rules.py
+   def label(state, question_id, question, record):
+       if question_id == "team" and "fattura" in state.lower():
+           return "billing"          # an option's name
+       if question_id == "is_urgent" and "entro oggi" in state.lower():
+           return True               # a noul: true or false
+       return None                   # nothing to say: the next teacher decides
+   ```
+
+3. **`--teacher-url URL --teacher-model NAME`**: a large model behind any
+   OpenAI-compatible chat endpoint — EuLLM serving a large chat model, say —
+   asked exactly the prompt the decision model will be asked, at
+   temperature 0, its reply parsed for a code (after any reasoning). Replies
+   are cached in `teacher-cache.jsonl`, so a second build asks nothing twice.
+   The states go to that endpoint: point it at a server you would send them
+   to anyway;
+4. **`--allow-logged`** only: the logged decision itself. A model trained on
+   its own answers learns to repeat them, mistakes included.
+
+Feedback naming an option the question did not offer is not overruled by a
+teacher: the question is left out. The same question about the same state
+is one example. Dev and test (`--dev-share`, `--test-share`, 10% each) hold
+out whole states, chosen by a hash of the state, so a state held out today
+stays held out when the set is built again next month — unless the traces
+carry a `splits.jsonl` (`import-rag` writes one), whose sides are followed
+instead and counted in `stats.json` (`split_by`). Questions a
+code-readout model cannot be asked — more than 26 options — are left out.
+Everything left out is counted with its reason in `stats.json`, next to the
+spread of every question's answers and the accuracy of always giving the
+commonest one, the floor a model has to clear. The output:
+
+| File | |
+|---|---|
+| `train.jsonl`, `dev.jsonl`, `test.jsonl` | one question per line: the state, the question, the right answer and its code, where the label came from |
+| `dev.labelled.jsonl`, `test.labelled.jsonl` | the same as requests, every question about a state in one: what `qualify.py --data` reads |
+| `stats.json` | what was kept, from where, and why the rest was not |
+
+A redacted state is trained on as it was redacted, and served unredacted:
+the model learns from `[EMAIL]` where it will read an address.
+
+### `train`: LoRA on the answer code
+
+The engine reads a decision model of our own through its *codes readout*
+(`engine/src/inference/decision.rs`): one chat prompt per question — a
+fixed system text, the state, the question with its codes `Yes`/`No`,
+`A`…`Z` or `0`…`9` — rendered with the model's chat template, reasoning
+off, and the answer read as the next-token probability of each code. Each
+example is that prompt, and the loss is the cross-entropy of the right
+code's token at its end, nothing else: there is no end-of-turn to learn,
+since the engine reads that one position and nothing after it. Only that
+position's logits are computed (`logits_to_keep=1`, prompts padded on the
+left): at 2,048 tokens and Qwen3's vocabulary, every position's would be
+1.2 GB per example, all of it thrown away.
+
+`eullm_forge.decisions.prompt` renders it, mirroring decision.rs line for
+line: what is trimmed and what is not, the template's empty reasoning
+block, a state's `<|im_end|>` kept as text, which spellings of a code count.
+A model trained on a prompt off by one space is trained for a prompt it
+will never be shown, and nothing fails, so this is tested two ways:
+`tests/test_decisions.py` reads the constants out of decision.rs itself,
+and `tests/test_decisions_engine.py` trains a tiny Qwen3 with Qwen3's
+tokenizer, exports it through Forge, serves it with the engine binary and
+compares every answer's log-probabilities. Measured on a CPU: the engine
+and training agree to 0.006 nats (F16), where one extra space in the prompt
+moves them by 0.23.
+
+| Option | Default | |
+|---|---|---|
+| `--base` | `Qwen/Qwen3-1.7B` | an Apache-2.0 chat model whose template can switch reasoning off; `Qwen/Qwen3-0.6B` for a decision on a CPU |
+| `--epochs` | 2 | more starts fitting noise: dev ECE grows while accuracy does not |
+| `--lr` | 2e-4 | AdamW, linear decay, as identity and stage 3 |
+| `--rank` | 16 | LoRA rank, alpha twice it, on attention and MLP |
+| `--batch-size`, `--grad-accum` | 8, 2 | effective batch 16 |
+| `--max-length` | 2048 | longest prompt kept; a longer one is dropped, never cut — the engine refuses to truncate a state too |
+| `--save-steps` | 0 (each epoch) | a run finding a checkpoint resumes from it |
+| `--no-baseline` | off | skip scoring the base model on dev first |
+
+It writes the adapter and `decision-model.json`: what was trained on what,
+and the dev split's accuracy, ECE, NLL and coverage per question type,
+before and after. A fine-tuned model is usually too sure of itself, so the
+report also fits a temperature on dev (`dev_temperature`), which `export`
+writes into the GGUF for the engine to apply by default. bf16 on a GPU,
+fp32 on a CPU.
+Not measured on a GPU yet; by estimate, Qwen3-1.7B at the defaults peaks
+around 7 GB with gradient checkpointing (3.4 GB of weights, the layer
+inputs of 8 × 2,048 tokens, one position's logits), which leaves a 16 GB
+card room for longer states or larger batches.
+
+### `export`: merge, then GGUF
+
+`identity.merge_identity_adapter` merges the adapter into its base (the base
+the run recorded, never a guess) and `export.export_gguf` converts and
+quantizes, so llama.cpp must be where Forge finds it (`LLAMA_CPP_PATH`, or
+`~/llama.cpp`, with `llama-quantize` built). The default is **Q8_0, not
+Q4_K_M**: a decision is a probability, and quantization noise moves it —
+Qwen3-0.6B answers the same question differently in two evaluation modes by
+up to 0.017 at F16, 0.13 at Q8_0 and 0.34 at Q4_K_M on a CPU
+([engine.md](engine.md)). `--quant f16` needs only the converter.
+
+**The temperature travels in the GGUF.** The one the run fitted on its dev
+split is written into the exported file as `eullm.decision.temperature`, a
+FLOAT32, for the engine to apply by default to a code-readout model it
+loads: every client gets the calibrated probabilities without saying how,
+and a request's own `"eullm": {"temperature": T}` still overrides it. An
+engine from before it read the key applies 1, and the qualification test
+says so.
+`--temperature 1.5` writes another, `--temperature none` none (the engine
+then applies 1); a run with no dev split fitted none and writes none. It is
+written only when the engine would take it — finite, above 0 and at most
+100, `MAX_TEMPERATURE` in systemone.rs, as the float32 the file holds — and
+checked before the merge, not after the conversion. Forge writes it with
+`gguf_metadata.py`, from the standard library: the key-value pairs are
+written again with the new one last, and every tensor is copied byte for
+byte, whatever its quantization. On a Qwen3-0.6B Q4_K_M, llama.cpp's own
+readers, in C and in Python, read the key as an f32 of 1.37, and the engine
+loads the file and answers with log-probabilities identical to the
+original's. `qualify.py --candidate-gguf` reads the key back and checks that
+the server applies it ([the qualification test](../bench/reflexbench/README.md#the-qualification-test-qualifypy)).
+
+### How many labelled decisions
+
+Each question id is a task of its own. A few hundred labelled answers per
+question are a first model; what decides is the qualification test, and it
+needs at least 50 answers per question type on held-out states to say
+anything (`--min-answers`), and a few hundred to tell apart two models a
+few points of accuracy apart. With 10% of the states held out for test,
+that is some 500 labelled decisions per question type before a verdict
+means much — feedback, rules or a teacher; the logged decisions themselves
+only teach the model to repeat them.
+
+### A first RAG-gate model on the RTX 5070 Ti, step by step
+
+From the RAG gate's labelled sets to a decision model of our own, compared
+with the Jev-Style 2B on cases neither saw in training. For the GPU server:
+an RTX 5070 Ti with 16 GB, the repository at `~/work/eullm`, the data under
+`~/work`. Everything written stays in `~/work/rag-gate` and
+`~/work/models`; nothing of it belongs in the repository.
+
+**0. Once: the checkout, Python, llama.cpp, the model to beat.** The
+checkout with this procedure in it, and the llama.cpp the engine reads
+GGUFs with — the same one converts them, since a converter newer than the
+reader can write what the reader does not know:
+
+```bash
+git -C ~/work/eullm pull --ff-only
+git -C ~/work/eullm submodule update --init engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
+```
+
+Forge in a virtual environment of its own. The 5070 Ti is a Blackwell card
+(sm_120), which needs a torch built for CUDA 12.8 or newer; PyPI's current
+torch is one. The last line must print the card's name and `True`:
+
+```bash
+python3 -m venv ~/work/venv-forge
+. ~/work/venv-forge/bin/activate
+pip install --upgrade pip
+pip install -e ~/work/eullm/forge
+python -c "import torch; print(torch.__version__, torch.cuda.get_device_name(0), torch.cuda.is_bf16_supported())"
+```
+
+`llama-quantize`, built from that llama.cpp outside its tree (a few
+minutes, CPU only), and where `decisions export` will look for it and for
+the converter:
+
+```bash
+cmake -S ~/work/eullm/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp \
+      -B ~/work/llama-build -DCMAKE_BUILD_TYPE=Release
+cmake --build ~/work/llama-build --target llama-quantize -j 8
+```
+
+The Jev-Style 2B, the decision model the new one would replace:
+
+```bash
+eullm pull hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q4_K_M
+```
+
+**1. The Italian set.** MuSiQue needs no step of its own: the next one
+downloads it, 30 MB, to `~/.cache/reflexbench`. The Italian set is asked by
+each article's rubrica, from the legislation records alone:
+
+```bash
+mkdir -p ~/work/rag-gate ~/work/models
+python3 ~/work/eullm/bench/reflexbench/rg_openbook.py --by-heading --limit 1000 \
+  --norms ~/work/corpus/legislazione_*.chunks.jsonl --out ~/work/rag-gate/rag-legal-it.jsonl
+```
+
+Forge's open-book pairs, written by a large model on Leonardo
+(`$WORK/eullm_runs/stage3/openbook-v04.jsonl`), ask questions closer to a
+user's; copied to `~/work/openbook-v04.jsonl`, they make the set instead:
+
+```bash
+python3 ~/work/eullm/bench/reflexbench/rg_openbook.py ~/work/openbook-v04.jsonl \
+  --norms ~/work/corpus/legislazione_*.chunks.jsonl --out ~/work/rag-gate/rag-legal-it.jsonl
+```
+
+**2. Traces, then the dataset.** Every case becomes a trace with its label
+as feedback; whole questions, and every question about one article or one
+MuSiQue paragraph, are held out ([`import-rag`](#import-rag-the-rag-gates-labelled-cases)):
+
+```bash
+. ~/work/venv-forge/bin/activate
+eullm-forge decisions import-rag --sets musique --data ~/work/rag-gate/rag-legal-it.jsonl \
+  -o ~/work/rag-gate/traces
+eullm-forge decisions build ~/work/rag-gate/traces -o ~/work/rag-gate/data
+```
+
+MuSiQue splits as 6,237 cases to train, 633 to dev and 381 to test (2,079,
+211 and 127 questions); the Italian set about a tenth of its articles each
+to dev and test. `build` must say that the split of every decision came
+from `splits.jsonl`. The test side is in two forms:
+`~/work/rag-gate/data/test.labelled.jsonl` for `qualify.py`, and
+`~/work/rag-gate/traces/rag-test/` for `ragbench.py`.
+
+**3. Training.** Qwen3-1.7B: Apache-2.0, among the bases this project may
+use, and the size of the model it would replace.
+
+```bash
+. ~/work/venv-forge/bin/activate
+eullm-forge decisions train ~/work/rag-gate/data -o ~/work/rag-gate/run-qwen3-1.7b \
+  --base Qwen/Qwen3-1.7B --max-length 4096 --batch-size 4 --grad-accum 4
+```
+
+`--max-length 4096`, because an Italian case — three articles of up to
+3,000 characters — runs past 2,048 tokens, and a prompt longer than the
+limit is dropped, not cut: `dropped` in `decision-model.json` must be
+empty. Batches of 4, accumulated four times, keep the effective batch at
+16 at twice the length. About 15,000 examples twice over, some thirty
+million tokens: a few hours on this card, by estimate — not measured yet.
+The base is downloaded on first use; a run that stops resumes from its
+last checkpoint when the same command is run again. It ends with the dev
+split before and after, and the temperature fitted on it.
+
+**4. Export.** Merged, converted, Q8_0, the temperature fitted on dev
+inside:
+
+```bash
+. ~/work/venv-forge/bin/activate
+export LLAMA_CPP_PATH=~/work/eullm/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp
+export PATH=~/work/llama-build/bin:$PATH
+eullm-forge decisions export ~/work/rag-gate/run-qwen3-1.7b \
+  -o ~/work/models/rag-gate-qwen3-1.7b-q8_0.gguf
+```
+
+It prints `eullm.decision.temperature = … (fitted on the dev split)`.
+
+**5. Both models served**, each on a port and with an audit directory of
+its own — in a second and a third terminal; together they fit in 16 GB:
+
+```bash
+EULLM_AUDIT_DIR=~/work/rag-gate/audit-candidate \
+  eullm serve --port 11500 --decision-model ~/work/models/rag-gate-qwen3-1.7b-q8_0.gguf
+```
+
+```bash
+EULLM_AUDIT_DIR=~/work/rag-gate/audit-current \
+  eullm serve --port 11501 --decision-model jev-style-2b-decision-v3-gguf-q4_k_m --decision-ctx 25600
+```
+
+**6. The qualification test, on the held-out cases.** Both questions of
+every test case, in the three evaluation modes, asked of both servers; PASS
+or FAIL, and why ([qualify.py](../bench/reflexbench/README.md#the-qualification-test-qualifypy)):
+
+```bash
+python3 ~/work/eullm/bench/reflexbench/qualify.py \
+  --candidate http://localhost:11500 \
+  --candidate-gguf ~/work/models/rag-gate-qwen3-1.7b-q8_0.gguf \
+  --current http://localhost:11501 \
+  --data ~/work/rag-gate/data/test.labelled.jsonl \
+  --out ~/work/rag-gate/qualify.json --details ~/work/rag-gate/qualify-details.jsonl
+```
+
+An engine from before it read `eullm.decision.temperature` applies 1, and
+the `gguf_temperature` check fails, rightly: it would serve the model
+uncalibrated. Update the engine — or, to see the model at its temperature
+meanwhile, add `--candidate-temperature` with the value export printed,
+which is what every client would then have to send.
+
+**7. The RAG gate's own report, on the same held-out cases**: AUROC,
+what each gate stops at its own decision and at a threshold fitted on half
+of them, the three-way accuracy, per set:
+
+```bash
+python3 ~/work/eullm/bench/reflexbench/ragbench.py --url http://localhost:11500 --sets '' \
+  --data ~/work/rag-gate/traces/rag-test/musique.jsonl \
+  --data ~/work/rag-gate/traces/rag-test/rag-legal-it.jsonl \
+  --methods reflex-gate,reflex-yesno \
+  --out ~/work/rag-gate/ragbench-candidate.json --details ~/work/rag-gate/ragbench-candidate.jsonl
+python3 ~/work/eullm/bench/reflexbench/ragbench.py --url http://localhost:11501 --sets '' \
+  --data ~/work/rag-gate/traces/rag-test/musique.jsonl \
+  --data ~/work/rag-gate/traces/rag-test/rag-legal-it.jsonl \
+  --methods reflex-gate,reflex-yesno \
+  --out ~/work/rag-gate/ragbench-jev-2b.json --details ~/work/rag-gate/ragbench-jev-2b.jsonl
+```
+
+The Jev-Style 2B's MuSiQue numbers in the [roadmap](reflex-roadmap.md)
+(AUROC 0.769 and 0.763) come from another draw of the set; here both models
+are scored on the same 127 questions, none of which our model was trained
+on, nor any question resting on the same paragraph. (A paragraph may still
+have been among the other passages of a training case — for 14 of the 127
+— read there, never as the answer to anything.)
+
 ## Running Tests
 
 ```bash
@@ -401,6 +822,10 @@ pytest tests/ -v
 | `test_pipeline.py` | Profile loading, config defaults, parameter estimation |
 | `test_distill.py` | Distillation cost estimation |
 | `test_identity.py` | Identity dataset generation (EN, IT, DE, FR) |
+| `test_decisions.py` | Decision models: the prompt against decision.rs, traces, labels, splits, CLI, a tiny CPU training run |
+| `test_decisions_rag.py` | The RAG gate's cases as traces: the prompt byte for byte against what the gate sends, both trace readers, the split by question and document, `build` following it, the CLI |
+| `test_gguf_metadata.py` | Metadata written into a GGUF: kept, replaced and removed to the byte, alignment, damaged files refused, read back by llama.cpp's `gguf` package; the export path against a stand-in llama.cpp, and a decision model's temperature in its GGUF |
+| `test_decisions_engine.py` | A trained decision model served by the engine binary (needs `EULLM_E2E_BIN`, `EULLM_E2E_TOKENIZER`, `LLAMA_CPP_PATH`) |
 
 ## Implementation Status
 
