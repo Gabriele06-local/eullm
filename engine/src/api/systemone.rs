@@ -49,7 +49,7 @@ use crate::audit::redact::redact;
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
     self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, DecisionModelInfo,
-    EvalMode, EvalStats, Question, QuestionKind, ReadoutKind,
+    EvalMode, EvalStats, MAX_TEMPERATURE, Question, QuestionKind, ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -65,10 +65,6 @@ pub(crate) const FEEDBACK_PATH: &str = "/v1/systemone/feedback";
 pub(crate) fn has_structured_errors(path: &str) -> bool {
     path == PATH || path == FEEDBACK_PATH
 }
-
-/// Highest `temperature` accepted. Temperature scaling fitted on real data
-/// lands around 0.5–3; anything past this is a mistake, not a calibration.
-const MAX_TEMPERATURE: f64 = 100.0;
 
 /// A `/v1/systemone` error as the System One API's clients and jev-style's
 /// read it: an HTTP status, and the body
@@ -640,7 +636,8 @@ struct RequestOptions {
     /// `none` (default) or `content_free`.
     #[serde(default)]
     calibration: Option<String>,
-    /// Temperature scaling applied after calibration; default 1.
+    /// Temperature scaling applied after calibration; by default the
+    /// model's own (`DecisionModel::default_temperature`).
     #[serde(default)]
     temperature: Option<f64>,
     /// `shared_prefix` (default), `batched` or `separate`.
@@ -752,7 +749,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         }
     };
     let temperature = options.temperature;
-    if temperature.is_some_and(|t| !(t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE)) {
+    if temperature.is_some_and(|t| !decision::is_usable_temperature(t)) {
         return Err(ApiError::invalid_request(format!(
             "\"temperature\" must be greater than 0 and at most {MAX_TEMPERATURE}"
         )));

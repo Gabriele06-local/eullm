@@ -654,12 +654,34 @@ the options can be compared on labelled data before one is trusted:
 | `eullm` option | Values | Default |
 |---|---|---|
 | `calibration` | `none`; `content_free` (code readout): divide out the answer the model gives the same question about the state `N/A` (Zhao et al., 2021), cached per question | `none` |
-| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1`; a Jev-Style model's own calibrated temperature |
+| `temperature` | Temperature scaling after calibration: `> 1` flattens, `< 1` sharpens | `1`; the model's own calibration temperature when it has one (below) |
 | `mode` | `shared_prefix`; `batched`; `separate` (see below) | `shared_prefix` |
 
 The content-free prior is not always noise to remove: when the options
 themselves imply a base rate, dividing it out moves probability towards
 options that are rarely right. Measure before choosing.
+
+**A model's own temperature.** A decision model can bring the temperature
+it was calibrated with: a Jev-Style release has one built in (see
+[Jev-Style decision models](#jev-style-decision-models)), and a model Forge
+trains is calibrated on held-out data and carries the fitted value in its
+GGUF, as the metadata key `eullm.decision.temperature` (a `FLOAT32` or
+`FLOAT64`). A code-readout model whose GGUF has that key scales its
+probabilities with it by default. A request's `temperature` still overrides
+it, and the response's `eullm.temperature` says which one was applied. The
+value has to pass the same check as a request's — greater than 0 and at
+most 100 — and anything else (another type, `NaN`, `0`, `250`) is ignored
+with a warning that names it: the model loads anyway, its probabilities
+unscaled. The load log prints the temperature in effect and where it came
+from:
+
+```text
+Decision model loaded — codes: …; prompts: …; calibration temperature 0.8730 (the GGUF's eullm.decision.temperature); …
+Decision model loaded — codes: …; prompts: …; calibration temperature 1 (none: the GGUF has no eullm.decision.temperature); …
+```
+
+A Jev-Style model keeps its release's temperature even when its GGUF
+carries this key, and the log warns when the two differ.
 
 **Many questions, one pass.** Every question's prompt starts with the same
 tokens — system prompt, template, the state — and differs only at the end.
@@ -1086,7 +1108,8 @@ The token ids were identical and, in `separate` mode, the scores agreed to
   budget, is refused rather than truncated. Raise `--decision-ctx` to
   25600 to allow the longest input the models accept.
 - Only the release's global temperature is applied, as its own runtime
-  does when it is not given a category.
+  does when it is not given a category — also when the GGUF carries an
+  `eullm.decision.temperature`, which a code-readout model would use.
 
 `shared_prefix` decodes the state once, as with any model, and each
 question on its own after it:

@@ -46,6 +46,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
+use llama_cpp_2::gguf::GgufContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
@@ -102,6 +103,19 @@ pub const CONFIDENCE_METHOD: &str = "normalized_max_probability";
 /// and audit records written before [`CONFIDENCE_METHOD`] replaced it, and
 /// `eullm.confidence_entropy` since.
 pub const ENTROPY_CONFIDENCE_METHOD: &str = "normalized_entropy";
+
+/// Highest temperature probabilities may be scaled with, whether a request
+/// asks for it or a model's GGUF carries it ([`TEMPERATURE_KEY`]).
+/// Temperature scaling fitted on real data lands around 0.5–3; anything past
+/// this is a mistake, not a calibration.
+pub const MAX_TEMPERATURE: f64 = 100.0;
+
+/// The GGUF metadata key under which a decision model carries the
+/// temperature its probabilities were calibrated with: a `FLOAT32` or
+/// `FLOAT64` fitted on held-out data, which Forge writes when it exports a
+/// decision model. A code-readout model scales its probabilities with it by
+/// default, as a Jev-Style model does with its release's.
+pub const TEMPERATURE_KEY: &str = "eullm.decision.temperature";
 
 /// Most questions one `batched` decode round holds on a recurrent or
 /// hybrid model, which keeps a recurrent state per sequence.
@@ -1132,6 +1146,9 @@ struct CodeReadout {
     uses_template: bool,
     layout: PromptLayout,
     codes: CodeTable,
+    /// The temperature its probabilities are scaled with unless a request
+    /// sets one: its GGUF's [`TEMPERATURE_KEY`] when that is usable, else 1.
+    temperature: f64,
 }
 
 enum ModelReadout {
@@ -1218,6 +1235,7 @@ impl DecisionModel {
         tracing::info!("Loading decision model: {}", path.display());
         let model = LlamaModel::load_from_file(&backend, path, &model_params)
             .map_err(|e| format!("Failed to load decision model: {e}"))?;
+        let gguf_temperature = GgufTemperature::read(path);
 
         let flash = if flash_attn { "auto" } else { "off" };
         let (readout, protocol) = match verdict::VerdictModel::detect(&model, path)? {
@@ -1227,6 +1245,18 @@ impl DecisionModel {
                      of context per request",
                     v.describe()
                 );
+                // A Jev-Style release's temperature is part of the release:
+                // its own runtime applies it, and the scores here are checked
+                // against that runtime's. It stays the one applied, and a
+                // GGUF that says otherwise gets a warning, not a say.
+                if let Some(value) = other_than_release(gguf_temperature.as_ref(), v.temperature) {
+                    tracing::warn!(
+                        "{}: its GGUF sets {TEMPERATURE_KEY} to {value}; the release's \
+                         calibration temperature {:.4} is used instead",
+                        v.name,
+                        v.temperature
+                    );
+                }
                 let protocol = match v.render {
                     // The ubatch its scores were validated with.
                     verdict::Render::V1 => engine::Protocol {
@@ -1261,9 +1291,25 @@ impl DecisionModel {
                 }
                 let codes = CodeTable::resolve(&model, uses_template)?;
                 let layout = PromptLayout::resolve(&model, uses_template);
+                let (temperature, calibration) = match own_temperature(gguf_temperature.as_ref()) {
+                    Ok(Some(t)) => (t, format!("{t:.4} (the GGUF's {TEMPERATURE_KEY})")),
+                    Ok(None) => (1.0, format!("1 (none: the GGUF has no {TEMPERATURE_KEY})")),
+                    Err(why) => {
+                        tracing::warn!(
+                            "{}: {TEMPERATURE_KEY} is {why} — not used: its probabilities are \
+                             not scaled unless a request sets a temperature",
+                            path.display()
+                        );
+                        (
+                            1.0,
+                            format!("1 (none: the GGUF's {TEMPERATURE_KEY} is not usable)"),
+                        )
+                    }
+                };
                 tracing::info!(
-                    "Decision model loaded — codes: {}; prompts: {}; flash attention {flash}; up \
-                     to {max_ctx} tokens of context per request",
+                    "Decision model loaded — codes: {}; prompts: {}; calibration temperature \
+                     {calibration}; flash attention {flash}; up to {max_ctx} tokens of context \
+                     per request",
                     codes.summary(),
                     layout.describe(),
                 );
@@ -1278,6 +1324,7 @@ impl DecisionModel {
                     uses_template,
                     layout,
                     codes,
+                    temperature,
                 };
                 (ModelReadout::Codes(code), protocol)
             }
@@ -1562,10 +1609,11 @@ impl DecisionModel {
     }
 
     /// The temperature probabilities are scaled with unless a request says
-    /// otherwise: a verdict model's own calibration, 1 (none) otherwise.
+    /// otherwise: a verdict model's release calibration; a code-readout
+    /// model's own, from its GGUF's [`TEMPERATURE_KEY`], or 1 (none).
     pub fn default_temperature(&self) -> f64 {
         match &self.readout {
-            ModelReadout::Codes(_) => 1.0,
+            ModelReadout::Codes(code) => code.temperature,
             ModelReadout::Verdict(v) => v.temperature,
         }
     }
@@ -1708,6 +1756,96 @@ impl DecisionModel {
     }
 }
 
+/// [`TEMPERATURE_KEY`] as a model's GGUF holds it.
+#[derive(Debug, Clone, PartialEq)]
+enum GgufTemperature {
+    F32(f32),
+    F64(f64),
+    /// A value of any other type, as a warning names it. It is never
+    /// converted: a writer that meant a temperature wrote a float.
+    Other(String),
+}
+
+impl GgufTemperature {
+    /// [`TEMPERATURE_KEY`] in the GGUF at `path`; `None` when it holds none.
+    ///
+    /// Read from the file's header, which llama.cpp parses again without the
+    /// weights, rather than from the loaded model: llama.cpp keeps a model's
+    /// metadata only as text, with every float printed to six decimals and
+    /// its type gone.
+    fn read(path: &Path) -> Option<Self> {
+        let Some(gguf) = GgufContext::from_file(path) else {
+            // The model was loaded from this file a moment ago, so only a
+            // file replaced in between gets here.
+            tracing::warn!(
+                "{}: its metadata could not be read again for {TEMPERATURE_KEY}",
+                path.display()
+            );
+            return None;
+        };
+        let idx = gguf.find_key(TEMPERATURE_KEY);
+        if idx < 0 {
+            return None;
+        }
+        Some(match gguf.kv_type(idx) {
+            llama_cpp_sys_2::GGUF_TYPE_FLOAT32 => Self::F32(gguf.val_f32(idx)),
+            llama_cpp_sys_2::GGUF_TYPE_FLOAT64 => Self::F64(gguf.val_f64(idx)),
+            llama_cpp_sys_2::GGUF_TYPE_STRING => Self::Other(format!(
+                "the string {:?}",
+                gguf.val_str(idx).unwrap_or_default()
+            )),
+            llama_cpp_sys_2::GGUF_TYPE_INT32 => {
+                Self::Other(format!("the integer {}", gguf.val_i32(idx)))
+            }
+            llama_cpp_sys_2::GGUF_TYPE_UINT32 => {
+                Self::Other(format!("the integer {}", gguf.val_u32(idx)))
+            }
+            llama_cpp_sys_2::GGUF_TYPE_UINT64 => {
+                Self::Other(format!("the integer {}", gguf.val_u64(idx)))
+            }
+            llama_cpp_sys_2::GGUF_TYPE_ARRAY => Self::Other("an array".to_string()),
+            other => Self::Other(format!("a value of GGUF type {other}")),
+        })
+    }
+}
+
+/// A code-readout model's own calibration temperature, from what its GGUF
+/// holds under [`TEMPERATURE_KEY`]: `Ok(None)` when it holds nothing, and
+/// `Err` naming the value and what is wrong with it when it holds one that
+/// cannot be used. Such a value costs the model its calibration, never its
+/// load.
+fn own_temperature(gguf: Option<&GgufTemperature>) -> Result<Option<f64>, String> {
+    let (t, shown) = match gguf {
+        None => return Ok(None),
+        // Widened exactly, every f32 being an f64, and shown as the f32 it
+        // was written as.
+        Some(GgufTemperature::F32(t)) => (f64::from(*t), format!("{t:?}")),
+        Some(GgufTemperature::F64(t)) => (*t, format!("{t:?}")),
+        Some(GgufTemperature::Other(value)) => return Err(format!("{value}, not a float")),
+    };
+    if is_usable_temperature(t) {
+        Ok(Some(t))
+    } else {
+        Err(format!(
+            "{shown}, not a temperature greater than 0 and at most {MAX_TEMPERATURE}"
+        ))
+    }
+}
+
+/// What a verdict model's GGUF holds under [`TEMPERATURE_KEY`] when it is
+/// not `release`, the release's calibration temperature, which is the one
+/// used whatever the GGUF says: `None` when it holds nothing or the same
+/// value. A `FLOAT32` copy of the release's value is that value, so the two
+/// are compared at `f32` precision.
+fn other_than_release(gguf: Option<&GgufTemperature>, release: f64) -> Option<String> {
+    let (t, shown) = match gguf? {
+        GgufTemperature::F32(t) => (*t, format!("{t:?}")),
+        GgufTemperature::F64(t) => (*t as f32, format!("{t:?}")),
+        GgufTemperature::Other(value) => return Some(value.clone()),
+    };
+    (t != release as f32).then_some(shown)
+}
+
 fn ms_since(t: Instant) -> f64 {
     t.elapsed().as_secs_f64() * 1000.0
 }
@@ -1838,6 +1976,13 @@ pub fn coverage(logprobs: &[f64]) -> f64 {
         .map(|lp| lp.exp())
         .sum::<f64>()
         .clamp(0.0, 1.0)
+}
+
+/// Whether probabilities may be scaled with temperature `t`: finite,
+/// greater than 0 and at most [`MAX_TEMPERATURE`] — the rule for a
+/// request's `temperature` and for a model's [`TEMPERATURE_KEY`] alike.
+pub fn is_usable_temperature(t: f64) -> bool {
+    t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE
 }
 
 /// Class probabilities from class log-probabilities: renormalized over the
@@ -2018,6 +2163,167 @@ mod tests {
         let raw = calibrated_probabilities(&lp, None, 1.0);
         for t in [0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert_eq!(calibrated_probabilities(&lp, None, t), raw);
+        }
+    }
+
+    #[test]
+    fn a_usable_temperature_is_positive_finite_and_at_most_the_maximum() {
+        for t in [f64::MIN_POSITIVE, 0.5, 1.0, 3.0, MAX_TEMPERATURE] {
+            assert!(is_usable_temperature(t), "{t}");
+        }
+        for t in [
+            0.0,
+            -0.5,
+            MAX_TEMPERATURE * 1.01,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ] {
+            assert!(!is_usable_temperature(t), "{t}");
+        }
+    }
+
+    #[test]
+    fn a_usable_gguf_temperature_is_the_model_s_own() {
+        assert_eq!(
+            own_temperature(Some(&GgufTemperature::F64(0.87))),
+            Ok(Some(0.87))
+        );
+        // Widened exactly, not re-rounded through text: llama.cpp's own
+        // rendering of this value would have been "0.870000".
+        assert_eq!(
+            own_temperature(Some(&GgufTemperature::F32(0.87))),
+            Ok(Some(f64::from(0.87f32)))
+        );
+        // The same bounds as a request's `temperature`, the top one inclusive.
+        assert_eq!(
+            own_temperature(Some(&GgufTemperature::F64(MAX_TEMPERATURE))),
+            Ok(Some(MAX_TEMPERATURE))
+        );
+        assert_eq!(own_temperature(None), Ok(None));
+    }
+
+    /// Whatever is wrong with the value, the warning names it, and the
+    /// model keeps no calibration rather than failing to load.
+    #[test]
+    fn an_unusable_gguf_temperature_is_named_and_not_used() {
+        for (value, named) in [
+            (GgufTemperature::F64(f64::NAN), "NaN"),
+            (GgufTemperature::F64(f64::INFINITY), "inf"),
+            (GgufTemperature::F32(0.0), "0.0"),
+            (GgufTemperature::F64(-1.0), "-1.0"),
+            (GgufTemperature::F32(250.0), "250.0"),
+            (
+                GgufTemperature::Other("the string \"0.9\"".into()),
+                "the string \"0.9\"",
+            ),
+            (
+                GgufTemperature::Other("the integer 1".into()),
+                "the integer 1",
+            ),
+            (GgufTemperature::Other("an array".into()), "an array"),
+        ] {
+            let why = own_temperature(Some(&value)).expect_err("must not be used");
+            assert!(why.starts_with(named), "{why:?} should name {named}");
+        }
+    }
+
+    #[test]
+    fn a_verdict_model_names_a_gguf_temperature_other_than_its_release_s() {
+        let release = 0.880_054_682_178_933_2;
+        assert_eq!(other_than_release(None, release), None);
+        assert_eq!(
+            other_than_release(Some(&GgufTemperature::F64(release)), release),
+            None
+        );
+        // A FLOAT32 copy of the release's value is that value, not another.
+        assert_eq!(
+            other_than_release(Some(&GgufTemperature::F32(release as f32)), release),
+            None
+        );
+        assert_eq!(
+            other_than_release(Some(&GgufTemperature::F64(0.5)), release).as_deref(),
+            Some("0.5")
+        );
+        assert_eq!(
+            other_than_release(Some(&GgufTemperature::F64(f64::NAN)), release).as_deref(),
+            Some("NaN")
+        );
+        assert_eq!(
+            other_than_release(Some(&GgufTemperature::Other("an array".into())), release)
+                .as_deref(),
+            Some("an array")
+        );
+    }
+
+    /// A GGUF holding one metadata entry and no tensors, written to a fresh
+    /// temporary file: `key`, of GGUF type `value_type`, holding `value` as
+    /// the file stores it. llama.cpp parses such a header like any other.
+    fn gguf_holding(key: &str, value_type: u32, value: &[u8]) -> std::path::PathBuf {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"GGUF");
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&1u64.to_le_bytes());
+        b.extend_from_slice(&(key.len() as u64).to_le_bytes());
+        b.extend_from_slice(key.as_bytes());
+        b.extend_from_slice(&value_type.to_le_bytes());
+        b.extend_from_slice(value);
+        let path = std::env::temp_dir().join(format!(
+            "eullm-decision-temperature-{}.gguf",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, b).expect("write the GGUF");
+        path
+    }
+
+    /// The key is read from the file with its type, both widths of float
+    /// exactly, and anything else is described for the warning rather than
+    /// converted.
+    #[test]
+    fn the_gguf_temperature_is_read_with_its_type() {
+        let text = |s: &str| {
+            let mut v = (s.len() as u64).to_le_bytes().to_vec();
+            v.extend_from_slice(s.as_bytes());
+            v
+        };
+        let cases = [
+            (
+                TEMPERATURE_KEY,
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT32,
+                0.873f32.to_le_bytes().to_vec(),
+                Some(GgufTemperature::F32(0.873)),
+            ),
+            (
+                TEMPERATURE_KEY,
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT64,
+                0.880_054_682_178_933_2f64.to_le_bytes().to_vec(),
+                Some(GgufTemperature::F64(0.880_054_682_178_933_2)),
+            ),
+            (
+                TEMPERATURE_KEY,
+                llama_cpp_sys_2::GGUF_TYPE_STRING,
+                text("0.9"),
+                Some(GgufTemperature::Other("the string \"0.9\"".into())),
+            ),
+            (
+                TEMPERATURE_KEY,
+                llama_cpp_sys_2::GGUF_TYPE_UINT32,
+                1u32.to_le_bytes().to_vec(),
+                Some(GgufTemperature::Other("the integer 1".into())),
+            ),
+            (
+                "general.name",
+                llama_cpp_sys_2::GGUF_TYPE_STRING,
+                text("no temperature here"),
+                None,
+            ),
+        ];
+        for (key, value_type, value, expected) in cases {
+            let path = gguf_holding(key, value_type, &value);
+            let read = GgufTemperature::read(&path);
+            let _ = std::fs::remove_file(&path);
+            assert_eq!(read, expected, "{key} of GGUF type {value_type}");
         }
     }
 
@@ -3071,6 +3377,93 @@ mod tests {
                     "probabilities differ by {worst_shared_p}"
                 );
             }
+        }
+    }
+
+    /// A code-readout model whose GGUF carries [`TEMPERATURE_KEY`] scales
+    /// its probabilities with it unless a request sets a temperature, and
+    /// one whose value cannot be used still loads, with temperature 1. Run
+    /// on copies of the GGUF in `EULLM_DECISION_TEST_MODEL` (the 1.2 MB
+    /// `stories260K.gguf` is enough), each with the key added, written to
+    /// the temporary directory and removed again:
+    ///
+    /// ```text
+    /// EULLM_DECISION_TEST_MODEL=/path/to/stories260K.gguf \
+    ///     cargo test --bin eullm decision::tests::real_model_takes -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_takes_its_default_temperature_from_its_gguf() {
+        let src = std::path::PathBuf::from(
+            std::env::var("EULLM_DECISION_TEST_MODEL")
+                .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file"),
+        );
+        // One backend for every load: a second `LlamaBackend::init` fails
+        // while the first is alive.
+        let backend = crate::inference::init_shared_backend().expect("backend");
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+        let load = |path: &Path| {
+            DecisionModel::load(
+                path,
+                threads,
+                DEFAULT_DECISION_CTX,
+                true,
+                Arc::clone(&backend),
+            )
+            .map(|model| model.default_temperature())
+            .map_err(|e| e.to_string())
+        };
+        assert_eq!(
+            load(&src),
+            Ok(1.0),
+            "the test model must be a code-readout model with no temperature of its own"
+        );
+
+        let mut text = 3u64.to_le_bytes().to_vec();
+        text.extend_from_slice(b"0.9");
+        let cases = [
+            (
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT32,
+                0.75f32.to_le_bytes().to_vec(),
+                0.75,
+            ),
+            (
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT64,
+                2.5f64.to_le_bytes().to_vec(),
+                2.5,
+            ),
+            (
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT64,
+                f64::NAN.to_le_bytes().to_vec(),
+                1.0,
+            ),
+            (
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT32,
+                0f32.to_le_bytes().to_vec(),
+                1.0,
+            ),
+            (
+                llama_cpp_sys_2::GGUF_TYPE_FLOAT64,
+                250f64.to_le_bytes().to_vec(),
+                1.0,
+            ),
+            (llama_cpp_sys_2::GGUF_TYPE_STRING, text, 1.0),
+        ];
+        for (value_type, value, expected) in cases {
+            let dst = std::env::temp_dir().join(format!(
+                "eullm-decision-temperature-model-{}.gguf",
+                uuid::Uuid::new_v4()
+            ));
+            let loaded =
+                crate::gguf_patch::add_metadata(&src, &dst, TEMPERATURE_KEY, value_type, &value)
+                    .map_err(|e| e.to_string())
+                    .and_then(|()| load(&dst));
+            let _ = std::fs::remove_file(&dst);
+            assert_eq!(
+                loaded,
+                Ok(expected),
+                "{TEMPERATURE_KEY} of GGUF type {value_type}: {value:?}"
+            );
         }
     }
 }
