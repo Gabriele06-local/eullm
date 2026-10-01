@@ -198,6 +198,21 @@ is that `serve` never prompts — a daemon has nobody at the keyboard — so
 `--fit` adds nothing there and `--fit-strict` surfaces a refused load as an
 error to the API caller.
 
+### `eullm unload [--model NAME]`
+
+Unload generation models from a running server, freeing their VRAM, without
+restarting it: every one, or with `--model` that one only, the others staying
+loaded. Requests still running on an unloaded model are cut off. A later
+request naming a model loads it again.
+
+```bash
+eullm unload                    # every generation model
+eullm unload --model qwen3-8b   # this one only
+eullm unload --port 11500
+```
+
+The same as `POST /api/unload` — see below.
+
 ### `eullm import-ollama <model> [--ollama-dir PATH]`
 
 Import a model from a local Ollama installation into EULLM's model store. Copies the GGUF blob so you can benchmark both engines with the exact same model file.
@@ -1121,7 +1136,7 @@ curl -X POST http://localhost:11434/api/generate \
 | `stream` | true | Stream response token-by-token (NDJSON) |
 | `num_ctx` | server per-slot ctx | Per-request context window budget (clamped to per-slot max) |
 | `format` | — | Set to `"json"` for constrained JSON decoding (GBNF grammar) |
-| `keep_alive` | `--keep-alive` | How long the model stays loaded once this request is over: a duration (`"5m"`), a number of seconds, `0` to unload it as soon as the answer has been sent, `-1` to keep it. The last request to finish on a model sets it |
+| `keep_alive` | `--keep-alive` | How long the model stays loaded once this request is over: a duration (`"5m"`), a number of seconds, `0` to unload it as soon as the answer has been sent, `-1` to keep it. Counted from when the model goes idle, with the keep_alive of the last request that arrived — as in Ollama, so a `keep_alive: 0` sent while an answer is still coming unloads the model once it is over |
 | `options` | — | Ollama-style nested object for `num_predict`, `temperature`, `num_ctx` |
 
 **Ollama `options` support:** Parameters can be passed at the top level (OpenAI style) or nested inside an `options` object (Ollama style). Top-level values take precedence.
@@ -1140,6 +1155,13 @@ curl -X POST http://localhost:11434/api/generate \
 **`num_predict` capping:** If `num_predict` (or `max_tokens`) would exceed the remaining context budget (`effective_ctx - prompt_tokens`), it is automatically capped. The Engine logs a `WARN` when this happens — see the [Logging & Troubleshooting](#logging--troubleshooting) section.
 
 **Streaming:** When `"stream": true` (the default), the response is sent as **NDJSON** (newline-delimited JSON). Each line is a complete JSON object with `"response"` (the token) and `"done": false`. The final line has `"done": true` with timing stats. Content-Type is `application/x-ndjson`.
+
+**Loading and unloading without generating**, as in Ollama: an empty `prompt`
+(or, on `/api/chat`, empty `messages`) loads the model and answers
+`"done_reason": "load"`. With `"keep_alive": 0` it unloads that model instead
+— only that one, the others staying loaded — and answers
+`"done_reason": "unload"`; a model that is not loaded is not loaded first.
+Answering other requests, the model goes when they are over.
 
 ```bash
 # Streaming example (NDJSON — same format as Ollama)
@@ -1172,6 +1194,20 @@ curl -N http://localhost:11434/api/chat \
     "stream": true
   }'
 ```
+
+#### `POST /api/unload`
+
+EuLLM extension: unload generation models now, freeing their VRAM. With a body
+`{"model": "qwen3-8b"}`, that model only; without one, every generation model.
+Requests still running on an unloaded model are cut off — to let them finish
+first, send an empty request with `"keep_alive": 0` instead (see above).
+
+```json
+{ "unloaded": "qwen3-8b", "unloaded_all": ["qwen3-8b"] }
+```
+
+`unloaded` names the first model unloaded, or is `null` when none was loaded —
+which is not an error — and `unloaded_all` lists every one.
 
 #### `POST /api/show`
 

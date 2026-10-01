@@ -567,21 +567,29 @@ enum Commands {
         #[arg(long)]
         ui: bool,
     },
-    /// Unload the currently loaded model from a running eullm server,
-    /// freeing its VRAM — without restarting the server.
+    /// Unload generation models from a running eullm server, freeing their
+    /// VRAM — without restarting the server.
     ///
-    /// A later request with a `model` field (or another `eullm run
-    /// <model>`) loads a model back in. Useful for temporarily handing GPU
-    /// memory to another process — e.g. an embedding model needed during
+    /// Every loaded generation model, or with --model only that one, the
+    /// others staying loaded. Requests still running on an unloaded model
+    /// are cut off. A later request with a `model` field (or another `eullm
+    /// run <model>`) loads a model back in. Useful for temporarily handing
+    /// GPU memory to another process — e.g. an embedding model needed during
     /// RAG document ingestion — then reloading the LLM once it's done.
     ///
     /// Examples:
     ///   eullm unload
+    ///   eullm unload --model qwen3-8b
     ///   eullm unload --port 11500
     Unload {
         /// Port of the running eullm API server
         #[arg(short, long, default_value_t = 11434)]
         port: u16,
+
+        /// Unload only this model (as `/api/tags` names it), and keep the
+        /// others loaded
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
     },
     /// Import a model from a local Ollama installation
     ///
@@ -1043,7 +1051,7 @@ async fn main() {
             )
             .await;
         }
-        Commands::Unload { port } => cmd_unload(port).await,
+        Commands::Unload { port, model } => cmd_unload(port, model.as_deref()).await,
         Commands::ImportOllama { model, ollama_dir } => {
             cmd_import_ollama(&store, &model, ollama_dir.as_deref())
         }
@@ -3026,13 +3034,14 @@ fn load_launch_decision(
     }
 }
 
-/// `eullm unload` — free the currently loaded model's VRAM on a running
-/// `eullm serve`/`eullm run` server, without restarting the process.
+/// `eullm unload` — free generation models' VRAM on a running `eullm
+/// serve`/`eullm run` server, without restarting the process: every one, or
+/// with `--model` that one only.
 ///
-/// Thin CLI wrapper around `POST /api/unload`. The server keeps running
-/// with an empty model slot; a later request with a `model` field (or
-/// another `eullm run <model>`) loads a model back in.
-async fn cmd_unload(port: u16) {
+/// Thin CLI wrapper around `POST /api/unload`. The server keeps running; a
+/// later request with a `model` field (or another `eullm run <model>`) loads
+/// a model back in.
+async fn cmd_unload(port: u16, model: Option<&str>) {
     let url = format!("http://127.0.0.1:{port}/api/unload");
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
@@ -3041,7 +3050,13 @@ async fn cmd_unload(port: u16) {
             std::process::exit(1);
         }
     };
-    let response = match client.post(&url).send().await {
+    let request = match model {
+        Some(name) => client
+            .post(&url)
+            .json(&serde_json::json!({ "model": name })),
+        None => client.post(&url),
+    };
+    let response = match request.send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!(
@@ -3056,12 +3071,41 @@ async fn cmd_unload(port: u16) {
         std::process::exit(1);
     }
     match response.json::<serde_json::Value>().await {
-        Ok(body) => match body.get("unloaded").and_then(|v| v.as_str()) {
-            Some(name) => println!("Unloaded '{name}'. VRAM freed."),
-            None => println!("No model was loaded."),
-        },
+        Ok(body) => {
+            for line in unload_report(&body, model) {
+                println!("{line}");
+            }
+        }
         Err(e) => eprintln!("Error reading response: {e}"),
     }
+}
+
+/// What `eullm unload` prints for the server's answer: every model the
+/// server unloaded, or that there was none. `unloaded_all` lists them; a
+/// server from before it did names one, in `unloaded`.
+fn unload_report(body: &serde_json::Value, asked_for: Option<&str>) -> Vec<String> {
+    let mut names: Vec<&str> = body
+        .get("unloaded_all")
+        .and_then(|v| v.as_array())
+        .map(|all| all.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if names.is_empty()
+        && let Some(name) = body.get("unloaded").and_then(|v| v.as_str())
+    {
+        names.push(name);
+    }
+    if names.is_empty() {
+        return vec![match asked_for {
+            Some(name) => format!("'{name}' was not loaded."),
+            None => "No model was loaded.".to_string(),
+        }];
+    }
+    let mut lines: Vec<String> = names
+        .iter()
+        .map(|name| format!("Unloaded '{name}'."))
+        .collect();
+    lines.push("VRAM freed.".to_string());
+    lines
 }
 
 // ── Import from Ollama ────────────────────────────────────────────────────
@@ -4518,6 +4562,39 @@ mod cli_default_parity_tests {
                 Cli::try_parse_from([sub, &["--mmproj-offload", "--no-mmproj-offload"]].concat());
             assert!(both.is_err(), "both flags at once must be refused");
         }
+    }
+
+    #[test]
+    fn eullm_unload_names_every_model_the_server_unloaded() {
+        let report = |body: serde_json::Value, model| unload_report(&body, model);
+        assert_eq!(
+            report(
+                serde_json::json!({ "unloaded": "a", "unloaded_all": ["a", "b"] }),
+                None
+            ),
+            ["Unloaded 'a'.", "Unloaded 'b'.", "VRAM freed."]
+        );
+        // A server from before `unloaded_all`.
+        assert_eq!(
+            report(serde_json::json!({ "unloaded": "a" }), None),
+            ["Unloaded 'a'.", "VRAM freed."]
+        );
+        assert_eq!(
+            report(
+                serde_json::json!({ "unloaded": null, "unloaded_all": [] }),
+                None
+            ),
+            ["No model was loaded."]
+        );
+        assert_eq!(
+            report(serde_json::json!({ "unloaded": null }), Some("qwen3-8b")),
+            ["'qwen3-8b' was not loaded."]
+        );
+        let parsed = Cli::parse_from(["eullm", "unload", "--model", "qwen3-8b"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Unload { model: Some(ref m), .. }) if m == "qwen3-8b"
+        ));
     }
 
     /// One generation model at a time unless asked: a second one only ever

@@ -915,6 +915,76 @@ impl AppState {
         unloaded
     }
 
+    /// Unload the generation model `requested` names, now — requests still
+    /// running on it are cut off, as with `unload_all` — and leave every
+    /// other resident alone. `None` when it was not loaded, under that name or
+    /// as the same file under another.
+    pub(crate) async fn unload_named(&self, requested: &str) -> Option<String> {
+        let _swap_guard = self.swap_lock.lock().await;
+        let id = self.resident_id(requested).await.ok().flatten()?;
+        let name = self.remove_generation(id, Removal::Always).await?;
+        tracing::info!(
+            "Generation model {} unloaded",
+            crate::audit::sanitize_for_log(&name)
+        );
+        Some(name)
+    }
+
+    /// `keep_alive: 0` on a request that asks for nothing else — Ollama's way
+    /// to unload one model: the model the request names, or the most recently
+    /// used one when it names none, goes without being loaded first. Idle, it
+    /// is unloaded before this returns; answering other requests, it goes
+    /// when they are over, as `keep_alive: 0` on any request does. Every other
+    /// resident stays.
+    ///
+    /// Returns its name, `None` when it was not loaded; a name that is no
+    /// model at all is `ModelError::NotFound`.
+    pub(crate) async fn expire_model(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, ModelError> {
+        let id = match requested {
+            Some(name) => self.resident_id(name).await?,
+            None => self.models.read().await.most_recently_used().map(|m| m.id),
+        };
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let name = {
+            let models = self.models.read().await;
+            let Some(model) = models.get(id) else {
+                return Ok(None);
+            };
+            // As a request that asked for keep_alive 0 and is now over.
+            drop(
+                model
+                    .usage
+                    .lease(KeepAlive::Immediate, self.default_keep_alive, &self.idle),
+            );
+            model.name.clone()
+        };
+        let _swap_guard = self.swap_lock.lock().await;
+        if self.remove_generation(id, Removal::IfDue).await.is_some() {
+            tracing::info!(
+                "keep_alive 0 — unloaded {}",
+                crate::audit::sanitize_for_log(&name)
+            );
+        }
+        Ok(Some(name))
+    }
+
+    /// The resident `requested` names, by name or else as its file, or `None`
+    /// when it is not loaded. A name that is no model at all is
+    /// `ModelError::NotFound`; one the residents answer to is never looked up
+    /// on disk.
+    async fn resident_id(&self, requested: &str) -> Result<Option<u64>, ModelError> {
+        if let Some(model) = self.models.read().await.find(requested) {
+            return Ok(Some(model.id));
+        }
+        let path = self.resolve_model(&normalize_model_name(requested))?;
+        Ok(self.models.read().await.find_file(&path).map(|m| m.id))
+    }
+
     /// Shared by `unload_all` and the companions that need the whole card:
     /// take every generation model out and wait for each one's scheduler
     /// thread to fully exit, so their VRAM is guaranteed freed by the time
@@ -937,8 +1007,8 @@ impl AppState {
     }
 
     /// Unload every generation model that is due (`resident::due`): no
-    /// request is using it, and the last one to finish asked for
-    /// `keep_alive: 0` or left a deadline that has passed. Each is checked
+    /// request is using it, and the keep_alive that applies — the last
+    /// request's to arrive — is 0, or ran out. Each is checked
     /// again under the residents' write guard, where no lease can be taken,
     /// so a request that arrived in the meantime keeps its model.
     async fn unload_due_generation_models(&self) {
@@ -3410,6 +3480,82 @@ mod http_tests {
         let (status, body) = get_json(&format!("{base}/api/tags")).await;
         assert_eq!(status, 401);
         assert!(body["error"].is_string(), "{body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Unloading a model that is not loaded is not an error: it is already
+    /// what was asked for. `unloaded` stays a string or null, which `eullm
+    /// unload` from earlier releases reads.
+    #[tokio::test]
+    async fn api_unload_of_a_model_not_loaded_is_a_200_null() {
+        let tmp = std::env::temp_dir().join(format!("eullm-unload-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        let url = format!("{base}/api/unload");
+        for body in [
+            serde_json::json!({ "model": "a-pulled-model" }),
+            serde_json::json!({ "model": "this-model-does-not-exist" }),
+            serde_json::json!({}),
+        ] {
+            let (status, text) = post_json(&url, body.clone()).await;
+            assert_eq!(status, 200, "{body}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert!(answer["unloaded"].is_null(), "{answer}");
+            assert_eq!(answer["unloaded_all"], serde_json::json!([]));
+        }
+        // No body at all, as `eullm unload` sends.
+        let r = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 200);
+        let answer: serde_json::Value = r.json().await.expect("json");
+        assert!(answer["unloaded"].is_null(), "{answer}");
+
+        let (status, _) = post_json(&url, serde_json::json!({ "model": 7 })).await;
+        assert_eq!(status, 400);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `keep_alive: 0` with an empty prompt or empty messages unloads the
+    /// model without loading it first. The fixture's weights are not a GGUF,
+    /// so a load would answer 500: this one answers `done_reason: "unload"`.
+    #[tokio::test]
+    async fn an_empty_request_with_keep_alive_zero_unloads_without_loading() {
+        let tmp = std::env::temp_dir().join(format!("eullm-expire-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        for (path, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "a-pulled-model", "prompt": "", "keep_alive": 0 }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "a-pulled-model", "messages": [], "keep_alive": 0 }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{path}"), body).await;
+            assert_eq!(status, 200, "{path}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert_eq!(answer["done_reason"], "unload", "{path}: {answer}");
+            assert_eq!(answer["model"], "a-pulled-model");
+            assert_eq!(answer["done"], true);
+        }
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "model": "this-model-does-not-exist", "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 404, "{text}");
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 503, "{text}");
+        assert!(text.contains("No model loaded"), "{text}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

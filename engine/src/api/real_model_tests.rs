@@ -660,3 +660,143 @@ async fn real_model_a_request_to_a_resident_model_is_not_held_by_a_load() {
     assert_eq!(loading.await.expect("tiny-b"), 200);
     assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
 }
+
+/// Each resident keeps its own keep_alive: one expiring leaves the others
+/// alone, and one kept for good stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_each_model_expires_on_its_own() {
+    let tick = Duration::from_millis(25);
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        state.idle_tick = tick;
+    })
+    .await;
+    let ask = |model: &str, keep_alive: Value| {
+        json!({
+            "model": model, "prompt": "Once", "stream": false, "keep_alive": keep_alive,
+            "options": { "num_predict": 4 },
+        })
+    };
+    let (status, _) = server.generate(ask("tiny-b", json!(-1))).await;
+    assert_eq!(status, 200);
+    let kept = server.load_id("tiny-b").await;
+    let (status, _) = server.generate(ask("tiny-a", json!(0.3))).await;
+    assert_eq!(status, 200);
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
+
+    server
+        .wait_for_loaded(&["tiny-b"], Duration::from_secs(5))
+        .await;
+    // Kept for good: still there well past tiny-a's keep_alive.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(server.loaded().await, ["tiny-b"]);
+    assert_eq!(server.load_id("tiny-b").await, kept);
+
+    // Its own keep_alive changes with its own next request.
+    let (status, _) = server.generate(ask("tiny-b", json!(0.1))).await;
+    assert_eq!(status, 200);
+    server.wait_for_loaded(&[], Duration::from_secs(5)).await;
+}
+
+/// An empty request with `keep_alive: 0` unloads the model it names and only
+/// that one, without loading it first; a model still answering finishes its
+/// answer and goes after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_an_empty_request_with_keep_alive_zero_unloads_only_that_model() {
+    let server = start(&["tiny-a", "tiny-b", "tiny-c"], |state| {
+        state.max_loaded_models = 2;
+        state.ctx_size = 8192;
+    })
+    .await;
+    let unload = |model: Option<&str>| {
+        let mut body = json!({ "prompt": "", "keep_alive": 0 });
+        if let Some(model) = model {
+            body["model"] = json!(model);
+        }
+        body
+    };
+    for model in ["tiny-a", "tiny-b"] {
+        let (status, _) = server.generate(short(model)).await;
+        assert_eq!(status, 200);
+    }
+
+    let (status, lines) = server.generate(unload(Some("tiny-a"))).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(lines[0]["done_reason"], "unload");
+    assert_eq!(
+        server.loaded().await,
+        ["tiny-b"],
+        "unloaded before the answer"
+    );
+
+    // A model that is not loaded is not loaded to be unloaded.
+    let (status, lines) = server.generate(unload(Some("tiny-c"))).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(lines[0]["done_reason"], "unload");
+    assert_eq!(server.loaded().await, ["tiny-b"]);
+
+    // Busy: its answer is finished, and the model goes after it.
+    let answering = server.start_streaming("tiny-b", 3000).await;
+    let (status, lines) = server.generate(unload(Some("tiny-b"))).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(server.loaded().await, ["tiny-b"], "still answering");
+    let (lines, _) = read_to_end(answering).await;
+    assert_finished(&lines);
+    server.wait_for_loaded(&[], Duration::from_secs(5)).await;
+
+    // With no model named, the most recently used one goes.
+    for model in ["tiny-a", "tiny-c"] {
+        let (status, _) = server.generate(short(model)).await;
+        assert_eq!(status, 200);
+    }
+    let (status, lines) = server.generate(unload(None)).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(lines[0]["model"], "tiny-c");
+    assert_eq!(server.loaded().await, ["tiny-a"]);
+}
+
+/// `/api/unload` with a model unloads that one and leaves the others; without
+/// one, every generation model goes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_unload_names_one_model_or_takes_them_all() {
+    let server = start(&["tiny-a", "tiny-b"], |state| state.max_loaded_models = 2).await;
+    for model in ["tiny-a", "tiny-b"] {
+        let (status, _) = server.generate(short(model)).await;
+        assert_eq!(status, 200);
+    }
+    let unload = |body: Option<Value>| {
+        let url = format!("{}/api/unload", server.base);
+        async move {
+            let request = reqwest::Client::new().post(url);
+            let request = match body {
+                Some(body) => request.json(&body),
+                None => request,
+            };
+            let response = request.send().await.expect("request");
+            assert_eq!(response.status(), 200);
+            response.json::<Value>().await.expect("json")
+        }
+    };
+
+    let answer = unload(Some(json!({ "model": "tiny:a" }))).await;
+    assert_eq!(answer["unloaded"], "tiny-a");
+    assert_eq!(answer["unloaded_all"], json!(["tiny-a"]));
+    assert_eq!(server.loaded().await, ["tiny-b"]);
+
+    let (status, _) = server.generate(short("tiny-a")).await;
+    assert_eq!(status, 200);
+    let answer = unload(None).await;
+    let mut all: Vec<String> = answer["unloaded_all"]
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    all.sort();
+    assert_eq!(all, ["tiny-a", "tiny-b"]);
+    assert!(answer["unloaded"].is_string());
+    assert!(server.loaded().await.is_empty());
+}

@@ -348,13 +348,7 @@ async fn ensure_model(
     }
 
     let Some(name) = requested else {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
-            ),
-        )
-            .into());
+        return Err(no_model_loaded().into());
     };
     state
         .load_generation_model(name, override_batch_size, override_ctx_size, keep_alive)
@@ -385,6 +379,42 @@ async fn ensure_model(
                 retry_after_secs: Some(BUSY_RETRY_AFTER_SECS),
             },
         })
+}
+
+/// `keep_alive: 0` on an empty request: unload the model it names — the
+/// most recently used one when it names none — without loading it first
+/// (`AppState::expire_model`), and say which. A model that exists but is not
+/// loaded is answered as unloaded, as Ollama does; with no model named and
+/// none loaded there is nothing to answer for, as on the load path.
+async fn unload_for_keep_alive_zero(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<String, Refusal> {
+    match state.expire_model(requested).await {
+        Ok(Some(name)) => Ok(requested.map_or(name, str::to_string)),
+        Ok(None) => match requested {
+            Some(name) => Ok(name.to_string()),
+            None => Err(no_model_loaded().into()),
+        },
+        Err(crate::api::ModelError::NotFound(msg)) => {
+            Err((StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into())
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into()),
+    }
+}
+
+/// The 503 for a request that names no model, with none loaded.
+fn no_model_loaded() -> ApiError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(
+            json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
+        ),
+    )
 }
 
 /// Parsed sampling parameters from the API request.
@@ -1127,18 +1157,58 @@ async fn version(State(state): State<S>) -> Json<Value> {
     }))
 }
 
-/// Unload the currently loaded model, freeing its VRAM, without loading a
+/// Unload generation models, freeing their VRAM, without loading a
 /// replacement. EULLM extension (not part of the Ollama API) — the primary
 /// use case is handing GPU memory to a co-resident process (e.g. an
 /// embedding server used during RAG document ingestion) without restarting
 /// eullm. Send a request with a `model` field afterwards (or run `eullm run
 /// <model>` again) to load a model back in.
-async fn unload_model(State(state): State<S>) -> Json<Value> {
-    // A string, or null: `eullm unload` reads it as one.
-    match state.unload_all().await.first() {
-        Some(name) => Json(json!({ "unloaded": name })),
-        None => Json(json!({ "unloaded": null, "message": "no model was loaded" })),
-    }
+///
+/// An optional `{"model": "..."}` body unloads that model only, leaving
+/// every other resident; without one, every generation model goes. Either
+/// way now: requests still running on an unloaded model are cut off.
+/// `unloaded` names the first model unloaded, or is null — a string, which
+/// `eullm unload` from older releases reads — and `unloaded_all` lists them
+/// all.
+async fn unload_model(
+    State(state): State<S>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let requested = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        let body: Value = serde_json::from_slice(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid JSON body: {e}") })),
+            )
+        })?;
+        match body.get("model") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.clone()),
+            Some(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "\"model\" must be a string" })),
+                ));
+            }
+        }
+    };
+    let unloaded: Vec<String> = match &requested {
+        Some(name) => state.unload_named(name).await.into_iter().collect(),
+        None => state.unload_all().await,
+    };
+    Ok(Json(match unloaded.first() {
+        Some(first) => json!({ "unloaded": first, "unloaded_all": unloaded }),
+        None => json!({
+            "unloaded": null,
+            "unloaded_all": [],
+            "message": match &requested {
+                Some(name) => format!("'{name}' was not loaded"),
+                None => "no model was loaded".to_string(),
+            },
+        }),
+    }))
 }
 
 /// `input`, in either shape the two embedding endpoints accept: one string,
@@ -1555,6 +1625,26 @@ async fn generate(
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
+    let prompt = body
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    // An empty prompt with `keep_alive: 0` is Ollama's way to unload one
+    // model: that model goes, and only it, without being loaded first.
+    if prompt.is_empty() && keep_alive == super::KeepAlive::Immediate {
+        let model = unload_for_keep_alive_zero(&state, requested).await?;
+        return Ok(Json(json!({
+            "model": model,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "response": "",
+            "done": true,
+            "done_reason": "unload",
+        }))
+        .into_response());
+    }
+
     let snap = ensure_model(
         &state,
         requested,
@@ -1564,12 +1654,6 @@ async fn generate(
     )
     .await?;
     let model = snap.model_name.clone();
-
-    let prompt = body
-        .get("prompt")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
     // An empty prompt is Ollama's documented way to load a model (or apply a
     // `keep_alive` to one already loaded) without generating anything —
@@ -1731,6 +1815,25 @@ async fn chat(
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
+    let messages = body
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // The unload counterpart, as on `/api/generate`.
+    if messages.is_empty() && keep_alive == super::KeepAlive::Immediate {
+        let model = unload_for_keep_alive_zero(&state, requested).await?;
+        return Ok(Json(json!({
+            "model": model,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+            "done_reason": "unload",
+        }))
+        .into_response());
+    }
+
     let snap = ensure_model(
         &state,
         requested,
@@ -1740,12 +1843,6 @@ async fn chat(
     )
     .await?;
     let model = snap.model_name.clone();
-
-    let messages = body
-        .get("messages")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
 
     // Same warm-load shape as `/api/generate` with an empty prompt: an empty
     // `messages` array asks only for the load (and, with it, a `keep_alive`)

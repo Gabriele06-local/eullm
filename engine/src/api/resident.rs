@@ -9,13 +9,16 @@
 //! request that asked for it had been submitted, which the scheduler then
 //! reported as a full queue.
 //!
+//! Which keep_alive applies is the last request's to arrive, as in Ollama:
+//! `keep_alive: 0` sent while an answer is still coming unloads the model
+//! once that answer is over, rather than being undone by it.
+//!
 //! Which resident gives way when another model has to load is decided here
 //! too, by pure functions over a [`ResidentView`] of each: [`next_step`] and
 //! [`eviction_order`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -24,28 +27,28 @@ use super::KeepAlive;
 use crate::inference::{InferenceEngine, SchedulerHandle};
 
 /// How one loaded generation model is in use, shared by its entry among the
-/// residents and by every lease on it. Nothing here is held across an await:
-/// atomics, and mutexes held for one assignment each.
+/// residents and by every lease on it: one mutex, held for a few assignments
+/// and never across an await, so that a view of it is always one moment's.
 pub(crate) struct Usage {
-    /// Leases out: requests whose response has not finished.
-    in_flight: AtomicUsize,
-    /// When a request on this model last started or finished, or when it
-    /// loaded: what "least recently used" is measured by.
-    last_used: parking_lot::Mutex<Instant>,
-    /// When the model, once idle, becomes due for unloading: set by the last
-    /// request to finish, from its keep_alive. `None`: no deadline.
-    deadline: parking_lot::Mutex<Option<Instant>>,
-    /// The last request to finish asked for `keep_alive: 0`.
-    unload_when_idle: AtomicBool,
+    state: parking_lot::Mutex<UsageView>,
 }
 
 /// [`Usage`] read at one moment, for [`due`] and the eviction order.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct UsageView {
+    /// Leases out: requests whose response has not finished.
     pub(crate) in_flight: usize,
+    /// When a request on this model last started or finished, or when it
+    /// loaded: what "least recently used" is measured by.
     pub(crate) last_used: Instant,
+    /// When the model, idle since its last request ended, becomes due for
+    /// unloading. `None`: no deadline — in use, or kept for good.
     pub(crate) deadline: Option<Instant>,
+    /// Idle, and the keep_alive that applies is 0: unload it now.
     pub(crate) unload_when_idle: bool,
+    /// The keep_alive of the last request to arrive, resolved against the
+    /// server's default: what applies when the model next goes idle.
+    keep_alive: KeepAlive,
 }
 
 impl UsageView {
@@ -62,14 +65,18 @@ impl Usage {
     /// starts with is kept until its first request.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            in_flight: AtomicUsize::new(0),
-            last_used: parking_lot::Mutex::new(Instant::now()),
-            deadline: parking_lot::Mutex::new(None),
-            unload_when_idle: AtomicBool::new(false),
+            state: parking_lot::Mutex::new(UsageView {
+                in_flight: 0,
+                last_used: Instant::now(),
+                deadline: None,
+                unload_when_idle: false,
+                keep_alive: KeepAlive::Forever,
+            }),
         })
     }
 
-    /// One more request in flight on this model.
+    /// One more request in flight on this model, whose keep_alive is now the
+    /// one that applies.
     ///
     /// Take it while holding a guard on the residents: an unload checks
     /// `in_flight` under their write guard, so a lease taken under the read
@@ -82,32 +89,28 @@ impl Usage {
         default: Option<Duration>,
         idle: &Arc<Notify>,
     ) -> Lease {
-        self.in_flight.fetch_add(1, Ordering::SeqCst);
-        *self.last_used.lock() = Instant::now();
+        {
+            let mut state = self.state.lock();
+            state.in_flight += 1;
+            state.last_used = Instant::now();
+            state.keep_alive = keep_alive.resolve(default);
+            // In use: nothing counts down until it is idle again.
+            state.deadline = None;
+            state.unload_when_idle = false;
+        }
         Lease {
             usage: Arc::clone(self),
-            keep_alive,
-            default,
             idle: Arc::clone(idle),
         }
     }
 
     pub(crate) fn view(&self) -> UsageView {
-        // `in_flight` first: a lease writes the deadline before it gives
-        // back its count, so a view that reads 0 also reads that deadline.
-        let in_flight = self.in_flight.load(Ordering::SeqCst);
-        UsageView {
-            in_flight,
-            last_used: *self.last_used.lock(),
-            deadline: *self.deadline.lock(),
-            unload_when_idle: self.unload_when_idle.load(Ordering::SeqCst),
-        }
+        *self.state.lock()
     }
 }
 
 /// Whether a model should be unloaded now: no request is using it, and the
-/// last one to finish asked for `keep_alive: 0` or left a deadline that has
-/// passed.
+/// keep_alive that applies is 0, or ran out at a deadline that has passed.
 pub(crate) fn due(usage: &UsageView, now: Instant) -> bool {
     usage.in_flight == 0
         && (usage.unload_when_idle || usage.deadline.is_some_and(|deadline| now >= deadline))
@@ -117,32 +120,35 @@ pub(crate) fn due(usage: &UsageView, now: Instant) -> bool {
 /// is over: when the handler returns, or with the stream it was moved into.
 pub(crate) struct Lease {
     usage: Arc<Usage>,
-    keep_alive: KeepAlive,
-    default: Option<Duration>,
     /// Woken when the last lease on a model is released, so the idle-unload
     /// loop acts on `keep_alive: 0` at once rather than at its next tick.
     idle: Arc<Notify>,
 }
 
 impl Drop for Lease {
-    /// The request is over, so its keep_alive starts now. The last request to
-    /// finish decides what happens next: each one replaces the deadline the
-    /// one before it left.
+    /// The request is over. If it was the last one running, the model is idle
+    /// from now, and the keep_alive of the last request to arrive starts to
+    /// count.
     fn drop(&mut self) {
         let now = Instant::now();
-        let (deadline, immediate) = match self.keep_alive.resolve(self.default) {
-            // A duration too long for an `Instant` is a deadline that never
-            // comes, not a panic in whatever drops the lease.
-            KeepAlive::For(duration) => (now.checked_add(duration), false),
-            KeepAlive::Immediate => (None, true),
-            KeepAlive::Forever | KeepAlive::Default => (None, false),
+        let idle = {
+            let mut state = self.usage.state.lock();
+            state.in_flight = state.in_flight.saturating_sub(1);
+            state.last_used = now;
+            let idle = state.in_flight == 0;
+            if idle {
+                (state.deadline, state.unload_when_idle) = match state.keep_alive {
+                    // A duration too long for an `Instant` is a deadline
+                    // that never comes, not a panic in whatever drops the
+                    // lease.
+                    KeepAlive::For(duration) => (now.checked_add(duration), false),
+                    KeepAlive::Immediate => (None, true),
+                    KeepAlive::Forever | KeepAlive::Default => (None, false),
+                };
+            }
+            idle
         };
-        *self.usage.last_used.lock() = now;
-        *self.usage.deadline.lock() = deadline;
-        self.usage
-            .unload_when_idle
-            .store(immediate, Ordering::SeqCst);
-        if self.usage.in_flight.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if idle {
             self.idle.notify_waiters();
         }
     }
@@ -476,14 +482,17 @@ mod tests {
         assert!(due(&usage.view(), Instant::now()));
     }
 
+    /// Which keep_alive applies is the last request's to arrive — the
+    /// order Ollama keeps — counted from when the model goes idle, whichever
+    /// request ends last.
     #[test]
-    fn the_last_request_to_finish_decides() {
+    fn the_last_request_to_arrive_decides() {
         let usage = Usage::new();
         let idle = notify();
         let unload = usage.lease(KeepAlive::Immediate, None, &idle);
         let keep = usage.lease(KeepAlive::Forever, None, &idle);
-        drop(unload);
         drop(keep);
+        drop(unload);
         assert!(!due(
             &usage.view(),
             Instant::now() + Duration::from_secs(3600)
@@ -491,8 +500,9 @@ mod tests {
 
         let keep = usage.lease(KeepAlive::Forever, None, &idle);
         let unload = usage.lease(KeepAlive::Immediate, None, &idle);
-        drop(keep);
         drop(unload);
+        assert!(!due(&usage.view(), Instant::now()), "still answering");
+        drop(keep);
         assert!(due(&usage.view(), Instant::now()));
     }
 
@@ -522,8 +532,39 @@ mod tests {
                 last_used,
                 deadline: None,
                 unload_when_idle: false,
+                keep_alive: KeepAlive::Forever,
             },
             launch: false,
+        }
+    }
+
+    /// `due` is what the idle-unload loop asks of each resident on its own.
+    #[test]
+    fn due_takes_only_an_idle_model_whose_keep_alive_is_over() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let view = |in_flight, deadline, unload_when_idle| UsageView {
+            in_flight,
+            last_used: t0,
+            deadline,
+            unload_when_idle,
+            keep_alive: KeepAlive::Forever,
+        };
+        let now = t0 + s(60);
+        for (usage, expected, why) in [
+            (view(0, None, false), false, "no deadline: kept for good"),
+            (view(0, Some(t0 + s(30)), false), true, "deadline passed"),
+            (view(0, Some(now), false), true, "deadline reached"),
+            (view(0, Some(t0 + s(90)), false), false, "deadline ahead"),
+            (view(0, None, true), true, "keep_alive 0, idle"),
+            (view(1, None, true), false, "keep_alive 0, still answering"),
+            (
+                view(2, Some(t0 + s(30)), false),
+                false,
+                "expired, still answering",
+            ),
+        ] {
+            assert_eq!(due(&usage, now), expected, "{why}");
         }
     }
 
