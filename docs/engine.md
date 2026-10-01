@@ -98,9 +98,10 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--daemon` | false | Run as a background daemon |
 | `--pidfile` | `/tmp/eullm.pid` | PID file path (with `--daemon`) |
 | `--logfile` | `~/.eullm/logs/eullm.log` | Daemon log file (with `--daemon`). Set `--pidfile` alone and the log stays beside it |
-| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently |
+| `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently. For a generation model the time counts from the end of its last request, and a model is never unloaded while a request is using it |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
 | `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
+| `--max-loaded-models` | `1` | How many generation models stay loaded at once (1–16); embedding and decision models are not counted. Past it, the least recently used idle model is unloaded; above 1, a model answering requests is never unloaded to make room. At 1, a request for another model replaces the loaded one, as before. See [Several models at once](#several-models-at-once) |
 | `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
@@ -197,6 +198,21 @@ is that `serve` never prompts — a daemon has nobody at the keyboard — so
 `--fit` adds nothing there and `--fit-strict` surfaces a refused load as an
 error to the API caller.
 
+### `eullm unload [--model NAME]`
+
+Unload generation models from a running server, freeing their VRAM, without
+restarting it: every one, or with `--model` that one only, the others staying
+loaded. Requests still running on an unloaded model are cut off. A later
+request naming a model loads it again.
+
+```bash
+eullm unload                    # every generation model
+eullm unload --model qwen3-8b   # this one only
+eullm unload --port 11500
+```
+
+The same as `POST /api/unload` — see below.
+
 ### `eullm import-ollama <model> [--ollama-dir PATH]`
 
 Import a model from a local Ollama installation into EULLM's model store. Copies the GGUF blob so you can benchmark both engines with the exact same model file.
@@ -261,7 +277,8 @@ curl http://localhost:11434/api/generate \
 
 **Behavior:**
 
-- In-flight requests on the old model complete normally (they hold cloned handles)
+- With one model at a time (the default), a swap cuts off the requests the old model is still answering: they end with the error `Server shutting down`. To keep several models loaded instead, see [Several models at once](#several-models-at-once)
+- A model served sequentially — every multimodal model, and any with `--batch-size 0` — cannot be cut off, and is freed only when the requests running on it end, so a swap waits for them, up to 30 seconds, before the next model is sized against free VRAM
 - The new model loads on a blocking thread, then atomically replaces the slot
 - The model name must be an imported model (`eullm import-ollama`) or a local GGUF path
 
@@ -281,6 +298,54 @@ That split is not a detail: treating a per-model property as a process-wide
 setting is how a launch model's projector ended up on its successors, and how
 a layer count chosen for one model produced an out-of-memory error on the
 next one.
+
+### Several models at once
+
+`--max-loaded-models N` (default 1, at most 16) keeps up to N generation
+models loaded, so that requests alternating between models answer from memory
+instead of reloading one each time. Embedding and decision models have slots
+of their own and are not counted.
+
+```bash
+eullm serve --max-loaded-models 2
+curl http://localhost:11434/api/generate -d '{"model": "qwen3-4b", "prompt": "Ciao"}'
+curl http://localhost:11434/api/generate -d '{"model": "qwen3-8b", "prompt": "Ciao"}'
+# → both stay loaded; the next request to either answers at once
+```
+
+How a model finds its place:
+
+- **Below the limit**, a model a request names is loaded beside the others.
+- **At the limit**, the least recently used idle model is unloaded first. A
+  model whose keep_alive is over goes before any other, a model kept for good
+  (`keep_alive: -1`, or no `--keep-alive`) after one that would expire, and
+  the model `eullm run` started with goes last.
+- **A model answering requests is never unloaded to make room.** When every
+  model that could make room is busy, the load waits up to 120 seconds for one
+  to finish, then answers 503 with `Retry-After: 5`. This holds from a limit
+  of 2: at 1, the default, a request for another model replaces the loaded
+  one even mid-answer, as it always did.
+- **A model loads beside others only if it fits whole** on the GPU in what
+  they leave free: every layer, and its projector. Otherwise models are
+  unloaded until it fits, or until it is alone, when it is sized like any
+  model loaded by itself, partial split included. The same rule as Ollama's
+  ("new models must be able to completely fit in VRAM to allow concurrent
+  model loads"): a second model only ever gets what the first one left, and
+  splitting it silently would divide the card. Without automatic sizing
+  (`--no-fit`, or a build that cannot read free VRAM) only the count is kept,
+  and the server says so at startup.
+- A request with no `model` field is answered by the most recently used model.
+
+Requests to a model that is loaded never wait for another model's load.
+`GET /api/ps` lists what is loaded, with what each model holds and when it
+expires. `/api/version` reports `max_loaded_models`, `loaded_models`, and
+`generation_evictions` (how many models were unloaded to make room; a steady
+rate of one per request means the models asked for do not fit together).
+
+Unlike Ollama's `OLLAMA_MAX_LOADED_MODELS`, this is a command-line flag, not an
+environment variable, and it counts generation models only, defaulting to 1
+rather than three per GPU. The server says so at startup when the variable is
+set.
 
 ## KV Cache Quantization
 
@@ -371,9 +436,13 @@ Start with `--batch-size 4` for the best per-request latency. Increase when your
 The Engine supports hot-swapping models at runtime. When a request specifies a different `model`, the server automatically:
 
 1. **Shuts down** the old scheduler thread (waits for it to fully exit)
-2. **Frees VRAM** — the old model, KV cache, and LlamaBackend are destroyed
+2. **Frees VRAM** — the old model and its KV cache are destroyed
 3. **Loads** the new model with the requested configuration
 4. **Resumes** serving requests on the new model
+
+That is with one model at a time, the default. With `--max-loaded-models`
+above 1, a model is unloaded only when the new one needs its place or its
+memory — see [Several models at once](#several-models-at-once).
 
 ### Basic swap (via model field)
 
@@ -423,12 +492,17 @@ The `model` field accepts:
 | Directory | `/models/mymodel/` | Picks the first `.gguf` file inside |
 | Registered name | `legal-it-4b` | Looked up in `~/.eullm/models/` |
 
+A model is its file, whatever it is called: a request that names the loaded
+model's GGUF another way — its path, or a second name `eullm pull` linked to
+the same weights — is answered by the model already loaded, under the name it
+was loaded with, instead of loading the same weights again.
+
 ### Concurrent swap safety
 
 Multiple requests arriving simultaneously for a different model are handled safely:
-- Only one swap runs at a time (serialized via Mutex)
-- Other requests wait for the swap to complete, then use the new model
-- In-flight requests on the old model continue normally via reference counting
+- Only one load runs at a time (serialized via Mutex); requests to a model that is already loaded do not wait for it
+- Other requests for the model being loaded wait for the load to complete, then use it
+- With one model at a time (the default), requests the old model is still answering are cut off with an error, except on a sequential engine, which finishes them before it is freed. With `--max-loaded-models` above 1, a model answering requests is never unloaded to make room — see [Several models at once](#several-models-at-once)
 
 ### VRAM budget reference
 
@@ -1225,13 +1299,24 @@ curl http://localhost:11434/api/version
 
 ```json
 {
-  "version": "0.1.0"
+  "version": "0.7.20",
+  "api_port": 11434,
+  "model_swaps": 0,
+  "max_loaded_models": 1,
+  "loaded_models": 1,
+  "generation_evictions": 0
 }
 ```
 
+Besides Ollama's `version`, EuLLM reports the API port, `model_swaps` (models
+evicted to make room in another slot), and the [resident
+models](#several-models-at-once): the `--max-loaded-models` limit, how many
+generation models are loaded, and how many were unloaded to make room for
+another.
+
 #### `GET /api/tags`
 
-List available models. Returns the currently loaded model first (what admin dashboards check for health), followed by catalog entries.
+List available models. Returns the loaded models first, the most recently used first, each with `"loaded": true` (what admin dashboards check for health), followed by catalog entries and the other models in the store. `GET /api/ps` lists only what is loaded, with what each model holds.
 
 ```bash
 curl http://localhost:11434/api/tags
@@ -1294,6 +1379,7 @@ curl -X POST http://localhost:11434/api/generate \
 | `stream` | true | Stream response token-by-token (NDJSON) |
 | `num_ctx` | server per-slot ctx | Per-request context window budget (clamped to per-slot max) |
 | `format` | — | Set to `"json"` for constrained JSON decoding (GBNF grammar) |
+| `keep_alive` | `--keep-alive` | How long the model stays loaded once this request is over: a duration (`"5m"`), a number of seconds, `0` to unload it as soon as the answer has been sent, `-1` to keep it. Counted from when the model goes idle, with the keep_alive of the last request that arrived — as in Ollama, so a `keep_alive: 0` sent while an answer is still coming unloads the model once it is over |
 | `options` | — | Ollama-style nested object for `num_predict`, `temperature`, `num_ctx` |
 
 **Ollama `options` support:** Parameters can be passed at the top level (OpenAI style) or nested inside an `options` object (Ollama style). Top-level values take precedence.
@@ -1312,6 +1398,13 @@ curl -X POST http://localhost:11434/api/generate \
 **`num_predict` capping:** If `num_predict` (or `max_tokens`) would exceed the remaining context budget (`effective_ctx - prompt_tokens`), it is automatically capped. The Engine logs a `WARN` when this happens — see the [Logging & Troubleshooting](#logging--troubleshooting) section.
 
 **Streaming:** When `"stream": true` (the default), the response is sent as **NDJSON** (newline-delimited JSON). Each line is a complete JSON object with `"response"` (the token) and `"done": false`. The final line has `"done": true` with timing stats. Content-Type is `application/x-ndjson`.
+
+**Loading and unloading without generating**, as in Ollama: an empty `prompt`
+(or, on `/api/chat`, empty `messages`) loads the model and answers
+`"done_reason": "load"`. With `"keep_alive": 0` it unloads that model instead
+— only that one, the others staying loaded — and answers
+`"done_reason": "unload"`; a model that is not loaded is not loaded first.
+Answering other requests, the model goes when they are over.
 
 ```bash
 # Streaming example (NDJSON — same format as Ollama)
@@ -1344,6 +1437,75 @@ curl -N http://localhost:11434/api/chat \
     "stream": true
   }'
 ```
+
+#### `GET /api/ps`
+
+The models in memory, in Ollama's shape: every generation model, the most
+recently used first, then the embedding and decision models.
+
+```bash
+curl http://localhost:11434/api/ps
+```
+
+```json
+{
+  "models": [
+    {
+      "name": "qwen3-8b",
+      "model": "qwen3-8b",
+      "size": 5603000000,
+      "digest": "sha256:…",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen3",
+        "families": ["qwen3"],
+        "parameter_size": "8.2B",
+        "quantization_level": "Q4_K_M"
+      },
+      "expires_at": "2026-10-01T15:42:07.512+00:00",
+      "size_vram": 5410000000,
+      "context_length": 4096,
+      "eullm": {
+        "slot": "generation",
+        "in_flight": 0,
+        "last_used": "2026-10-01T15:37:07.512+00:00",
+        "batch_size": 1,
+        "gpu_layers": -1,
+        "reserved_companion": false,
+        "launch": false,
+        "size_vram_measured": true
+      }
+    }
+  ]
+}
+```
+
+- `size` is the model's weights, its projector and its KV cache; `size_vram`
+  what free VRAM lost when it loaded (`eullm.size_vram_measured`), or an
+  estimate from its layers on the GPU when that could not be measured.
+- `expires_at` is when its keep_alive runs out once it is idle; a model kept
+  for good gets a date centuries ahead, as in Ollama, never `null`.
+- `context_length` is what one request gets: a scheduler's context is shared
+  by its `batch_size` slots.
+- `eullm` is EuLLM's own: which slot holds the model, how many requests it is
+  answering, when it was last used, and whether it is a reserved companion
+  (`--embedding-model`, `--decision-model`) or the model `eullm run` started
+  with.
+
+#### `POST /api/unload`
+
+EuLLM extension: unload generation models now, freeing their VRAM. With a body
+`{"model": "qwen3-8b"}`, that model only; without one, every generation model.
+Requests still running on an unloaded model are cut off — to let them finish
+first, send an empty request with `"keep_alive": 0` instead (see above).
+
+```json
+{ "unloaded": "qwen3-8b", "unloaded_all": ["qwen3-8b"] }
+```
+
+`unloaded` names the first model unloaded, or is `null` when none was loaded —
+which is not an error — and `unloaded_all` lists every one.
 
 #### `POST /api/show`
 

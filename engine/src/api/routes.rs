@@ -27,10 +27,9 @@ use tokio::sync::mpsc;
 use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded, EmbeddingModel};
 
 use super::AppState;
+use super::resident::{Lease, SlotSnapshot};
 use crate::audit::{AuditEntry, AuditLogger};
-use crate::inference::{
-    GenerateRequest, InferenceEngine, JSON_GBNF, SchedulerHandle, StopReason, StreamEvent,
-};
+use crate::inference::{GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent};
 use crate::models::EU_CATALOG;
 use crate::tools;
 
@@ -48,13 +47,46 @@ const MAX_BATCH_SIZE_OVERRIDE: usize = 64;
 /// Bounds accepted for a request's `ctx_size` override. The lower bound leaves
 /// room for a prompt plus at least one output token; the upper bound is the
 /// largest context any current architecture declares, and keeps the value from
-/// becoming a KV-cache allocation that fails *after* `swap_model` has already
+/// becoming a KV-cache allocation that fails *after* `load_generation_model` has already
 /// unloaded the previous model.
 const MIN_CTX_SIZE_OVERRIDE: u32 = 512;
 const MAX_CTX_SIZE_OVERRIDE: u32 = 1_048_576;
 
 /// Error shape returned by the JSON handlers: an HTTP status plus a JSON body.
 type ApiError = (StatusCode, Json<Value>);
+
+/// What a generation handler answers when it cannot answer: an [`ApiError`],
+/// and for a 503 a client may simply retry, the `Retry-After` that says when.
+struct Refusal {
+    status: StatusCode,
+    body: Json<Value>,
+    retry_after_secs: Option<u64>,
+}
+
+impl From<ApiError> for Refusal {
+    fn from((status, body): ApiError) -> Self {
+        Self {
+            status,
+            body,
+            retry_after_secs: None,
+        }
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> axum::response::Response {
+        let mut response = (self.status, self.body).into_response();
+        if let Some(secs) = self.retry_after_secs {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, axum::http::HeaderValue::from(secs));
+        }
+        response
+    }
+}
+
+/// When a client refused with `ModelError::Busy` may try again.
+const BUSY_RETRY_AFTER_SECS: u64 = 5;
 
 /// Validated `(batch_size, ctx_size)` slot overrides read from a request body.
 /// `None` in either position means "keep the launch-time value".
@@ -63,7 +95,7 @@ type SlotOverrides = (Option<usize>, Option<u32>);
 /// Read the `batch_size` / `ctx_size` slot overrides from a request body,
 /// rejecting anything outside a serviceable range with HTTP 400.
 ///
-/// Both fields are forwarded to `AppState::swap_model`, which rebuilds the
+/// Both fields are forwarded to `AppState::load_generation_model`, which rebuilds the
 /// scheduler and reallocates the KV cache. A value that is merely *parsed*
 /// rather than *validated* therefore turns a single request into a
 /// configuration change that can leave the server unable to serve anything
@@ -124,6 +156,7 @@ fn parse_slot_overrides(body: &Value) -> Result<SlotOverrides, ApiError> {
 pub fn api_routes() -> Router<S> {
     Router::new()
         .route("/tags", get(list_models))
+        .route("/ps", get(list_running))
         .route("/generate", post(generate))
         .route("/chat", post(chat))
         .route("/show", post(show_model))
@@ -295,77 +328,113 @@ pub fn openai_routes() -> Router<S> {
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────
 
-/// A snapshot of the model slot — cloned handles that don't hold the RwLock.
-/// The `Arc` / `SchedulerHandle` clones are cheap (refcount bump + channel clone)
-/// and keep the old model alive until in-flight requests finish.
-struct SlotSnapshot {
-    model_name: String,
-    engine: Option<Arc<InferenceEngine>>,
-    scheduler: Option<SchedulerHandle>,
-}
-
-/// Ensure the requested model is loaded and return a snapshot of the slot.
+/// Ensure the requested model is loaded and return a snapshot of it, with a
+/// lease on the model for this request (see `resident::Lease`).
 ///
-/// If `requested` differs from the currently loaded model, triggers a
-/// dynamic model swap (unloads old, loads new).  In-flight requests on
-/// cloned handles of the old model complete normally.
+/// A model that is resident answers at once: finding it takes the residents'
+/// read guard and nothing else. One that is not is loaded, which makes room
+/// for it first (see `AppState::load_generation_model`).
 ///
-/// If no model is specified in the request, uses whatever is loaded.
+/// If no model is specified in the request, uses the most recently used
+/// resident.
+///
+/// `keep_alive` is the request's own: it applies to the model that answers
+/// it, from the moment the response is over.
 async fn ensure_model(
     state: &AppState,
     requested: Option<&str>,
     override_batch_size: Option<usize>,
     override_ctx_size: Option<u32>,
-) -> Result<SlotSnapshot, (StatusCode, Json<Value>)> {
-    // Check if a swap is needed.
-    if let Some(name) = requested {
-        let normalized = name.replace(':', "-");
-        let needs_swap = {
-            let slot = state.slot.read().await;
-            match slot.model_name.as_deref() {
-                Some(loaded) => !model_names_match(loaded, &normalized),
-                None => true,
-            }
+    keep_alive: super::KeepAlive,
+) -> Result<SlotSnapshot, Refusal> {
+    {
+        // The lease is taken under this guard: see `resident::Usage::lease`.
+        let models = state.models.read().await;
+        let found = match requested {
+            Some(name) => models.find(name),
+            None => models.most_recently_used(),
         };
-        if needs_swap {
-            state
-                .swap_model(name, override_batch_size, override_ctx_size)
-                .await
-                .map_err(|e| match e {
-                    // A model that does not exist is a client mistake, and a
-                    // 5xx here is actively harmful: clients with automatic
-                    // retry treat it as transient and hammer a request that
-                    // can never succeed. Ollama answers 404 for this.
-                    crate::api::ModelError::NotFound(msg) => {
-                        (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
-                    }
-                    // The model exists but would not load: out of VRAM, a
-                    // corrupt GGUF, a context that will not allocate. That is
-                    // ours, and 500 is correct.
-                    crate::api::ModelError::LoadFailed(msg) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("Failed to load model '{name}': {msg}") })),
-                    ),
-                })?;
+        if let Some(model) = found {
+            return Ok(state.lease(model, keep_alive));
         }
     }
 
-    // Take a read-lock snapshot (cheap clones: Arc bump + channel clone).
-    let slot = state.slot.read().await;
-    if slot.engine.is_none() && slot.scheduler.is_none() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(
-                json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
-            ),
-        ));
-    }
+    let Some(name) = requested else {
+        return Err(no_model_loaded().into());
+    };
+    let loading = std::time::Instant::now();
+    let mut snapshot = state
+        .load_generation_model(name, override_batch_size, override_ctx_size, keep_alive)
+        .await
+        .map_err(|e| match e {
+            // A model that does not exist is a client mistake, and a
+            // 5xx here is actively harmful: clients with automatic
+            // retry treat it as transient and hammer a request that
+            // can never succeed. Ollama answers 404 for this.
+            crate::api::ModelError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into()
+            }
+            // The model exists but would not load: out of VRAM, a
+            // corrupt GGUF, a context that will not allocate. That is
+            // ours, and 500 is correct.
+            crate::api::ModelError::LoadFailed(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to load model '{name}': {msg}") })),
+            )
+                .into(),
+            // Every model that could make room was busy for as long as the
+            // load would wait. Nothing is wrong with the request: the same
+            // one succeeds once a model finishes, which a 503 and its
+            // `Retry-After` tell a client with automatic retry.
+            crate::api::ModelError::Busy(msg) => Refusal {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: Json(json!({ "error": msg })),
+                retry_after_secs: Some(BUSY_RETRY_AFTER_SECS),
+            },
+        })?;
+    snapshot.load_duration = loading.elapsed();
+    Ok(snapshot)
+}
 
-    Ok(SlotSnapshot {
-        model_name: slot.model_name.clone().unwrap_or_else(|| "unknown".into()),
-        engine: slot.engine.clone(),
-        scheduler: slot.scheduler.clone(),
-    })
+/// A duration in nanoseconds, the unit Ollama's response timings are in.
+fn nanos(d: std::time::Duration) -> u64 {
+    u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// `keep_alive: 0` on an empty request: unload the model it names — the
+/// most recently used one when it names none — without loading it first
+/// (`AppState::expire_model`), and say which. A model that exists but is not
+/// loaded is answered as unloaded, as Ollama does; with no model named and
+/// none loaded there is nothing to answer for, as on the load path.
+async fn unload_for_keep_alive_zero(
+    state: &AppState,
+    requested: Option<&str>,
+) -> Result<String, Refusal> {
+    match state.expire_model(requested).await {
+        Ok(Some(name)) => Ok(requested.map_or(name, str::to_string)),
+        Ok(None) => match requested {
+            Some(name) => Ok(name.to_string()),
+            None => Err(no_model_loaded().into()),
+        },
+        Err(crate::api::ModelError::NotFound(msg)) => {
+            Err((StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into())
+        }
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into()),
+    }
+}
+
+/// The 503 for a request that names no model, with none loaded.
+fn no_model_loaded() -> ApiError {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(
+            json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
+        ),
+    )
 }
 
 /// Parsed sampling parameters from the API request.
@@ -1124,27 +1193,69 @@ async fn version(State(state): State<S>) -> Json<Value> {
         "model_swaps": state
             .cross_slot_evictions
             .load(std::sync::atomic::Ordering::Relaxed),
+        // EULLM extension: `--max-loaded-models`, how many generation models
+        // are resident now, and how many were unloaded to make room for
+        // another (`AppState::generation_evictions`).
+        "max_loaded_models": state.max_loaded_models,
+        "loaded_models": state.models.read().await.len(),
+        "generation_evictions": state
+            .generation_evictions
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
-/// Unload the currently loaded model, freeing its VRAM, without loading a
+/// Unload generation models, freeing their VRAM, without loading a
 /// replacement. EULLM extension (not part of the Ollama API) — the primary
 /// use case is handing GPU memory to a co-resident process (e.g. an
 /// embedding server used during RAG document ingestion) without restarting
 /// eullm. Send a request with a `model` field afterwards (or run `eullm run
 /// <model>` again) to load a model back in.
-async fn unload_model(State(state): State<S>) -> (StatusCode, Json<Value>) {
-    match state.unload().await {
-        Ok(Some(name)) => (StatusCode::OK, Json(json!({ "unloaded": name }))),
-        Ok(None) => (
-            StatusCode::OK,
-            Json(json!({ "unloaded": null, "message": "no model was loaded" })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to unload model: {e}") })),
-        ),
-    }
+///
+/// An optional `{"model": "..."}` body unloads that model only, leaving
+/// every other resident; without one, every generation model goes. Either
+/// way now: requests still running on an unloaded model are cut off.
+/// `unloaded` names the first model unloaded, or is null — a string, which
+/// `eullm unload` from older releases reads — and `unloaded_all` lists them
+/// all.
+async fn unload_model(
+    State(state): State<S>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, ApiError> {
+    let requested = if body.iter().all(u8::is_ascii_whitespace) {
+        None
+    } else {
+        let body: Value = serde_json::from_slice(&body).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("invalid JSON body: {e}") })),
+            )
+        })?;
+        match body.get("model") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) => Some(name.clone()),
+            Some(_) => {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "\"model\" must be a string" })),
+                ));
+            }
+        }
+    };
+    let unloaded: Vec<String> = match &requested {
+        Some(name) => state.unload_named(name).await.into_iter().collect(),
+        None => state.unload_all().await,
+    };
+    Ok(Json(match unloaded.first() {
+        Some(first) => json!({ "unloaded": first, "unloaded_all": unloaded }),
+        None => json!({
+            "unloaded": null,
+            "unloaded_all": [],
+            "message": match &requested {
+                Some(name) => format!("'{name}' was not loaded"),
+                None => "no model was loaded".to_string(),
+            },
+        }),
+    }))
 }
 
 /// `input`, in either shape the two embedding endpoints accept: one string,
@@ -1348,6 +1459,10 @@ fn embedding_model_error(e: crate::api::ModelError) -> (StatusCode, Json<Value>)
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": msg })),
         ),
+        crate::api::ModelError::Busy(msg) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": msg })),
+        ),
     }
 }
 
@@ -1421,34 +1536,40 @@ mod embedding_input_tests {
     }
 }
 
-/// List models — returns the currently loaded model (like Ollama) plus catalog entries.
+/// List models — returns the loaded models (like Ollama) plus catalog entries.
 ///
 /// Ollama's `/api/tags` returns all locally available models.  We return the
-/// currently loaded model first (so health-check dashboards see it), followed
+/// loaded models first, the most recently used first (so health-check
+/// dashboards see them, and the chat UI preselects the one in use), followed
 /// by catalog entries for discoverability.
 async fn list_models(State(state): State<S>) -> Json<Value> {
-    let mut models: Vec<Value> = Vec::new();
+    let loaded: Vec<String> = state
+        .models
+        .read()
+        .await
+        .by_recent_use()
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
 
-    let loaded_name = {
-        let slot = state.slot.read().await;
-        slot.model_name.clone()
-    };
-
-    // If a model is loaded, include it first (this is what dashboards check)
-    if let Some(ref name) = loaded_name {
-        models.push(json!({
-            "name": name,
-            "size": 0,
-            "digest": "",
-            "loaded": true,
-            "details": {
-                "format": "gguf",
-                "family": "",
-                "parameter_size": "",
-                "quantization_level": "Q4_K_M",
-            }
-        }));
-    }
+    // The loaded models first (this is what dashboards check).
+    let mut models: Vec<Value> = loaded
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "size": 0,
+                "digest": "",
+                "loaded": true,
+                "details": {
+                    "format": "gguf",
+                    "family": "",
+                    "parameter_size": "",
+                    "quantization_level": "Q4_K_M",
+                }
+            })
+        })
+        .collect();
 
     // Add catalog entries (skip duplicates if the loaded model is in the catalog).
     // The Ollama-compatible `name` field MUST be the addressable id — clients
@@ -1457,9 +1578,7 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
     // catalog name is exposed alongside as `details.display_name` for UIs that
     // want to show it.
     for m in EU_CATALOG.iter() {
-        if loaded_name.as_deref() == Some(m.name.as_str())
-            || loaded_name.as_deref() == Some(m.id.as_str())
-        {
+        if let Some(i) = loaded.iter().position(|n| *n == m.name || *n == m.id) {
             // Replace the placeholder entry above with full catalog metadata.
             // `loaded` must survive that replacement: it is the only thing in
             // the response that says which model is in the slot. Clients used
@@ -1469,24 +1588,22 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
             // been downloaded, while a loaded raw `.gguf` path (which never
             // reaches this branch) looked correct. That is why the chat UI
             // reported "No model loaded" only after picking from the picker.
-            if let Some(first) = models.first_mut() {
-                *first = json!({
-                    "name": m.id,
-                    "size": m.size_bytes,
-                    "digest": m.digest,
-                    "loaded": true,
-                    "downloaded": true,
-                    "details": {
-                        "format": "gguf",
-                        "family": m.base(),
-                        "parameter_size": format!("{:.1}B", m.params_b),
-                        "quantization_level": m.quantization,
-                        "domain": m.domain,
-                        "source_model": m.source_model(),
-                        "display_name": m.name,
-                    }
-                });
-            }
+            models[i] = json!({
+                "name": m.id,
+                "size": m.size_bytes,
+                "digest": m.digest,
+                "loaded": true,
+                "downloaded": true,
+                "details": {
+                    "format": "gguf",
+                    "family": m.base(),
+                    "parameter_size": format!("{:.1}B", m.params_b),
+                    "quantization_level": m.quantization,
+                    "domain": m.domain,
+                    "source_model": m.source_model(),
+                    "display_name": m.name,
+                }
+            });
             continue;
         }
         // Whether the weights are on disk. Ollama has no equivalent field
@@ -1544,32 +1661,259 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
     Json(json!({ "models": models }))
 }
 
+/// One model as `GET /api/ps` lists it — what `running_model_entry` needs,
+/// gathered from whichever slot holds it.
+struct RunningModel {
+    name: String,
+    /// Its weights (and, for a generation model, its projector and KV cache).
+    size: u64,
+    /// The VRAM it holds, measured at load or estimated.
+    size_vram: u64,
+    size_vram_measured: bool,
+    /// Tokens of context a request to it gets.
+    context_length: u32,
+    /// Until it is unloaded for being idle; `None`: never.
+    expires_in: Option<std::time::Duration>,
+    /// Since it was last used.
+    idle_for: std::time::Duration,
+    digest: String,
+    family: String,
+    parameter_size: String,
+    quantization_level: String,
+    /// `generation`, `embedding` or `decision`.
+    slot: &'static str,
+    in_flight: usize,
+    batch_size: Option<usize>,
+    gpu_layers: Option<i32>,
+    reserved_companion: bool,
+    launch: bool,
+}
+
+/// A model in Ollama's `/api/ps` shape, as of `now`, with what EuLLM adds
+/// under `eullm`. A model nothing will unload expires so far ahead it never
+/// comes — `null` is not what Ollama sends, and its clients parse a date.
+fn running_model_entry(m: &RunningModel, now: chrono::DateTime<chrono::Utc>) -> Value {
+    let at = |from_now: Option<std::time::Duration>| {
+        from_now
+            .and_then(|d| chrono::TimeDelta::from_std(d).ok())
+            .and_then(|d| now.checked_add_signed(d))
+            .unwrap_or_else(|| now + chrono::TimeDelta::nanoseconds(i64::MAX))
+            .to_rfc3339()
+    };
+    let since = chrono::TimeDelta::from_std(m.idle_for).unwrap_or(chrono::TimeDelta::zero());
+    json!({
+        "name": m.name,
+        "model": m.name,
+        "size": m.size,
+        "digest": m.digest,
+        "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": m.family,
+            "families": if m.family.is_empty() { Vec::new() } else { vec![m.family.clone()] },
+            "parameter_size": m.parameter_size,
+            "quantization_level": m.quantization_level,
+        },
+        "expires_at": at(m.expires_in),
+        "size_vram": m.size_vram,
+        "context_length": m.context_length,
+        "eullm": {
+            "slot": m.slot,
+            "in_flight": m.in_flight,
+            "last_used": (now - since).to_rfc3339(),
+            "batch_size": m.batch_size,
+            "gpu_layers": m.gpu_layers,
+            "reserved_companion": m.reserved_companion,
+            "launch": m.launch,
+            "size_vram_measured": m.size_vram_measured,
+        },
+    })
+}
+
+/// `GET /api/ps` — the models in memory, Ollama's endpoint of the name: every
+/// generation model, the most recently used first, then the embedding and
+/// decision models, which Ollama lists too.
+async fn list_running(State(state): State<S>) -> Json<Value> {
+    let now = std::time::Instant::now();
+    // A build with no GPU backend puts nothing on a GPU, whatever was asked.
+    let on_gpu = crate::inference::has_gpu_backend();
+    let mut running: Vec<RunningModel> = state
+        .models
+        .read()
+        .await
+        .by_recent_use()
+        .into_iter()
+        .map(|m| {
+            let usage = m.usage.view();
+            let facts = &m.facts;
+            RunningModel {
+                name: m.name.clone(),
+                size: facts.size_bytes,
+                size_vram: if on_gpu { facts.vram_bytes() } else { 0 },
+                size_vram_measured: facts.size_vram.is_some(),
+                // What one request gets: the context is split between a
+                // scheduler's slots.
+                context_length: facts.ctx_size / facts.batch_size.max(1) as u32,
+                expires_in: usage.expires_in(now),
+                idle_for: now.saturating_duration_since(usage.last_used),
+                digest: String::new(),
+                family: facts.family.clone().unwrap_or_default(),
+                parameter_size: String::new(),
+                quantization_level: String::new(),
+                slot: "generation",
+                in_flight: usage.in_flight,
+                batch_size: Some(facts.batch_size),
+                gpu_layers: Some(if on_gpu { facts.gpu_layers } else { 0 }),
+                reserved_companion: false,
+                launch: m.launch,
+            }
+        })
+        .collect();
+
+    let tokio_now = tokio::time::Instant::now();
+    let left = |deadline: Option<tokio::time::Instant>| {
+        deadline.map(|d| d.saturating_duration_since(tokio_now))
+    };
+    let embedding = state.embedding.read().await.as_ref().map(|slot| {
+        (
+            slot.model_name.clone(),
+            slot.model.weights_bytes(),
+            slot.model.largest_context(),
+            slot.is_reserved_companion,
+        )
+    });
+    if let Some((name, weights, context, reserved)) = embedding {
+        let expires_in = left(*state.embedding_deadline.lock().await);
+        running.push(companion(
+            "embedding",
+            name,
+            weights,
+            context,
+            reserved,
+            expires_in,
+            on_gpu,
+        ));
+    }
+    let decision = state.decision.read().await.as_ref().map(|slot| {
+        (
+            slot.model_name.clone(),
+            slot.model.weights_bytes(),
+            slot.model.info().context_tokens as u32,
+            slot.is_reserved_companion,
+        )
+    });
+    if let Some((name, weights, context, reserved)) = decision {
+        let expires_in = left(*state.decision_deadline.lock().await);
+        running.push(companion(
+            "decision", name, weights, context, reserved, expires_in, on_gpu,
+        ));
+    }
+
+    // What the store and the catalog know about each, read with no lock held.
+    for m in &mut running {
+        if let Ok(Some(manifest)) = state.store.get(&m.name) {
+            m.digest = manifest.digest;
+            if m.family.is_empty() {
+                m.family = manifest.base;
+            }
+        }
+        if let Some(entry) = crate::models::catalog::find_model(&m.name) {
+            if m.digest.is_empty() {
+                m.digest = entry.digest.clone();
+            }
+            if m.family.is_empty() {
+                m.family = entry.base();
+            }
+            m.parameter_size = format!("{:.1}B", entry.params_b);
+            m.quantization_level = entry.quantization.clone();
+        }
+    }
+    let wall = chrono::Utc::now();
+    Json(json!({
+        "models": running.iter().map(|m| running_model_entry(m, wall)).collect::<Vec<_>>(),
+    }))
+}
+
+/// An embedding or decision model as `/api/ps` lists it: loaded whole onto
+/// the GPU when this build has one, in RAM otherwise (see
+/// `EmbeddingModel::load`), so its weights are its VRAM or none of it.
+fn companion(
+    slot: &'static str,
+    name: String,
+    weights: u64,
+    context_length: u32,
+    reserved_companion: bool,
+    expires_in: Option<std::time::Duration>,
+    on_gpu: bool,
+) -> RunningModel {
+    RunningModel {
+        name,
+        size: weights,
+        size_vram: if on_gpu { weights } else { 0 },
+        size_vram_measured: false,
+        context_length,
+        expires_in,
+        idle_for: std::time::Duration::ZERO,
+        digest: String::new(),
+        family: String::new(),
+        parameter_size: String::new(),
+        quantization_level: String::new(),
+        slot,
+        in_flight: 0,
+        batch_size: None,
+        gpu_layers: None,
+        reserved_companion,
+        launch: false,
+    }
+}
+
 async fn generate(
     State(state): State<S>,
     // Present on every request: the auth middleware inserts an anonymous
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
-
     let prompt = body
         .get("prompt")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
 
+    // An empty prompt with `keep_alive: 0` is Ollama's way to unload one
+    // model: that model goes, and only it, without being loaded first.
+    if prompt.is_empty() && keep_alive == super::KeepAlive::Immediate {
+        let model = unload_for_keep_alive_zero(&state, requested).await?;
+        return Ok(Json(json!({
+            "model": model,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "response": "",
+            "done": true,
+            "done_reason": "unload",
+        }))
+        .into_response());
+    }
+
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
+
     // An empty prompt is Ollama's documented way to load a model (or apply a
     // `keep_alive` to one already loaded) without generating anything —
     // `ensure_model` above already did the loading/swap, so there is nothing
     // left to do. Returning here, before `GenerateRequest` is built, is what
     // makes this genuinely free: it never reaches the scheduler or engine.
+    // The lease ends with it, which is what applies the `keep_alive`.
     if prompt.is_empty() {
         return Ok(Json(json!({
             "model": model,
@@ -1618,6 +1962,8 @@ async fn generate(
                 model,
                 StreamFormat::OllamaGenerate,
                 user_id,
+                snap.lease,
+                snap.load_duration,
             ))
         } else {
             let Collected {
@@ -1646,8 +1992,8 @@ async fn generate(
                 "response": text,
                 "done": true,
                 "done_reason": stop_reason.as_api_str(),
-                "total_duration": duration_ms * 1_000_000,
-                "load_duration": 0,
+                "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
+                "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": tokens_prompt,
                 "prompt_eval_duration": 0,
                 "eval_count": tokens_generated,
@@ -1666,6 +2012,8 @@ async fn generate(
                 model,
                 StreamFormat::OllamaGenerate,
                 user_id,
+                snap.lease,
+                snap.load_duration,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -1699,8 +2047,8 @@ async fn generate(
                 "response": result.text,
                 "done": true,
                 "done_reason": result.stop_reason.as_api_str(),
-                "total_duration": result.duration_ms * 1_000_000,
-                "load_duration": 0,
+                "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
+                "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": result.tokens_prompt,
                 "prompt_eval_duration": 0,
                 "eval_count": result.tokens_generated,
@@ -1717,20 +2065,39 @@ async fn chat(
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
-
     let messages = body
         .get("messages")
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+
+    // The unload counterpart, as on `/api/generate`.
+    if messages.is_empty() && keep_alive == super::KeepAlive::Immediate {
+        let model = unload_for_keep_alive_zero(&state, requested).await?;
+        return Ok(Json(json!({
+            "model": model,
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "message": { "role": "assistant", "content": "" },
+            "done": true,
+            "done_reason": "unload",
+        }))
+        .into_response());
+    }
+
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
 
     // Same warm-load shape as `/api/generate` with an empty prompt: an empty
     // `messages` array asks only for the load (and, with it, a `keep_alive`)
@@ -1759,7 +2126,7 @@ async fn chat(
 
     // ── Attachments ────────────────────────────────────────────────────
     // A conversation carrying any goes through the sequential mtmd path,
-    // whole. `swap_model` forces sequential mode when the loaded model has an
+    // whole. `load_generation_model` forces sequential mode when the loaded model has an
     // mmproj, so a model that can read them has `snap.engine` with a
     // projector in it. One that cannot is refused when the current turn has
     // its own attachments — the question is about them — and otherwise gets
@@ -1774,7 +2141,7 @@ async fn chat(
     let messages = if media.items.is_empty() || projector.is_some() {
         messages
     } else if media.current_turn > 0 {
-        return Err(cannot_read_media(&snap.model_name));
+        return Err(cannot_read_media(&snap.model_name).into());
     } else {
         tracing::info!(
             "`{}` cannot read attachments: {} from earlier turns become notes",
@@ -1829,6 +2196,8 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
+                snap.load_duration,
             ));
         }
         let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
@@ -1856,8 +2225,8 @@ async fn chat(
             "message": { "role": "assistant", "content": text },
             "done": true,
             "done_reason": stop_reason.as_api_str(),
-            "total_duration": duration_ms * 1_000_000,
-            "load_duration": 0,
+            "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
+            "load_duration": nanos(snap.load_duration),
             "prompt_eval_count": tokens_prompt,
             "prompt_eval_duration": 0,
             "eval_count": tokens_generated,
@@ -1900,6 +2269,8 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
+                snap.load_duration,
             ))
         } else {
             let Collected {
@@ -1931,8 +2302,8 @@ async fn chat(
                 },
                 "done": true,
                 "done_reason": stop_reason.as_api_str(),
-                "total_duration": duration_ms * 1_000_000,
-                "load_duration": 0,
+                "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
+                "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": tokens_prompt,
                 "prompt_eval_duration": 0,
                 "eval_count": tokens_generated,
@@ -1950,6 +2321,8 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
+                snap.load_duration,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -1986,8 +2359,8 @@ async fn chat(
                 },
                 "done": true,
                 "done_reason": result.stop_reason.as_api_str(),
-                "total_duration": result.duration_ms * 1_000_000,
-                "load_duration": 0,
+                "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
+                "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": result.tokens_prompt,
                 "prompt_eval_duration": 0,
                 "eval_count": result.tokens_generated,
@@ -2202,17 +2575,25 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
         }
     }
 
-    // The model in the slot, when it was launched from a path rather than
-    // pulled, has no manifest and so is not in the list above.
-    if let Some(name) = state.slot.read().await.model_name.clone()
-        && seen.insert(name.clone())
-    {
-        data.push(json!({
-            "id": name,
-            "object": "model",
-            "created": 1700000000_u64,
-            "owned_by": "eullm"
-        }));
+    // A loaded model launched from a path rather than pulled has no manifest,
+    // and so is not in the list above.
+    let loaded: Vec<String> = state
+        .models
+        .read()
+        .await
+        .by_recent_use()
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    for name in loaded {
+        if seen.insert(name.clone()) {
+            data.push(json!({
+                "id": name,
+                "object": "model",
+                "created": 1700000000_u64,
+                "owned_by": "eullm"
+            }));
+        }
     }
 
     // The decision model, when one is loaded, for System One clients
@@ -2277,17 +2658,23 @@ async fn chat_completions(
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape, not part
     // of it — accepted here too so the idle-unload timer works the same way
     // regardless of which endpoint a client happens to use.
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
 
     let messages = body
         .get("messages")
@@ -2459,7 +2846,8 @@ async fn chat_completions(
         });
 
         if is_streaming(&body) {
-            let stream = buffered_message_sse(model, message, finish_reason.to_string(), usage);
+            let stream =
+                buffered_message_sse(model, message, finish_reason.to_string(), usage, snap.lease);
             return Ok(Sse::new(stream).into_response());
         }
         return Ok(Json(json!({
@@ -2481,7 +2869,14 @@ async fn chat_completions(
         let rx = sched.submit(request);
 
         if is_streaming(&body) {
-            let stream = stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id);
+            let stream = stream_from_channel_sse(
+                rx,
+                model,
+                StreamFormat::OpenAI,
+                user_id,
+                snap.lease,
+                snap.load_duration,
+            );
             Ok(Sse::new(stream).into_response())
         } else {
             let Collected {
@@ -2530,7 +2925,14 @@ async fn chat_completions(
 
         if is_streaming(&body) {
             let rx = sequential_to_channel(engine, request);
-            let stream = stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id);
+            let stream = stream_from_channel_sse(
+                rx,
+                model,
+                StreamFormat::OpenAI,
+                user_id,
+                snap.lease,
+                snap.load_duration,
+            );
             Ok(Sse::new(stream).into_response())
         } else {
             let result = tokio::task::spawn_blocking({
@@ -2589,13 +2991,18 @@ async fn chat_completions(
 /// valid OpenAI streaming — structured tool calls cannot be streamed
 /// incrementally without the format-aware incremental parser, which is
 /// separate future work.
+///
+/// The stream holds `lease` until it ends, so the model counts as in use for
+/// the whole response — as it does in the other stream helpers.
 fn buffered_message_sse(
     model: String,
     message: Value,
     finish_reason: String,
     usage: Value,
+    lease: Lease,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
         let created = chrono::Utc::now().timestamp();
         yield Ok(Event::default().data(
@@ -2633,13 +3040,20 @@ enum StreamFormat {
 /// Convert an mpsc channel of StreamEvents into an SSE event stream.
 ///
 /// Used for OpenAI-compatible `/v1/chat/completions` streaming only.
+///
+/// The stream holds `lease` until it ends — the last event sent, or the
+/// client gone — so keep_alive counts from the end of the response, not
+/// from when the handler returned it.
 fn stream_from_channel_sse(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
     user_id: Option<String>,
+    lease: Lease,
+    load_duration: std::time::Duration,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         while let Some(event) = rx.recv().await {
@@ -2664,6 +3078,7 @@ fn stream_from_channel_sse(
                     let data = format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
+                        load_duration,
                     );
                     yield Ok(Event::default().data(data.to_string()));
 
@@ -2689,13 +3104,18 @@ fn stream_from_channel_sse(
 /// followed by a newline. No `data:` prefix, no double newlines.
 ///
 /// This is what Ollama clients (RAG Enterprise, Open WebUI, etc.) expect.
+///
+/// The stream holds `lease` until it ends, as `stream_from_channel_sse` does.
 fn ndjson_stream_response(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
     user_id: Option<String>,
+    lease: Lease,
+    load_duration: std::time::Duration,
 ) -> axum::response::Response {
     let stream = async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         while let Some(event) = rx.recv().await {
@@ -2721,6 +3141,7 @@ fn ndjson_stream_response(
                     let data = format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
+                        load_duration,
                     );
                     let mut line = data.to_string();
                     line.push('\n');
@@ -2798,6 +3219,10 @@ fn format_token_event(
     }
 }
 
+/// `load_duration` is how long the request waited for the model to load
+/// (Ollama's field of the name; zero for a model already loaded), and part
+/// of `total_duration`, as in Ollama.
+#[allow(clippy::too_many_arguments)]
 fn format_done_event(
     model: &str,
     completion_id: &str,
@@ -2806,8 +3231,10 @@ fn format_done_event(
     tokens_prompt: u32,
     duration_ms: u64,
     stop_reason: StopReason,
+    load_duration: std::time::Duration,
 ) -> Value {
     let reason = stop_reason.as_api_str();
+    let load = nanos(load_duration);
     match format {
         StreamFormat::OllamaGenerate => json!({
             "model": model,
@@ -2815,8 +3242,8 @@ fn format_done_event(
             "response": "",
             "done": true,
             "done_reason": reason,
-            "total_duration": duration_ms * 1_000_000,
-            "load_duration": 0,
+            "total_duration": duration_ms * 1_000_000 + load,
+            "load_duration": load,
             "prompt_eval_count": tokens_prompt,
             "prompt_eval_duration": 0,
             "eval_count": tokens_generated,
@@ -2831,8 +3258,8 @@ fn format_done_event(
             },
             "done": true,
             "done_reason": reason,
-            "total_duration": duration_ms * 1_000_000,
-            "load_duration": 0,
+            "total_duration": duration_ms * 1_000_000 + load,
+            "load_duration": load,
             "prompt_eval_count": tokens_prompt,
             "prompt_eval_duration": 0,
             "eval_count": tokens_generated,
@@ -2857,26 +3284,71 @@ fn format_done_event(
     }
 }
 
-/// Check if a loaded model name matches a requested name.
-///
-/// Handles the common case where the loaded model is a full path
-/// (e.g. `/models/qwen3-8b.gguf`) but the request uses a short name
-/// (e.g. `qwen3-8b` or `qwen3:8b`).
-fn model_names_match(loaded: &str, normalized_request: &str) -> bool {
-    // Exact match.
-    if loaded == normalized_request {
-        return true;
-    }
-    // Otherwise compare identity keys: last path component, `.gguf` stripped,
-    // case-insensitive. See `api::model_identity_key` for why this is not
-    // `file_stem` — model names contain dots, and cutting at the last one
-    // made every quant of a repo look like the same model (#345).
-    crate::api::model_identity_key(loaded) == crate::api::model_identity_key(normalized_request)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::model_names_match;
+
+    /// Ollama's `/api/ps` fields, in their types, and a date for a model kept
+    /// for good, which Ollama sends far in the future rather than null.
+    #[test]
+    fn a_ps_entry_has_ollamas_fields() {
+        let model = |expires_in| RunningModel {
+            name: "qwen3-8b".into(),
+            size: 5_000_000_000,
+            size_vram: 4_000_000_000,
+            size_vram_measured: true,
+            context_length: 4096,
+            expires_in,
+            idle_for: std::time::Duration::from_secs(30),
+            digest: "sha256:abc".into(),
+            family: "qwen3".into(),
+            parameter_size: "8.2B".into(),
+            quantization_level: "Q4_K_M".into(),
+            slot: "generation",
+            in_flight: 1,
+            batch_size: Some(4),
+            gpu_layers: Some(-1),
+            reserved_companion: false,
+            launch: true,
+        };
+        let now = chrono::Utc::now();
+        let entry = running_model_entry(&model(Some(std::time::Duration::from_secs(300))), now);
+        for field in ["name", "model", "digest", "expires_at"] {
+            assert!(entry[field].is_string(), "{field}: {entry}");
+        }
+        for field in ["size", "size_vram", "context_length"] {
+            assert!(entry[field].is_u64(), "{field}: {entry}");
+        }
+        for field in [
+            "parent_model",
+            "format",
+            "family",
+            "parameter_size",
+            "quantization_level",
+        ] {
+            assert!(entry["details"][field].is_string(), "{field}: {entry}");
+        }
+        assert_eq!(entry["details"]["families"], json!(["qwen3"]));
+        let parse = |entry: &Value, field: &str| {
+            chrono::DateTime::parse_from_rfc3339(entry[field].as_str().unwrap()).expect("RFC 3339")
+        };
+        assert_eq!(
+            (parse(&entry, "expires_at").to_utc() - now).num_seconds(),
+            300
+        );
+        assert_eq!(
+            (now - parse(&entry["eullm"], "last_used").to_utc()).num_seconds(),
+            30
+        );
+        assert_eq!(entry["eullm"]["slot"], "generation");
+        assert_eq!(entry["eullm"]["in_flight"], 1);
+        assert_eq!(entry["eullm"]["launch"], true);
+
+        let kept = running_model_entry(&model(None), now);
+        let year = parse(&kept, "expires_at").format("%Y").to_string();
+        assert!(year.parse::<i32>().unwrap() > 2200, "kept for good: {kept}");
+    }
 
     // A reasoning model doing free-text tool-calling can burn through
     // hundreds of tokens of <think> before producing anything else — a
@@ -3009,7 +3481,7 @@ mod tests {
     // validation existed, `{"batch_size": 4294967296}` truncated to zero
     // usable slots — the model reported as loaded while no request could
     // ever be served again — and an absurd `ctx_size` failed the context
-    // allocation *after* swap_model had already unloaded the previous
+    // allocation *after* load_generation_model had already unloaded the previous
     // model, leaving the slot empty.
 
     fn overrides(body: Value) -> Result<SlotOverrides, StatusCode> {
