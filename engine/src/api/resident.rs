@@ -270,6 +270,10 @@ impl ResidentModels {
         self.models.is_empty()
     }
 
+    pub(crate) fn len(&self) -> usize {
+        self.models.len()
+    }
+
     /// VRAM the residents will take that the free-VRAM figure does not show
     /// (see [`LoadedModel::unallocated_reserve`]): what any load beside them
     /// must leave free.
@@ -327,6 +331,18 @@ pub(crate) struct ResidentView {
     pub(crate) launch: bool,
 }
 
+/// What to do about a resident that would have to give way while a request
+/// is still running on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BusyPolicy {
+    /// Unload it anyway, cutting the request off: one model resident at a
+    /// time, where a request for another model has always replaced it.
+    Abort,
+    /// Wait for it to finish: several models resident, where the busy one
+    /// is another client's, and nothing entitles this load to its answer.
+    Wait,
+}
+
 /// What to do next to make room for a model about to load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -334,19 +350,39 @@ pub(crate) enum Step {
     Load,
     /// Unload the resident at this index of the views first.
     Evict(usize),
+    /// Every resident that could give way is answering a request: wait for
+    /// one to finish.
+    WaitFor,
 }
 
 /// The next step towards loading one more model beside `residents`, when at
-/// most `max` may be resident: load when there is room, otherwise evict the
-/// first resident in [`eviction_order`] — a busy one too, as a single model
-/// has always been replaced even while it was answering.
-pub(crate) fn next_step(residents: &[ResidentView], max: usize, now: Instant) -> Step {
-    if residents.len() < max {
+/// most `max` may be resident.
+///
+/// Room means both a free place in the count and, when `fits_now` says so,
+/// enough VRAM: `Some(false)` — the model's plan is not whole beside the
+/// residents — asks for one more of them to go, until it fits or is alone;
+/// `None` — VRAM unknown, or sizing off — leaves the count as the only rule.
+/// The resident that goes is the first in [`eviction_order`]; if it is busy,
+/// `busy` decides between unloading it and waiting.
+pub(crate) fn next_step(
+    residents: &[ResidentView],
+    max: usize,
+    busy: BusyPolicy,
+    fits_now: Option<bool>,
+    now: Instant,
+) -> Step {
+    let full = residents.len() >= max;
+    let too_big = fits_now == Some(false) && !residents.is_empty();
+    if !full && !too_big {
         return Step::Load;
     }
-    eviction_order(residents, now)
-        .first()
-        .map_or(Step::Load, |&i| Step::Evict(i))
+    match eviction_order(residents, now).first() {
+        None => Step::Load,
+        Some(&i) if residents[i].usage.in_flight == 0 || busy == BusyPolicy::Abort => {
+            Step::Evict(i)
+        }
+        Some(_) => Step::WaitFor,
+    }
 }
 
 /// The order in which residents give way to another model, as indices into
@@ -496,8 +532,83 @@ mod tests {
         let now = Instant::now();
         let mut busy = resident(1, now);
         busy.usage.in_flight = 3;
-        assert_eq!(next_step(&[busy], 1, now), Step::Evict(0));
-        assert_eq!(next_step(&[], 1, now), Step::Load);
+        assert_eq!(
+            next_step(&[busy], 1, BusyPolicy::Abort, None, now),
+            Step::Evict(0)
+        );
+        assert_eq!(next_step(&[], 1, BusyPolicy::Abort, None, now), Step::Load);
+    }
+
+    /// The table `--max-loaded-models` rests on.
+    #[test]
+    fn next_step_makes_room_by_count_and_by_fit_and_waits_for_busy_models() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let now = t0 + s(10);
+        let old = resident(1, t0);
+        let recent = resident(2, t0 + s(5));
+        let busy = |r: ResidentView| ResidentView {
+            usage: UsageView {
+                in_flight: 1,
+                ..r.usage
+            },
+            ..r
+        };
+        let wait = BusyPolicy::Wait;
+
+        // Room in the count, and nothing says it does not fit: load.
+        assert_eq!(next_step(&[old], 2, wait, None, now), Step::Load);
+        assert_eq!(next_step(&[old], 2, wait, Some(true), now), Step::Load);
+        // The count is reached: the least recently used idle model goes.
+        assert_eq!(
+            next_step(&[recent, old], 2, wait, None, now),
+            Step::Evict(1)
+        );
+        // An idle model goes before a busy one, however recently used.
+        assert_eq!(
+            next_step(&[recent, busy(old)], 2, wait, None, now),
+            Step::Evict(0)
+        );
+        // Every model busy: wait for one, or, one model at a time, replace it.
+        assert_eq!(
+            next_step(&[busy(recent), busy(old)], 2, wait, None, now),
+            Step::WaitFor
+        );
+        assert_eq!(
+            next_step(&[busy(recent), busy(old)], 2, BusyPolicy::Abort, None, now),
+            Step::Evict(1)
+        );
+        // Room in the count but not on the card: make room there too...
+        assert_eq!(
+            next_step(&[recent, old], 4, wait, Some(false), now),
+            Step::Evict(1)
+        );
+        assert_eq!(
+            next_step(&[busy(old)], 4, wait, Some(false), now),
+            Step::WaitFor
+        );
+        // ...until the model is alone, which loads whatever it does not fit.
+        assert_eq!(next_step(&[], 4, wait, Some(false), now), Step::Load);
+    }
+
+    #[test]
+    fn next_step_takes_expired_models_first_and_the_launch_model_last() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let now = t0 + s(100);
+        let mut launch = resident(1, t0);
+        launch.launch = true;
+        let forever = resident(2, t0 + s(1));
+        let mut finite = resident(3, t0 + s(50));
+        finite.usage.deadline = Some(t0 + s(500));
+        let mut expired = resident(4, t0 + s(90));
+        expired.usage.deadline = Some(t0 + s(95));
+        let wait = BusyPolicy::Wait;
+        let all = [launch, forever, finite, expired];
+        assert_eq!(next_step(&all, 4, wait, None, now), Step::Evict(3));
+        assert_eq!(next_step(&all[..3], 3, wait, None, now), Step::Evict(2));
+        assert_eq!(next_step(&all[..2], 2, wait, None, now), Step::Evict(1));
+        assert_eq!(next_step(&all[..1], 1, wait, None, now), Step::Evict(0));
     }
 
     #[test]
@@ -512,8 +623,15 @@ mod tests {
             eviction_order(&[recent, busy_and_oldest, old], t0 + s(10)),
             [2, 0, 1]
         );
-        assert_eq!(next_step(&[recent, old], 2, t0 + s(10)), Step::Evict(1));
-        assert_eq!(next_step(&[recent, old], 3, t0 + s(10)), Step::Load);
+        let abort = BusyPolicy::Abort;
+        assert_eq!(
+            next_step(&[recent, old], 2, abort, None, t0 + s(10)),
+            Step::Evict(1)
+        );
+        assert_eq!(
+            next_step(&[recent, old], 3, abort, None, t0 + s(10)),
+            Step::Load
+        );
     }
 
     /// A model whose keep_alive is over goes first, whenever it was used; a

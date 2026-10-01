@@ -137,18 +137,13 @@ struct Cli {
 /// rather than forbidden: a flag added here exists on both, with the same
 /// default and the same help text, and there is no second place to forget.
 ///
-/// Two things deliberately stay out:
-///
-/// * `batch_size`, because `run` defaults to 1 and `serve` to 8. That is not
-///   drift: `run` is one interactive conversation which should get the whole
-///   context window, `serve` is a daemon fielding concurrent requests. The
-///   scheduler's own "each of the N slots gets only M tokens" warning is
-///   written against the `serve` default.
-/// * `--fit` / `--fit-strict`, which pick a layer count against measured free
-///   VRAM before the model is loaded. `serve` loads its models inside
-///   `api::swap_model`, which has no such step, so exposing the flags there
-///   would parse them and silently do nothing — worse than not offering them.
-///   Wiring auto-fit into the swap path is its own piece of work.
+/// Nothing stays out any more. The two flags that once did are both here:
+/// `batch_size`, whose two defaults (1 for `run`, 8 for `serve`) became one
+/// when eight slots were found to give each request an eighth of
+/// `--ctx-size`; and `--fit`/`--fit-strict`, since every load `serve` makes
+/// is sized too (`api::AppState::load_generation_model`). A flag that
+/// reaches a model `serve` loads must still be carried there through
+/// `api::ServeConfig` by hand — see `engine/CLAUDE.md`.
 #[derive(clap::Args, Debug, PartialEq)]
 struct RuntimeOpts {
     /// Port for the API server
@@ -464,6 +459,37 @@ struct RuntimeOpts {
         value_parser = clap::value_parser!(u32).range(512..=131_072)
     )]
     decision_ctx: u32,
+
+    /// How many generation models to keep loaded at once, 1 to 16. The
+    /// embedding and decision models have slots of their own and are not
+    /// counted.
+    ///
+    /// A model a request names that is not loaded is loaded beside the
+    /// others while fewer than this many are; past that, the least recently
+    /// used idle one is unloaded first. A model answering requests is never
+    /// unloaded to make room: the load waits up to 120 s for one to finish,
+    /// then answers 503 with Retry-After.
+    ///
+    /// A model loads beside others only if it fits whole on the GPU in what
+    /// they leave free — every layer, and its projector — and otherwise
+    /// models are unloaded until it does, or until it is alone, when it is
+    /// sized like any model loaded by itself. Without automatic sizing
+    /// (--no-fit, or a build that cannot read free VRAM) only the count is
+    /// kept.
+    ///
+    /// Default 1: one model at a time, as before — a request for another
+    /// model replaces it, even mid-answer. A default above 1 would not be a
+    /// default but a decision to divide the card, because a second model
+    /// only ever gets what the first one left. Ollama's
+    /// OLLAMA_MAX_LOADED_MODELS counts every model and is read from the
+    /// environment; this is a flag, and counts generation models only.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=16)
+    )]
+    max_loaded_models: usize,
 }
 
 #[derive(Subcommand)]
@@ -773,7 +799,9 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                max_loaded_models,
             } = opts;
+            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -891,6 +919,7 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                residency,
             )
             .await;
         }
@@ -934,7 +963,9 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                max_loaded_models,
             } = opts;
+            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -1008,6 +1039,7 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                residency,
             )
             .await;
         }
@@ -2075,6 +2107,7 @@ async fn cmd_run(
     embedding_model: Option<String>,
     decision_model: Option<String>,
     decision_ctx: u32,
+    residency: api::ResidencyConfig,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -2768,6 +2801,7 @@ async fn cmd_run(
             launch_embedding,
             launch_decision,
             decision_ctx,
+            residency,
             backend,
         })
         .await
@@ -2835,6 +2869,7 @@ async fn cmd_serve(
     embedding_model: Option<String>,
     decision_model: Option<String>,
     decision_ctx: u32,
+    residency: api::ResidencyConfig,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -2943,6 +2978,7 @@ async fn cmd_serve(
         launch_embedding,
         launch_decision,
         decision_ctx,
+        residency,
         backend,
     })
     .await
@@ -4481,6 +4517,25 @@ mod cli_default_parity_tests {
             let both =
                 Cli::try_parse_from([sub, &["--mmproj-offload", "--no-mmproj-offload"]].concat());
             assert!(both.is_err(), "both flags at once must be refused");
+        }
+    }
+
+    /// One generation model at a time unless asked: a second one only ever
+    /// gets what the first left, so a default above 1 would divide the card
+    /// for whoever loads second. Sixteen at most, and never none.
+    #[test]
+    fn max_loaded_models_defaults_to_one_on_both_commands() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            assert_eq!(runtime_opts(sub).max_loaded_models, 1);
+            let four = runtime_opts(&[sub, &["--max-loaded-models", "4"]].concat());
+            assert_eq!(four.max_loaded_models, 4);
+            for refused in ["0", "17", "-1", "two"] {
+                let parsed = Cli::try_parse_from([sub, &["--max-loaded-models", refused]].concat());
+                assert!(
+                    parsed.is_err(),
+                    "--max-loaded-models {refused} must be refused"
+                );
+            }
         }
     }
 

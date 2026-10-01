@@ -55,6 +55,39 @@ const MAX_CTX_SIZE_OVERRIDE: u32 = 1_048_576;
 /// Error shape returned by the JSON handlers: an HTTP status plus a JSON body.
 type ApiError = (StatusCode, Json<Value>);
 
+/// What a generation handler answers when it cannot answer: an [`ApiError`],
+/// and for a 503 a client may simply retry, the `Retry-After` that says when.
+struct Refusal {
+    status: StatusCode,
+    body: Json<Value>,
+    retry_after_secs: Option<u64>,
+}
+
+impl From<ApiError> for Refusal {
+    fn from((status, body): ApiError) -> Self {
+        Self {
+            status,
+            body,
+            retry_after_secs: None,
+        }
+    }
+}
+
+impl IntoResponse for Refusal {
+    fn into_response(self) -> axum::response::Response {
+        let mut response = (self.status, self.body).into_response();
+        if let Some(secs) = self.retry_after_secs {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, axum::http::HeaderValue::from(secs));
+        }
+        response
+    }
+}
+
+/// When a client refused with `ModelError::Busy` may try again.
+const BUSY_RETRY_AFTER_SECS: u64 = 5;
+
 /// Validated `(batch_size, ctx_size)` slot overrides read from a request body.
 /// `None` in either position means "keep the launch-time value".
 type SlotOverrides = (Option<usize>, Option<u32>);
@@ -301,7 +334,7 @@ async fn ensure_model(
     override_batch_size: Option<usize>,
     override_ctx_size: Option<u32>,
     keep_alive: super::KeepAlive,
-) -> Result<SlotSnapshot, (StatusCode, Json<Value>)> {
+) -> Result<SlotSnapshot, Refusal> {
     {
         // The lease is taken under this guard: see `resident::Usage::lease`.
         let models = state.models.read().await;
@@ -320,7 +353,8 @@ async fn ensure_model(
             Json(
                 json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
             ),
-        ));
+        )
+            .into());
     };
     state
         .load_generation_model(name, override_batch_size, override_ctx_size, keep_alive)
@@ -331,7 +365,7 @@ async fn ensure_model(
             // retry treat it as transient and hammer a request that
             // can never succeed. Ollama answers 404 for this.
             crate::api::ModelError::NotFound(msg) => {
-                (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
+                (StatusCode::NOT_FOUND, Json(json!({ "error": msg }))).into()
             }
             // The model exists but would not load: out of VRAM, a
             // corrupt GGUF, a context that will not allocate. That is
@@ -339,7 +373,17 @@ async fn ensure_model(
             crate::api::ModelError::LoadFailed(msg) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({ "error": format!("Failed to load model '{name}': {msg}") })),
-            ),
+            )
+                .into(),
+            // Every model that could make room was busy for as long as the
+            // load would wait. Nothing is wrong with the request: the same
+            // one succeeds once a model finishes, which a 503 and its
+            // `Retry-After` tell a client with automatic retry.
+            crate::api::ModelError::Busy(msg) => Refusal {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                body: Json(json!({ "error": msg })),
+                retry_after_secs: Some(BUSY_RETRY_AFTER_SECS),
+            },
         })
 }
 
@@ -1072,6 +1116,14 @@ async fn version(State(state): State<S>) -> Json<Value> {
         "model_swaps": state
             .cross_slot_evictions
             .load(std::sync::atomic::Ordering::Relaxed),
+        // EULLM extension: `--max-loaded-models`, how many generation models
+        // are resident now, and how many were unloaded to make room for
+        // another (`AppState::generation_evictions`).
+        "max_loaded_models": state.max_loaded_models,
+        "loaded_models": state.models.read().await.len(),
+        "generation_evictions": state
+            .generation_evictions
+            .load(std::sync::atomic::Ordering::Relaxed),
     }))
 }
 
@@ -1290,6 +1342,10 @@ fn embedding_model_error(e: crate::api::ModelError) -> (StatusCode, Json<Value>)
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": msg })),
         ),
+        crate::api::ModelError::Busy(msg) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "error": msg })),
+        ),
     }
 }
 
@@ -1494,7 +1550,7 @@ async fn generate(
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
@@ -1670,7 +1726,7 @@ async fn chat(
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
@@ -1733,7 +1789,7 @@ async fn chat(
     let messages = if media.items.is_empty() || projector.is_some() {
         messages
     } else if media.current_turn > 0 {
-        return Err(cannot_read_media(&snap.model_name));
+        return Err(cannot_read_media(&snap.model_name).into());
     } else {
         tracing::info!(
             "`{}` cannot read attachments: {} from earlier turns become notes",
@@ -2247,7 +2303,7 @@ async fn chat_completions(
     // identity when no keys are configured, so this never fails to extract.
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
-) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;

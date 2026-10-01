@@ -101,6 +101,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently. For a generation model the time counts from the end of its last request, and a model is never unloaded while a request is using it |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
 | `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
+| `--max-loaded-models` | `1` | How many generation models stay loaded at once (1–16); embedding and decision models are not counted. Past it, the least recently used idle model is unloaded; a model answering requests is never unloaded to make room. See [Several models at once](#several-models-at-once) |
 | `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
@@ -261,8 +262,8 @@ curl http://localhost:11434/api/generate \
 
 **Behavior:**
 
-- In-flight requests on the old model complete normally (they hold cloned handles)
-- A model served sequentially — every multimodal model, and any with `--batch-size 0` — is freed only when the requests running on it end, so a swap waits for them, up to 30 seconds, before the next model is sized against free VRAM
+- With one model at a time (the default), a swap cuts off the requests the old model is still answering: they end with the error `Server shutting down`. To keep several models loaded instead, see [Several models at once](#several-models-at-once)
+- A model served sequentially — every multimodal model, and any with `--batch-size 0` — cannot be cut off, and is freed only when the requests running on it end, so a swap waits for them, up to 30 seconds, before the next model is sized against free VRAM
 - The new model loads on a blocking thread, then atomically replaces the slot
 - The model name must be an imported model (`eullm import-ollama`) or a local GGUF path
 
@@ -282,6 +283,51 @@ That split is not a detail: treating a per-model property as a process-wide
 setting is how a launch model's projector ended up on its successors, and how
 a layer count chosen for one model produced an out-of-memory error on the
 next one.
+
+### Several models at once
+
+`--max-loaded-models N` (default 1, at most 16) keeps up to N generation
+models loaded, so that requests alternating between models answer from memory
+instead of reloading one each time. Embedding and decision models have slots
+of their own and are not counted.
+
+```bash
+eullm serve --max-loaded-models 2
+curl http://localhost:11434/api/generate -d '{"model": "qwen3-4b", "prompt": "Ciao"}'
+curl http://localhost:11434/api/generate -d '{"model": "qwen3-8b", "prompt": "Ciao"}'
+# → both stay loaded; the next request to either answers at once
+```
+
+How a model finds its place:
+
+- **Below the limit**, a model a request names is loaded beside the others.
+- **At the limit**, the least recently used idle model is unloaded first. A
+  model whose keep_alive is over goes before any other, a model kept for good
+  (`keep_alive: -1`, or no `--keep-alive`) after one that would expire, and
+  the model `eullm run` started with goes last.
+- **A model answering requests is never unloaded to make room.** When every
+  model that could make room is busy, the load waits up to 120 seconds for one
+  to finish, then answers 503 with `Retry-After: 5`.
+- **A model loads beside others only if it fits whole** on the GPU in what
+  they leave free: every layer, and its projector. Otherwise models are
+  unloaded until it fits, or until it is alone, when it is sized like any
+  model loaded by itself, partial split included. The same rule as Ollama's
+  ("new models must be able to completely fit in VRAM to allow concurrent
+  model loads"): a second model only ever gets what the first one left, and
+  splitting it silently would divide the card. Without automatic sizing
+  (`--no-fit`, or a build that cannot read free VRAM) only the count is kept,
+  and the server says so at startup.
+- A request with no `model` field is answered by the most recently used model.
+
+Requests to a model that is loaded never wait for another model's load.
+`/api/version` reports `max_loaded_models`, `loaded_models`, and
+`generation_evictions` (how many models were unloaded to make room; a steady
+rate of one per request means the models asked for do not fit together).
+
+Unlike Ollama's `OLLAMA_MAX_LOADED_MODELS`, this is a command-line flag, not an
+environment variable, and it counts generation models only, defaulting to 1
+rather than three per GPU. The server says so at startup when the variable is
+set.
 
 ## KV Cache Quantization
 
@@ -432,9 +478,9 @@ was loaded with, instead of loading the same weights again.
 ### Concurrent swap safety
 
 Multiple requests arriving simultaneously for a different model are handled safely:
-- Only one swap runs at a time (serialized via Mutex)
-- Other requests wait for the swap to complete, then use the new model
-- In-flight requests on the old model continue normally via reference counting
+- Only one load runs at a time (serialized via Mutex); requests to a model that is already loaded do not wait for it
+- Other requests for the model being loaded wait for the load to complete, then use it
+- With one model at a time (the default), requests the old model is still answering are cut off with an error, except on a sequential engine, which finishes them before it is freed. With `--max-loaded-models` above 1, a model answering requests is never unloaded to make room — see [Several models at once](#several-models-at-once)
 
 ### VRAM budget reference
 
@@ -995,9 +1041,20 @@ curl http://localhost:11434/api/version
 
 ```json
 {
-  "version": "0.1.0"
+  "version": "0.7.20",
+  "api_port": 11434,
+  "model_swaps": 0,
+  "max_loaded_models": 1,
+  "loaded_models": 1,
+  "generation_evictions": 0
 }
 ```
+
+Besides Ollama's `version`, EuLLM reports the API port, `model_swaps` (models
+evicted to make room in another slot), and the [resident
+models](#several-models-at-once): the `--max-loaded-models` limit, how many
+generation models are loaded, and how many were unloaded to make room for
+another.
 
 #### `GET /api/tags`
 

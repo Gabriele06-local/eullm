@@ -158,9 +158,11 @@ fn answer(lines: &[Value]) -> String {
 /// The last line of a generation that ended as it should: done, for a reason
 /// a generation ends with, and no error anywhere.
 fn assert_finished(lines: &[Value]) {
+    let errors: Vec<&Value> = lines.iter().filter(|l| l.get("error").is_some()).collect();
     assert!(
-        lines.iter().all(|l| l.get("error").is_none()),
-        "an error in the answer: {lines:?}"
+        errors.is_empty(),
+        "an error after {} lines: {errors:?}",
+        lines.len()
     );
     let last = lines.last().expect("at least one line");
     assert_eq!(last["done"], true, "{last}");
@@ -383,4 +385,278 @@ async fn real_model_a_swap_waits_for_a_sequential_engine_to_be_released() {
         a_ended - b_answered
     );
     assert_eq!(server.loaded().await, ["tiny-b"]);
+}
+
+impl TestServer {
+    /// `/api/version`, where the residency counters are.
+    async fn version(&self) -> Value {
+        reqwest::get(format!("{}/api/version", self.base))
+            .await
+            .expect("request")
+            .json()
+            .await
+            .expect("json")
+    }
+
+    /// A streamed generation from `model` that has started: its first chunk
+    /// is in, so the model is answering.
+    async fn start_streaming(&self, model: &str, num_predict: u32) -> reqwest::Response {
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/generate", self.base))
+            .json(&json!({
+                "model": model, "prompt": "Once upon a time", "stream": true,
+                "options": { "num_predict": num_predict },
+            }))
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(response.status(), 200, "{model}");
+        response
+    }
+}
+
+/// The rest of a streamed answer, as JSON lines, and when it ended.
+async fn read_to_end(response: reqwest::Response) -> (Vec<Value>, Instant) {
+    let text = response.text().await.expect("body");
+    let lines = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    (lines, Instant::now())
+}
+
+fn short(model: &str) -> Value {
+    json!({
+        "model": model, "prompt": "Once upon a time", "stream": false,
+        "options": { "num_predict": 8 },
+    })
+}
+
+/// Two models resident at once, each answering — at the same time too —
+/// without either being loaded again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_two_models_answer_side_by_side() {
+    let server = start(&["tiny-a", "tiny-b"], |state| state.max_loaded_models = 2).await;
+    for model in ["tiny-a", "tiny-b"] {
+        let (status, lines) = server.generate(short(model)).await;
+        assert_eq!(status, 200, "{lines:?}");
+        assert_finished(&lines);
+    }
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
+    let loads = (
+        server.load_id("tiny-a").await,
+        server.load_id("tiny-b").await,
+    );
+
+    let streamed = |model: &'static str| {
+        json!({
+            "model": model, "prompt": "Once upon a time", "stream": true,
+            "options": { "num_predict": 200 },
+        })
+    };
+    let ((status_a, a), (status_b, b)) = tokio::join!(
+        server.generate(streamed("tiny-a")),
+        server.generate(streamed("tiny-b"))
+    );
+    assert_eq!(status_a, 200);
+    assert_eq!(status_b, 200);
+    assert_finished(&a);
+    assert_finished(&b);
+    assert_eq!(a[0]["model"], "tiny-a");
+    assert_eq!(b[0]["model"], "tiny-b");
+    assert_eq!(
+        (
+            server.load_id("tiny-a").await,
+            server.load_id("tiny-b").await
+        ),
+        loads,
+        "neither was loaded again"
+    );
+
+    let version = server.version().await;
+    assert_eq!(version["max_loaded_models"], 2);
+    assert_eq!(version["loaded_models"], 2);
+    assert_eq!(version["generation_evictions"], 0);
+}
+
+/// Past `--max-loaded-models`, the least recently used idle model makes
+/// room, and only it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_third_model_evicts_the_least_recently_used() {
+    let server = start(&["tiny-a", "tiny-b", "tiny-c"], |state| {
+        state.max_loaded_models = 2
+    })
+    .await;
+    // tiny-b is used before tiny-a is used again: tiny-b is the least
+    // recently used when tiny-c comes.
+    for model in ["tiny-a", "tiny-b", "tiny-a"] {
+        let (status, lines) = server.generate(short(model)).await;
+        assert_eq!(status, 200, "{lines:?}");
+    }
+    let kept = server.load_id("tiny-a").await;
+
+    let (status, lines) = server.generate(short("tiny-c")).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_finished(&lines);
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-c"]);
+    assert_eq!(server.load_id("tiny-a").await, kept);
+    let version = server.version().await;
+    assert_eq!(version["generation_evictions"], 1);
+    assert_eq!(version["loaded_models"], 2);
+}
+
+/// With every resident answering a request, a load that needs one of them
+/// waits for one to finish; it does not cut another client's answer off, as
+/// a swap of the one resident model does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_eviction_waits_for_a_busy_model_instead_of_aborting_it() {
+    let server = start(&["tiny-a", "tiny-b", "tiny-c"], |state| {
+        state.max_loaded_models = 2;
+        state.ctx_size = 8192;
+    })
+    .await;
+    let started = Instant::now();
+    let a = server.start_streaming("tiny-a", 3000).await;
+    let b = server.start_streaming("tiny-b", 3000).await;
+    let third = {
+        let base = server.base.clone();
+        tokio::spawn(async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/api/generate"))
+                .json(&short("tiny-c"))
+                .send()
+                .await
+                .expect("request");
+            let status = response.status();
+            let line: Value = response.json().await.expect("json");
+            (status, line, Instant::now())
+        })
+    };
+
+    let ((a, a_ended), (b, b_ended)) = tokio::join!(read_to_end(a), read_to_end(b));
+    assert_finished(&a);
+    assert_finished(&b);
+    let (status, line, c_answered) = third.await.expect("the third request");
+    assert_eq!(status, 200, "{line}");
+    assert_finished(&[line]);
+    // Compared on the client's clocks, across connections: the server frees a
+    // model a moment before its client has read the end of the body, so a
+    // few milliseconds either way say nothing. Not waiting would have
+    // answered tiny-c a second or more before either answer was over.
+    let first_free = a_ended.min(b_ended);
+    let tolerance = Duration::from_millis(250);
+    assert!(
+        first_free.duration_since(started) > 4 * tolerance,
+        "the answers took {:?}, too short to tell waiting from not; raise num_predict",
+        first_free.duration_since(started)
+    );
+    assert!(
+        c_answered + tolerance >= first_free,
+        "tiny-c answered {:?} before a model it needed was free",
+        first_free - c_answered
+    );
+    let loaded = server.loaded().await;
+    assert!(
+        loaded.len() == 2 && loaded.contains(&"tiny-c".to_string()),
+        "{loaded:?}"
+    );
+    assert_eq!(server.version().await["generation_evictions"], 1);
+}
+
+/// When no resident finishes within the wait, the load gives up with a 503
+/// a client can retry — and the answers that kept it waiting are not
+/// touched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_load_that_cannot_make_room_in_time_is_a_503() {
+    let server = start(&["tiny-a", "tiny-b", "tiny-c"], |state| {
+        state.max_loaded_models = 2;
+        state.ctx_size = 8192;
+        state.busy_wait = Duration::from_millis(200);
+    })
+    .await;
+    let a = server.start_streaming("tiny-a", 3000).await;
+    let b = server.start_streaming("tiny-b", 3000).await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/generate", server.base))
+        .json(&short("tiny-c"))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 503);
+    assert_eq!(
+        response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok()),
+        Some("5")
+    );
+    let body: Value = response.json().await.expect("json");
+    assert!(
+        body["error"].as_str().is_some_and(|e| e.contains("tiny-c")),
+        "{body}"
+    );
+
+    let ((a, _), (b, _)) = tokio::join!(read_to_end(a), read_to_end(b));
+    assert_finished(&a);
+    assert_finished(&b);
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
+
+    // Retried once they are done, it goes through.
+    let (status, lines) = server.generate(short("tiny-c")).await;
+    assert_eq!(status, 200, "{lines:?}");
+}
+
+/// A request to a resident model takes no lock a load holds: it is
+/// answered while another model is still loading.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_request_to_a_resident_model_is_not_held_by_a_load() {
+    let gate = Arc::new(super::LoadGate {
+        arrived: tokio::sync::Notify::new(),
+        proceed: tokio::sync::Notify::new(),
+    });
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        state.load_gate = Some(Arc::clone(&gate));
+    })
+    .await;
+    let spawn_request = |model: &'static str| {
+        let base = server.base.clone();
+        tokio::spawn(async move {
+            reqwest::Client::new()
+                .post(format!("{base}/api/generate"))
+                .json(&short(model))
+                .send()
+                .await
+                .expect("request")
+                .status()
+        })
+    };
+
+    let first = spawn_request("tiny-a");
+    gate.arrived.notified().await;
+    gate.proceed.notify_one();
+    assert_eq!(first.await.expect("tiny-a"), 200);
+
+    // tiny-b's load stops at the gate, holding the load lock...
+    let loading = spawn_request("tiny-b");
+    gate.arrived.notified().await;
+    // ...and tiny-a answers all the same.
+    let (status, lines) =
+        tokio::time::timeout(Duration::from_secs(20), server.generate(short("tiny-a")))
+            .await
+            .expect("tiny-a answered while tiny-b was loading");
+    assert_eq!(status, 200, "{lines:?}");
+    assert_finished(&lines);
+    assert!(!loading.is_finished(), "tiny-b was still loading");
+
+    gate.proceed.notify_one();
+    assert_eq!(loading.await.expect("tiny-b"), 200);
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
 }

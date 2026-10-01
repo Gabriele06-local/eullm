@@ -1496,6 +1496,13 @@ pub struct OffloadPlan {
     pub n_cpu_moe: u32,
     pub mmproj: MmprojPlacement,
     pub basis: OffloadBasis,
+    /// Sizing cut nothing below what the flags ask for: the text model whole
+    /// on the GPU — or with as many layers as `--gpu-layers` allows — beside
+    /// whatever experts the user sent to RAM, and the projector on the GPU
+    /// unless the user sent it to RAM. A model loads beside other resident
+    /// models only on a full plan: a second model gets what the first one
+    /// left, and a split it never asked for would quietly divide the card.
+    pub full: bool,
     /// The free VRAM the model was sized against, every reservation taken
     /// out — the figure the load log reports.
     pub free_vram: Option<u64>,
@@ -1592,11 +1599,22 @@ pub fn plan_offload(
         }
     };
     let capped = apply_gpu_layers_ceiling(gpu_layers, flags.gpu_layers);
+    let text_full = match basis {
+        OffloadBasis::Dense(FitDecision::FitsFully) => true,
+        // Short of the whole model, but not of the user's own ceiling.
+        OffloadBasis::Dense(FitDecision::Partial { layers, .. }) => {
+            flags.gpu_layers >= 0 && layers >= flags.gpu_layers
+        }
+        _ => false,
+    };
+    let projector_full =
+        mmproj_bytes == 0 || mmproj != MmprojPlacement::Cpu || flags.mmproj_offload == Some(false);
     OffloadPlan {
         gpu_layers: capped,
         cpu_moe,
         n_cpu_moe,
         mmproj,
+        full: text_full && projector_full,
         basis,
         free_vram: vram.map(|(free, _)| free),
         capped_from: (capped != gpu_layers).then_some(gpu_layers),
@@ -1604,6 +1622,14 @@ pub fn plan_offload(
 }
 
 impl OffloadPlan {
+    /// Whether this plan rests on an estimate at all: free VRAM and the
+    /// model's header were both read. Without one, whether a model fits
+    /// beside others cannot be told, and only the count of residents is
+    /// enforced.
+    pub fn sized(&self) -> bool {
+        !matches!(self.basis, OffloadBasis::Dense(FitDecision::Unknown { .. }))
+    }
+
     /// `--fit-strict` loads only a model the dense sizer put wholly on the
     /// GPU: it refuses a split, and a model it could not size. A MoE plan
     /// always resolves to a loadable configuration and is never refused.
@@ -2446,6 +2472,110 @@ mod plan_offload_tests {
         ));
         assert!(starved.cpu_moe);
         assert!(!starved.refused_by_strict());
+    }
+
+    /// When a plan counts as whole, which is what a second resident model
+    /// has to be.
+    #[test]
+    fn a_plan_is_full_only_when_sizing_cut_nothing_the_flags_asked_for() {
+        let (info, file_size) = dense();
+        let (moe_info, moe_layout, moe_size) = moe();
+        let card = |free| Some((free, 16 * GIB));
+        let dense_plan = |vram, mmproj_bytes, flags| {
+            plan_offload(
+                vram,
+                Some(&info),
+                None,
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+                0,
+                mmproj_bytes,
+                flags,
+            )
+        };
+        let whole = dense_plan(card(15 * GIB), 0, flags());
+        assert!(whole.full && whole.sized());
+
+        let split = dense_plan(card(6 * GIB), 0, flags());
+        assert!(!split.full && split.sized());
+        // The same split under a ceiling it meets: what the flags asked for.
+        let ceiling = match split.basis {
+            OffloadBasis::Dense(FitDecision::Partial { layers, .. }) => layers,
+            ref other => panic!("{other:?}"),
+        };
+        let at_ceiling = dense_plan(
+            card(6 * GIB),
+            0,
+            OffloadFlags {
+                gpu_layers: ceiling,
+                ..flags()
+            },
+        );
+        assert!(at_ceiling.full);
+        let above_it = dense_plan(
+            card(6 * GIB),
+            0,
+            OffloadFlags {
+                gpu_layers: ceiling + 1,
+                ..flags()
+            },
+        );
+        assert!(!above_it.full);
+
+        // The text model fits, but not with its projector beside it: sizing
+        // sent the projector to RAM, and that is a cut...
+        let threshold = (1..=64)
+            .map(|q| q * 256 * MIB)
+            .find(|&free| dense_plan(card(free), 0, flags()).full)
+            .expect("fits on a 16 GiB card");
+        let crowded = dense_plan(card(threshold), 1200 * MIB, flags());
+        assert_eq!(crowded.mmproj, MmprojPlacement::Cpu);
+        assert!(!crowded.full);
+        // ...unless the user sent it there.
+        let asked = dense_plan(
+            card(threshold),
+            1200 * MIB,
+            OffloadFlags {
+                mmproj_offload: Some(false),
+                ..flags()
+            },
+        );
+        assert!(asked.full);
+
+        let unknown = dense_plan(None, 0, flags());
+        assert!(!unknown.sized() && !unknown.full);
+
+        let moe_plan = |free, flags| {
+            plan_offload(
+                card(free),
+                Some(&moe_info),
+                Some(&moe_layout),
+                moe_size,
+                4096,
+                F16.0,
+                F16.1,
+                0,
+                0,
+                flags,
+            )
+        };
+        assert!(!moe_plan(14 * GIB, flags()).full, "experts moved to RAM");
+        assert!(!moe_plan(3 * GIB, flags()).full);
+        let roomy = plan_offload(
+            Some((40 * GIB, 48 * GIB)),
+            Some(&moe_info),
+            Some(&moe_layout),
+            moe_size,
+            4096,
+            F16.0,
+            F16.1,
+            0,
+            0,
+            flags(),
+        );
+        assert!(roomy.full, "a MoE that fits whole: {:?}", roomy.basis);
     }
 
     #[test]

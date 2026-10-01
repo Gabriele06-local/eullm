@@ -97,8 +97,25 @@ pub struct AppState {
     /// Serializes loads and unloads of every slot — generation, embedding
     /// and decision — so that two loads never size themselves against the
     /// same free VRAM. Taken before any other lock here, never after one:
-    /// `swap_lock` → `models` → `embedding`/`decision`.
+    /// `swap_lock` → `models` → `embedding`/`decision`. A load waiting for a
+    /// busy model to finish lets go of it meanwhile.
     swap_lock: tokio::sync::Mutex<()>,
+    /// `--max-loaded-models`: how many generation models may be resident at
+    /// once. At 1, the default, a request for another model replaces the
+    /// resident one, as every release before the flag did.
+    pub max_loaded_models: usize,
+    /// How long a load waits for a busy resident to finish before it gives
+    /// up with a 503: `BUSY_EVICTION_WAIT`, shorter in tests.
+    busy_wait: std::time::Duration,
+    /// How many generation models were unloaded to make room for another
+    /// one (`/api/version`'s `generation_evictions`). With one model at a
+    /// time that is every swap; with several, a steady rate of one per
+    /// request means the models asked for do not fit together.
+    pub generation_evictions: std::sync::atomic::AtomicU64,
+    /// Holds every generation load just before it starts, until the test
+    /// lets it go — to prove what a request does while a load is running.
+    #[cfg(test)]
+    load_gate: Option<Arc<LoadGate>>,
 
     // ── Immutable inference settings (from CLI flags) ────────────────
     pub gpu_layers: i32,
@@ -264,12 +281,16 @@ pub enum ModelError {
     /// The model exists but could not be loaded: out of VRAM, corrupt GGUF,
     /// a context that will not allocate. The caller should get a 500.
     LoadFailed(String),
+    /// Loading the model needs room only a resident model still answering
+    /// requests can give, and none finished in time. The caller should get a
+    /// 503 with `Retry-After`: the same request can succeed in a moment.
+    Busy(String),
 }
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::LoadFailed(m) => f.write_str(m),
+            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) => f.write_str(m),
         }
     }
 }
@@ -283,8 +304,7 @@ impl From<String> for ModelError {
 
 impl AppState {
     /// Load a generation model that is not resident, making room for it
-    /// first: the resident gives way, and in-flight requests on it are cut off
-    /// as they always were. The new model loads with the same inference
+    /// first (see `make_room`). The new model loads with the same inference
     /// settings as every other.
     ///
     /// `override_batch_size` allows the caller to change the number of
@@ -297,7 +317,8 @@ impl AppState {
     /// is answered by the model it named even when another load follows
     /// straight after. `keep_alive` is that request's.
     ///
-    /// This is the **write** path — only one load runs at a time.
+    /// This is the **write** path — only one load runs at a time, and a load
+    /// that waits for a busy model to finish lets go of the lock meanwhile.
     pub(crate) async fn load_generation_model(
         &self,
         name: &str,
@@ -307,18 +328,14 @@ impl AppState {
     ) -> Result<resident::SlotSnapshot, ModelError> {
         // Serialize loads — if another request is already loading, wait for
         // it to finish instead of starting a parallel load.
-        let _swap_guard = self.swap_lock.lock().await;
+        let mut swap_guard = Some(self.swap_lock.lock().await);
 
         // Normalize Ollama-style names: "qwen3:14b" → "qwen3-14b"
         let normalized = normalize_model_name(name);
 
         // Re-check after acquiring the lock — another request may have
         // loaded it while this one waited.
-        if let Some(snapshot) = self.lease_resident(&normalized, keep_alive).await {
-            tracing::info!(
-                "Model {} already loaded (by another request)",
-                crate::audit::sanitize_for_log(&normalized)
-            );
+        if let Some(snapshot) = self.lease_loaded(&normalized, None, keep_alive).await {
             return Ok(snapshot);
         }
 
@@ -328,16 +345,11 @@ impl AppState {
         // The same file under another of its names — a store name for a model
         // launched by its path, or another name `eullm pull` linked to the
         // same weights: loading it again would hold it twice.
+        if let Some(snapshot) = self
+            .lease_loaded(&normalized, Some(&gguf_path), keep_alive)
+            .await
         {
-            let models = self.models.read().await;
-            if let Some(model) = models.find_file(&gguf_path) {
-                tracing::info!(
-                    "{} is {}, already loaded",
-                    crate::audit::sanitize_for_log(&normalized),
-                    crate::audit::sanitize_for_log(&model.name)
-                );
-                return Ok(self.lease(model, keep_alive));
-            }
+            return Ok(snapshot);
         }
         // Resolve an mmproj sibling (vision projector) if the model store
         // declares one. Presence of a projector is the signal that this is
@@ -366,28 +378,11 @@ impl AppState {
             tracing::info!("Multimodal model detected — mmproj: {}", p.display());
         }
         tracing::info!(
-            "Swapping model → {} ({})",
+            "Loading model → {} ({})",
             crate::audit::sanitize_for_log(&normalized),
             gguf_path.display()
         );
 
-        // ── 1. Make room: unload the resident that gives way and WAIT for
-        //       its scheduler thread to fully exit before loading the new
-        //       model.
-        //
-        // Without this, both models would be in VRAM simultaneously —
-        // causing OOM or a C-level crash in llama.cpp.
-        self.make_room_for(&normalized).await;
-
-        // An embedder left resident from an earlier ingestion run would
-        // otherwise shrink the free VRAM `--fit` measures below, sizing this
-        // load as if the card were smaller than it actually is once the
-        // embedder itself is later evicted by `ensure_embedding_model`. See
-        // `evict_embedding_if_present_for_generation_load`.
-        self.evict_embedding_if_present_for_generation_load().await;
-        self.evict_decision_if_present_for_generation_load().await;
-
-        // ── 2. Load the new model ───────────────────────────────────
         // Gemma 4 requires f16 KV cache regardless of the server's configured
         // baseline (mixed SWA architecture) — see
         // `inference::correct_kv_cache_for_model` for the rationale. This
@@ -407,239 +402,274 @@ impl AppState {
                 crate::audit::sanitize_for_log(&normalized)
             );
         }
-        // ── 2a. Size the offload for THIS model (--fit) ─────────────
+
+        // What sizing reads about the model, read once for every attempt.
         // The launch flags describe the launch model; whatever is being
-        // swapped in has its own size, layer count, and (possibly) expert
-        // layout. Runs after the unload above so the measured free VRAM is
-        // real. Never prompts — same decision order as the `run` startup
-        // flow: projector placement, MoE auto-sizing (always resolves), then
-        // the dense split, headless — all in one `fit::plan_offload`.
+        // loaded has its own size, layer count, and (possibly) expert
+        // layout.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
         let info = crate::fit::read_gguf_info(&gguf_path);
         let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
-        let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
-        let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
-        // The projector is loaded with the model, always, so sizing has to
-        // count it — see `fit::place_mmproj` for where it goes and why.
-        let mmproj_bytes = crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref());
-        let flags = crate::fit::OffloadFlags {
-            gpu_layers: self.gpu_layers,
-            cpu_moe: self.cpu_moe,
-            n_cpu_moe: self.n_cpu_moe,
-            mmproj_offload: self.mmproj_offload,
-        };
-        let plan = if self.fit {
-            // Counted below as reserved; the context the decision model
-            // keeps between requests must not show up as used as well.
-            self.release_decision_context().await;
-            // Memory the free-VRAM figure does not show yet: the reserved
-            // companions' requests, and the context every sequential
-            // resident creates per request.
-            let reserve_bytes = self
-                .reserved_embedding_bytes()
-                .await
-                .saturating_add(self.reserved_decision_bytes().await)
-                .saturating_add(self.models.read().await.unallocated_reserve());
-            let layout = match (&info, file_size) {
-                (Some(i), size) if size > 0 => {
-                    crate::fit::read_gguf_moe_layout(&gguf_path, size, i.n_layers)
-                }
-                _ => None,
-            };
-            let plan = crate::fit::plan_offload(
-                crate::fit::vram_bytes(),
-                info.as_ref(),
-                layout.as_ref(),
-                file_size,
-                effective_ctx,
-                kv_bpe_k,
-                kv_bpe_v,
-                reserve_bytes,
-                mmproj_bytes,
-                flags,
-            );
-            plan.print_decision(file_size, self.fit_strict);
-            if self.fit_strict && plan.refused_by_strict() {
-                return Err(ModelError::LoadFailed(format!(
-                    "--fit-strict: model '{normalized}' does not fully fit in the \
-                     currently free VRAM; not loading. Retry without --fit-strict \
-                     to allow a partial CPU/GPU split."
-                )));
+        let layout = match (&info, file_size) {
+            (Some(i), size) if self.fit && size > 0 => {
+                crate::fit::read_gguf_moe_layout(&gguf_path, size, i.n_layers)
             }
-            // A `--gpu-layers` given at startup is an upper bound for every
-            // model this server loads, not a count to apply blindly to a
-            // model it was never chosen for.
-            if plan.capped_from.is_some() {
-                tracing::info!(
-                    "--gpu-layers {}: offloading {} layers for {}",
+            _ => None,
+        };
+        let sizing = Sizing {
+            info: info.as_ref(),
+            layout: layout.as_ref(),
+            file_size,
+            ctx_size: effective_ctx,
+            kv_bpe_k: crate::inference::cache_type_bytes_per_elem(&cache_type_k),
+            kv_bpe_v: crate::inference::cache_type_bytes_per_elem(&cache_type_v),
+            // The projector is loaded with the model, always, so sizing has
+            // to count it — see `fit::place_mmproj` for where it goes and why.
+            mmproj_bytes: crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref()),
+            flags: crate::fit::OffloadFlags {
+                gpu_layers: self.gpu_layers,
+                cpu_moe: self.cpu_moe,
+                n_cpu_moe: self.n_cpu_moe,
+                mmproj_offload: self.mmproj_offload,
+            },
+        };
+
+        let mut make_more_room = false;
+        loop {
+            // ── 1. Make room, and size the load for THIS model (--fit) ──
+            // Never prompts — same decision order as the `run` startup
+            // flow: projector placement, MoE auto-sizing (always resolves),
+            // then the dense split, headless — all in one `fit::plan_offload`.
+            let fits_now = make_more_room.then_some(false);
+            let plan = match self
+                .make_room(
+                    &mut swap_guard,
+                    &normalized,
+                    &gguf_path,
+                    &sizing,
+                    fits_now,
+                    keep_alive,
+                )
+                .await?
+            {
+                Room::Loaded(snapshot) => return Ok(snapshot),
+                Room::Ready(plan) => plan,
+            };
+            if let Some(plan) = &plan {
+                plan.print_decision(file_size, self.fit_strict);
+                if self.fit_strict && plan.refused_by_strict() {
+                    return Err(ModelError::LoadFailed(format!(
+                        "--fit-strict: model '{normalized}' does not fully fit in the \
+                         currently free VRAM; not loading. Retry without --fit-strict \
+                         to allow a partial CPU/GPU split."
+                    )));
+                }
+                // A `--gpu-layers` given at startup is an upper bound for
+                // every model this server loads, not a count to apply blindly
+                // to a model it was never chosen for.
+                if plan.capped_from.is_some() {
+                    tracing::info!(
+                        "--gpu-layers {}: offloading {} layers for {}",
+                        self.gpu_layers,
+                        plan.gpu_layers,
+                        crate::audit::sanitize_for_log(&normalized)
+                    );
+                }
+            }
+            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
+                Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+                None => (
                     self.gpu_layers,
-                    plan.gpu_layers,
+                    self.cpu_moe,
+                    self.n_cpu_moe,
+                    crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
+                ),
+            };
+
+            // ── 2. Load the new model ───────────────────────────────
+            let config = InferenceConfig {
+                model_path: gguf_path.clone(),
+                gpu_layers,
+                context_size: effective_ctx,
+                threads: self.threads,
+                flash_attn: self.flash_attn,
+                n_batch: self.n_batch,
+                cache_type_k,
+                cache_type_v,
+                // Multimodal: when the model store declares an mmproj sibling
+                // we load it here so HTTP requests with `images` can route
+                // through `engine.generate_multimodal()`. Models without an
+                // mmproj keep the text-only fast path (None → no extra VRAM,
+                // no init cost).
+                mmproj_path: mmproj_path.clone(),
+                mmproj_on_gpu: mmproj_placement.on_gpu(),
+                cpu_moe,
+                n_cpu_moe,
+                rs_seq: self.rs_seq,
+            };
+            if mmproj_path.is_some() {
+                tracing::info!("{}", mmproj_placement.describe());
+            }
+
+            // The continuous-batching scheduler is text-only — it does not
+            // route mtmd chunks. For multimodal models we therefore force the
+            // sequential `InferenceEngine` (batch_size=0). Vision is
+            // interactive single-user anyway, so losing batching here is not
+            // a practical regression.
+            let batch_size = if mmproj_path.is_some() {
+                0
+            } else {
+                override_batch_size.unwrap_or(self.batch_size)
+            };
+            let ctx_checkpoints_for_swap = self.ctx_checkpoints;
+            let checkpoint_min_step_for_swap = self.checkpoint_min_step;
+            let rust_debug_for_swap = self.rust_debug;
+            // What the banner shows unless the sequential engine has to
+            // shrink it. The scheduler never shrinks: if its context does not
+            // fit, the whole load fails, so requested and actual are always
+            // the same there.
+            let requested_ctx_size = effective_ctx;
+            let backend_for_swap = self.backend.clone();
+
+            #[cfg(test)]
+            if let Some(gate) = &self.load_gate {
+                gate.arrived.notify_one();
+                gate.proceed.notified().await;
+            }
+
+            let (new_engine, new_scheduler, ready_info, effective_ctx_size) =
+                tokio::task::spawn_blocking(move || {
+                    if batch_size > 0 {
+                        let sched_config = SchedulerConfig {
+                            max_batch_size: batch_size,
+                            queue_capacity: batch_size * 8,
+                            ctx_checkpoints: ctx_checkpoints_for_swap,
+                            checkpoint_min_step: checkpoint_min_step_for_swap,
+                            debug_logit_check: rust_debug_for_swap,
+                        };
+                        let sched = BatchScheduler::new(config, sched_config);
+                        match sched.start(backend_for_swap) {
+                            Ok((handle, model_info)) => {
+                                Ok((None, Some(handle), Some(model_info), requested_ctx_size))
+                            }
+                            Err(e) => Err(format!("Failed to start scheduler: {e}")),
+                        }
+                    } else {
+                        match InferenceEngine::load(config, backend_for_swap) {
+                            Ok(eng) => {
+                                // Read it here, on the blocking thread that
+                                // already owns the model, rather than after
+                                // the move into the slot: the estimate needs
+                                // the model's own metadata.
+                                let info = eng.ready_info();
+                                // May be smaller than `requested_ctx_size`:
+                                // `load()` shrinks it automatically when the
+                                // requested size does not fit, and the banner
+                                // has to say what actually loaded — `info`'s
+                                // KV estimate already reflects the shrunk
+                                // size, so showing the requested one here
+                                // would state a KV cost that belongs to a
+                                // different context than the one printed next
+                                // to it.
+                                let actual_ctx_size = eng.context_size();
+                                Ok((Some(Arc::new(eng)), None, Some(info), actual_ctx_size))
+                            }
+                            Err(e) => Err(format!("Failed to load model: {e}")),
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| format!("Task join error: {e}"))??;
+
+            // A sequential engine shrinks its context, silently, when the one
+            // asked for does not fit. Beside other resident models that is
+            // the card being divided after all: give it back, make more room,
+            // and load once more. Alone, or the second time, the shrunk
+            // context is what there is, as it always was.
+            if self.fit
+                && !make_more_room
+                && effective_ctx_size < requested_ctx_size
+                && !self.models.read().await.is_empty()
+            {
+                tracing::warn!(
+                    "{}: its context had to shrink from {requested_ctx_size} to \
+                     {effective_ctx_size} tokens beside the other resident models — \
+                     making more room and loading it again",
                     crate::audit::sanitize_for_log(&normalized)
                 );
+                drop(new_engine);
+                make_more_room = true;
+                continue;
             }
-            Some(plan)
-        } else {
-            None
-        };
-        let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
-            Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
-            None => (
-                self.gpu_layers,
-                self.cpu_moe,
-                self.n_cpu_moe,
-                crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
-            ),
-        };
 
-        let config = InferenceConfig {
-            model_path: gguf_path.clone(),
-            gpu_layers,
-            context_size: effective_ctx,
-            threads: self.threads,
-            flash_attn: self.flash_attn,
-            n_batch: self.n_batch,
-            cache_type_k,
-            cache_type_v,
-            // Multimodal: when the model store declares an mmproj sibling we
-            // load it here so HTTP requests with `images` can route through
-            // `engine.generate_multimodal()`. Models without an mmproj keep
-            // the text-only fast path (None → no extra VRAM, no init cost).
-            mmproj_path: mmproj_path.clone(),
-            mmproj_on_gpu: mmproj_placement.on_gpu(),
-            cpu_moe,
-            n_cpu_moe,
-            rs_seq: self.rs_seq,
-        };
-        if mmproj_path.is_some() {
-            tracing::info!("{}", mmproj_placement.describe());
-        }
+            // ── 3. Install the new model among the residents ─────────
+            // A sequential engine creates its context per request, so the
+            // memory that context takes is free while it is idle; it is held
+            // back from everything sized next to it instead (F5).
+            let unallocated_reserve = match &new_engine {
+                Some(engine) if gpu_layers != 0 => crate::fit::context_reserve_bytes(
+                    sizing.info,
+                    engine.context_size(),
+                    sizing.kv_bpe_k,
+                    sizing.kv_bpe_v,
+                ),
+                _ => 0,
+            };
+            let snapshot = {
+                let mut models = self.models.write().await;
+                let mut model = resident::LoadedModel::new(
+                    normalized.clone(),
+                    gguf_path,
+                    new_engine,
+                    new_scheduler,
+                );
+                model.unallocated_reserve = unallocated_reserve;
+                let model = models.insert(model);
+                self.lease(model, keep_alive)
+            };
+            drop(swap_guard);
 
-        // The continuous-batching scheduler is text-only — it does not route
-        // mtmd chunks. For multimodal models we therefore force the sequential
-        // `InferenceEngine` (batch_size=0). Vision is interactive single-user
-        // anyway, so losing batching here is not a practical regression.
-        let batch_size = if mmproj_path.is_some() {
-            0
-        } else {
-            override_batch_size.unwrap_or(self.batch_size)
-        };
-        let model_name = normalized.clone();
-        let ctx_checkpoints_for_swap = self.ctx_checkpoints;
-        let checkpoint_min_step_for_swap = self.checkpoint_min_step;
-        let rust_debug_for_swap = self.rust_debug;
-        // What the banner shows unless the sequential engine has to shrink it.
-        // The scheduler never shrinks: if its context does not fit, the whole
-        // swap fails, so requested and actual are always the same there.
-        let requested_ctx_size = override_ctx_size.unwrap_or(self.ctx_size);
-        let backend_for_swap = self.backend.clone();
-
-        let (new_engine, new_scheduler, ready_info, effective_ctx_size) =
-            tokio::task::spawn_blocking(move || {
-                if batch_size > 0 {
-                    let sched_config = SchedulerConfig {
-                        max_batch_size: batch_size,
-                        queue_capacity: batch_size * 8,
-                        ctx_checkpoints: ctx_checkpoints_for_swap,
-                        checkpoint_min_step: checkpoint_min_step_for_swap,
-                        debug_logit_check: rust_debug_for_swap,
-                    };
-                    let sched = BatchScheduler::new(config, sched_config);
-                    match sched.start(backend_for_swap) {
-                        Ok((handle, model_info)) => {
-                            Ok((None, Some(handle), Some(model_info), requested_ctx_size))
-                        }
-                        Err(e) => Err(format!("Failed to start scheduler: {e}")),
-                    }
-                } else {
-                    match InferenceEngine::load(config, backend_for_swap) {
-                        Ok(eng) => {
-                            // Read it here, on the blocking thread that already
-                            // owns the model, rather than after the move into the
-                            // slot: the estimate needs the model's own metadata.
-                            let info = eng.ready_info();
-                            // May be smaller than `requested_ctx_size`: `load()`
-                            // shrinks it automatically when the requested size
-                            // does not fit, and the banner has to say what
-                            // actually loaded — `info`'s KV estimate already
-                            // reflects the shrunk size, so showing the
-                            // requested one here would state a KV cost that
-                            // belongs to a different context than the one
-                            // printed next to it.
-                            let actual_ctx_size = eng.context_size();
-                            Ok((Some(Arc::new(eng)), None, Some(info), actual_ctx_size))
-                        }
-                        Err(e) => Err(format!("Failed to load model: {e}")),
-                    }
-                }
-            })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))??;
-
-        // ── 3. Install the new model in the slot ─────────────────────
-        // A sequential engine creates its context per request, so the
-        // memory that context takes is free while it is idle; it is held
-        // back from everything sized next to it instead (F5).
-        let unallocated_reserve = match &new_engine {
-            Some(engine) if gpu_layers != 0 => crate::fit::context_reserve_bytes(
-                info.as_ref(),
-                engine.context_size(),
-                kv_bpe_k,
-                kv_bpe_v,
-            ),
-            _ => 0,
-        };
-        let snapshot = {
-            let mut models = self.models.write().await;
-            let mut model = resident::LoadedModel::new(
-                model_name.clone(),
-                gguf_path,
-                new_engine,
-                new_scheduler,
+            tracing::info!(
+                "Model swap complete → {} (batch_size={batch_size})",
+                crate::audit::sanitize_for_log(&normalized)
             );
-            model.unallocated_reserve = unallocated_reserve;
-            let model = models.insert(model);
-            self.lease(model, keep_alive)
-        };
 
-        tracing::info!(
-            "Model swap complete → {} (batch_size={batch_size})",
-            crate::audit::sanitize_for_log(&model_name)
-        );
+            // The diagnostic banner `run` prints at startup. `serve` starts
+            // with no model, so this is the only place it can be emitted — and
+            // until it was here, anyone driving the engine as a daemon never
+            // saw which backend actually initialised, how many layers were
+            // offloaded, or what the KV cache costs. That is the audience
+            // least able to guess and most likely to be filing a report. See
+            // `crate::banner`.
+            let info = ready_info.unwrap_or_default();
+            crate::banner::ModelBanner {
+                model_name: normalized
+                    .strip_prefix("eullm/")
+                    .unwrap_or(&normalized)
+                    .to_string(),
+                gpu_layers: self.gpu_layers,
+                cpu_moe: self.cpu_moe,
+                n_cpu_moe: self.n_cpu_moe,
+                rs_seq: self.rs_seq,
+                ctx_checkpoints: self.ctx_checkpoints,
+                checkpoint_min_step: self.checkpoint_min_step,
+                batch_size,
+                ctx_size: effective_ctx_size,
+                n_ctx_train: info.n_ctx_train,
+                flash_attn: self.flash_attn,
+                cache_type_k,
+                cache_type_v,
+                kv_k_mib: info.kv_k_mib,
+                kv_v_mib: info.kv_v_mib,
+                web: self.web_enabled,
+                threads: self.threads,
+                n_batch: self.n_batch,
+                rust_debug: self.rust_debug,
+            }
+            .print();
 
-        // The diagnostic banner `run` prints at startup. `serve` starts with no
-        // model, so this is the only place it can be emitted — and until it was
-        // here, anyone driving the engine as a daemon never saw which backend
-        // actually initialised, how many layers were offloaded, or what the KV
-        // cache costs. That is the audience least able to guess and most likely
-        // to be filing a report. See `crate::banner`.
-        let info = ready_info.unwrap_or_default();
-        crate::banner::ModelBanner {
-            model_name: model_name
-                .strip_prefix("eullm/")
-                .unwrap_or(&model_name)
-                .to_string(),
-            gpu_layers: self.gpu_layers,
-            cpu_moe: self.cpu_moe,
-            n_cpu_moe: self.n_cpu_moe,
-            rs_seq: self.rs_seq,
-            ctx_checkpoints: self.ctx_checkpoints,
-            checkpoint_min_step: self.checkpoint_min_step,
-            batch_size,
-            ctx_size: effective_ctx_size,
-            n_ctx_train: info.n_ctx_train,
-            flash_attn: self.flash_attn,
-            cache_type_k,
-            cache_type_v,
-            kv_k_mib: info.kv_k_mib,
-            kv_v_mib: info.kv_v_mib,
-            web: self.web_enabled,
-            threads: self.threads,
-            n_batch: self.n_batch,
-            rust_debug: self.rust_debug,
+            return Ok(snapshot);
         }
-        .print();
-
-        Ok(snapshot)
     }
 
     /// A resident's handles, with a lease on it for one request. Only with a
@@ -659,37 +689,186 @@ impl AppState {
         }
     }
 
-    /// The resident `requested` names, with a lease on it, if it is loaded.
-    async fn lease_resident(
+    /// The resident `requested` names — or, given `path`, the one loaded
+    /// from that file under any name — with a lease on it, if it is loaded.
+    async fn lease_loaded(
         &self,
         requested: &str,
+        path: Option<&std::path::Path>,
         keep_alive: KeepAlive,
     ) -> Option<resident::SlotSnapshot> {
         let models = self.models.read().await;
-        models
-            .find(requested)
-            .map(|model| self.lease(model, keep_alive))
+        let model = match path {
+            None => models.find(requested)?,
+            Some(path) => models.find_file(path)?,
+        };
+        tracing::info!(
+            "Model {} already loaded (as {})",
+            crate::audit::sanitize_for_log(requested),
+            crate::audit::sanitize_for_log(&model.name)
+        );
+        Some(self.lease(model, keep_alive))
     }
 
-    /// Unload residents until there is room for one more model, in the order
-    /// `resident::next_step` gives. One model is resident at a time, so this
-    /// unloads the one there is, busy or not, exactly as a swap always did.
-    async fn make_room_for(&self, incoming: &str) {
+    /// Make room for `incoming` among the residents, then size its load: the
+    /// steps `resident::next_step` gives, until it says load.
+    ///
+    /// Room is a place in the count (`--max-loaded-models`) and, under
+    /// `--fit`, VRAM: a model that would not fit whole beside the residents
+    /// makes one more of them go, until it does or is alone — when it is
+    /// sized as any model loaded by itself, partial split included. A busy
+    /// resident is unloaded mid-request only when one model is kept at a
+    /// time, as a swap always did; with several, the load waits for one to go
+    /// idle, up to `busy_wait`, with `swap_lock` released meanwhile, and
+    /// gives up with `ModelError::Busy`. Once the count is satisfied, ad-hoc
+    /// companions are evicted under `--fit` before sizing, as before.
+    ///
+    /// `fits_now` starts the planning: `Some(false)` makes one more resident
+    /// go before anything is sized.
+    async fn make_room<'a>(
+        &'a self,
+        swap_guard: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
+        incoming: &str,
+        path: &std::path::Path,
+        sizing: &Sizing<'_>,
+        mut fits_now: Option<bool>,
+        keep_alive: KeepAlive,
+    ) -> Result<Room, ModelError> {
+        let busy = if self.max_loaded_models <= 1 {
+            resident::BusyPolicy::Abort
+        } else {
+            resident::BusyPolicy::Wait
+        };
+        let give_up_at = std::time::Instant::now() + self.busy_wait;
+        let mut companions_evicted = false;
         loop {
+            // Registered before the residents are read: a request that ends
+            // in between still wakes the wait below.
+            let mut went_idle = std::pin::pin!(self.idle.notified());
+            went_idle.as_mut().enable();
             let views = self.models.read().await.views();
-            match resident::next_step(&views, 1, std::time::Instant::now()) {
-                resident::Step::Load => return,
+            let now = std::time::Instant::now();
+            match resident::next_step(&views, self.max_loaded_models, busy, fits_now, now) {
                 resident::Step::Evict(i) => {
-                    if let Some(name) = self.remove_generation(views[i].id, Removal::Always).await {
+                    let view = views[i];
+                    let removal = match busy {
+                        resident::BusyPolicy::Abort => Removal::Always,
+                        resident::BusyPolicy::Wait => Removal::IfIdle,
+                    };
+                    if let Some(name) = self.remove_generation(view.id, removal).await {
+                        self.generation_evictions
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let why = if resident::due(&view.usage, now) {
+                            "its keep_alive was over"
+                        } else if fits_now == Some(false) {
+                            "the new model would not fit whole beside it"
+                        } else if self.max_loaded_models <= 1 {
+                            "one generation model is kept at a time"
+                        } else {
+                            "the least recently used, with --max-loaded-models reached"
+                        };
+                        let state = if view.usage.in_flight > 0 {
+                            format!("answering {} request(s)", view.usage.in_flight)
+                        } else {
+                            format!(
+                                "idle for {} s",
+                                now.duration_since(view.usage.last_used).as_secs()
+                            )
+                        };
                         tracing::info!(
-                            "Unloaded {} to make room for {}",
+                            "Unloaded {} ({state}; {why}) to make room for {}",
                             crate::audit::sanitize_for_log(&name),
                             crate::audit::sanitize_for_log(incoming)
                         );
                     }
+                    fits_now = None;
+                }
+                resident::Step::WaitFor => {
+                    let remaining = give_up_at.saturating_duration_since(now);
+                    if remaining.is_zero() {
+                        return Err(ModelError::Busy(format!(
+                            "Loading '{incoming}' needs room that only a model still \
+                             answering requests can give, and none finished within {} s. \
+                             Retry shortly.",
+                            self.busy_wait.as_secs()
+                        )));
+                    }
+                    tracing::info!(
+                        "{}: every model that could make room is answering a request — \
+                         waiting up to {} s for one to finish",
+                        crate::audit::sanitize_for_log(incoming),
+                        remaining.as_secs()
+                    );
+                    // Embedding and decision loads are not held up meanwhile.
+                    swap_guard.take();
+                    let _ = tokio::time::timeout(remaining, went_idle).await;
+                    *swap_guard = Some(self.swap_lock.lock().await);
+                    // Loaded by another request in the meantime?
+                    if let Some(snapshot) =
+                        self.lease_loaded(incoming, Some(path), keep_alive).await
+                    {
+                        return Ok(Room::Loaded(snapshot));
+                    }
+                    fits_now = None;
+                }
+                resident::Step::Load => {
+                    // An embedder left resident from an earlier ingestion run
+                    // would otherwise shrink the free VRAM `--fit` measures
+                    // below, sizing this load as if the card were smaller
+                    // than it actually is once the embedder itself is later
+                    // evicted by `ensure_embedding_model`. See
+                    // `evict_embedding_if_present_for_generation_load`.
+                    if !companions_evicted {
+                        self.evict_embedding_if_present_for_generation_load().await;
+                        self.evict_decision_if_present_for_generation_load().await;
+                        companions_evicted = true;
+                    }
+                    if !self.fit {
+                        return Ok(Room::Ready(None));
+                    }
+                    let plan = self.size_load(sizing).await;
+                    // A second model gets what the first one left: whole, or
+                    // not beside it — never a split it did not ask for.
+                    if plan.sized() && !plan.full && !self.models.read().await.is_empty() {
+                        tracing::info!(
+                            "{} would not fit whole beside the resident models — \
+                             making room",
+                            crate::audit::sanitize_for_log(incoming)
+                        );
+                        fits_now = Some(false);
+                        continue;
+                    }
+                    return Ok(Room::Ready(Some(plan)));
                 }
             }
         }
+    }
+
+    /// Size a load against the VRAM free right now (see `fit::plan_offload`),
+    /// less what the free figure does not show yet: the reserved companions'
+    /// requests, and the context every sequential resident creates per
+    /// request.
+    async fn size_load(&self, sizing: &Sizing<'_>) -> crate::fit::OffloadPlan {
+        // Counted below as reserved; the context the decision model keeps
+        // between requests must not show up as used as well.
+        self.release_decision_context().await;
+        let reserve_bytes = self
+            .reserved_embedding_bytes()
+            .await
+            .saturating_add(self.reserved_decision_bytes().await)
+            .saturating_add(self.models.read().await.unallocated_reserve());
+        crate::fit::plan_offload(
+            crate::fit::vram_bytes(),
+            sizing.info,
+            sizing.layout,
+            sizing.file_size,
+            sizing.ctx_size,
+            sizing.kv_bpe_k,
+            sizing.kv_bpe_v,
+            reserve_bytes,
+            sizing.mmproj_bytes,
+            sizing.flags,
+        )
     }
 
     /// Take the generation model `id` out of the residents — if `when` still
@@ -702,6 +881,7 @@ impl AppState {
             let usage = models.get(id)?.usage.view();
             let allowed = match when {
                 Removal::Always => true,
+                Removal::IfIdle => usage.in_flight == 0,
                 Removal::IfDue => resident::due(&usage, std::time::Instant::now()),
             };
             if !allowed {
@@ -1285,8 +1465,31 @@ impl AppState {
 enum Removal {
     /// Whatever it is doing: requests still running on it are cut off.
     Always,
+    /// Only if no request is running on it.
+    IfIdle,
     /// Only if it is still due — idle, and its keep_alive over.
     IfDue,
+}
+
+/// What `AppState::make_room` ends with.
+enum Room {
+    /// Another request loaded the model while this one waited for room.
+    Loaded(resident::SlotSnapshot),
+    /// There is room, and this is the load's plan (`None` without `--fit`).
+    Ready(Option<crate::fit::OffloadPlan>),
+}
+
+/// What sizing a load reads about the model: once per load, however many
+/// times it is sized while room is made for it.
+struct Sizing<'a> {
+    info: Option<&'a crate::fit::GgufInfo>,
+    layout: Option<&'a crate::fit::MoeLayout>,
+    file_size: u64,
+    ctx_size: u32,
+    kv_bpe_k: f64,
+    kv_bpe_v: f64,
+    mmproj_bytes: u64,
+    flags: crate::fit::OffloadFlags,
 }
 
 /// Free a generation model taken out of the residents, so that its memory
@@ -1360,6 +1563,29 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
+    }
+}
+
+#[cfg(test)]
+mod residency_config_tests {
+    use super::*;
+
+    #[test]
+    fn ollamas_variable_gets_a_hint_and_is_never_read() {
+        assert_eq!(ollama_env_hint(None, true), None);
+        assert_eq!(ollama_env_hint(Some("  "), true), None);
+        let hint = ollama_env_hint(Some("3"), true).expect("a hint");
+        assert!(
+            hint.contains("OLLAMA_MAX_LOADED_MODELS=3") && hint.contains("--max-loaded-models")
+        );
+        let ignored = ollama_env_hint(Some("3"), false).expect("a hint");
+        assert!(ignored.contains("ignored"), "{ignored}");
+    }
+
+    #[test]
+    fn the_residency_config_holds_at_least_one_model() {
+        assert_eq!(ResidencyConfig::from_flags(0).max_loaded_models, 1);
+        assert_eq!(ResidencyConfig::from_flags(4).max_loaded_models, 4);
     }
 }
 
@@ -1914,6 +2140,41 @@ pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool 
     model_identity_key(loaded) == model_identity_key(normalized_request)
 }
 
+/// How generation models are kept resident: the user's flags, built once in
+/// `main.rs` and handed to `serve` whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidencyConfig {
+    /// `--max-loaded-models` (see `RuntimeOpts::max_loaded_models`).
+    pub max_loaded_models: usize,
+}
+
+impl ResidencyConfig {
+    /// From the flags as the command line gave them.
+    pub fn from_flags(max_loaded_models: usize) -> Self {
+        Self {
+            max_loaded_models: max_loaded_models.max(1),
+        }
+    }
+}
+
+/// The startup line for `OLLAMA_MAX_LOADED_MODELS`, when it is set: EuLLM
+/// does not read it. Ollama counts every model, embedders included, and takes
+/// it from the environment; here the number is a flag, model configuration
+/// rather than perimeter, and counts generation models only. `flag_default`:
+/// `--max-loaded-models` was left at its default.
+fn ollama_env_hint(env: Option<&str>, flag_default: bool) -> Option<String> {
+    let value = env.map(str::trim).filter(|v| !v.is_empty())?;
+    Some(if flag_default {
+        format!(
+            "OLLAMA_MAX_LOADED_MODELS={value} is set, but EuLLM does not read it: pass \
+             --max-loaded-models to keep several generation models resident (embedding \
+             and decision models are not counted)"
+        )
+    } else {
+        format!("OLLAMA_MAX_LOADED_MODELS={value} is set and ignored: --max-loaded-models decides")
+    })
+}
+
 /// Configuration for starting the API server.
 pub struct ServeConfig {
     /// The one `LlamaBackend` the process created at startup — see
@@ -1983,6 +2244,8 @@ pub struct ServeConfig {
     pub launch_decision: Option<DecisionSlot>,
     /// `--decision-ctx`: see `AppState::decision_ctx`.
     pub decision_ctx: u32,
+    /// `--max-loaded-models`, as the user gave it.
+    pub residency: ResidencyConfig,
 }
 
 /// Start the API server on the given port with graceful shutdown support.
@@ -2095,6 +2358,28 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
+    let max_loaded_models = cfg.residency.max_loaded_models;
+    tracing::info!(
+        "Generation models kept resident: up to {max_loaded_models} (--max-loaded-models)"
+    );
+    if max_loaded_models > 1 && (!cfg.fit || crate::fit::vram_bytes().is_none()) {
+        tracing::warn!(
+            "--max-loaded-models {max_loaded_models}: generation models are kept up to the \
+             count only; whether they fit together is not checked ({})",
+            if cfg.fit {
+                "free VRAM cannot be read on this build"
+            } else {
+                "--no-fit"
+            }
+        );
+    }
+    if let Some(hint) = ollama_env_hint(
+        std::env::var("OLLAMA_MAX_LOADED_MODELS").ok().as_deref(),
+        max_loaded_models == 1,
+    ) {
+        tracing::warn!("{hint}");
+    }
+
     // `eullm run`'s model, loaded before the server started, is the first
     // resident; `serve` starts with none.
     let mut models = resident::ResidentModels::default();
@@ -2128,6 +2413,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         mmproj_offload: cfg.mmproj_offload,
         models: tokio::sync::RwLock::new(models),
         swap_lock: tokio::sync::Mutex::new(()),
+        max_loaded_models,
+        busy_wait: BUSY_EVICTION_WAIT,
+        generation_evictions: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(test)]
+        load_gate: None,
         gpu_layers: cfg.gpu_layers,
         fit: cfg.fit,
         fit_strict: cfg.fit_strict,
@@ -2242,6 +2532,20 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
 /// `AppState::run_idle_unload_loop`.
 const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a load waits for a busy resident model to finish its requests
+/// when it needs that model's room, before it answers 503: long enough for
+/// a long answer to end, short enough that a client is not left hanging.
+const BUSY_EVICTION_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Holds a generation load just before it starts (`AppState::load_gate`):
+/// `arrived` is notified when one gets there, and it goes on when `proceed`
+/// is.
+#[cfg(test)]
+pub(crate) struct LoadGate {
+    pub(crate) arrived: tokio::sync::Notify,
+    pub(crate) proceed: tokio::sync::Notify,
+}
+
 #[cfg(test)]
 impl AppState {
     /// A server with nothing loaded, and every other field at a test's
@@ -2256,6 +2560,10 @@ impl AppState {
             mmproj_offload: None,
             models: tokio::sync::RwLock::new(resident::ResidentModels::default()),
             swap_lock: tokio::sync::Mutex::new(()),
+            max_loaded_models: 1,
+            busy_wait: BUSY_EVICTION_WAIT,
+            generation_evictions: std::sync::atomic::AtomicU64::new(0),
+            load_gate: None,
             gpu_layers: 0,
             fit: false,
             fit_strict: false,
@@ -2926,6 +3234,12 @@ mod http_tests {
             Some(0),
             "a fresh server has evicted nothing yet"
         );
+        assert_eq!(
+            body["max_loaded_models"], 1,
+            "one model at a time by default"
+        );
+        assert_eq!(body["loaded_models"], 0);
+        assert_eq!(body["generation_evictions"], 0);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
