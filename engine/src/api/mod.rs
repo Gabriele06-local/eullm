@@ -12,6 +12,8 @@
 //! the new one.  In-flight requests on the old model complete normally.
 
 mod auth;
+mod decision_policy;
+mod decision_traces;
 mod ip_allowlist;
 mod origin;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
@@ -219,6 +221,13 @@ pub struct AppState {
     /// Most tokens of context one decision request may use
     /// (`--decision-ctx`). Every model loaded into the decision slot gets it.
     pub decision_ctx: u32,
+    /// The operator's rules for every `/v1/systemone` request
+    /// (`EULLM_DECISION_POLICY`) — see `decision_policy`. Read once at
+    /// startup.
+    pub decision_policy: decision_policy::DecisionPolicy,
+    /// Where every decision's redacted trace goes (`EULLM_DECISION_TRACES`)
+    /// — see `decision_traces`. `None`, the default: traces are off.
+    pub decision_traces: Option<Arc<decision_traces::DecisionTraces>>,
 
     /// How many times a model was evicted to make VRAM room for another
     /// slot (generation displacing the embedder or the decision model, or
@@ -1744,6 +1753,29 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?);
     let allowed_origins = origin::AllowedOrigins::load(env_file);
+    // Fatal when configured but unusable, for the reason the API keys are: an
+    // operator who wrote a policy and gets every option through because of a
+    // typo in it is worse off than one whose server refused to start.
+    let decision_policy = decision_policy::DecisionPolicy::load(env_file).map_err(|e| {
+        format!(
+            "{e}\n  Expected {{\"version\": {}, \"deny_options\": [\"pattern\", …]}}. Refusing to \
+             start: serving decisions without the policy you configured would be worse than \
+             not starting.",
+            decision_policy::POLICY_VERSION
+        )
+    })?;
+    // Fatal too when set but unusable, as for an explicitly set
+    // EULLM_AUDIT_DIR: whoever set it asked for the traces, and a server that
+    // ran without them would leave a hole found only when the training data
+    // is.
+    let decision_traces = decision_traces::DecisionTraces::load(env_file)
+        .map_err(|e| {
+            format!(
+                "EULLM_DECISION_TRACES is set but the decision traces cannot be written: {e}\n  \
+                 Point it at a writable directory, or unset it to keep no traces."
+            )
+        })?
+        .map(Arc::new);
     let web_policy = crate::tools::guard::WebPolicy::from_env();
     let allow_model_paths = matches!(
         std::env::var("EULLM_ALLOW_MODEL_PATHS")
@@ -1783,6 +1815,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         "Allowed browser origins: {}  [source: {}]",
         allowed_origins.describe(),
         allowed_origins.source(),
+    );
+    tracing::info!(
+        "Decision policy: {}  [source: {}]",
+        decision_policy.describe(),
+        decision_policy.source(),
     );
     if cfg.web_enabled {
         tracing::info!("Web tool: enabled — fetchable: {}", web_policy.describe());
@@ -1832,6 +1869,18 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             audit.log_path().display(),
         ),
     }
+    match &decision_traces {
+        Some(traces) => tracing::info!(
+            "Decision traces: on — every decision's state, questions and answers, personal \
+             data redacted, go to {}  [source: {}]",
+            traces.decisions_path().display(),
+            traces.source(),
+        ),
+        None => tracing::info!(
+            "Decision traces: off (EULLM_DECISION_TRACES not set) — decisions are audited \
+             with their state as a SHA-256 only"
+        ),
+    }
 
     let state = Arc::new(AppState {
         backend: cfg.backend,
@@ -1871,6 +1920,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
+        decision_policy,
+        decision_traces,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
         main_deadline: tokio::sync::Mutex::new(None),
         embedding_deadline: tokio::sync::Mutex::new(None),
@@ -2006,7 +2057,7 @@ async fn enforce_ip_allowlist(
     } else {
         tracing::warn!("Rejected request from disallowed IP {}", addr.ip());
         let message = "source IP not in the configured allowlist";
-        if req.uri().path() == systemone::PATH {
+        if systemone::has_structured_errors(req.uri().path()) {
             return systemone::ApiError::new(
                 axum::http::StatusCode::FORBIDDEN,
                 "forbidden",
@@ -2037,9 +2088,10 @@ async fn enforce_auth(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let presented = extract_token(&req, allow_query_token);
-    // `/v1/systemone` refusals carry the body its clients parse (see
-    // `systemone::ApiError`); every other endpoint keeps the one it had.
-    let structured = req.uri().path() == systemone::PATH;
+    // `/v1/systemone` refusals, and its feedback's, carry the body its
+    // clients parse (see `systemone::ApiError`); every other endpoint keeps
+    // the one it had.
+    let structured = systemone::has_structured_errors(req.uri().path());
     match state.api_keys.authenticate(presented.as_deref()) {
         Ok(identity) => {
             req.extensions_mut().insert(identity);
@@ -2171,7 +2223,7 @@ async fn enforce_origin(
         );
         let message = "request origin is not allowed — set EULLM_ALLOWED_ORIGINS \
                        if this frontend should be permitted";
-        if req.uri().path() == systemone::PATH {
+        if systemone::has_structured_errors(req.uri().path()) {
             return systemone::ApiError::new(
                 axum::http::StatusCode::FORBIDDEN,
                 "forbidden",
@@ -2345,19 +2397,36 @@ mod http_tests {
     /// test in the binary, and a hardcoded port makes the suite fail depending
     /// on what else is listening on the machine.
     async fn spawn(store: ModelStore) -> String {
-        // A path that does not exist, so the perimeter types fall back to
-        // their defaults instead of reading a developer's real `.env`.
-        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
-        spawn_with_keys(
-            store,
-            auth::ApiKeys::load(absent).expect("no keys configured"),
-        )
-        .await
+        spawn_with(store, Setup::default()).await
     }
 
     /// `spawn`, with API keys configured.
     async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
+        let setup = Setup {
+            api_keys: Some(api_keys),
+            ..Setup::default()
+        };
+        spawn_with(store, setup).await
+    }
+
+    /// What a test server starts with besides its store; by default, what
+    /// `serve` starts with when nothing is configured.
+    #[derive(Default)]
+    struct Setup {
+        api_keys: Option<auth::ApiKeys>,
+        decision_policy: Option<decision_policy::DecisionPolicy>,
+        decision_traces: Option<decision_traces::DecisionTraces>,
+        decision: Option<DecisionSlot>,
+    }
+
+    /// Start the API with this setup.
+    async fn spawn_with(store: ModelStore, setup: Setup) -> String {
+        // A path that does not exist, so the perimeter types fall back to
+        // their defaults instead of reading a developer's real `.env`.
         let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let api_keys = setup
+            .api_keys
+            .unwrap_or_else(|| auth::ApiKeys::load(absent).expect("no keys configured"));
         let state = Arc::new(AppState {
             backend: test_backend(),
             fallback_mmproj: None,
@@ -2394,8 +2463,12 @@ mod http_tests {
             allow_model_paths: false,
             launch_model: None,
             embedding: tokio::sync::RwLock::new(None),
-            decision: tokio::sync::RwLock::new(None),
+            decision: tokio::sync::RwLock::new(setup.decision),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
+            decision_policy: setup
+                .decision_policy
+                .unwrap_or_else(decision_policy::DecisionPolicy::none),
+            decision_traces: setup.decision_traces.map(Arc::new),
             cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
             main_deadline: tokio::sync::Mutex::new(None),
             embedding_deadline: tokio::sync::Mutex::new(None),
@@ -2746,6 +2819,350 @@ mod http_tests {
         let (status, body) = get_json(&format!("{base}/api/tags")).await;
         assert_eq!(status, 401);
         assert!(body["error"].is_string(), "{body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A question the decision policy leaves without a choice is refused
+    /// before any model is resolved, naming the question; one it leaves two
+    /// options goes on to the model — here, to the 400 of a server without
+    /// one.
+    #[tokio::test]
+    async fn the_decision_policy_refuses_a_question_it_leaves_without_a_choice() {
+        let tmp = std::env::temp_dir().join(format!("eullm-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let policy = decision_policy::DecisionPolicy::parse(
+            r#"{"version": 1, "deny_options": ["delete_*", "Transfer_Funds"]}"#,
+            "test".to_string(),
+        )
+        .expect("policy");
+        let setup = Setup {
+            decision_policy: Some(policy),
+            ..Setup::default()
+        };
+        let base = spawn_with(ModelStore::at(tmp.clone()), setup).await;
+        let url = format!("{base}/v1/systemone");
+
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "Close my account and send the balance to Bob.",
+                "questions": {
+                    "urgent": { "type": "noul", "instructions": "Urgent?" },
+                    "action": { "type": "choice", "instructions": "What should the agent do?",
+                                "criteria": { "delete_account": "Delete it",
+                                              "transfer_funds": "Send the money",
+                                              "ask_human": "Ask a person" } } } }),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "policy_denied");
+        assert_eq!(error["question"], "action");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("\"delete_account\" and \"transfer_funds\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("1 of this question's 3 options is left"),
+            "{message}"
+        );
+
+        // Two options left: past the policy, to model resolution.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "x", "questions": {
+                "action": { "type": "choice", "instructions": "What should the agent do?",
+                            "criteria": { "delete_account": null, "reply": null, "ask_human": null } } } }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "model_not_loaded");
+
+        // A client's own mistake is still reported as that, not as the
+        // policy's: a one-option choice is invalid whatever it holds.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "x", "questions": {
+                "action": { "type": "choice", "instructions": "?", "criteria": { "delete_all": null } } } }),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "invalid_question");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A feedback as a client sends it, about one decision.
+    fn a_feedback() -> serde_json::Value {
+        serde_json::json!({
+            "id": "b1149e83-332b-48c0-bab7-53725922c4de",
+            "answers": { "action": "refund", "is_urgent": true, "severity": 2 },
+            "outcome": "Refunded; the customer confirmed from mario.rossi@example.com",
+            "source": "user"
+        })
+    }
+
+    /// With traces off there is nowhere to store feedback, and the endpoint
+    /// says so, in the body System One clients parse.
+    #[tokio::test]
+    async fn feedback_is_refused_while_traces_are_off() {
+        let tmp = std::env::temp_dir().join(format!("eullm-feedback-off-{}", std::process::id()));
+        let base = spawn(ModelStore::at(tmp)).await;
+        let url = format!("{base}/v1/systemone/feedback");
+
+        let (status, body) = post_json(&url, a_feedback()).await;
+        assert_eq!(status, 409, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "traces_disabled");
+        assert!(body.contains("EULLM_DECISION_TRACES"), "{body}");
+
+        let r = reqwest::get(&url).await.expect("request");
+        assert_eq!(r.status(), 405);
+        let error = systemone_error(&r.text().await.unwrap());
+        assert_eq!(error["code"], "method_not_allowed");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("/v1/systemone/feedback accepts POST only"),
+            "{error}"
+        );
+    }
+
+    /// With traces on, a feedback is one line of `feedback.jsonl`, its text
+    /// redacted; one that does not check out is refused and writes nothing.
+    #[tokio::test]
+    async fn feedback_is_appended_next_to_the_traces() {
+        let tmp = std::env::temp_dir().join(format!("eullm-feedback-{}", uuid::Uuid::new_v4()));
+        let traces = decision_traces::DecisionTraces::at(tmp.join("traces"), "test".into());
+        let setup = Setup {
+            decision_traces: Some(traces),
+            ..Setup::default()
+        };
+        let base = spawn_with(ModelStore::at(tmp.join("store")), setup).await;
+        let url = format!("{base}/v1/systemone/feedback");
+        let file = tmp.join("traces").join("feedback.jsonl");
+
+        let (status, body) = post_json(&url, a_feedback()).await;
+        assert_eq!(status, 200, "{body}");
+        let answer: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            answer,
+            serde_json::json!({ "id": "b1149e83-332b-48c0-bab7-53725922c4de", "recorded": true })
+        );
+        let lines = std::fs::read_to_string(&file).expect("feedback.jsonl");
+        assert_eq!(lines.lines().count(), 1);
+        let line: serde_json::Value = serde_json::from_str(lines.trim_end()).unwrap();
+        assert_eq!(line["schema"], 1);
+        assert_eq!(line["kind"], "feedback");
+        assert_eq!(line["id"], "b1149e83-332b-48c0-bab7-53725922c4de");
+        assert_eq!(
+            line["answers"],
+            serde_json::json!({ "action": "refund", "is_urgent": true, "severity": 2 })
+        );
+        assert_eq!(
+            line["outcome"],
+            "Refunded; the customer confirmed from [EMAIL]"
+        );
+        assert_eq!(line["source"], "user");
+        assert!(line["timestamp"].is_string());
+
+        // Refused, and nothing written: a wrong answer names its question.
+        let mut wrong = a_feedback();
+        wrong["answers"]["severity"] = serde_json::json!(2.5);
+        let (status, body) = post_json(&url, wrong).await;
+        assert_eq!(status, 422, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "invalid_question");
+        assert_eq!(error["question"], "severity");
+        let mut no_id = a_feedback();
+        no_id.as_object_mut().unwrap().remove("id");
+        let (status, body) = post_json(&url, no_id).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "invalid_request");
+
+        // A body far past what a feedback holds stops at the route's limit.
+        let mut huge = a_feedback();
+        huge["outcome"] = serde_json::json!("x".repeat(300 * 1024));
+        let (status, body) = post_json(&url, huge).await;
+        assert_eq!(status, 413, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "payload_too_large");
+
+        let r = reqwest::Client::new()
+            .post(&url)
+            .body(a_feedback().to_string())
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 415);
+
+        // A second feedback is a second line.
+        let (status, _) = post_json(&url, a_feedback()).await;
+        assert_eq!(status, 200);
+        let lines = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(lines.lines().count(), 2);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Feedback sits behind the same checks as the decisions it is about,
+    /// refused in the same body.
+    #[tokio::test]
+    async fn feedback_needs_the_key_a_decision_needs() {
+        let tmp =
+            std::env::temp_dir().join(format!("eullm-feedback-auth-{}", uuid::Uuid::new_v4()));
+        let setup = Setup {
+            api_keys: Some(auth::ApiKeys::from_spec("ci:0123456789abcdef01").expect("keys")),
+            decision_traces: Some(decision_traces::DecisionTraces::at(
+                tmp.clone(),
+                "test".into(),
+            )),
+            ..Setup::default()
+        };
+        let base = spawn_with(ModelStore::at(tmp.join("store")), setup).await;
+        let url = format!("{base}/v1/systemone/feedback");
+
+        let (status, body) = post_json(&url, a_feedback()).await;
+        assert_eq!(status, 401, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "unauthorized");
+        assert!(!tmp.join("feedback.jsonl").exists());
+
+        let r = reqwest::Client::new()
+            .post(&url)
+            .bearer_auth("0123456789abcdef01")
+            .json(&a_feedback())
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 200);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A real decision through the whole stack, on the GGUF in
+    /// `EULLM_DECISION_TEST_MODEL`: the response names its audit record,
+    /// the trace has the same id, the state redacted and the option the
+    /// policy removed, and feedback on the decision is stored under it. The
+    /// audit record goes where `EULLM_AUDIT_DIR` says, so point it at a
+    /// scratch directory:
+    ///
+    /// ```text
+    /// EULLM_AUDIT_DIR=/tmp/eullm-test-audit \
+    /// EULLM_DECISION_TEST_MODEL=/path/to/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf \
+    ///     cargo test -p eullm-engine http_tests::real_model -- --ignored
+    /// ```
+    #[tokio::test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    async fn real_model_a_decision_is_traced_and_takes_feedback() {
+        let path = std::env::var("EULLM_DECISION_TEST_MODEL")
+            .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file");
+        let backend = test_backend();
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+        let model = tokio::task::spawn_blocking(move || {
+            DecisionModel::load(
+                std::path::Path::new(&path),
+                threads,
+                crate::inference::decision::DEFAULT_DECISION_CTX,
+                true,
+                backend,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("load the model");
+        let tmp = std::env::temp_dir().join(format!("eullm-real-traces-{}", uuid::Uuid::new_v4()));
+        let policy = decision_policy::DecisionPolicy::parse(
+            r#"{"version": 1, "deny_options": ["delete_*"]}"#,
+            "test".to_string(),
+        )
+        .expect("policy");
+        let setup = Setup {
+            decision_policy: Some(policy),
+            decision_traces: Some(decision_traces::DecisionTraces::at(
+                tmp.join("traces"),
+                "test".into(),
+            )),
+            decision: Some(DecisionSlot {
+                model_name: "test-decision-model".into(),
+                model: Arc::new(model),
+                is_reserved_companion: true,
+                reserve_bytes: 0,
+            }),
+            ..Setup::default()
+        };
+        let base = spawn_with(ModelStore::at(tmp.join("store")), setup).await;
+
+        let (status, body) = post_json(
+            &format!("{base}/v1/systemone"),
+            serde_json::json!({
+                "state": "Mario Rossi (mario.rossi@example.com, +39 333 1234567) was charged twice for March.",
+                "questions": {
+                    "billing": { "type": "noul", "instructions": "Is this about billing?" },
+                    "action": { "type": "choice", "instructions": "What should the agent do?",
+                                "criteria": { "refund": "Refund the duplicate charge",
+                                              "delete_account": "Delete the account",
+                                              "ask_human": "Hand it to a person" } } } }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let audit_id = response["eullm"]["audit_id"]
+            .as_str()
+            .expect("eullm.audit_id");
+        assert!(uuid::Uuid::parse_str(audit_id).is_ok(), "{audit_id}");
+        let mut keys: Vec<&str> = response
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["answers", "eullm", "model", "timing", "usage"]);
+        assert_eq!(
+            response["eullm"]["policy_removed"],
+            serde_json::json!({ "action": ["delete_account"] })
+        );
+        let probabilities = &response["answers"]["action"]["probabilities"];
+        assert!(
+            probabilities.get("delete_account").is_none(),
+            "{probabilities}"
+        );
+
+        let traces = std::fs::read_to_string(tmp.join("traces/decisions.jsonl")).unwrap();
+        assert_eq!(traces.lines().count(), 1);
+        let line: serde_json::Value = serde_json::from_str(traces.trim_end()).unwrap();
+        assert_eq!(line["id"], audit_id);
+        assert_eq!(
+            line["state"],
+            "Mario Rossi ([EMAIL], [PHONE]) was charged twice for March."
+        );
+        assert_eq!(line["answers"]["action"], {
+            let mut answer = response["answers"]["action"].clone();
+            answer.as_object_mut().unwrap().remove("eullm");
+            answer
+        });
+        assert_eq!(
+            line["policy_removed"],
+            serde_json::json!({ "action": ["delete_account"] })
+        );
+        if let Ok(dir) = std::env::var("EULLM_AUDIT_DIR") {
+            let audit = std::fs::read_to_string(std::path::Path::new(&dir).join("audit.jsonl"))
+                .expect("the audit trail");
+            assert!(
+                audit.contains(audit_id),
+                "the decision is audited under its id"
+            );
+        }
+
+        let (status, body) = post_json(
+            &format!("{base}/v1/systemone/feedback"),
+            serde_json::json!({ "id": audit_id, "answers": { "billing": true, "action": "refund" },
+                                "outcome": "Refunded; Mario wrote back from mario.rossi@example.com",
+                                "source": "user" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let feedback = std::fs::read_to_string(tmp.join("traces/feedback.jsonl")).unwrap();
+        let line: serde_json::Value = serde_json::from_str(feedback.trim_end()).unwrap();
+        assert_eq!(line["id"], audit_id);
+        assert_eq!(line["outcome"], "Refunded; Mario wrote back from [EMAIL]");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

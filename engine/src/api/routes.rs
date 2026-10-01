@@ -280,6 +280,17 @@ pub fn openai_routes() -> Router<S> {
             "/systemone",
             post(super::systemone::systemone).fallback(super::systemone::method_not_allowed),
         )
+        // Feedback on those decisions, stored next to their traces. Its own
+        // body limit: a valid feedback is a few kilobytes, not the 64 MB an
+        // image for /api/chat may need.
+        .route(
+            "/systemone/feedback",
+            post(super::decision_traces::feedback)
+                .fallback(super::systemone::method_not_allowed)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    super::decision_traces::FEEDBACK_MAX_BODY_BYTES,
+                )),
+        )
 }
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────

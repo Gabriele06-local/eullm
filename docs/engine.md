@@ -569,8 +569,9 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
   },
   "usage": { "input_tokens": 312, "output_tokens": 0 },
   "timing": { "total_ms": 187.4 },
-  "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
-             "evaluated_tokens": 312, "timings_ms": { ... }, "request_ms": 187.43, ... }
+  "eullm": { "audit_id": "b1149e83-332b-48c0-bab7-53725922c4de", "mode": "shared_prefix",
+             "prompt_tokens": 520, "shared_prefix_tokens": 104, "evaluated_tokens": 312,
+             "timings_ms": { ... }, "request_ms": 187.43, ... }
 }
 ```
 
@@ -578,6 +579,12 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 jev-style's server reports it and its MCP tools and guard show it:
 `eullm.request_ms` to 0.1 ms. `eullm.timings_ms` splits the decode into its
 phases.
+
+`eullm.audit_id` is the decision's `id` in the audit trail, and in the
+[decision traces](#decision-traces-eullm_decision_traces) when they are on:
+the id to [give feedback](#feedback-post-v1systemonefeedback) under. It is
+inside `eullm`, not at the top level, because the System One SDKs' response
+models are strict and refuse a key they do not know.
 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
@@ -749,6 +756,8 @@ and guard show EuLLM's message instead of failing on the body:
 | 422 | `invalid_request` | The request as a whole fails validation: no `state`, no questions, more than 64, an unknown `eullm` option |
 | 422 | `invalid_question` | One question fails validation — an unknown `type`, one option, 11 levels; `question` names it |
 | 422 | `input_budget_exceeded` | Longer than `--decision-ctx`, or than a Jev-Style model's budgets; `question` names the question when it was one question's. Nothing was truncated |
+| 422 | `policy_denied` | The server's [decision policy](#a-server-side-decision-policy-eullm_decision_policy) leaves a `choice` question fewer than two options; `question` names it |
+| 409 | `traces_disabled` | Feedback sent to a server with [decision traces](#decision-traces-eullm_decision_traces) off |
 | 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
 | 404 | `not_found` | `model` names a model the server does not have |
 | 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
@@ -801,7 +810,8 @@ works unchanged. With no decision model loaded the request is refused with a
 Every decision is written to the audit trail with `request_type:
 "systemone"` and a `decision` record: each answer with its log-probabilities
 and its probabilities before and after calibration. The state itself is not
-stored, only its SHA-256.
+stored, only its SHA-256; its text, redacted, goes only to the
+[decision traces](#decision-traces-eullm_decision_traces), when they are on.
 
 **A client that disconnects.** The record is written by the thread that
 computed the decision, not by the connection that asked for it, so every
@@ -813,6 +823,209 @@ the next request does not wait behind work nobody will read. It decided
 nothing and, like a request refused as invalid or one llama.cpp failed on, is
 not recorded; the server log says it was abandoned. A single question is not
 interrupted once it is being decoded.
+
+### A server-side decision policy (`EULLM_DECISION_POLICY`)
+
+Some options must never be chosen, whatever a model makes of the state: a
+tool that deletes data, a transfer of money, anything that touches
+production. The decision policy takes them out of every request before the
+model reads it. Code filters, the model judges: an option the policy denies
+is removed from the question, not vetoed after the model picked it, so the
+model chooses among the options that remain and their probabilities add up
+without it. A model shown an option it must not take can prefer it whatever
+the state says: offered a way to the food that ended in a trap, the
+Jev-Style 0.8B took it 20 times out of 20 in the Snake example.
+
+`EULLM_DECISION_POLICY` names a JSON file, read once at startup, from the
+environment first and the `.env` file second, like the other perimeter
+settings:
+
+```json
+{ "version": 1, "deny_options": ["delete_*", "transfer_funds", "*_prod"] }
+```
+
+- `deny_options` is matched against the option names of every `choice`
+  question. `*` stands for any run of characters, none included; everything
+  else is literal. Case does not count, nor do spaces around a name:
+  `delete_*` denies `Delete_All` as well. Descriptions are not matched, and
+  `noul` and `score` questions have no options to deny.
+- The response lists what was removed, per question, in
+  `eullm.policy_removed` (`{"action": ["delete_account"]}`), and so does the
+  decision's audit record. The field is absent when the policy removed
+  nothing; a request it removes nothing from is answered exactly as without a
+  policy.
+- A question left with fewer than two options is refused with a 422
+  `policy_denied` that names the question and the options denied: what
+  remains is not a choice. A client's own mistakes come first — a `choice`
+  sent with one option is still an `invalid_question`.
+- `version` is required and must be `1`. A file written for a later version
+  may hold rules this engine does not know, and applying only the others
+  would silently leave those out. A file that cannot be read or applied as
+  written — missing, not JSON, an unknown key, an empty pattern, a later
+  version — stops the server at startup instead of letting every option
+  through. The startup log prints the patterns and where they came from;
+  restart the server to change them.
+
+### Decision traces (`EULLM_DECISION_TRACES`)
+
+Training a decision model on the decisions it is actually asked to make
+needs the text of those decisions, and the audit trail does not keep it, on
+purpose: it records every decision's state as a SHA-256 only. Traces are
+the explicit place for that text. They are off unless
+`EULLM_DECISION_TRACES` names a directory (from the environment first and
+the `.env` file second), they stay on the machine, and personal data is
+redacted before anything is written.
+
+```bash
+EULLM_DECISION_TRACES=/data/traces eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+```
+
+`decisions.jsonl` in that directory gets one line for every decision the
+audit trail records — the same decisions, those whose client had gone
+included — and nothing for a request that was refused or abandoned:
+
+| Key | Value |
+|---|---|
+| `schema` | `1`, the version of this shape. A change that would break a reader of it gets a new number |
+| `id` | The audit record's `id`, which the response gave as `eullm.audit_id`: the same decision in the audit trail, and what feedback names it by |
+| `timestamp` | The audit record's, RFC 3339 in UTC |
+| `model` | The decision model, named as in the audit record |
+| `readout` | `codes` or `verdict` |
+| `mode` | `shared_prefix`, `batched` or `separate` |
+| `state` | The state as the model read it: text as it is; a structured state as the readout writes it (indented JSON for `codes`, one line for `verdict`), its values redacted, so it is still JSON |
+| `questions` | Each question as the model read it, after the decision policy, in the shape of a request: `type`, `instructions` (structured instructions as the compact JSON the model read) and `criteria` — `{"true": …, "false": …}` for `noul`, `""` where the question said nothing; option → description for `choice`, `""` for none; for `score`, each level as the model read it |
+| `answers` | Each answer as the response returned it, without its `eullm` object: `noul`; `choice`, `probabilities`, `confidence`; `score`, `legend`, `probabilities`, `confidence` |
+| `policy_removed` | Per question, the options the decision policy removed; `{}` when none |
+| `client_disconnected` | `true` when the answers were computed after the client had gone, and never sent |
+
+Every key is on every line. A line from the Jev-Style 0.8B on a CPU, wrapped
+here, for a ticket that named a card number, an IBAN and a mobile number, on
+a server whose policy denies `delete_*` and `transfer_funds`:
+
+```json
+{"schema": 1, "id": "b1149e83-332b-48c0-bab7-53725922c4de", "timestamp": "2026-10-01T13:35:34.529683343Z",
+ "model": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "readout": "verdict", "mode": "shared_prefix",
+ "state": "Sono Mario Rossi, il pagamento del 28/09 è stato addebitato due volte sulla carta [CARD]. Rimborsate su [IBAN] o chiamatemi al [PHONE].",
+ "questions": {
+   "is_urgent": {"type": "noul", "instructions": "Does the customer need an answer today?", "criteria": {"true": "", "false": ""}},
+   "action": {"type": "choice", "instructions": "What should the support agent do?",
+              "criteria": {"refund": "Refund the duplicate charge", "ask_human": "Hand the ticket to a person"}},
+   "severity": {"type": "score", "instructions": "How severe is the problem?",
+                "criteria": ["Cosmetic", "Degraded, with a workaround", "Blocking"]}},
+ "answers": {
+   "is_urgent": {"type": "noul", "noul": 0.525160129126831},
+   "action": {"type": "choice", "choice": "refund",
+              "probabilities": {"refund": 0.8943443753775355, "ask_human": 0.1056556246224647}, "confidence": 0.788688750755071},
+   "severity": {"type": "score", "score": 1.400225522364445,
+                "legend": {"0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking"},
+                "probabilities": {"0": 0.03265542390587039, "1": 0.5344636298238142, "2": 0.4328809462703154},
+                "confidence": 0.3016954447357214}},
+ "policy_removed": {"action": ["transfer_funds", "delete_account"]},
+ "client_disconnected": false}
+```
+
+**What is redacted.** Every text on the line — the state, instructions,
+descriptions, levels and legend — has six kinds of personal data replaced
+by a placeholder:
+
+| Placeholder | What | Recognised |
+|---|---|---|
+| `[EMAIL]` | E-mail addresses | `name@domain.tld`, international letters included |
+| `[PHONE]` | Phone numbers | With `+` or `00` and a country code, any country: `+39 333 1234567`, `+44 20 7946 0958`, `+1 (202) 555-0123`. Italian ones without it: a mobile, ten digits from a 3 (`333 1234567`, `333-123-4567`); a landline, 8 to 11 digits from a 0 (`06 1234 5678`, `(02) 12345678`) |
+| `[IBAN]` | IBANs | Any country, whole, in groups of four, or by its parts as Italian documents print it (`IT 60 X 05428 11101 000000123456`), when the check digits match |
+| `[CF]` | Italian codici fiscali | By their structure, omocodia included, so a mistyped check letter is caught too |
+| `[CARD]` | Payment card numbers | 13 to 19 digits starting with 2 to 6, whole or in the groups cards are printed in, when the Luhn check passes |
+| `[IP]` | IPv4 addresses | Four numbers from 0 to 255 joined by dots |
+
+Dates, times, amounts, years, article numbers (`art. 2043 c.c.`,
+`d.lgs. 196/2003`) and other numbers are left as they are.
+
+It is pattern matching, and it misses things:
+
+- Names, street addresses, dates of birth and every identifier not in the
+  table — an identity card or passport number, a licence plate, an IPv6
+  address, a partita IVA — stay as written.
+- So does anything in the table written in a form it does not expect:
+  `mario at example dot com`, a foreign number without its `+`
+  (`(202) 555-0123`), a codice fiscale split by spaces, an IBAN or a card
+  number with a wrong check digit.
+- Question ids and option names are written as they are, as in the audit
+  trail: they are what the answers and the feedback refer to, and redacting
+  them could turn two options into one. Keep personal data out of them.
+
+And it errs the other way: a four-part version number (`1.2.3.4`) becomes
+`[IP]`; a code of 13 to 19 digits that happens to pass the Luhn check — one
+in ten do — becomes `[CARD]`; ten digits from a 3, or 8 to 10 from a 0,
+become `[PHONE]`. Treat the files as what they are: the text of the
+decisions, less what the patterns catch.
+
+**A trace that cannot be written** — a full disk, a directory removed —
+never fails the decision: it is still made, audited and answered, and the
+server log says the trace is missing. A directory that cannot be written at
+startup stops the server instead, since whoever set the variable asked for
+the traces. The file grows with every decision; move it away to start a new
+one, and the next decision creates it again.
+
+### Feedback (`POST /v1/systemone/feedback`)
+
+A model trained on its own answers learns nothing it did not already know;
+what teaches it is the answer that would have been right.
+`POST /v1/systemone/feedback` records that for a decision, named by the
+`eullm.audit_id` its response carried — from a person reviewing it, a rule
+that knows better, or a larger model acting as teacher:
+
+```bash
+curl -s http://localhost:11434/v1/systemone/feedback -H 'Content-Type: application/json' -d '{
+  "id": "094cd37b-9db6-4b58-acb7-54fb92f32a29",
+  "answers": { "action": "refund", "is_urgent": true, "severity": 2 },
+  "outcome": "Rimborsato il 02/10; il cliente ha confermato da mario.rossi@example.com",
+  "source": "user"
+}'
+```
+
+```json
+{"id": "094cd37b-9db6-4b58-acb7-54fb92f32a29", "recorded": true}
+```
+
+| Field | Value |
+|---|---|
+| `id` | Required. The decision's `eullm.audit_id` |
+| `answers` | Required. Question id → the answer that was right: an option's name for a `choice`, `true` or `false` for a `noul`, the level's index from 0 for a `score`. Only the questions there is something to say about; `{}` when the feedback gives an `outcome` alone |
+| `outcome` | Optional. What came of the decision, as text, up to 16 KB |
+| `source` | Optional. Who says so: `user`, `rule` or `teacher` |
+
+It is appended to `feedback.jsonl`, next to `decisions.jsonl`, as one line
+with every key, `null` for what was not given:
+
+| Key | Value |
+|---|---|
+| `schema` | `1` |
+| `kind` | `feedback` |
+| `timestamp` | When the feedback was received, RFC 3339 in UTC |
+| `id` | The decision's audit id, in lower case: the `id` of its line in `decisions.jsonl` |
+| `answers` | As sent, in the order sent |
+| `outcome` | As sent, redacted like every text in the traces, or `null` |
+| `source` | As sent, or `null` |
+
+The line the request above wrote:
+
+```json
+{"schema":1,"kind":"feedback","timestamp":"2026-10-01T13:49:08.356674032Z","id":"094cd37b-9db6-4b58-acb7-54fb92f32a29","answers":{"action":"refund","is_urgent":true,"severity":2},"outcome":"Rimborsato il 02/10; il cliente ha confermato da [EMAIL]","source":"user"}
+```
+
+Several feedbacks on one decision are several lines, and whoever reads them
+decides which counts: the latest, or a person's over a rule's.
+
+The server checks a feedback's shape, not its sense. Types and sizes are
+checked — at most 64 answers, question ids and option names up to 1 KB, an
+unknown key refused — and a wrong answer is refused with a 422
+`invalid_question` naming its question. But the server keeps no index of
+past decisions, so whether `id` names a decision in the traces, and whether
+`"refund"` is one of that question's options, is for whoever joins the two
+files to check. With traces off there is nowhere to keep a feedback, and the
+endpoint answers 409 `traces_disabled`. It sits behind the same API key, IP
+allowlist and origin checks as `/v1/systemone`, and its errors take the same
+shape.
 
 ### Jev-Style decision models
 
@@ -1274,6 +1487,12 @@ API shape. Not an OpenAI endpoint; it sits under `/v1` because that is where
 System One clients look for it. See
 [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot).
 
+#### `POST /v1/systemone/feedback`
+
+The answers that would have been right for a decision `/v1/systemone`
+made, stored next to its trace when decision traces are on. See
+[Feedback](#feedback-post-v1systemonefeedback).
+
 ## Model Catalog
 
 The Engine ships with a built-in catalog of EU models:
@@ -1304,7 +1523,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
-| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), `policy_removed` (only when the [decision policy](#a-server-side-decision-policy-eullm_decision_policy) removed options: per question, the options the model never read), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 
