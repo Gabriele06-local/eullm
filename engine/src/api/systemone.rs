@@ -1476,7 +1476,7 @@ pub(super) async fn systemone(
                         ApiError::new(StatusCode::NOT_FOUND, "not_found", msg)
                     }
                     super::ModelError::LoadFailed(msg) => ApiError::internal(msg),
-                    super::ModelError::Busy(msg) => {
+                    super::ModelError::Busy(msg) | super::ModelError::NoRoom(msg) => {
                         ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "busy", msg)
                     }
                 })?;

@@ -500,6 +500,9 @@ struct RuntimeOpts {
     /// recently used generation model — with one model at a time, the one
     /// there is — and refused when none is loaded.
     ///
+    /// `auto`, with --auto-model, routes such a request as one naming
+    /// `"model": "auto"` is.
+    ///
     /// Checked at startup: a name that is no model stops the server there,
     /// rather than letting every request that names none fail.
     #[arg(long, value_name = "NAME_OR_PATH")]

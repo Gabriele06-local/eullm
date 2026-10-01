@@ -48,6 +48,11 @@ pub struct AuditEntry {
     /// routing existed, which still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing: Option<RoutingRecord>,
+    /// On the line of a generation `"model": "auto"` routed, the route it
+    /// took: its `route` line's id, and whether the fallback answered in the
+    /// chosen model's place. Absent on every other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteRef>,
 }
 
 impl AuditEntry {
@@ -64,6 +69,7 @@ impl AuditEntry {
             user_id: None,
             decision: None,
             routing: None,
+            route: None,
         }
     }
 }
@@ -105,6 +111,20 @@ pub struct RoutingRecord {
     /// Why the decision failed, for `decision_error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// What a routed generation's audit line says about its route; the request's
+/// `route` line has the rest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RouteRef {
+    /// The `id` of the request's `route` line.
+    pub id: Uuid,
+    /// The model the request named: `auto`.
+    pub requested: String,
+    /// Set when the chosen model could not be loaded and the fallback
+    /// answered in its place: `load_failed: ` and why. Written only then.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
 }
 
 /// A configured model the router did not offer for a request, and why: it
@@ -512,6 +532,34 @@ mod tests {
         let json = serde_json::to_string(&entry).unwrap();
         assert!(json.contains(r#""dry_run":true"#), "{json}");
         assert!(!json.contains("excluded"), "{json}");
+    }
+
+    /// A routed generation's line names its route line, and says the
+    /// fallback answered only when it did.
+    #[test]
+    fn a_route_reference_round_trips() {
+        let mut entry = AuditEntry::new("qwen3-4b".into(), "chat".into());
+        assert!(!serde_json::to_string(&entry).unwrap().contains("route"));
+        let reference = RouteRef {
+            id: Uuid::new_v4(),
+            requested: "auto".into(),
+            fallback: None,
+        };
+        entry.route = Some(reference.clone());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("fallback"), "{json}");
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.route.as_ref(), Some(&reference));
+
+        entry.route = Some(RouteRef {
+            fallback: Some("load_failed: out of memory".into()),
+            ..reference
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            json.contains(r#""fallback":"load_failed: out of memory""#),
+            "{json}"
+        );
     }
 
     #[test]

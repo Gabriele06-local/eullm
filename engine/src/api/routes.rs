@@ -367,7 +367,13 @@ async fn ensure_model(
     };
     let loading = std::time::Instant::now();
     let mut snapshot = state
-        .load_generation_model(name, override_batch_size, override_ctx_size, keep_alive)
+        .load_generation_model(
+            name,
+            override_batch_size,
+            override_ctx_size,
+            keep_alive,
+            crate::api::EvictPolicy::Allowed,
+        )
         .await
         .map_err(|e| match e {
             // A model that does not exist is a client mistake, and a
@@ -389,7 +395,7 @@ async fn ensure_model(
             // load would wait. Nothing is wrong with the request: the same
             // one succeeds once a model finishes, which a 503 and its
             // `Retry-After` tell a client with automatic retry.
-            crate::api::ModelError::Busy(msg) => Refusal {
+            crate::api::ModelError::Busy(msg) | crate::api::ModelError::NoRoom(msg) => Refusal {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 body: Json(json!({ "error": msg })),
                 retry_after_secs: Some(BUSY_RETRY_AFTER_SECS),
@@ -449,6 +455,182 @@ fn no_model_loaded() -> ApiError {
             json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
         ),
     )
+}
+
+// ── "model": "auto" ──────────────────────────────────────────────────────────
+
+/// What `"model": "auto"` made of a request, before it is answered.
+enum Routing {
+    /// Not routed: it names a model, or routing is not configured.
+    Not,
+    /// Routed, and answered already: a request with nothing to generate,
+    /// which loads or unloads the candidates.
+    Answered(axum::response::Response),
+    /// Routed to the model the snapshot holds, with a lease on it.
+    To(SlotSnapshot, super::route::RouteInfo),
+}
+
+/// Route a request `"model": "auto"` names — or that names no model, under
+/// `--default-model auto` — and load the model chosen. When that one does
+/// not load, the fallback answers in its place, once; when the fallback
+/// does not load either, the request fails as one naming it would.
+///
+/// Routing reads the request as the client sent it, before any web content
+/// is added. A request with nothing to generate is Ollama's way to load or,
+/// with `keep_alive: 0`, unload a model: for `auto` that is every candidate
+/// — loaded as far as they fit without unloading anything — answered as
+/// `auto`. A raw prompt on `/api/generate` is written for one model's
+/// template, and is refused.
+async fn route_auto(
+    state: &AppState,
+    body: &Value,
+    format: StreamFormat,
+    user_id: Option<String>,
+) -> Result<Routing, Refusal> {
+    use super::route::{AUTO, RouteInfo, RouteInput, decide_route};
+
+    let Some(table) = state.router.as_ref() else {
+        return Ok(Routing::Not);
+    };
+    let routed = match requested_model(body) {
+        Some(name) => name.eq_ignore_ascii_case(AUTO),
+        None => state.default_auto,
+    };
+    if !routed {
+        return Ok(Routing::Not);
+    }
+
+    let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
+    let input = match format {
+        StreamFormat::OllamaGenerate => RouteInput::Generate {
+            prompt: body.get("prompt").and_then(Value::as_str).unwrap_or(""),
+        },
+        _ => match RouteInput::of(body) {
+            Some(chat @ RouteInput::Chat { .. }) => chat,
+            _ => RouteInput::Chat {
+                messages: &[],
+                tools: Vec::new(),
+            },
+        },
+    };
+    let nothing_to_generate = format != StreamFormat::OpenAI
+        && match &input {
+            RouteInput::Generate { prompt } => prompt.is_empty(),
+            RouteInput::Chat { messages, .. } => messages.is_empty(),
+        };
+    if nothing_to_generate {
+        let reason = if keep_alive == super::KeepAlive::Immediate {
+            for candidate in &table.candidates {
+                if let Err(e) = state.expire_model(Some(&candidate.name)).await {
+                    tracing::warn!(
+                        "Unloading {}: {e}",
+                        crate::audit::sanitize_for_log(&candidate.name)
+                    );
+                }
+            }
+            "unload"
+        } else {
+            state.warm_route_candidates(table, keep_alive).await;
+            "load"
+        };
+        return Ok(Routing::Answered(
+            Json(nothing_generated(format, AUTO, reason)).into_response(),
+        ));
+    }
+    if format == StreamFormat::OllamaGenerate
+        && body.get("raw").and_then(Value::as_bool) == Some(true)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "a raw prompt is written for one model's template and cannot be routed: \
+                          name the model it is for instead of \"auto\""
+            })),
+        )
+            .into());
+    }
+
+    let overrides = parse_slot_overrides(body)?;
+    let (contexts, resident) = state.route_candidates(table, overrides).await;
+    let route = decide_route(state, table, &input, &contexts, resident, user_id, false).await;
+    let mut info = RouteInfo::new(&route, table);
+    let (batch_size, ctx_size) = overrides;
+    match ensure_model(state, Some(&route.model), batch_size, ctx_size, keep_alive).await {
+        Ok(snapshot) => Ok(Routing::To(snapshot, info)),
+        Err(refusal) if route.model != route.fallback => {
+            let why = refusal.body.0["error"]
+                .as_str()
+                .unwrap_or("it did not load")
+                .to_string();
+            tracing::warn!(
+                "Auto routing chose {}, which did not load ({why}); the fallback {} answers",
+                crate::audit::sanitize_for_log(&route.model),
+                crate::audit::sanitize_for_log(&route.fallback)
+            );
+            info.fell_back(&route.fallback, why);
+            let snapshot = ensure_model(
+                state,
+                Some(&route.fallback),
+                batch_size,
+                ctx_size,
+                keep_alive,
+            )
+            .await?;
+            Ok(Routing::To(snapshot, info))
+        }
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// Answer a generation request with `answer`, routed first when it asks for
+/// `auto` (see [`route_auto`]): `answer` gets the model chosen, with a lease
+/// on it, and an audit context carrying the route, and its response gets
+/// the route's headers — before its body, so a streaming client has them
+/// first. A request that is not routed reaches `answer` with no model, to
+/// find its own.
+async fn answer_routed<F, Fut>(
+    state: S,
+    identity: super::Identity,
+    body: Value,
+    format: StreamFormat,
+    answer: F,
+) -> Result<axum::response::Response, Refusal>
+where
+    F: FnOnce(S, AuditCtx, Option<SlotSnapshot>, Value) -> Fut,
+    Fut: std::future::Future<Output = Result<axum::response::Response, Refusal>>,
+{
+    let mut audit = AuditCtx::of(&identity);
+    let snapshot = match route_auto(&state, &body, format, audit.user_id.clone()).await? {
+        Routing::Not => None,
+        Routing::Answered(response) => return Ok(response),
+        Routing::To(snapshot, route) => {
+            audit.route = Some(route);
+            Some(snapshot)
+        }
+    };
+    let headers = audit.route.as_ref().map(super::route::RouteInfo::headers);
+    let mut response = answer(state, audit, snapshot, body).await?;
+    for (name, value) in headers.into_iter().flatten() {
+        response.headers_mut().insert(name, value);
+    }
+    Ok(response)
+}
+
+/// The answer to an Ollama request with nothing to generate, which only
+/// loaded or unloaded `model`: `done_reason` says which.
+fn nothing_generated(format: StreamFormat, model: &str, done_reason: &str) -> Value {
+    let mut answer = json!({
+        "model": model,
+        "created_at": chrono::Utc::now().to_rfc3339(),
+        "done": true,
+        "done_reason": done_reason,
+    });
+    if format == StreamFormat::OllamaGenerate {
+        answer["response"] = json!("");
+    } else {
+        answer["message"] = json!({ "role": "assistant", "content": "" });
+    }
+    answer
 }
 
 /// Parsed sampling parameters from the API request.
@@ -1518,7 +1700,7 @@ fn embedding_model_error(e: crate::api::ModelError) -> (StatusCode, Json<Value>)
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": msg })),
         ),
-        crate::api::ModelError::Busy(msg) => (
+        crate::api::ModelError::Busy(msg) | crate::api::ModelError::NoRoom(msg) => (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "error": msg })),
         ),
@@ -1713,6 +1895,27 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
                 "parameter_size": "",
                 "quantization_level": "",
                 "display_name": m.name,
+            }
+        }));
+    }
+
+    // `auto`, when routing is configured: a name a client picks like any
+    // model's, answered by one of the candidates. Last, so that a client
+    // which takes the first model it is offered keeps the one it took.
+    if let Some(table) = &state.router {
+        let candidates: Vec<&str> = table.candidates.iter().map(|c| c.name.as_str()).collect();
+        models.push(json!({
+            "name": super::route::AUTO,
+            "size": 0,
+            "digest": "",
+            "downloaded": true,
+            "details": {
+                "format": "",
+                "family": "eullm-router",
+                "parameter_size": "",
+                "quantization_level": "",
+                "display_name": format!("auto ({})", candidates.join(", ")),
+                "candidates": candidates,
             }
         }));
     }
@@ -1933,7 +2136,24 @@ async fn generate(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let audit = AuditCtx::of(&identity);
+    answer_routed(
+        state,
+        identity,
+        body,
+        StreamFormat::OllamaGenerate,
+        generate_with,
+    )
+    .await
+}
+
+/// `/api/generate`, answered by `routed` when the request was routed to
+/// it, and otherwise by the model it names.
+async fn generate_with(
+    state: S,
+    audit: AuditCtx,
+    routed: Option<SlotSnapshot>,
+    body: Value,
+) -> Result<axum::response::Response, Refusal> {
     let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
@@ -1947,24 +2167,23 @@ async fn generate(
     // model: that model goes, and only it, without being loaded first.
     if prompt.is_empty() && keep_alive == super::KeepAlive::Immediate {
         let model = unload_for_keep_alive_zero(&state, requested).await?;
-        return Ok(Json(json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "response": "",
-            "done": true,
-            "done_reason": "unload",
-        }))
-        .into_response());
+        let answer = nothing_generated(StreamFormat::OllamaGenerate, &model, "unload");
+        return Ok(Json(answer).into_response());
     }
 
-    let snap = ensure_model(
-        &state,
-        requested,
-        override_batch_size,
-        override_ctx_size,
-        keep_alive,
-    )
-    .await?;
+    let snap = match routed {
+        Some(snap) => snap,
+        None => {
+            ensure_model(
+                &state,
+                requested,
+                override_batch_size,
+                override_ctx_size,
+                keep_alive,
+            )
+            .await?
+        }
+    };
     let model = snap.model_name.clone();
 
     // An empty prompt is Ollama's documented way to load a model (or apply a
@@ -1974,14 +2193,8 @@ async fn generate(
     // makes this genuinely free: it never reaches the scheduler or engine.
     // The lease ends with it, which is what applies the `keep_alive`.
     if prompt.is_empty() {
-        return Ok(Json(json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "response": "",
-            "done": true,
-            "done_reason": "load",
-        }))
-        .into_response());
+        let answer = nothing_generated(StreamFormat::OllamaGenerate, &model, "load");
+        return Ok(Json(answer).into_response());
     }
 
     let sp = parse_generate_params(&body);
@@ -2046,7 +2259,7 @@ async fn generate(
                 duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "response": text,
@@ -2058,7 +2271,7 @@ async fn generate(
                 "prompt_eval_duration": 0,
                 "eval_count": tokens_generated,
                 "eval_duration": duration_ms * 1_000_000
-            }))
+            })))
             .into_response())
         }
     } else {
@@ -2102,7 +2315,7 @@ async fn generate(
                 result.duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "response": result.text,
@@ -2114,7 +2327,7 @@ async fn generate(
                 "prompt_eval_duration": 0,
                 "eval_count": result.tokens_generated,
                 "eval_duration": result.duration_ms * 1_000_000
-            }))
+            })))
             .into_response())
         }
     }
@@ -2127,7 +2340,17 @@ async fn chat(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let audit = AuditCtx::of(&identity);
+    answer_routed(state, identity, body, StreamFormat::OllamaChat, chat_with).await
+}
+
+/// `/api/chat`, answered by `routed` when the request was routed to it, and
+/// otherwise by the model it names.
+async fn chat_with(
+    state: S,
+    audit: AuditCtx,
+    routed: Option<SlotSnapshot>,
+    body: Value,
+) -> Result<axum::response::Response, Refusal> {
     let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
@@ -2140,24 +2363,23 @@ async fn chat(
     // The unload counterpart, as on `/api/generate`.
     if messages.is_empty() && keep_alive == super::KeepAlive::Immediate {
         let model = unload_for_keep_alive_zero(&state, requested).await?;
-        return Ok(Json(json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "message": { "role": "assistant", "content": "" },
-            "done": true,
-            "done_reason": "unload",
-        }))
-        .into_response());
+        let answer = nothing_generated(StreamFormat::OllamaChat, &model, "unload");
+        return Ok(Json(answer).into_response());
     }
 
-    let snap = ensure_model(
-        &state,
-        requested,
-        override_batch_size,
-        override_ctx_size,
-        keep_alive,
-    )
-    .await?;
+    let snap = match routed {
+        Some(snap) => snap,
+        None => {
+            ensure_model(
+                &state,
+                requested,
+                override_batch_size,
+                override_ctx_size,
+                keep_alive,
+            )
+            .await?
+        }
+    };
     let model = snap.model_name.clone();
 
     // Same warm-load shape as `/api/generate` with an empty prompt: an empty
@@ -2166,14 +2388,8 @@ async fn chat(
     // such convention and requires non-empty messages, so this stays out of
     // `chat_completions`.
     if messages.is_empty() {
-        return Ok(Json(json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "message": { "role": "assistant", "content": "" },
-            "done": true,
-            "done_reason": "load",
-        }))
-        .into_response());
+        let answer = nothing_generated(StreamFormat::OllamaChat, &model, "load");
+        return Ok(Json(answer).into_response());
     }
 
     let messages = inject_web_content(
@@ -2281,7 +2497,7 @@ async fn chat(
             tokens_generated,
             duration_ms,
         );
-        return Ok(Json(json!({
+        return Ok(Json(audit.extended(json!({
             "model": model,
             "created_at": chrono::Utc::now().to_rfc3339(),
             "message": { "role": "assistant", "content": text },
@@ -2293,7 +2509,7 @@ async fn chat(
             "prompt_eval_duration": 0,
             "eval_count": tokens_generated,
             "eval_duration": duration_ms * 1_000_000
-        }))
+        })))
         .into_response());
     }
 
@@ -2356,7 +2572,7 @@ async fn chat(
                 duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "message": {
@@ -2371,7 +2587,7 @@ async fn chat(
                 "prompt_eval_duration": 0,
                 "eval_count": tokens_generated,
                 "eval_duration": duration_ms * 1_000_000
-            }))
+            })))
             .into_response())
         }
     } else {
@@ -2414,7 +2630,7 @@ async fn chat(
                 result.duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "message": {
@@ -2429,7 +2645,7 @@ async fn chat(
                 "prompt_eval_duration": 0,
                 "eval_count": result.tokens_generated,
                 "eval_duration": result.duration_ms * 1_000_000
-            }))
+            })))
             .into_response())
         }
     }
@@ -2713,6 +2929,16 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
             }),
     );
 
+    // `auto`, when routing is configured, as on `/api/tags`.
+    if state.router.is_some() {
+        data.push(json!({
+            "id": super::route::AUTO,
+            "object": "model",
+            "created": 1700000000_u64,
+            "owned_by": "eullm"
+        }));
+    }
+
     Json(json!({ "object": "list", "data": data, "models": models }))
 }
 
@@ -2723,21 +2949,43 @@ async fn chat_completions(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let audit = AuditCtx::of(&identity);
-    let requested = requested_model(&body);
-    let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape, not part
-    // of it — accepted here too so the idle-unload timer works the same way
-    // regardless of which endpoint a client happens to use.
-    let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    let snap = ensure_model(
-        &state,
-        requested,
-        override_batch_size,
-        override_ctx_size,
-        keep_alive,
+    answer_routed(
+        state,
+        identity,
+        body,
+        StreamFormat::OpenAI,
+        chat_completions_with,
     )
-    .await?;
+    .await
+}
+
+/// `/v1/chat/completions`, answered by `routed` when the request was routed
+/// to it, and otherwise by the model it names.
+async fn chat_completions_with(
+    state: S,
+    audit: AuditCtx,
+    routed: Option<SlotSnapshot>,
+    body: Value,
+) -> Result<axum::response::Response, Refusal> {
+    let snap = match routed {
+        Some(snap) => snap,
+        None => {
+            let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
+            // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape,
+            // not part of it — accepted here too so the idle-unload timer
+            // works the same way regardless of which endpoint a client
+            // happens to use.
+            let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
+            ensure_model(
+                &state,
+                requested_model(&body),
+                override_batch_size,
+                override_ctx_size,
+                keep_alive,
+            )
+            .await?
+        }
+    };
     let model = snap.model_name.clone();
 
     let messages = body
@@ -2911,11 +3159,17 @@ async fn chat_completions(
         });
 
         if is_streaming(&body) {
-            let stream =
-                buffered_message_sse(model, message, finish_reason.to_string(), usage, snap.lease);
+            let stream = buffered_message_sse(
+                model,
+                message,
+                finish_reason.to_string(),
+                usage,
+                snap.lease,
+                audit,
+            );
             return Ok(Sse::new(stream).into_response());
         }
-        return Ok(Json(json!({
+        return Ok(Json(audit.extended(json!({
             "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
             "object": "chat.completion",
             "created": chrono::Utc::now().timestamp(),
@@ -2926,7 +3180,7 @@ async fn chat_completions(
                 "finish_reason": finish_reason,
             }],
             "usage": usage,
-        }))
+        })))
         .into_response());
     }
 
@@ -2965,7 +3219,7 @@ async fn chat_completions(
                 duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                 "object": "chat.completion",
                 "created": chrono::Utc::now().timestamp(),
@@ -2983,7 +3237,7 @@ async fn chat_completions(
                     "completion_tokens": tokens_generated,
                     "total_tokens": tokens_prompt + tokens_generated
                 }
-            }))
+            })))
             .into_response())
         }
     } else {
@@ -3027,7 +3281,7 @@ async fn chat_completions(
                 result.duration_ms,
             );
 
-            Ok(Json(json!({
+            Ok(Json(audit.extended(json!({
                 "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
                 "object": "chat.completion",
                 "created": chrono::Utc::now().timestamp(),
@@ -3045,7 +3299,7 @@ async fn chat_completions(
                     "completion_tokens": result.tokens_generated,
                     "total_tokens": result.tokens_prompt + result.tokens_generated
                 }
-            }))
+            })))
             .into_response())
         }
     }
@@ -3067,11 +3321,20 @@ fn buffered_message_sse(
     finish_reason: String,
     usage: Value,
     lease: Lease,
+    audit: AuditCtx,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
+    let created = chrono::Utc::now().timestamp();
+    let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+    let last = audit.extended(json!({
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
+        "usage": usage,
+    }));
     async_stream::stream! {
         let _lease = lease;
-        let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
-        let created = chrono::Utc::now().timestamp();
         yield Ok(Event::default().data(
             json!({
                 "id": completion_id,
@@ -3082,17 +3345,7 @@ fn buffered_message_sse(
             })
             .to_string(),
         ));
-        yield Ok(Event::default().data(
-            json!({
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
-                "usage": usage,
-            })
-            .to_string(),
-        ));
+        yield Ok(Event::default().data(last.to_string()));
         yield Ok(Event::default().data("[DONE]"));
     }
 }
@@ -3117,15 +3370,18 @@ impl StreamFormat {
 }
 
 /// What a generation's audit entry records besides the model and what it
-/// read and wrote: who asked. One builder for every way a generation can
-/// end — buffered or streamed, on the scheduler or the sequential engine,
-/// text or images — each of which used to build the entry field by field,
-/// ten copies of the same six lines that any new field had to reach in all
-/// ten places.
+/// read and wrote: who asked, and the route `"model": "auto"` took to it.
+/// One builder for every way a generation can end — buffered or streamed,
+/// on the scheduler or the sequential engine, text or images — each of
+/// which used to build the entry field by field, ten copies of the same six
+/// lines that any new field had to reach in all ten places. The route also
+/// goes on the response, in the same places, through [`AuditCtx::extended`].
 #[derive(Debug, Clone, Default, PartialEq)]
 struct AuditCtx {
     /// The id of the API key the request presented, when it presented one.
     user_id: Option<String>,
+    /// How the request was routed, when it asked for `auto`.
+    route: Option<super::route::RouteInfo>,
 }
 
 impl AuditCtx {
@@ -3133,7 +3389,17 @@ impl AuditCtx {
     fn of(identity: &super::Identity) -> Self {
         Self {
             user_id: identity.key_id().map(str::to_string),
+            route: None,
         }
+    }
+
+    /// `answer` — a response, or the last line or chunk of a stream — with
+    /// the route under `eullm.route` when the request was routed.
+    fn extended(&self, mut answer: Value) -> Value {
+        if let Some(route) = &self.route {
+            answer["eullm"] = json!({ "route": route });
+        }
+        answer
     }
 
     /// The audit entry of one finished generation on `model`.
@@ -3150,6 +3416,7 @@ impl AuditCtx {
         entry.output_tokens = tokens_generated;
         entry.duration_ms = duration_ms;
         entry.user_id = self.user_id.clone();
+        entry.route = self.route.as_ref().map(super::route::RouteInfo::reference);
         entry
     }
 
@@ -3201,11 +3468,11 @@ fn stream_from_channel_sse(
                     // Audit log
                     audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
 
-                    let data = format_done_event(
+                    let data = audit.extended(format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
                         load_duration,
-                    );
+                    ));
                     yield Ok(Event::default().data(data.to_string()));
 
                     if matches!(format, StreamFormat::OpenAI) {
@@ -3255,11 +3522,11 @@ fn ndjson_stream_response(
                 StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
                     audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
 
-                    let data = format_done_event(
+                    let data = audit.extended(format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
                         load_duration,
-                    );
+                    ));
                     let mut line = data.to_string();
                     line.push('\n');
                     yield Ok(line);
@@ -3470,6 +3737,25 @@ mod tests {
     /// The one builder writes what each of the ten copies it replaced wrote:
     /// the model, the endpoint as the request type, the tokens read and
     /// written, the time, and who asked — and nothing else.
+    /// Only a routed request's answer gains the `eullm` object, and its
+    /// Ollama and OpenAI fields stay as they were.
+    #[test]
+    fn only_a_routed_answer_carries_its_route() {
+        let done = format_done_event(
+            "small-m",
+            "chatcmpl-x",
+            StreamFormat::OpenAI,
+            3,
+            5,
+            10,
+            StopReason::Stop,
+            std::time::Duration::ZERO,
+        );
+        assert_eq!(AuditCtx::default().extended(done.clone()), done);
+        let entry = AuditCtx::default().entry("small-m", StreamFormat::OpenAI, 5, 3, 10);
+        assert!(entry.route.is_none());
+    }
+
     #[test]
     fn a_generations_audit_entry_has_the_fields_it_always_had() {
         for (format, request_type) in [
@@ -3480,6 +3766,7 @@ mod tests {
             for user_id in [None, Some("ci".to_string())] {
                 let ctx = AuditCtx {
                     user_id: user_id.clone(),
+                    route: None,
                 };
                 let entry = ctx.entry("qwen3-8b", format, 12, 40, 900);
                 // As the copies built it.

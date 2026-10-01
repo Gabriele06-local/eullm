@@ -1064,3 +1064,99 @@ async fn real_model_a_route_past_its_timeout_falls_back() {
         "waited for the decision: {route}"
     );
 }
+
+/// `"model": "auto"` on every endpoint, streamed and not: the decision model
+/// chooses, the chosen model answers — every line and chunk says which —
+/// the headers say it before the body, and the last line or chunk, or the
+/// response, carries the route. With `EULLM_AUDIT_DIR` set, the
+/// generation's audit line names the route's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs GGUF models in EULLM_GENERATION_TEST_MODEL and EULLM_DECISION_TEST_MODEL"]
+async fn real_model_auto_answers_on_every_endpoint_and_says_how() {
+    let decision = decision_slot().await;
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        state.router = Some(route_table(state, Duration::from_secs(300)));
+        state.decision = tokio::sync::RwLock::new(Some(decision));
+    })
+    .await;
+    let messages = json!([{ "role": "user", "content": "What is the capital of France?" }]);
+    for path in ["/api/generate", "/api/chat", "/v1/chat/completions"] {
+        for stream in [false, true] {
+            let mut body = json!({
+                "model": "auto", "stream": stream, "think": false,
+                "options": { "num_predict": 8 }, "max_tokens": 8,
+            });
+            if path == "/api/generate" {
+                body["prompt"] = json!("The capital of France is");
+            } else {
+                body["messages"] = messages.clone();
+            }
+            let response = reqwest::Client::new()
+                .post(format!("{}{path}", server.base))
+                .json(&body)
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(response.status(), 200, "{path} {body}");
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .map(|v| v.to_str().expect("text").to_string())
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+            };
+            let (model, reason, id) = (
+                header("x-eullm-model"),
+                header("x-eullm-route"),
+                header("x-eullm-route-id"),
+            );
+            assert!(["tiny-a", "tiny-b"].contains(&model.as_str()), "{model}");
+            assert_eq!(reason, "decided", "{path}");
+            let text = response.text().await.expect("body");
+            let objects: Vec<Value> = text
+                .lines()
+                .map(|l| l.strip_prefix("data:").unwrap_or(l).trim())
+                .filter(|l| !l.is_empty() && *l != "[DONE]")
+                .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+                .collect();
+            let (last, before) = objects.split_last().expect("an answer");
+            for object in &objects {
+                assert_eq!(object["model"], model.as_str(), "{path}: {object}");
+            }
+            assert!(
+                before.iter().all(|o| o.get("eullm").is_none()),
+                "{path}: only the last carries the route"
+            );
+            let route = &last["eullm"]["route"];
+            assert_eq!(route["requested"], "auto", "{path}: {last}");
+            assert_eq!(route["model"], model.as_str());
+            assert_eq!(route["reason"], "decided");
+            assert_eq!(route["id"], id.as_str());
+            assert_eq!(route["decision_model"], "test-decision");
+            let p = route["probabilities"].as_object().expect("probabilities");
+            assert_eq!(p.len(), 2, "{route}");
+            assert!((p.values().filter_map(Value::as_f64).sum::<f64>() - 1.0).abs() < 1e-6);
+
+            if let Ok(dir) = std::env::var("EULLM_AUDIT_DIR") {
+                let audit =
+                    std::fs::read_to_string(Path::new(&dir).join("audit.jsonl")).expect("audit");
+                let lines: Vec<Value> = audit
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                let routed = lines
+                    .iter()
+                    .find(|l| l["id"] == id.as_str())
+                    .expect("the route's line");
+                assert_eq!(routed["routing"]["model"], model.as_str());
+                let generation = lines
+                    .iter()
+                    .find(|l| l["route"]["id"] == id.as_str())
+                    .expect("the generation's line names its route");
+                assert_eq!(generation["model"], model.as_str());
+                assert!(generation["route"].get("fallback").is_none());
+            }
+        }
+    }
+}

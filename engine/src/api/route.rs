@@ -28,13 +28,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+use axum::http::{HeaderName, HeaderValue};
 use serde::Serialize;
 use serde_json::Value;
 use uuid::Uuid;
 
 use super::systemone::{self, CancelOnDrop, OrderedMap};
 use super::{AppState, KeepAlive, NamedModel};
-use crate::audit::{AuditEntry, AuditLogger, DecisionRecord, ExcludedCandidate, RoutingRecord};
+use crate::audit::{
+    AuditEntry, AuditLogger, DecisionRecord, ExcludedCandidate, RouteRef, RoutingRecord,
+};
 use crate::inference::decision::{
     self, Cancel, DecideOptions, DecisionError, DecisionModel, EvalMode, Question,
 };
@@ -619,6 +622,11 @@ pub(crate) enum RouteReason {
     NoEligibleCandidate,
     /// One candidate can take the request: there was nothing to decide.
     OnlyCandidate,
+    /// The model chosen could not be loaded, and the fallback answered in
+    /// its place. Known only once the route is taken: the route's audit
+    /// line has the reason it was chosen for, and the generation's line
+    /// says it fell back.
+    LoadFailed,
 }
 
 impl RouteReason {
@@ -630,6 +638,7 @@ impl RouteReason {
             Self::DecisionError => "decision_error",
             Self::NoEligibleCandidate => "no_eligible_candidate",
             Self::OnlyCandidate => "only_candidate",
+            Self::LoadFailed => "load_failed",
         }
     }
 }
@@ -1043,6 +1052,102 @@ impl RouteResponse {
     }
 }
 
+// ── What a routed request's response says ───────────────────────────────
+
+/// The headers a routed response carries, before its body: the model that
+/// answers, the reason, and the route's id.
+pub(crate) const MODEL_HEADER: &str = "x-eullm-model";
+pub(crate) const ROUTE_HEADER: &str = "x-eullm-route";
+pub(crate) const ROUTE_ID_HEADER: &str = "x-eullm-route-id";
+
+/// What the response to a request `"model": "auto"` routed says about its
+/// route — the `eullm.route` object on the response, or on the last line or
+/// chunk of a stream, and the `X-EuLLM-*` headers — and what the
+/// generation's audit line links to. Ollama and OpenAI clients ignore an
+/// object they do not know.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct RouteInfo {
+    /// What the request named: `auto`.
+    requested: &'static str,
+    /// The model that answers.
+    model: String,
+    reason: &'static str,
+    confidence: Option<f64>,
+    /// Per offered candidate, in the order the decision model read them,
+    /// the probability it gave it; `null` when it did not decide.
+    probabilities: Option<OrderedMap<f64>>,
+    decision_model: Option<String>,
+    decision_ms: f64,
+    /// The id of the route's audit line.
+    id: Uuid,
+    /// Why the model chosen did not answer, when the fallback did instead.
+    #[serde(skip)]
+    load_failed: Option<String>,
+}
+
+impl RouteInfo {
+    /// What `route` says, its candidates named from `table`.
+    pub(crate) fn new(route: &Route, table: &RouteTable) -> Self {
+        let probabilities = route.probabilities.as_ref().map(|p| {
+            OrderedMap(
+                route
+                    .offered
+                    .iter()
+                    .zip(p)
+                    .map(|(&i, &p)| (table.candidates[i].name.clone(), p))
+                    .collect(),
+            )
+        });
+        Self {
+            requested: AUTO,
+            model: route.model.clone(),
+            reason: route.reason.as_str(),
+            confidence: route.confidence,
+            probabilities,
+            decision_model: route.decision_model.clone(),
+            decision_ms: route.decision_ms,
+            id: route.id,
+            load_failed: None,
+        }
+    }
+
+    /// The model chosen could not be loaded, for `why`: `fallback` answers.
+    pub(crate) fn fell_back(&mut self, fallback: &str, why: String) {
+        self.model = fallback.to_string();
+        self.reason = RouteReason::LoadFailed.as_str();
+        self.load_failed = Some(why);
+    }
+
+    /// What the generation's audit line records of the route.
+    pub(crate) fn reference(&self) -> RouteRef {
+        RouteRef {
+            id: self.id,
+            requested: self.requested.to_string(),
+            fallback: self
+                .load_failed
+                .as_ref()
+                .map(|why| format!("{}: {why}", RouteReason::LoadFailed.as_str())),
+        }
+    }
+
+    /// The response's `X-EuLLM-*` headers. A value a header cannot carry —
+    /// a model name with a control character in it — is left out rather
+    /// than failing the response.
+    pub(crate) fn headers(&self) -> Vec<(HeaderName, HeaderValue)> {
+        [
+            (MODEL_HEADER, self.model.clone()),
+            (ROUTE_HEADER, self.reason.to_string()),
+            (ROUTE_ID_HEADER, self.id.to_string()),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let value = HeaderValue::from_str(&value).ok()?;
+            Some((HeaderName::from_static(name), value))
+        })
+        .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1238,6 +1343,109 @@ mod tests {
         question(&table, &[0, 1, 2])
             .validate()
             .expect("a valid question");
+    }
+
+    /// A route the decision model decided between the first and the last
+    /// candidate of `table()`.
+    fn decided(table: &RouteTable) -> Route {
+        Route {
+            id: Uuid::nil(),
+            model: "qwen3-4b".into(),
+            reason: RouteReason::Decided,
+            fallback: "qwen3-8b".into(),
+            offered: vec![0, 2],
+            resident: vec![true, false, true],
+            probabilities: Some(vec![0.75, 0.25]),
+            confidence: Some(0.5),
+            excluded: vec![ExcludedCandidate {
+                model: "vision".into(),
+                why: "excluded for the test".into(),
+            }],
+            decision_model: Some("jev-style-0.8b".into()),
+            decision_ms: 38.5,
+            state: "Prompt:\nhi".into(),
+            question: question(table, &[0, 2]),
+            error: None,
+        }
+    }
+
+    /// What a routed response carries under `eullm.route`: the model that
+    /// answers and why, each offered candidate's probability by name in the
+    /// order offered, and the route's id — the state and the question stay
+    /// out of every response.
+    #[test]
+    fn a_routed_response_says_which_model_answers_and_why() {
+        let table = table();
+        let info = RouteInfo::new(&decided(&table), &table);
+        assert_eq!(
+            serde_json::to_string(&info).unwrap(),
+            r#"{"requested":"auto","model":"qwen3-4b","reason":"decided","confidence":0.5,"probabilities":{"qwen3-4b":0.75,"qwen3-8b":0.25},"decision_model":"jev-style-0.8b","decision_ms":38.5,"id":"00000000-0000-0000-0000-000000000000"}"#
+        );
+        assert_eq!(
+            info.reference(),
+            RouteRef {
+                id: Uuid::nil(),
+                requested: "auto".into(),
+                fallback: None,
+            }
+        );
+
+        let mut undecided = decided(&table);
+        undecided.reason = RouteReason::Timeout;
+        undecided.probabilities = None;
+        undecided.confidence = None;
+        let json = serde_json::to_value(RouteInfo::new(&undecided, &table)).unwrap();
+        assert_eq!(json["reason"], "timeout");
+        assert!(json["probabilities"].is_null() && json["confidence"].is_null());
+    }
+
+    /// When the model chosen does not load, the fallback answers, and both
+    /// the response and the generation's audit line say so.
+    #[test]
+    fn a_route_that_fell_back_says_why() {
+        let table = table();
+        let mut info = RouteInfo::new(&decided(&table), &table);
+        info.fell_back("qwen3-8b", "out of memory".into());
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["model"], "qwen3-8b");
+        assert_eq!(json["reason"], "load_failed");
+        assert_eq!(
+            info.reference().fallback.as_deref(),
+            Some("load_failed: out of memory")
+        );
+    }
+
+    /// The headers name the model, the reason and the route; a value no
+    /// header can carry is left out, and the others still go.
+    #[test]
+    fn a_routed_response_has_its_headers() {
+        let table = table();
+        let info = RouteInfo::new(&decided(&table), &table);
+        let headers: Vec<(String, String)> = info
+            .headers()
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.to_str().unwrap().to_string()))
+            .collect();
+        assert_eq!(
+            headers,
+            [
+                ("x-eullm-model".to_string(), "qwen3-4b".to_string()),
+                ("x-eullm-route".to_string(), "decided".to_string()),
+                (
+                    "x-eullm-route-id".to_string(),
+                    "00000000-0000-0000-0000-000000000000".to_string()
+                ),
+            ]
+        );
+
+        let mut odd = decided(&table);
+        odd.model = "line\nbreak".into();
+        let names: Vec<HeaderName> = RouteInfo::new(&odd, &table)
+            .headers()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names, [ROUTE_HEADER, ROUTE_ID_HEADER]);
     }
 
     /// The digest of a conversation, exactly: what it is, the start of the

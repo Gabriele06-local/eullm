@@ -237,6 +237,9 @@ pub struct AppState {
     /// take to (`--auto-model`, `--auto-timeout-ms`); `None` without them,
     /// and `auto` is then a model name like any other. See `route`.
     pub(crate) router: Option<route::RouteTable>,
+    /// `--default-model auto`: a request that names no model is routed, as
+    /// one naming `auto` is.
+    pub(crate) default_auto: bool,
 
     /// Second, independent model slot for text embeddings — see
     /// `ensure_embedding_model`. `None` until the first `/v1/embeddings` or
@@ -308,14 +311,29 @@ pub enum ModelError {
     /// requests can give, and none finished in time. The caller should get a
     /// 503 with `Retry-After`: the same request can succeed in a moment.
     Busy(String),
+    /// Loading the model would unload another, and the load was asked not
+    /// to (`EvictPolicy::Never`): a warm-up, which has nobody waiting for
+    /// the model and must not take one away from someone who is.
+    NoRoom(String),
 }
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) => f.write_str(m),
+            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) | Self::NoRoom(m) => {
+                f.write_str(m)
+            }
         }
     }
+}
+
+/// Whether a load may unload resident generation models to make room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvictPolicy {
+    /// As a request needs: the count, and what fits beside what, decide.
+    Allowed,
+    /// Never: the load is refused with `ModelError::NoRoom` instead.
+    Never,
 }
 
 impl From<String> for ModelError {
@@ -342,12 +360,14 @@ impl AppState {
     ///
     /// This is the **write** path — only one load runs at a time, and a load
     /// that waits for a busy model to finish lets go of the lock meanwhile.
+    /// `evict` says whether it may unload other models at all.
     pub(crate) async fn load_generation_model(
         &self,
         name: &str,
         override_batch_size: Option<usize>,
         override_ctx_size: Option<u32>,
         keep_alive: KeepAlive,
+        evict: EvictPolicy,
     ) -> Result<resident::SlotSnapshot, ModelError> {
         // Serialize loads — if another request is already loading, wait for
         // it to finish instead of starting a parallel load.
@@ -472,6 +492,7 @@ impl AppState {
                     &sizing,
                     fits_now,
                     keep_alive,
+                    evict,
                 )
                 .await?
             {
@@ -774,7 +795,10 @@ impl AppState {
     /// companions are evicted under `--fit` before sizing, as before.
     ///
     /// `fits_now` starts the planning: `Some(false)` makes one more resident
-    /// go before anything is sized.
+    /// go before anything is sized. Under `EvictPolicy::Never`, the first
+    /// step that would unload a model, or wait for one to go idle so that it
+    /// can, refuses the load instead.
+    #[allow(clippy::too_many_arguments)]
     async fn make_room<'a>(
         &'a self,
         swap_guard: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
@@ -783,6 +807,7 @@ impl AppState {
         sizing: &Sizing<'_>,
         mut fits_now: Option<bool>,
         keep_alive: KeepAlive,
+        evict: EvictPolicy,
     ) -> Result<Room, ModelError> {
         let busy = if self.max_loaded_models <= 1 {
             resident::BusyPolicy::Abort
@@ -798,7 +823,18 @@ impl AppState {
             went_idle.as_mut().enable();
             let views = self.models.read().await.views();
             let now = std::time::Instant::now();
-            match resident::next_step(&views, self.max_loaded_models, busy, fits_now, now) {
+            let step = resident::next_step(&views, self.max_loaded_models, busy, fits_now, now);
+            if evict == EvictPolicy::Never && step != resident::Step::Load {
+                let why = if fits_now == Some(false) {
+                    "it would not fit whole beside the resident ones"
+                } else {
+                    "there is no room for it in --max-loaded-models"
+                };
+                return Err(ModelError::NoRoom(format!(
+                    "Loading '{incoming}' would unload another model: {why}"
+                )));
+            }
+            match step {
                 resident::Step::Evict(i) => {
                     let view = views[i];
                     let removal = match busy {
@@ -1058,6 +1094,42 @@ impl AppState {
                 }
             })
             .unzip()
+    }
+
+    /// Load the routing candidates that fit without unloading anything, so
+    /// that the first routed requests do not pay for a load: the fallback
+    /// first — it answers whenever the decision model does not decide — then
+    /// the others in the table's order, until one would need another model
+    /// to go (`EvictPolicy::Never`). A candidate that fails to load is
+    /// logged and passed over. `keep_alive` applies to each from when it is
+    /// loaded. Returns the candidates resident at the end, in that order.
+    pub(crate) async fn warm_route_candidates(
+        &self,
+        table: &route::RouteTable,
+        keep_alive: KeepAlive,
+    ) -> Vec<String> {
+        let order = std::iter::once(table.fallback)
+            .chain((0..table.candidates.len()).filter(|&i| i != table.fallback));
+        let mut warm = Vec::new();
+        for i in order {
+            let name = &table.candidates[i].name;
+            let loaded = self
+                .load_generation_model(name, None, None, keep_alive, EvictPolicy::Never)
+                .await;
+            match loaded {
+                // The lease ends here, which starts its keep_alive.
+                Ok(_) => warm.push(name.clone()),
+                Err(ModelError::NoRoom(why)) => {
+                    tracing::info!("Auto routing warm-up stops: {why}");
+                    break;
+                }
+                Err(e) => tracing::warn!(
+                    "Auto routing warm-up: {} did not load: {e}",
+                    crate::audit::sanitize_for_log(name)
+                ),
+            }
+        }
+        warm
     }
 
     /// The resident `requested` names, by name or else as its file, or `None`
@@ -1582,13 +1654,14 @@ impl AppState {
     /// The launch path is always accepted regardless: `/api/tags` reports it as
     /// the loaded model's name, clients echo back what they were told, and
     /// refusing our own answer would break `eullm run ./model.gguf`. So is
-    /// `--default-model`'s: it was named on the command line, not in a
-    /// request.
+    /// `--default-model`'s and every `--auto-model`'s: they were named on
+    /// the command line, not in a request.
     fn resolve_model(&self, name: &str) -> Result<PathBuf, ModelError> {
         let path = PathBuf::from(name);
 
-        // 0. The model this process was launched with, or the one
-        //    `--default-model` names, by the name the API uses for it or by
+        // 0. The model this process was launched with, or one that
+        //    `--default-model` or `--auto-model` names, by the name the API
+        //    uses for it or by
         //    its literal path. Exact match on either — never a stem or prefix
         //    comparison, which would turn this allowance into a way to reach
         //    any similarly named file.
@@ -1600,6 +1673,12 @@ impl AppState {
                 self.default_model
                     .iter()
                     .map(|m| (m.name.as_str(), &m.path)),
+            )
+            .chain(
+                self.router
+                    .iter()
+                    .flat_map(|table| &table.candidates)
+                    .map(|c| (c.name.as_str(), &c.path)),
             );
         for (named, named_path) in named {
             if (name == named || &path == named_path) && named_path.is_file() {
@@ -1848,6 +1927,20 @@ mod residency_config_tests {
         flags.auto_models.push("qwen3-80b".into());
         let refused = ResidencyConfig::resolve(&flags, lookup).unwrap_err();
         assert!(refused.contains("'qwen3-80b' is not a model"), "{refused}");
+    }
+
+    /// `--default-model auto` routes the requests that name no model, which
+    /// takes models to route between; the fallback is then the last one.
+    #[test]
+    fn default_model_auto_routes_and_needs_auto_models() {
+        let mut flags = flags(2, Some("Auto"));
+        let refused = ResidencyConfig::resolve(&flags, lookup).unwrap_err();
+        assert!(refused.contains("--auto-model"), "{refused}");
+        flags.auto_models = vec!["qwen3-4b=Small".into(), "qwen3-8b=Large".into()];
+        let config = ResidencyConfig::resolve(&flags, lookup).expect("resolved");
+        assert!(config.default_auto);
+        assert_eq!(config.default_model, None);
+        assert_eq!(config.router.expect("a table").fallback().name, "qwen3-8b");
     }
 }
 
@@ -2389,6 +2482,9 @@ pub struct ResidencyConfig {
     /// `--auto-model` and `--auto-timeout-ms`, resolved; `None` without
     /// `--auto-model` (see `route`).
     pub router: Option<route::RouteTable>,
+    /// `--default-model auto`: a request that names no model is routed.
+    /// Only ever set with a `router`.
+    pub default_auto: bool,
 }
 
 /// The flags `ResidencyConfig` is resolved from, as the command line gave
@@ -2423,12 +2519,22 @@ impl ResidencyConfig {
     /// A `--default-model` or an `--auto-model` it cannot resolve is an
     /// error: the server would otherwise start, and fail every request that
     /// needs it (see `route::RouteTable::resolve` for what else
-    /// `--auto-model` refuses).
+    /// `--auto-model` refuses). `--default-model auto` routes a request that
+    /// names no model, and needs `--auto-model` to route with.
     pub fn resolve(
         flags: &ResidencyFlags,
         lookup: impl Fn(&str) -> Option<CandidateFacts>,
     ) -> Result<Self, String> {
-        let default_model = match flags.default_model.as_deref().map(str::trim) {
+        let default_flag = flags.default_model.as_deref().map(str::trim);
+        let default_auto = default_flag.is_some_and(|name| name.eq_ignore_ascii_case(route::AUTO));
+        if default_auto && flags.auto_models.is_empty() {
+            return Err(
+                "--default-model auto routes requests that name no model, and needs the models \
+                 to route between: give two or more --auto-model"
+                    .to_string(),
+            );
+        }
+        let default_model = match default_flag.filter(|_| !default_auto) {
             None => None,
             Some(name) => Some(lookup(name).map(|facts| facts.model).ok_or_else(|| {
                 format!(
@@ -2448,6 +2554,7 @@ impl ResidencyConfig {
             max_loaded_models: flags.max_loaded_models.max(1),
             default_model,
             router,
+            default_auto,
         })
     }
 }
@@ -2764,6 +2871,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             model.name,
             model.path.display()
         ),
+        None if cfg.residency.default_auto => tracing::info!(
+            "A request that names no model is routed, as \"model\": \"auto\" is \
+             (--default-model auto)"
+        ),
         None => tracing::info!(
             "A request that names no model is answered by the most recently used generation \
              model (no --default-model)"
@@ -2879,6 +2990,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         launch_model: cfg.launch_model,
         default_model: cfg.residency.default_model,
         router: cfg.residency.router,
+        default_auto: cfg.residency.default_auto,
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
@@ -2902,6 +3014,25 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let api_addr = format!("0.0.0.0:{api_port}");
     let api_listener = TcpListener::bind(&api_addr).await?;
     tracing::info!("eullm API listening on {api_addr}");
+
+    // Started once the port is bound, so that requests are taken while the
+    // candidates load; a request that wants one first loads it itself.
+    if let Some(table) = state.router.clone() {
+        let warming = state.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let warm = warming
+                .warm_route_candidates(&table, KeepAlive::Default)
+                .await;
+            tracing::info!(
+                "Auto routing warm-up: {} of {} candidates resident after {:.1} s ({})",
+                warm.len(),
+                table.candidates.len(),
+                started.elapsed().as_secs_f64(),
+                crate::audit::sanitize_for_log(&warm.join(", "))
+            );
+        });
+    }
 
     // Spawn the optional chat-UI listener on a separate port. It exposes the
     // same API surface (so the embedded JS can call same-origin) plus the
@@ -3029,6 +3160,7 @@ impl AppState {
             launch_model: None,
             default_model: None,
             router: None,
+            default_auto: false,
             embedding: tokio::sync::RwLock::new(None),
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
@@ -3298,6 +3430,13 @@ fn cors_layer(state: &Arc<AppState>) -> CorsLayer {
         }))
         .allow_methods(Any)
         .allow_headers(Any)
+        // Which model a routed request went to, and why: a browser client
+        // can read only the response headers named here.
+        .expose_headers([
+            axum::http::HeaderName::from_static(route::MODEL_HEADER),
+            axum::http::HeaderName::from_static(route::ROUTE_HEADER),
+            axum::http::HeaderName::from_static(route::ROUTE_ID_HEADER),
+        ])
 }
 
 /// Build the EULLM API router (Ollama + OpenAI compat) with CORS enabled
@@ -4469,6 +4608,147 @@ mod http_tests {
         let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
         assert_eq!(answer["done_reason"], "unload");
         assert_eq!(answer["model"], "a-pulled-model");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Without `--auto-model`, `auto` is a name like any other, and no model
+    /// has it: a 404 that names it, as before routing existed. Nor is it
+    /// listed.
+    #[tokio::test]
+    async fn auto_without_auto_model_is_a_model_that_does_not_exist() {
+        let tmp = std::env::temp_dir().join(format!("eullm-auto-off-{}", uuid::Uuid::new_v4()));
+        let base = spawn(store_with_one_model(&tmp, "a-pulled-model")).await;
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        for (endpoint, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "hi" }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body).await;
+            assert_eq!(status, 404, "{endpoint}: {text}");
+            assert!(text.contains("auto"), "{endpoint}: {text}");
+        }
+        let (_, tags) = get_json(&format!("{base}/api/tags")).await;
+        assert!(!tags.to_string().contains("eullm-router"), "{tags}");
+        let (_, models) = get_json(&format!("{base}/v1/models")).await;
+        assert!(!models.to_string().contains(r#""id":"auto""#), "{models}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Routing configured, and neither candidate loads (their weights are
+    /// not GGUFs): with no decision model the fallback is chosen, and the
+    /// request fails as one naming it would, on every endpoint — also when
+    /// the model chosen was the other one, which the fallback then stands
+    /// in for, and when the request names no model under `--default-model
+    /// auto`. A raw prompt is refused before anything is chosen; the
+    /// requests with nothing to generate answer as `auto`; and `auto` is
+    /// listed.
+    #[tokio::test]
+    async fn a_routed_request_is_answered_by_the_model_chosen_or_the_fallback() {
+        let tmp = std::env::temp_dir().join(format!("eullm-auto-{}", uuid::Uuid::new_v4()));
+        store_with_one_model(&tmp, "small-m");
+        let store = store_with_one_model(&tmp, "large-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        let mut table = two_candidates(&state.store);
+        // The only one that can read an image: a request with one has
+        // nothing to decide, and goes to it.
+        table.candidates[0].has_projector = true;
+        state.router = Some(table);
+        state.default_auto = true;
+        let base = spawn_state(state).await;
+
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        let photo = serde_json::json!([{ "role": "user", "content": "what is this?",
+            "images": ["aGVsbG8="] }]);
+        for (endpoint, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "hi" }),
+            ),
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "AUTO", "prompt": "hi", "stream": true }),
+            ),
+            ("/api/generate", serde_json::json!({ "prompt": "hi" })),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": photo }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": "auto", "messages": hi, "stream": true }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body.clone()).await;
+            assert_eq!(status, 500, "{endpoint} {body}: {text}");
+            assert!(
+                text.contains("Failed to load model 'large-m'"),
+                "{endpoint} {body}: {text}"
+            );
+        }
+
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "model": "auto", "prompt": "<|im_start|>", "raw": true }),
+        )
+        .await;
+        assert_eq!(status, 400, "{text}");
+        assert!(text.contains("raw prompt"), "{text}");
+
+        for (endpoint, body, done_reason) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "" }),
+                "load",
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": [], "keep_alive": 0 }),
+                "unload",
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body).await;
+            assert_eq!(status, 200, "{endpoint}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert_eq!(answer["model"], "auto", "{answer}");
+            assert_eq!(answer["done_reason"], done_reason, "{answer}");
+        }
+
+        let (_, tags) = get_json(&format!("{base}/api/tags")).await;
+        let auto = tags["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["name"] == "auto"))
+            .expect("auto in /api/tags");
+        assert_eq!(auto["details"]["family"], "eullm-router");
+        assert_eq!(
+            auto["details"]["candidates"],
+            serde_json::json!(["small-m", "large-m"])
+        );
+        let (_, models) = get_json(&format!("{base}/v1/models")).await;
+        assert!(
+            models["data"]
+                .as_array()
+                .is_some_and(|data| data.iter().any(|m| m["id"] == "auto")),
+            "{models}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
