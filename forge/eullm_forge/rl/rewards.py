@@ -76,7 +76,7 @@ _REFUSAL = re.compile(
     # matched and "l'articolo 10 è stato abrogato. Non esiste alcuna proroga"
     # is still read as the refusal it looks like.
     rf"|non esiste\s+(?:alcun[ao]?\s+|nessun[ao]?\s+)?(?:l['’]\s*)?(?:{_NOT_THE_ARTICLE})"
-    rf"|(?:l['’]\s*)?(?:{_NOT_THE_ARTICLE})[^.?!;\n]{{0,60}}?\bnon esiste\b",
+    rf"|\b(?:{_NOT_THE_ARTICLE})\s*(?:n\.\s*)?\d*[\w-]*[^.?!;\n\d]{{0,60}}?\bnon esiste\b",
     re.IGNORECASE,
 )
 
