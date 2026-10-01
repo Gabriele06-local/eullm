@@ -32,6 +32,9 @@
 # two leave the embedder too little room on a 16 GB card.
 # PORT=11500, OUT=/tmp/residency-check. Needs curl and python3.
 set -u
+# Numbers with a decimal point whatever the locale: awk and printf read and
+# write them, and an Italian locale writes "6,0".
+export LC_ALL=C
 
 if [ $# -ne 2 ]; then
     sed -n '2,33p' "$0"
