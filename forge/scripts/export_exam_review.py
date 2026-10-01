@@ -66,10 +66,11 @@ def main(argv: list[str] | None = None) -> int:
     spare = max(0, args.n - len(order))
     exact = {k: spare * len(by_type[k]) / len(items) for k in order}
     shares = {k: min(len(by_type[k]), 1 + int(exact[k])) for k in order}
-    for k in sorted(order, key=lambda k: exact[k] - int(exact[k]), reverse=True):
-        if sum(shares.values()) >= args.n:
-            break
-        shares[k] = min(len(by_type[k]), shares[k] + 1)
+    by_remainder = sorted(order, key=lambda k: exact[k] - int(exact[k]), reverse=True)
+    while sum(shares.values()) < min(args.n, len(items)):
+        for k in by_remainder:
+            if shares[k] < len(by_type[k]) and sum(shares.values()) < args.n:
+                shares[k] += 1
 
     rng = random.Random(args.seed)
     chosen = []
