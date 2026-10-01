@@ -749,6 +749,7 @@ and guard show EuLLM's message instead of failing on the body:
 | 422 | `invalid_request` | The request as a whole fails validation: no `state`, no questions, more than 64, an unknown `eullm` option |
 | 422 | `invalid_question` | One question fails validation — an unknown `type`, one option, 11 levels; `question` names it |
 | 422 | `input_budget_exceeded` | Longer than `--decision-ctx`, or than a Jev-Style model's budgets; `question` names the question when it was one question's. Nothing was truncated |
+| 422 | `policy_denied` | The server's [decision policy](#a-server-side-decision-policy-eullm_decision_policy) leaves a `choice` question fewer than two options; `question` names it |
 | 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
 | 404 | `not_found` | `model` names a model the server does not have |
 | 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
@@ -813,6 +814,48 @@ the next request does not wait behind work nobody will read. It decided
 nothing and, like a request refused as invalid or one llama.cpp failed on, is
 not recorded; the server log says it was abandoned. A single question is not
 interrupted once it is being decoded.
+
+### A server-side decision policy (`EULLM_DECISION_POLICY`)
+
+Some options must never be chosen, whatever a model makes of the state: a
+tool that deletes data, a transfer of money, anything that touches
+production. The decision policy takes them out of every request before the
+model reads it. Code filters, the model judges: an option the policy denies
+is removed from the question, not vetoed after the model picked it, so the
+model chooses among the options that remain and their probabilities add up
+without it. A model shown an option it must not take can prefer it whatever
+the state says: offered a way to the food that ended in a trap, the
+Jev-Style 0.8B took it 20 times out of 20 in the Snake example.
+
+`EULLM_DECISION_POLICY` names a JSON file, read once at startup, from the
+environment first and the `.env` file second, like the other perimeter
+settings:
+
+```json
+{ "version": 1, "deny_options": ["delete_*", "transfer_funds", "*_prod"] }
+```
+
+- `deny_options` is matched against the option names of every `choice`
+  question. `*` stands for any run of characters, none included; everything
+  else is literal. Case does not count, nor do spaces around a name:
+  `delete_*` denies `Delete_All` as well. Descriptions are not matched, and
+  `noul` and `score` questions have no options to deny.
+- The response lists what was removed, per question, in
+  `eullm.policy_removed` (`{"action": ["delete_account"]}`), and so does the
+  decision's audit record. The field is absent when the policy removed
+  nothing; a request it removes nothing from is answered exactly as without a
+  policy.
+- A question left with fewer than two options is refused with a 422
+  `policy_denied` that names the question and the options denied: what
+  remains is not a choice. A client's own mistakes come first — a `choice`
+  sent with one option is still an `invalid_question`.
+- `version` is required and must be `1`. A file written for a later version
+  may hold rules this engine does not know, and applying only the others
+  would silently leave those out. A file that cannot be read or applied as
+  written — missing, not JSON, an unknown key, an empty pattern, a later
+  version — stops the server at startup instead of letting every option
+  through. The startup log prints the patterns and where they came from;
+  restart the server to change them.
 
 ### Jev-Style decision models
 
@@ -1304,7 +1347,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
-| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), `policy_removed` (only when the [decision policy](#a-server-side-decision-policy-eullm_decision_policy) removed options: per question, the options the model never read), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 
 **Example audit entry:**
 

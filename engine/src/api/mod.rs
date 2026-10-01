@@ -12,6 +12,7 @@
 //! the new one.  In-flight requests on the old model complete normally.
 
 mod auth;
+mod decision_policy;
 mod ip_allowlist;
 mod origin;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
@@ -219,6 +220,10 @@ pub struct AppState {
     /// Most tokens of context one decision request may use
     /// (`--decision-ctx`). Every model loaded into the decision slot gets it.
     pub decision_ctx: u32,
+    /// The operator's rules for every `/v1/systemone` request
+    /// (`EULLM_DECISION_POLICY`) — see `decision_policy`. Read once at
+    /// startup.
+    pub decision_policy: decision_policy::DecisionPolicy,
 
     /// How many times a model was evicted to make VRAM room for another
     /// slot (generation displacing the embedder or the decision model, or
@@ -1744,6 +1749,17 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         )
     })?);
     let allowed_origins = origin::AllowedOrigins::load(env_file);
+    // Fatal when configured but unusable, for the reason the API keys are: an
+    // operator who wrote a policy and gets every option through because of a
+    // typo in it is worse off than one whose server refused to start.
+    let decision_policy = decision_policy::DecisionPolicy::load(env_file).map_err(|e| {
+        format!(
+            "{e}\n  Expected {{\"version\": {}, \"deny_options\": [\"pattern\", …]}}. Refusing to \
+             start: serving decisions without the policy you configured would be worse than \
+             not starting.",
+            decision_policy::POLICY_VERSION
+        )
+    })?;
     let web_policy = crate::tools::guard::WebPolicy::from_env();
     let allow_model_paths = matches!(
         std::env::var("EULLM_ALLOW_MODEL_PATHS")
@@ -1783,6 +1799,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         "Allowed browser origins: {}  [source: {}]",
         allowed_origins.describe(),
         allowed_origins.source(),
+    );
+    tracing::info!(
+        "Decision policy: {}  [source: {}]",
+        decision_policy.describe(),
+        decision_policy.source(),
     );
     if cfg.web_enabled {
         tracing::info!("Web tool: enabled — fetchable: {}", web_policy.describe());
@@ -1871,6 +1892,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
+        decision_policy,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
         main_deadline: tokio::sync::Mutex::new(None),
         embedding_deadline: tokio::sync::Mutex::new(None),
@@ -2357,6 +2379,25 @@ mod http_tests {
 
     /// `spawn`, with API keys configured.
     async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
+        spawn_with(store, api_keys, decision_policy::DecisionPolicy::none()).await
+    }
+
+    /// `spawn`, with a decision policy.
+    async fn spawn_with_policy(
+        store: ModelStore,
+        decision_policy: decision_policy::DecisionPolicy,
+    ) -> String {
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let api_keys = auth::ApiKeys::load(absent).expect("no keys configured");
+        spawn_with(store, api_keys, decision_policy).await
+    }
+
+    /// Start the API with these perimeter settings.
+    async fn spawn_with(
+        store: ModelStore,
+        api_keys: auth::ApiKeys,
+        decision_policy: decision_policy::DecisionPolicy,
+    ) -> String {
         let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
         let state = Arc::new(AppState {
             backend: test_backend(),
@@ -2396,6 +2437,7 @@ mod http_tests {
             embedding: tokio::sync::RwLock::new(None),
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
+            decision_policy,
             cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
             main_deadline: tokio::sync::Mutex::new(None),
             embedding_deadline: tokio::sync::Mutex::new(None),
@@ -2746,6 +2788,71 @@ mod http_tests {
         let (status, body) = get_json(&format!("{base}/api/tags")).await;
         assert_eq!(status, 401);
         assert!(body["error"].is_string(), "{body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A question the decision policy leaves without a choice is refused
+    /// before any model is resolved, naming the question; one it leaves two
+    /// options goes on to the model — here, to the 400 of a server without
+    /// one.
+    #[tokio::test]
+    async fn the_decision_policy_refuses_a_question_it_leaves_without_a_choice() {
+        let tmp = std::env::temp_dir().join(format!("eullm-policy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let policy = decision_policy::DecisionPolicy::parse(
+            r#"{"version": 1, "deny_options": ["delete_*", "Transfer_Funds"]}"#,
+            "test".to_string(),
+        )
+        .expect("policy");
+        let base = spawn_with_policy(ModelStore::at(tmp.clone()), policy).await;
+        let url = format!("{base}/v1/systemone");
+
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "Close my account and send the balance to Bob.",
+                "questions": {
+                    "urgent": { "type": "noul", "instructions": "Urgent?" },
+                    "action": { "type": "choice", "instructions": "What should the agent do?",
+                                "criteria": { "delete_account": "Delete it",
+                                              "transfer_funds": "Send the money",
+                                              "ask_human": "Ask a person" } } } }),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        let error = systemone_error(&body);
+        assert_eq!(error["code"], "policy_denied");
+        assert_eq!(error["question"], "action");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.contains("\"delete_account\" and \"transfer_funds\""),
+            "{message}"
+        );
+        assert!(
+            message.contains("1 of this question's 3 options is left"),
+            "{message}"
+        );
+
+        // Two options left: past the policy, to model resolution.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "x", "questions": {
+                "action": { "type": "choice", "instructions": "What should the agent do?",
+                            "criteria": { "delete_account": null, "reply": null, "ask_human": null } } } }),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "model_not_loaded");
+
+        // A client's own mistake is still reported as that, not as the
+        // policy's: a one-option choice is invalid whatever it holds.
+        let (status, body) = post_json(
+            &url,
+            serde_json::json!({ "state": "x", "questions": {
+                "action": { "type": "choice", "instructions": "?", "criteria": { "delete_all": null } } } }),
+        )
+        .await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(systemone_error(&body)["code"], "invalid_question");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

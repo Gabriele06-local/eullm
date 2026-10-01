@@ -25,6 +25,7 @@
 //! model name (`jev-latest`, `jev-1.13.0`), it means the decision model this
 //! server already has loaded — so a Jev client works without changes.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use super::decision_policy::DecisionPolicy;
 use super::{AppState, KeepAlive};
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
@@ -73,7 +75,8 @@ const MAX_TEMPERATURE: f64 = 100.0;
 /// `method_not_allowed` (405) and `internal_error` (500). The rest are for
 /// what jev-style's server never refuses: `model_not_loaded` (400),
 /// `forbidden` (403), `payload_too_large` (413), `unsupported_media_type`
-/// (415) and `too_many_requests` (429).
+/// (415), `too_many_requests` (429), and `policy_denied` (422), a question
+/// the server's decision policy leaves without a choice.
 #[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
@@ -100,6 +103,12 @@ impl ApiError {
     /// Question `id` fails validation.
     fn invalid_question(id: &str, message: impl Into<String>) -> Self {
         Self::invalid_request(message).in_question(id)
+    }
+
+    /// The server's decision policy leaves question `id` fewer options than
+    /// a choice needs.
+    fn policy_denied(id: &str, message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, "policy_denied", message).in_question(id)
     }
 
     /// This error as question `id`'s: named in `question`, and an invalid
@@ -631,6 +640,10 @@ struct ParsedRequest {
     temperature: Option<f64>,
     mode: EvalMode,
     keep_alive: KeepAlive,
+    /// Per question, the options the server's decision policy took out
+    /// before the model read them ([`apply_policy`]); only questions that
+    /// lost one are listed.
+    policy_removed: BTreeMap<String, Vec<String>>,
 }
 
 fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
@@ -717,7 +730,65 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         temperature,
         mode,
         keep_alive: super::parse_keep_alive(request.keep_alive.as_ref()),
+        policy_removed: BTreeMap::new(),
     })
+}
+
+/// Take the options the server's decision policy denies out of every
+/// `choice` question, before any model is loaded or reads them: code
+/// filters, the model judges (see [`DecisionPolicy`]). What was taken out is
+/// kept in `parsed.policy_removed`, for the response and the audit record.
+///
+/// A question left with fewer than two options is refused, naming it: what
+/// remains is not a choice, and answering it would only look like one — the
+/// reason a request with a one-option `choice` is refused too. Runs after
+/// [`parse_request`], so a client's own mistake in a question is still
+/// reported as that, not as the policy's doing.
+fn apply_policy(parsed: &mut ParsedRequest, policy: &DecisionPolicy) -> Result<(), ApiError> {
+    if policy.is_empty() {
+        return Ok(());
+    }
+    for (id, question) in parsed.ids.iter().zip(parsed.questions.iter_mut()) {
+        let Question::Choice { options, .. } = question else {
+            continue;
+        };
+        let offered = options.len();
+        let mut removed = Vec::new();
+        options.retain(|(name, _)| {
+            let denied = policy.denies(name);
+            if denied {
+                removed.push(name.clone());
+            }
+            !denied
+        });
+        if removed.is_empty() {
+            continue;
+        }
+        if options.len() < decision::MIN_OPTIONS {
+            return Err(ApiError::policy_denied(
+                id,
+                format!(
+                    "the server's decision policy denies {}: {} of this question's {offered} \
+                     options {} left, and a choice needs at least {}",
+                    quoted_list(&removed),
+                    options.len(),
+                    if options.len() == 1 { "is" } else { "are" },
+                    decision::MIN_OPTIONS
+                ),
+            ));
+        }
+        parsed.policy_removed.insert(id.clone(), removed);
+    }
+    Ok(())
+}
+
+/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`.
+fn quoted_list(names: &[String]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    match quoted.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        _ => quoted.concat(),
+    }
 }
 
 /// Instructions given as an object or an array, as the System One API
@@ -954,6 +1025,10 @@ struct ResponseExtension {
     content_free: Option<ContentFreeInfo>,
     /// Wall time of the whole request, model resolution included.
     request_ms: f64,
+    /// Per question, the options the server's decision policy removed
+    /// before the model read them. Absent when it removed none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    policy_removed: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1144,7 +1219,8 @@ pub(super) async fn systemone(
 ) -> Result<Json<SystemOneResponse>, ApiError> {
     let started = Instant::now();
     let Json(request) = body.map_err(rejection)?;
-    let parsed = parse_request(request)?;
+    let mut parsed = parse_request(request)?;
+    apply_policy(&mut parsed, &state.decision_policy)?;
 
     let (model_name, model) = match parsed.model.as_deref() {
         Some(name) => {
@@ -1242,6 +1318,7 @@ pub(super) async fn systemone(
                 }
             }),
             request_ms,
+            policy_removed: parsed.policy_removed,
         },
     }))
 }
@@ -1348,6 +1425,7 @@ impl DecisionJob {
             temperature,
             confidence_method: decision::CONFIDENCE_METHOD.to_string(),
             client_disconnected: cancel.is_cancelled(),
+            policy_removed: parsed.policy_removed.clone(),
             answers: records,
         });
         AuditLogger::new().log(&audit);
@@ -1863,6 +1941,108 @@ mod tests {
         let err = parse(json!({"state": "x", "questions": questions})).unwrap_err();
         assert_eq!(err.code, "invalid_request");
         assert!(err.message.contains("at most 64"), "{err:?}");
+    }
+
+    fn deny(patterns: &str) -> DecisionPolicy {
+        DecisionPolicy::parse(
+            &format!(r#"{{"version": 1, "deny_options": [{patterns}]}}"#),
+            "test".to_string(),
+        )
+        .expect("policy")
+    }
+
+    /// The policy takes denied options out of the question the model reads,
+    /// in the order the others were listed, and says what it took.
+    #[test]
+    fn the_policy_removes_denied_options_before_the_model_reads_them() {
+        let text = r#"{ "state": "x", "questions": {
+            "urgent": { "type": "noul", "instructions": "Urgent?" },
+            "action": { "type": "choice", "instructions": "Which?",
+                        "criteria": { "reply": "Answer", "delete_all": "Wipe", "escalate": "Ask",
+                                      "DELETE_ONE": "Wipe one", "refund": "Pay back" } },
+            "level": { "type": "score", "instructions": "How bad?",
+                       "criteria": ["delete_low", "delete_high"] } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""delete_*""#)).unwrap();
+
+        let Question::Choice { options, .. } = &parsed.questions[1] else {
+            panic!("not a choice");
+        };
+        let names: Vec<&str> = options.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["reply", "escalate", "refund"]);
+        assert_eq!(options[1].1, "Ask", "descriptions travel with their option");
+        assert_eq!(
+            parsed.policy_removed,
+            BTreeMap::from([(
+                "action".to_string(),
+                vec!["delete_all".to_string(), "DELETE_ONE".to_string()]
+            )])
+        );
+        // Score levels and yes/no questions have no options to deny.
+        let Question::Score { levels, .. } = &parsed.questions[2] else {
+            panic!("not a score");
+        };
+        assert_eq!(levels.len(), 2);
+
+        // What the response and the audit record are built from.
+        let decision = fake_decision(vec![
+            outcome(&[0.5, 0.5], None),
+            outcome(&[0.6, 0.3, 0.1], None),
+            outcome(&[0.5, 0.5], None),
+        ]);
+        let (answers, records) = build_answers(&parsed, &decision, ReadoutKind::Verdict, 1.0);
+        assert_eq!(records[1].labels, ["reply", "escalate", "refund"]);
+        let json = serde_json::to_value(&answers).unwrap();
+        assert!(json["action"]["probabilities"].get("delete_all").is_none());
+        assert_eq!(json["action"]["choice"], "reply");
+    }
+
+    #[test]
+    fn a_question_the_policy_leaves_without_a_choice_is_refused_by_name() {
+        let text = r#"{ "state": "x", "questions": {
+            "fine": { "type": "choice", "instructions": "?", "criteria": { "a": null, "b": null } },
+            "action": { "type": "choice", "instructions": "Which?",
+                        "criteria": { "drop_db": null, "drop_table": null, "noop": null } } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let err = apply_policy(&mut parsed, &deny(r#""drop_*""#)).unwrap_err();
+        assert_eq!(err.status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            (err.code, err.question.as_deref()),
+            ("policy_denied", Some("action"))
+        );
+        assert_eq!(
+            err.message,
+            "the server's decision policy denies \"drop_db\" and \"drop_table\": 1 of this \
+             question's 3 options is left, and a choice needs at least 2"
+        );
+
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        let err = apply_policy(&mut parsed, &deny(r#""*""#)).unwrap_err();
+        // The first question it empties is the one named.
+        assert_eq!(err.question.as_deref(), Some("fine"));
+        assert!(
+            err.message
+                .contains("0 of this question's 2 options are left"),
+            "{err:?}"
+        );
+    }
+
+    #[test]
+    fn no_policy_changes_nothing() {
+        let mut parsed = parse_text("{}");
+        let before = parsed.questions.clone();
+        apply_policy(&mut parsed, &DecisionPolicy::none()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""nothing_like_these""#)).unwrap();
+        assert_eq!(parsed.questions, before);
+        assert!(parsed.policy_removed.is_empty());
+    }
+
+    #[test]
+    fn names_are_listed_as_a_sentence_would() {
+        let names = |n: &[&str]| quoted_list(&n.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        assert_eq!(names(&["a"]), "\"a\"");
+        assert_eq!(names(&["a", "b"]), "\"a\" and \"b\"");
+        assert_eq!(names(&["a", "b", "c"]), "\"a\", \"b\" and \"c\"");
     }
 
     #[test]
