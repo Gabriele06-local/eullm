@@ -29,8 +29,16 @@
 #   GRPO_LIBS     where TRL is (default $WORK/pylibs/grpo)
 #   GRPO_REPO     checkout to run (default: the one this file was submitted from)
 #
-# Resumable: submitting it again with the same GRPO_OUT continues from the
-# last checkpoint (every --save-steps, 25 by default).
+# Two-hour links, chained, never one long job: on Leonardo a 2 h request is
+# backfilled into gaps within the hour, a 24 h one waits for a whole node to
+# stay free for a day (2026-10-01: five 24 h GRPO jobs sat in Priority all
+# afternoon). Each link resumes from the last checkpoint (every --save-steps,
+# 25 by default) and one that finds the adapter already saved exits at once:
+#
+#   GRPO_MODEL=... GRPO_PROMPTS=... GRPO_OUT=... \
+#       bash forge/scripts/leonardo/submit_chain.sh sbatch_grpo.slurm 4 -J eullm-grpo-<name>
+#
+# Four links cover 250 steps of a 4 B model; give an 8 B five.
 #
 #SBATCH --job-name=eullm-grpo
 #SBATCH --partition=boost_usr_prod
@@ -39,7 +47,7 @@
 #SBATCH --cpus-per-task=32
 #SBATCH --gres=gpu:4
 #SBATCH --mem=480G
-#SBATCH --time=24:00:00
+#SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 
 set -uo pipefail

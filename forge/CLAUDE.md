@@ -116,6 +116,16 @@ reintroduce:**
 
 ## Compute Infrastructure
 
+**On Leonardo every GPU job is a chain of 2-hour links, never one long job.**
+A 2 h request is backfilled into the gaps between other users' jobs and
+usually starts within the hour; a 24 h request waits until a whole node can
+stay free for a day, which on a busy Booster means a day or two in
+`Priority`. Every training script here resumes from its last checkpoint and
+exits at once when its output is already complete, so a chain of short links
+(`submit_chain.sh <script> N`) loses minutes per link and gains days of
+queue. This was established for stage 3 and then forgotten for GRPO on
+2026-10-01, which left five whole-node jobs waiting all afternoon for nothing.
+
 - **EuroHPC Leonardo Booster (CINECA) — active allocation EHPC-AIF-2026PG01-1147**: 1,250 node hours, 02/09/2026 → 02/11/2026. Nodes have 4x A100 **64 GB** (not 96 GB — single-GPU memory budgets do not apply there), max walltime 24 h, no internet on compute nodes. Use the `leonardo/` training configs and `forge/scripts/leonardo/`; runbook in `docs/leonardo-runbook.md`.
 - **EU Cloud (preferred)**: Seeweb (IT), Hetzner (DE), OVH/Scaleway (FR) — GPU servers with A100/H100/RTX PRO 6000
 - **Fallback**: HuggingFace Inference Endpoints, dedicated GPU hosting (GPU-Mart and similar)
