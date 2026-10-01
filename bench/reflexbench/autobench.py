@@ -25,6 +25,11 @@ Stages, all on by default (`--stages`):
      deterministically (temperature 0, top_k 1, seed 1; thinking off unless
      --think). `--answers FILE` keeps the answers: a second run reuses them.
   2. `route`: decisions only, no generation.
+  3. `e2e`: `"model": "auto"` itself, on the first --e2e-limit items of each
+     test half, at each --concurrency (1, 4 and 16): whether the model a
+     request is routed to answers it with the text it gave when named —
+     which is what makes stage 2's scores hold — and the time to the first
+     token a client sees, routing and loads included.
 
 Start a server with both models as auto candidates, a decision model and,
 for the `knn` baseline, an embedding model, with an audit trail of its own:
@@ -48,6 +53,7 @@ import os
 import pathlib
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ab_data  # noqa: E402
@@ -56,7 +62,7 @@ import ab_methods  # noqa: E402
 import ab_metrics  # noqa: E402
 from rb_metrics import percentile  # noqa: E402
 
-STAGES = ("generate", "route")
+STAGES = ("generate", "route", "e2e")
 
 
 def answer_key(item, model):
@@ -275,6 +281,137 @@ def rows_for_set(args, dataset, answers, details):
     return rows
 
 
+def ask_auto(args, item):
+    """`item` asked of `"model": "auto"`, as a client asks it: the answer,
+    or the error it got."""
+    try:
+        return ab_methods.generate(
+            args.url, item, "auto", args.api_key, args.timeout, args.think, args.max_tokens
+        )
+    except (ab_methods.ServerError, OSError, ValueError) as e:
+        return e
+
+
+def e2e_rows(args, dataset, answers):
+    """Stage 3 on one set: the first `--e2e-limit` items of its test half
+    asked of `"model": "auto"`, at each `--concurrency`. Stage 2 scored a
+    route by the chosen model's stage-1 grade; that holds only if the model
+    a request is routed to answers it as it did when named, so the share of
+    answers that are the same text is the first thing reported. The rest is
+    what a client sees: time to the first token, routing and loads
+    included, against the large model's alone."""
+    _, test = ab_data.split(dataset, args.seed)
+    subset = test[: args.e2e_limit] if args.e2e_limit else test
+    large_alone = [answers[answer_key(i, args.large)] for i in subset]
+    rows = []
+    for concurrency in args.concurrency:
+        print(
+            f"  {dataset.name}: auto, {len(subset)} items at concurrency {concurrency}",
+            file=sys.stderr,
+            flush=True,
+        )
+        with ThreadPoolExecutor(concurrency) as pool:
+            got = list(pool.map(lambda i: ask_auto(args, i), subset))
+        made = [(i, a) for i, a in zip(subset, got) if isinstance(a, ab_methods.Answer)]
+        errors = [str(a)[:200] for a in got if not isinstance(a, ab_methods.Answer)]
+        same = small = right = 0
+        reasons = {}
+        for item, answer in made:
+            alone = answers.get(answer_key(item, answer.model))
+            same += alone is not None and alone.text == answer.text
+            small += answer.model == args.small
+            if item.grader != "judge":
+                right += bool(ab_grade.correct(item, answer.text))
+            reason = (answer.route or {}).get("reason") or "unrouted"
+            reasons[reason] = reasons.get(reason, 0) + 1
+        n = len(made)
+        graded = [i for i, _ in made if i.grader != "judge"]
+        routing = [
+            a.route["decision_ms"]
+            for _, a in made
+            if isinstance((a.route or {}).get("decision_ms"), (int, float))
+        ]
+        metrics = {
+            "items": len(subset),
+            "answered": n,
+            "same_answer": same / n if n else None,
+            "routed_small": small,
+            "accuracy": right / len(graded) if graded else None,
+            "accuracy_large": (
+                sum(bool(answers[answer_key(i, args.large)].correct) for i in graded) / len(graded)
+                if graded
+                else None
+            ),
+            "ttft_ms": latency([a.ttft_ms for _, a in made]),
+            "ttft_large_alone_ms": latency([a.ttft_ms for a in large_alone]),
+            "total_ms": latency([a.total_ms for _, a in made]),
+            "routing_ms": latency(routing),
+            "reasons": reasons,
+            "errors": errors[:5],
+            "error_count": len(errors),
+        }
+        rows.append({"set": dataset.name, "concurrency": concurrency, "metrics": metrics})
+    return rows
+
+
+def latency(ms):
+    """p50 and p95 of `ms`, None when empty."""
+    if not ms:
+        return None
+    return {"p50": percentile(ms, 0.5), "p95": percentile(ms, 0.95)}
+
+
+E2E_COLUMNS = (
+    "set",
+    "concurrency",
+    "items",
+    "same answer",
+    "routed small",
+    "accuracy",
+    "large accuracy",
+    "TTFT p50 ms",
+    "TTFT p95 ms",
+    "large alone TTFT p50 ms",
+    "routing p50 ms",
+    "routing p95 ms",
+    "not decided",
+    "errors",
+)
+
+
+def e2e_table(rows):
+    """Stage 3 as Markdown, one row per set and concurrency."""
+    lines = ["| " + " | ".join(E2E_COLUMNS) + " |", "|---" * len(E2E_COLUMNS) + "|"]
+
+    def pct(x):
+        return "—" if x is None else f"{100 * x:.1f}%"
+
+    def ms(stats, key):
+        return "—" if not stats else f"{stats[key]:.1f}"
+
+    for r in rows:
+        m = r["metrics"]
+        undecided = sum(n for reason, n in m["reasons"].items() if reason != "decided")
+        cells = [
+            r["set"],
+            str(r["concurrency"]),
+            str(m["items"]),
+            pct(m["same_answer"]),
+            str(m["routed_small"]),
+            pct(m["accuracy"]),
+            pct(m["accuracy_large"]),
+            ms(m["ttft_ms"], "p50"),
+            ms(m["ttft_ms"], "p95"),
+            ms(m["ttft_large_alone_ms"], "p50"),
+            ms(m["routing_ms"], "p50"),
+            ms(m["routing_ms"], "p95"),
+            str(undecided),
+            str(m["error_count"]),
+        ]
+        lines.append("| " + " | ".join(cells) + " |")
+    return "\n".join(lines)
+
+
 def score_of(decision):
     """P(small); when the router gave none (a fallback), what it decided."""
     if decision.score is not None:
@@ -377,6 +514,12 @@ def parse_args(argv=None):
     )
     parser.add_argument("--judge-model", default=None, help="judge for `judge` items")
     parser.add_argument("--judge-labels", default=None, help="hand verdicts, for Cohen's kappa")
+    parser.add_argument(
+        "--e2e-limit", type=int, default=50, help="test items per set for `e2e`, 0 for all"
+    )
+    parser.add_argument(
+        "--concurrency", default="1,4,16", help="comma-separated concurrencies for `e2e`"
+    )
     parser.add_argument("--timeout", type=float, default=600.0, help="per-request timeout, s")
     parser.add_argument("--out", default=None, help="the report, as JSON")
     parser.add_argument("--details", default=None, help="every item, one JSON line each")
@@ -385,6 +528,12 @@ def parse_args(argv=None):
     unknown = [s for s in args.stages if s not in STAGES]
     if unknown:
         parser.error(f"unknown stages {unknown}: {', '.join(STAGES)}")
+    try:
+        args.concurrency = [int(c) for c in args.concurrency.split(",") if c.strip()]
+    except ValueError:
+        parser.error(f"--concurrency takes numbers: {args.concurrency}")
+    if not args.concurrency or min(args.concurrency) < 1:
+        parser.error("--concurrency needs one level or more, each at least 1")
     args.question_specs = (
         json.loads(pathlib.Path(args.questions).read_text(encoding="utf-8"))
         if args.questions
@@ -423,11 +572,16 @@ def main(argv=None):
 
     details = open(args.details, "w", encoding="utf-8") if args.details else None
     rows = []
+    e2e = []
     try:
         if "route" in args.stages:
             print("stage 2: route", file=sys.stderr, flush=True)
             for dataset in datasets:
                 rows += rows_for_set(args, dataset, answers, details)
+        if "e2e" in args.stages:
+            print("stage 3: end to end", file=sys.stderr, flush=True)
+            for dataset in datasets:
+                e2e += e2e_rows(args, dataset, answers)
     finally:
         if details:
             details.close()
@@ -453,6 +607,8 @@ def main(argv=None):
             "judge": {"model": args.judge_model, "agreement": judge_agreement(args, datasets)},
             "results": rows,
             "kill_criterion": ab_metrics.kill_criterion(rows) if rows else None,
+            "e2e_limit": args.e2e_limit,
+            "end_to_end": e2e,
         }
         out.write_text(json.dumps(report, indent=2), encoding="utf-8")
         if rows:
@@ -465,6 +621,19 @@ def main(argv=None):
             for set_name, beaten in (report["kill_criterion"] or {}).items():
                 if beaten:
                     print(f"\n{set_name}: kill criterion met by {', '.join(beaten)}")
+        if e2e:
+            print('\nend to end, model "auto":\n')
+            print(e2e_table(e2e))
+            low = [
+                f"{r['set']} at {r['concurrency']}"
+                for r in e2e
+                if r["metrics"]["same_answer"] is not None and r["metrics"]["same_answer"] < 0.99
+            ]
+            if low:
+                print(
+                    f"\nunder 99% the same answer as the model alone ({', '.join(low)}): "
+                    "stage 2's scores do not hold there"
+                )
         print(f"\nreport: {out}", file=sys.stderr)
 
 

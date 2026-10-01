@@ -20,8 +20,11 @@
 #    that timed out to the fallback.
 # 3. AutoBench (V7): bench/reflexbench/autobench.py on each pair with each
 #    decision model — calls avoided, accuracy against always-large with its
-#    95% CI, router p50/p95 — the tables in $OUT/3-*.md. Stage 1's answers
-#    are kept per pair in $OUT, so the second decision model reuses them.
+#    95% CI, router p50/p95, and end to end at concurrency 1, 4 and 16 the
+#    share of answers identical to the chosen model's alone (99% expected)
+#    and the time to the first token — the tables in $OUT/3-*.md. Stage 1's
+#    answers are kept per pair in $OUT, so the second decision model reuses
+#    them.
 # 4. Soak (V8): DURATION seconds (one hour) of /api/chat, /v1/chat/completions,
 #    /api/embed, /v1/systemone and "auto" at concurrency 8, VRAM sampled every
 #    5 s: no failed request, VRAM flat after the first minute (within 5%), no
@@ -47,7 +50,7 @@ set -u
 export LC_ALL=C
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-    sed -n '2,44p' "$0"
+    sed -n '2,47p' "$0"
     exit 2
 fi
 BIN=$(realpath "$1")
@@ -259,10 +262,19 @@ for pair in $PAIRS; do
         status=$?
         down
         reflex=$(grep -c "| reflex" "$OUT/3-$tag.md")
-        if [ $status = 0 ] && [ "$reflex" -gt 0 ]; then
-            result PASS "3 autobench $small/$large with $(basename "$decision" .gguf): $OUT/3-$tag.md"
+        # The lowest share of answers identical to the chosen model's alone,
+        # over the sets and concurrencies of the end-to-end stage.
+        same=$(python3 -c 'import json,sys
+rows=json.load(open(sys.argv[1])).get("end_to_end",[])
+v=[r["metrics"]["same_answer"] for r in rows if r["metrics"]["same_answer"] is not None]
+print(f"{min(v):.3f}" if v else "none")' "$OUT/3-$tag.json" 2> /dev/null)
+        what="3 autobench $small/$large with $(basename "$decision" .gguf)"
+        if [ $status != 0 ] || [ "$reflex" = 0 ]; then
+            result FAIL "$what: exit $status (see $OUT/3-$tag.err)"
+        elif [ "$same" = none ] || awk "BEGIN{exit !(${same:-0} < 0.99)}"; then
+            result FAIL "$what: end to end, as low as $same of answers the same as the model's alone (99% expected): $OUT/3-$tag.md"
         else
-            result FAIL "3 autobench $small/$large with $(basename "$decision" .gguf): exit $status (see $OUT/3-$tag.err)"
+            result PASS "$what: end to end, at least $same of answers the same as the model's alone; $OUT/3-$tag.md"
         fi
     done
 done

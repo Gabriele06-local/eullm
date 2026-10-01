@@ -428,6 +428,59 @@ class ReportTest(unittest.TestCase):
             self.assertEqual(line.count("|"), len(autobench.COLUMNS) + 1, line)
         self.assertEqual(len(details.getvalue().splitlines()), 8)
 
+    def test_end_to_end_compares_auto_with_the_model_alone(self):
+        items = [item(f"i{n}") for n in range(8)]
+        dataset = ab_data.Dataset("t", items)
+        answers = {}
+        for it in items:
+            for model, ttft in (("small-m", 10.0), ("large-m", 20.0)):
+                answer = ab_methods.Answer("Answer: B", model, ttft, 100.0)
+                answer.correct = True
+                answers[autobench.answer_key(it, model)] = answer
+        _, test = ab_data.split(dataset, 1)
+        asked = []
+
+        def generate(url, it, model, api_key, timeout, think=False, max_tokens=768):
+            asked.append(model)
+            if it is test[0]:
+                raise ab_methods.ServerError(500, "boom")
+            chosen = "small-m" if it is test[1] else "large-m"
+            # One answer that is not what its model gave alone.
+            text = "Answer: C" if it is test[2] else "Answer: B"
+            answer = ab_methods.Answer(text, chosen, 30.0, 120.0)
+            answer.route = {"reason": "decided", "decision_ms": 12.0, "model": chosen}
+            return answer
+
+        args = autobench.parse_args(
+            ["--small", "small-m", "--large", "large-m", "--concurrency", "1,2", "--e2e-limit", "3"]
+        )
+        with mock.patch.object(ab_methods, "generate", generate):
+            rows = autobench.e2e_rows(args, dataset, answers)
+        self.assertEqual(set(asked), {"auto"})
+        self.assertEqual([r["concurrency"] for r in rows], [1, 2])
+        m = rows[0]["metrics"]
+        self.assertEqual((m["items"], m["answered"], m["error_count"]), (3, 2, 1))
+        self.assertEqual(m["same_answer"], 0.5)
+        self.assertEqual(m["routed_small"], 1)
+        self.assertEqual(m["accuracy"], 0.5)
+        self.assertEqual(m["accuracy_large"], 1.0)
+        self.assertEqual(m["reasons"], {"decided": 2})
+        self.assertEqual(m["ttft_large_alone_ms"]["p50"], 20.0)
+        self.assertEqual(m["routing_ms"]["p50"], 12.0)
+        text = autobench.e2e_table(rows)
+        for column in autobench.E2E_COLUMNS:
+            self.assertIn(column, text.splitlines()[0])
+        for line in text.splitlines()[2:]:
+            self.assertEqual(line.count("|"), len(autobench.E2E_COLUMNS) + 1, line)
+
+    def test_concurrency_levels_are_numbers(self):
+        args = autobench.parse_args(["--small", "s", "--large", "l"])
+        self.assertEqual(args.concurrency, [1, 4, 16])
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            autobench.parse_args(["--small", "s", "--large", "l", "--concurrency", "1,x"])
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            autobench.parse_args(["--small", "s", "--large", "l", "--concurrency", "0"])
+
 
 if __name__ == "__main__":
     unittest.main()

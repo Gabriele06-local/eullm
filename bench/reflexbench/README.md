@@ -406,6 +406,21 @@ one point of always-large on the dev half.
 | AUROC | how well the score separates `small_ok` items from the others |
 | p50 ms, p95 ms | deciding, as the client sees it; the JSON report adds the server's `decision_ms` and how often each reason (`decided`, `timeout`, …) came up |
 
+**Stage 3, `e2e`.** `"model": "auto"` itself, as a client uses it, on the
+first `--e2e-limit` (50) items of each test half, at each `--concurrency`
+(`1,4,16`). Stage 2's scores hold only if the model a request is routed to
+answers it with the text it gave when named; the share of answers that are
+the same comes first, and under 99% the report says stage 2 does not hold
+there. Then what a client sees: accuracy, time to the first token against
+the large model's alone — routing, queueing behind other decisions and any
+load included — routing time from each answer's `eullm.route`, how many
+were not decided (a timeout, no decision model), and errors.
+
+On LUMI-G, `tools/lumi/sbatch_autobench.slurm` runs all three stages on one
+GCD, with a large model a 16 GB card cannot hold beside a small one, and
+prints a `BENCH_RESULT` line; on a workstation, `tools/auto_check.sh` runs
+them as part of the hardware checks.
+
 **The kill criterion.** When the length threshold or the embeddings avoid as
 many calls as Reflex at an accuracy just as indistinguishable from
 always-large, Reflex is not the answer for routing: the report says so per
