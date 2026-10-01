@@ -24,6 +24,9 @@
 # SMALL=qwen3-1.7b A=qwen3-4b B=qwen3-8b; BIG and VISION only when set.
 # PORT=11500, OUT=/tmp/residency-check. Needs curl and python3.
 set -u
+# Numbers with a decimal point whatever the locale: awk and printf read and
+# write them, and an Italian locale writes "6,0".
+export LC_ALL=C
 
 if [ $# -ne 2 ]; then
     sed -n '2,25p' "$0"
