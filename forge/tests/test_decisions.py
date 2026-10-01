@@ -272,6 +272,24 @@ def test_a_traced_question_may_be_in_the_shape_the_engine_evaluated():
     assert question_from_record(TEAM) == question_from_api(TEAM)
 
 
+def test_a_question_written_as_a_trace_records_it_reads_back_the_same():
+    """systemone.rs `trace_question`, as docs/engine.md shows it: a noul's
+    criteria `""` where the question said nothing, a choice's too."""
+    from eullm_forge.decisions.prompt import question_to_record
+
+    assert question_to_record(question_from_api(URGENT)) == {
+        "type": "noul", "instructions": URGENT["instructions"],
+        "criteria": {"true": "", "false": ""}}
+    assert question_to_record(question_from_api(TEAM))["criteria"]["other"] == ""
+    levels = question_from_api({"type": "score", "instructions": "Risk?", "criteria": [
+        {"label": "calm", "description": "nothing to do"}, "high"]})
+    assert question_to_record(levels)["criteria"] == ["calm: nothing to do", "high"]
+    for spec in (TEAM, URGENT, SEVERITY,
+                 {"type": "noul", "instructions": "Ok?", "criteria": {"true": "fine"}}):
+        q = question_from_api(spec)
+        assert question_from_record(question_to_record(q)) == q
+
+
 def test_answers_name_classes():
     noul, team, sev = (question_from_api(s) for s in (URGENT, TEAM, SEVERITY))
     assert [answer_index(noul, a) for a in (True, False, "yes", "No", 1, 0, "true")] == \

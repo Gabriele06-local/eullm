@@ -22,6 +22,11 @@ people at different times — the decisions by the server, the feedback by
 whoever learns what the right answer was — so a feedback line may name a
 decision that is not there; it is counted, not fatal.
 
+A third file, `splits.jsonl`, is never written by a server: traces made
+from a labelled set (`decisions import-rag`) carry the split the set needs,
+one `{"id", "split"}` per decision, and `decisions build` follows it where
+it would otherwise split by state.
+
 Only the standard library is needed.
 """
 
@@ -35,6 +40,10 @@ from pathlib import Path
 from .prompt import Question, answer_index, question_from_record, state_text
 
 SCHEMA = 1
+#: The sides of a dataset; a decision falls on one.
+SPLITS = ("train", "dev", "test")
+#: Beside the traces, when they come from a labelled set: each decision's side.
+SPLITS_FILE = "splits.jsonl"
 
 
 def read_jsonl(path: str | Path) -> tuple[list[dict], int]:
@@ -79,6 +88,9 @@ class Trace:
     #: questions, as recorded; the questions above are what was left.
     policy_removed: object = None
     client_disconnected: bool = False
+    #: The side `splits.jsonl` puts the decision on; None where there is
+    #: no such file, and the state decides.
+    split: str | None = None
 
 
 @dataclass
@@ -229,6 +241,16 @@ def load_traces(directory: str | Path) -> TraceSet:
         ))
     stats["decisions"] = len(traces)
 
+    splits_path = directory / SPLITS_FILE
+    stats["splits_file"], stats["recorded_splits"] = None, 0
+    if splits_path.is_file():
+        splits, bad = read_splits(splits_path)
+        stats["malformed_lines"] += bad
+        for trace in traces:
+            trace.split = splits.get(trace.id)
+        stats["splits_file"] = str(splits_path)
+        stats["recorded_splits"] = sum(1 for t in traces if t.split)
+
     feedback_files = _files(directory, "feedback")
     stats["feedback_files"] = [str(p) for p in feedback_files]
     for path in feedback_files:
@@ -238,6 +260,19 @@ def load_traces(directory: str | Path) -> TraceSet:
     feedback, fstats = merge_feedback(feedback_rows, {t.id for t in traces})
     stats["feedback"] = fstats
     return TraceSet(traces, feedback, stats)
+
+
+def read_splits(path: str | Path) -> tuple[dict[str, str], int]:
+    """Decision id → side, from a `splits.jsonl`, and how many lines were
+    not a decision and one of the three sides."""
+    rows, bad = read_jsonl(path)
+    splits: dict[str, str] = {}
+    for row in rows:
+        if row.get("id") is None or row.get("split") not in SPLITS:
+            bad += 1
+            continue
+        splits[str(row["id"])] = row["split"]
+    return splits, bad
 
 
 def merge_feedback(rows: list[dict], known_ids: set[str]) -> tuple[dict[str, Feedback], dict]:

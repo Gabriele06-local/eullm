@@ -517,8 +517,94 @@ def decisions() -> None:
         eullm-forge decisions export RUN -o model.gguf
 
     Then bench/reflexbench/qualify.py says whether it may replace the
-    decision model in service.
+    decision model in service. For the RAG gate, whose cases are labelled
+    already, `import-rag` writes the traces to start from.
     """
+
+
+@decisions.command("import-rag")
+@click.option("--sets", default="",
+              help="ReflexBench's public RAG gate sets, comma-separated: musique "
+                   "(downloaded on first use, as ragbench.py does)")
+@click.option("--data", multiple=True, type=click.Path(exists=True, dir_okay=False),
+              help="A RAG gate set of your own, as ragbench.py --data reads it "
+                   "(rg_openbook.py writes one); repeatable")
+@click.option("--output", "-o", required=True, help="The traces directory to write")
+@click.option("--questions", default="reflex-gate,reflex-yesno", show_default=True,
+              help="The gate's questions to ask of every case, by ragbench.py method")
+@click.option("--limit", type=int, default=0, show_default=True,
+              help="Questions per public set, 0 for all")
+@click.option("--passages", type=int, default=5, show_default=True,
+              help="Passages per MuSiQue case, as ragbench.py --passages")
+@click.option("--seed", type=int, default=1, show_default=True,
+              help="Which MuSiQue questions and passages, as ragbench.py --seed")
+@click.option("--dev-share", type=float, default=0.1, show_default=True)
+@click.option("--test-share", type=float, default=0.1, show_default=True)
+@click.option("--split-seed", default="eullm-rag-gate", show_default=True,
+              help="Changes which questions are held out")
+def decisions_import_rag(
+    sets: str,
+    data: tuple[str, ...],
+    output: str,
+    questions: str,
+    limit: int,
+    passages: int,
+    seed: int,
+    dev_share: float,
+    test_share: float,
+    split_seed: str,
+) -> None:
+    """Write the RAG gate's labelled cases as decision traces.
+
+    Every case of bench/reflexbench's RAG gate sets becomes a decision —
+    the state and the questions exactly as ragbench.py's Reflex methods
+    send them — with its label as a person's feedback. Train, dev and test
+    hold out whole questions, and every question about one document; the
+    split goes in splits.jsonl, which `decisions build` follows, and the
+    test cases also in rag-test/, for ragbench.py.
+
+    Examples:
+
+        eullm-forge decisions import-rag --sets musique -o ~/rag-gate/traces
+
+        eullm-forge decisions import-rag --sets musique \\
+            --data ~/rag-gate/rag-legal-it.jsonl -o ~/rag-gate/traces
+    """
+    from .decisions.rag import import_rag
+
+    try:
+        report = import_rag(
+            output,
+            sets=tuple(s.strip() for s in sets.split(",") if s.strip()),
+            data=data,
+            questions=tuple(q.strip() for q in questions.split(",") if q.strip()),
+            limit=limit, seed=seed, passages=passages, dev_share=dev_share,
+            test_share=test_share, split_seed=split_seed,
+            progress=lambda msg: console.print(f"  {msg}"),
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, OSError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1) from e
+
+    for s in report["sets"]:
+        documents = f", {s['documents']} documents" if s["documents"] else ""
+        console.print(f"  {s['name']} ({s['source']}): {s['cases']} cases, "
+                      f"{s['questions']} questions{documents}")
+    table = Table(title=f"RAG gate traces — {output}")
+    table.add_column("Split")
+    table.add_column("Cases", justify="right")
+    table.add_column("Questions", justify="right")
+    table.add_column("Documents", justify="right")
+    table.add_column("answer / retrieve_more / abstain", justify="right")
+    for split, s in report["splits"].items():
+        labels = s["labels"]
+        table.add_row(split, str(s["cases"]), str(s["questions"]), str(s["documents"]),
+                      f"{labels.get('answer', 0)} / {labels.get('retrieve_more', 0)} / "
+                      f"{labels.get('abstain', 0)}")
+    console.print(table)
+    for name, path in report["held_out"].items():
+        console.print(f"  Held out for ragbench.py: {Path(output) / path}")
+    console.print(f"\nNext:\n  eullm-forge decisions build {output} -o <dataset>")
 
 
 @decisions.command("build")
@@ -562,7 +648,8 @@ def decisions_build(
     The label of each question is the feedback's when there is one, else a
     teacher's (--rules first, then --teacher-url), else — with
     --allow-logged only — the decision that was logged. Dev and test hold
-    out whole states.
+    out whole states, or follow the splits.jsonl beside the traces when
+    there is one (`import-rag` writes it).
 
     Examples:
 
@@ -604,6 +691,8 @@ def decisions_build(
             line += f"; {read['malformed_lines']} lines that are not JSON objects skipped"
         if feedback["orphans"]:
             line += f"; feedback on {feedback['orphans']} decisions not in the traces"
+        if read["recorded_splits"]:
+            line += f"; the split of {read['recorded_splits']} from splits.jsonl"
         console.print(line)
     table = Table(title=f"Decision dataset — {output}")
     table.add_column("Split")

@@ -21,7 +21,10 @@ they say:
   state lands on the same side, so a model is never tested on a state it
   was trained on. The side is a hash of the state, not a shuffle: traces
   keep arriving, and a state held out today stays held out when the set is
-  built again next month.
+  built again next month. Traces made from a labelled set carry a split of
+  their own (`splits.jsonl`, see `traces`), which is followed instead: the
+  states of one RAG-gate question differ only in their passages, and a
+  split by state would train on a question and then test on it.
 * **Everything left out is counted**, with its reason, in `stats.json`:
   unreadable lines, questions a code-readout model cannot be asked (more
   than 26 options), feedback that names an option the question did not
@@ -57,9 +60,7 @@ from .prompt import (
     question_text,
     question_to_api,
 )
-from .traces import Trace, feedback_index, load_traces, logged_index
-
-SPLITS = ("train", "dev", "test")
+from .traces import SPLITS, Trace, feedback_index, load_traces, logged_index
 
 
 @dataclass
@@ -109,8 +110,9 @@ def _sha(text: str) -> str:
 
 
 def split_of(state: str, dev_share: float, test_share: float, seed: str) -> str:
-    """The side a state falls on: a hash of it, so that it never moves while
-    the set grows."""
+    """The side a state — or anything else that must stay on one side, a
+    question, a document — falls on: a hash of it, so that it never moves
+    while the set grows."""
     bucket = int(_sha(f"{seed}\0{state}")[:12], 16) / 16**12
     if bucket < test_share:
         return "test"
@@ -153,7 +155,8 @@ def build_dataset(
         teacher: a `teachers.ChatTeacher`, or None.
         allow_logged: label what nobody else labelled with the logged
             decision itself.
-        dev_share, test_share: the share of states held out for each.
+        dev_share, test_share: the share of states held out for each, for
+            the decisions `splits.jsonl` does not place.
         split_seed: changes which states are held out.
         teacher_workers: questions put to the large model at once.
         progress: `callable(str)` for progress lines, or None.
@@ -163,7 +166,8 @@ def build_dataset(
     say = progress or (lambda _msg: None)
     stats: dict = {"traces": [], "questions": 0, "skipped_questions": Counter(),
                    "unusable_feedback": Counter(), "duplicates": 0, "conflicts": 0,
-                   "unlabelled": 0, "teacher_unparsed": 0, "sources": Counter()}
+                   "unlabelled": 0, "teacher_unparsed": 0, "sources": Counter(),
+                   "split_by": Counter()}
 
     # Every question of every decision, keyed by what the model will read.
     groups: dict[tuple[str, str], list[_Candidate]] = defaultdict(list)
@@ -240,9 +244,10 @@ def build_dataset(
         if c.label is None:
             continue
         stats["sources"][c.source] += 1
+        stats["split_by"]["splits.jsonl" if c.trace.split else "state"] += 1
+        split = c.trace.split or split_of(c.trace.state, dev_share, test_share, split_seed)
         examples.append(Example(c.trace.id, c.question_id, c.trace.state, c.question, c.label,
-                                c.source, split_of(c.trace.state, dev_share, test_share,
-                                                   split_seed)))
+                                c.source, split))
     # Stable: a decision's questions stay in the order its request asked
     # them, which `batched` evaluation depends on.
     examples.sort(key=lambda e: (e.split, e.trace))

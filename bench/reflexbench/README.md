@@ -171,6 +171,12 @@ your own, one JSON object per line:
 {"id": "q1:a", "group": "q1", "question": "Entro quanto si ricorre al TAR?", "passages": ["Art. 29 c.p.a.: ...", "..."], "label": "answer"}
 ```
 
+`document`, optional, names the text a question was written from, when
+several questions share one — `rg_openbook.py` writes the article, as
+`codice_civile/2043`; MuSiQue's cases name the questions that rest on the
+same supporting paragraph, since MuSiQue builds many questions on one
+single-hop question.
+
 **An Italian set.** `rg_openbook.py` writes one from Forge's open-book
 pairs: for each question asked by topic about an article of Italian law,
 the passages retrieval finds with that article among them (`answer`), and
@@ -217,6 +223,16 @@ method is scored on the test half, the same cases for all.
 | fitted | at the threshold fitted on the dev half, what calibrating on a domain's own cases buys |
 | 3-way accuracy, macro-F1 | the decision among the three: Reflex's own choice, the embeddings' two fitted thresholds |
 | ECE | how far Reflex's probability of `answer` is from how often it is right |
+
+**A gate model of your own.** The sets are labelled, so they train one:
+`eullm-forge decisions import-rag` writes their cases as decision traces —
+the state and the questions built by `rg_methods.request`, the body the
+Reflex methods post, so the model is trained on the prompt the gate sends —
+holding out whole questions, and every question about one `document`, for
+dev and test. The test side's cases go to `rag-test/<set>.jsonl` beside the
+traces, in this format, for `--data`: the trained model and the Jev-Style
+2B are compared here on cases the model was not trained on. See
+[docs/forge.md](../../docs/forge.md#import-rag-the-rag-gates-labelled-cases).
 
 ## The qualification test: `qualify.py`
 

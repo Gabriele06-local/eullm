@@ -144,10 +144,11 @@ eullm-forge export ./my-model -o ./my-model.gguf --quant q4_k_m
 | `--output, -o` | — | Output GGUF file path |
 | `--quant` | `q4_k_m` | Quantization type |
 
-### `eullm-forge decisions build | train | export`
+### `eullm-forge decisions import-rag | build | train | export`
 
 A decision model of your own, trained on the decisions a server traced and
-the feedback on them, for `eullm serve --decision-model`. See
+the feedback on them, for `eullm serve --decision-model`; `import-rag`
+writes the RAG gate's labelled sets as such traces. See
 [Decision models trained on your decisions](#decision-models-trained-on-your-decisions).
 
 ## Pipeline Stages
@@ -421,6 +422,75 @@ tolerantly: unknown fields are ignored, a line that is not a JSON object is
 skipped and counted, rotated files beside the two are read too, and a later
 feedback line on a question corrects an earlier one.
 
+### `import-rag`: the RAG gate's labelled cases
+
+The [RAG gate](../bench/reflexbench/README.md#the-rag-gate-ragbenchpy) asks
+a decision model whether the passages retrieved for a question are enough
+to answer it, and its sets are labelled already: MuSiQue's questions with
+every passage they need, all but one, or none, and the Italian open-book
+set `rg_openbook.py` writes. `import-rag` writes them as traces, each
+case's label as a person's feedback (`source: "user"`), so that `build`,
+`train` and `export` make a RAG-gate model with nothing else to label:
+
+```bash
+eullm-forge decisions import-rag --sets musique --data ~/rag-gate/rag-legal-it.jsonl \
+    -o ~/rag-gate/traces
+eullm-forge decisions build ~/rag-gate/traces -o ~/rag-gate/data
+```
+
+**The prompt is the gate's own.** Every case becomes one decision whose
+state and questions are built by the gate's code — `rg_methods.request`
+and each method's `question`, the very body `ragbench.py` posts — never by a
+copy of it: a model trained on a prompt off by a space is trained for one it
+is never shown, and nothing fails. `tests/test_decisions_rag.py` takes the
+body the gate's client sends and the example `build` makes of the same case
+and compares them byte for byte, on a case with spaces at both ends,
+newlines, tabs, non-ASCII and a template's own turn markers. Each case is
+asked both of the gate's questions, by the name of the method that asks
+them: `reflex-gate`, the choice among `answer`, `retrieve_more` and
+`abstain`, and `reflex-yesno`, yes only when the passages hold every fact
+the answer needs (`--questions` for one of them). The states are written as
+they are, not redacted as a server's traces are: they are public text, and
+the prompt must be the one the gate sends.
+
+**The split is by question, and by document.** The three contexts of a
+MuSiQue question differ only in their passages, and the open-book pairs ask
+up to four questions of one article: split by state, as `build` splits a
+server's traces, a model would be tested on questions — and articles — it
+was trained on. So every question falls on one side with every other
+question about the same document, chosen by a hash with `--split-seed`:
+converted again, with more questions, a set keeps every held-out question
+held out. The sides go in `splits.jsonl`, which `build` follows in place of
+its own split. A case's document is the set's own word for it:
+
+- **open-book:** the article the question was written from
+  (`codice_civile/2043`), which `rg_openbook.py` writes; for a set written
+  before it did, the article the case's key names;
+- **MuSiQue:** the questions resting on one supporting paragraph, directly
+  or through others. MuSiQue composes its questions from single-hop ones
+  and reuses them, and two questions built on the same one share the
+  paragraph that answers it: split by question alone, 89% of the held-out
+  questions share a single-hop question with one trained on. Grouped, none
+  does — 528 groups of 1 to 84 questions over the 2,417.
+
+`--dev-share` and `--test-share` (10% each) are shares of documents, so the
+share of questions varies with their size: at the default seed MuSiQue
+holds out 127 questions for test and 211 for dev, 381 and 633 cases.
+
+| File | |
+|---|---|
+| `decisions.jsonl`, `feedback.jsonl` | a decision per case, every key a server writes; `model`, `readout` and `mode` are `null` and `answers` empty, since no model decided it |
+| `splits.jsonl` | each decision's side, with the set, case, question and document it came from |
+| `rag-test/<set>.jsonl` | the test side's cases, in `ragbench.py --data`'s own format |
+| `import.json` | the sets read, the questions asked, the settings, and how many cases, questions and documents went to each side |
+
+`--sets musique` reads the set as `ragbench.py` does, downloaded on first
+use, with the same `--passages` (5) and `--seed` (1) and a `--limit` of
+questions that here defaults to 0, all 2,417; `--data` takes a file in
+`ragbench.py --data`'s format, repeatable. A directory a server writes
+traces to is never overwritten: `import-rag` writes again only a directory
+it wrote itself.
+
 ### `build`: the label of every question
 
 In this order, the first that has one:
@@ -456,7 +526,9 @@ Feedback naming an option the question did not offer is not overruled by a
 teacher: the question is left out. The same question about the same state
 is one example. Dev and test (`--dev-share`, `--test-share`, 10% each) hold
 out whole states, chosen by a hash of the state, so a state held out today
-stays held out when the set is built again next month. Questions a
+stays held out when the set is built again next month — unless the traces
+carry a `splits.jsonl` (`import-rag` writes one), whose sides are followed
+instead and counted in `stats.json` (`split_by`). Questions a
 code-readout model cannot be asked — more than 26 options — are left out.
 Everything left out is counted with its reason in `stats.json`, next to the
 spread of every question's answers and the accuracy of always giving the
@@ -558,6 +630,7 @@ pytest tests/ -v
 | `test_distill.py` | Distillation cost estimation |
 | `test_identity.py` | Identity dataset generation (EN, IT, DE, FR) |
 | `test_decisions.py` | Decision models: the prompt against decision.rs, traces, labels, splits, CLI, a tiny CPU training run |
+| `test_decisions_rag.py` | The RAG gate's cases as traces: the prompt byte for byte against what the gate sends, both trace readers, the split by question and document, `build` following it, the CLI |
 | `test_decisions_engine.py` | A trained decision model served by the engine binary (needs `EULLM_E2E_BIN`, `EULLM_E2E_TOKENIZER`, `LLAMA_CPP_PATH`) |
 
 ## Implementation Status

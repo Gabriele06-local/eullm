@@ -13,6 +13,10 @@ The model is trained for the engine's codes readout, the prompt
 serves unchanged. Whether it may replace the decision model in service is
 for `bench/reflexbench/qualify.py` to say, not this package.
 
-`prompt`, `traces`, `teachers`, `dataset` and `metrics` need only the
-standard library; `train` needs torch, transformers and peft.
+The RAG gate's sets are labelled already: `rag` writes them as traces
+(`eullm-forge decisions import-rag`), the prompt built by the gate's own
+code in bench/reflexbench, the split by question and by document.
+
+`prompt`, `traces`, `teachers`, `dataset`, `metrics` and `rag` need only
+the standard library; `train` needs torch, transformers and peft.
 """

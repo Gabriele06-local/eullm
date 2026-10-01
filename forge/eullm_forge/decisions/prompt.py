@@ -340,6 +340,20 @@ def question_to_api(question: Question) -> dict:
     return spec
 
 
+def question_to_record(question: Question) -> dict:
+    """The question as a decision trace records it — systemone.rs
+    `trace_question`: `type`, `instructions` and `criteria` as the model
+    read them, a noul's `{"true": …, "false": …}` and a choice's
+    descriptions `""` where the question said nothing."""
+    if question.kind == "noul":
+        criteria: object = {"true": question.true_means, "false": question.false_means}
+    elif question.kind == "choice":
+        criteria = dict(question.options)
+    else:
+        criteria = list(question.levels)
+    return {"type": question.kind, "instructions": question.instructions, "criteria": criteria}
+
+
 def answer_index(question: Question, answer) -> int:
     """The class a right answer names: true/false (or yes/no) for a `noul`,
     the option's name for a `choice`, the level's number — or its text —

@@ -36,11 +36,14 @@ SETS = {"musique": "MuSiQue dev: 2 to 4 hop questions over Wikipedia"}
 
 class Case:
     """A question, the passages retrieved for it, and what to do with them.
-    Cases of one `group` come from the same question."""
+    Cases of one `group` come from the same question; `document`, when a
+    set gives it, is the text the question was written from, which several
+    questions may share (an article of law in rg_openbook.py's set)."""
 
-    def __init__(self, id, group, question, passages, label):
+    def __init__(self, id, group, question, passages, label, document=None):
         self.id, self.group, self.question = id, group, question
         self.passages, self.label = passages, label
+        self.document = document
 
     @property
     def sufficient(self):
@@ -52,9 +55,40 @@ class Dataset:
         self.name, self.cases = name, cases
 
 
+def shared_paragraphs(rows):
+    """Question id → the questions its supporting paragraphs tie it to,
+    directly or through others, named after the first of their ids.
+
+    MuSiQue composes its questions from single-hop ones, and reuses them:
+    two questions built on the same single-hop question share the paragraph
+    that answers it. Nine held-out questions in ten share one with a
+    question trained on, when the set is split by question alone — so a
+    split that keeps these groups apart (`import-rag`, by `document`) is
+    the one that holds out what a model has not read."""
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for row in rows:
+        for p in row["paragraphs"]:
+            if p["is_supporting"]:
+                parent[find(("paragraph", p["title"], p["paragraph_text"]))] = find(row["id"])
+    names = {}
+    for row in sorted(rows, key=lambda r: r["id"]):
+        names.setdefault(find(row["id"]), row["id"])
+    return {row["id"]: f"musique/{names[find(row['id'])]}" for row in rows}
+
+
 def musique(limit=0, seed=1, k=5):
-    """Three cases for each of `limit` questions (0: all 2,417)."""
+    """Three cases for each of `limit` questions (0: all 2,417), each case's
+    `document` the questions its supporting paragraphs tie it to (see
+    `shared_paragraphs`), over the whole set whatever `limit` draws."""
     rows = [json.loads(line) for line in fetch(MUSIQUE).decode("utf-8").splitlines() if line]
+    documents = shared_paragraphs(rows)
     order = list(range(len(rows)))
     random.Random(seed).shuffle(order)
     cases = []
@@ -78,6 +112,7 @@ def musique(limit=0, seed=1, k=5):
                     row["question"],
                     [f"{p['title']}: {p['paragraph_text']}" for p in passages],
                     label,
+                    documents[row["id"]],
                 )
             )
     return Dataset("musique", cases)
@@ -92,7 +127,8 @@ def load(name, limit=0, seed=1, k=5):
 def from_jsonl(path):
     """A set of your own, one JSON object per line:
     {"id": ..., "question": "...", "passages": ["...", ...],
-     "label": "answer" | "retrieve_more" | "abstain", "group": optional}.
+     "label": "answer" | "retrieve_more" | "abstain", "group": optional,
+     "document": optional}.
     A passage may also be {"title": ..., "text": ...}. Cases of one group
     stay on the same side of the split."""
     cases = []
@@ -107,7 +143,17 @@ def from_jsonl(path):
         ]
         case_id = str(row.get("id", n))
         group = str(row.get("group", case_id))
-        cases.append(Case(case_id, group, row["question"], passages, row["label"]))
+        document = row.get("document")
+        cases.append(
+            Case(
+                case_id,
+                group,
+                row["question"],
+                passages,
+                row["label"],
+                None if document is None else str(document),
+            )
+        )
     return Dataset(pathlib.Path(path).stem, cases)
 
 
