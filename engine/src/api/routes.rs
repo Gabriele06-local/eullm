@@ -1265,14 +1265,10 @@ async fn embed_on_a_blocking_thread(
 
 /// How many embedding requests may take a blocking thread at once: one per
 /// core, the number that could when each one held a runtime worker thread;
-/// the blocking pool alone would allow hundreds. It is not what bounds
-/// their memory. Every embedding builds a context of its own, sized to its
-/// input — for a decoder-based embedder a logits row per token, 1.2 GB at
-/// 2048 tokens of Qwen3-Embedding — and one per core let sixteen requests
-/// of ~2,000 tokens fill a 16 GB GPU, half of them failing; what their
-/// contexts hold together is bounded by the embedder's own context budget
-/// (`inference::embedding`). Running more would not be faster either: each
-/// already uses every core, or the one GPU.
+/// the blocking pool alone would allow hundreds. They wait there for the
+/// embedder, which embeds one input at a time in the one context it keeps
+/// (`inference::embedding`): running more would not be faster, as each
+/// input already uses every core, or the one GPU.
 static EMBEDDING_SLOTS: LazyLock<tokio::sync::Semaphore> = LazyLock::new(|| {
     tokio::sync::Semaphore::new(std::thread::available_parallelism().map_or(4, |n| n.get()))
 });
