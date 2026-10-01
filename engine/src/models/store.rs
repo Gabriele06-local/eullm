@@ -116,6 +116,15 @@ impl RecordedHfFile {
 }
 
 impl ModelManifest {
+    /// What the description says the model is, for a reader that shows it as
+    /// such: `None` when it is empty, or when it only records where an
+    /// external pull came from (see `write_external_manifest`).
+    pub fn written_description(&self) -> Option<&str> {
+        let description = self.description.trim();
+        (!description.is_empty() && !description.starts_with(EXTERNAL_SOURCE_PREFIX))
+            .then_some(description)
+    }
+
     /// Whether these weights are the HuggingFace file `wanted` — asked of
     /// every stored model before a pull downloads anything.
     pub fn holds(&self, wanted: &HfFile) -> bool {

@@ -37,11 +37,17 @@ pub struct AuditEntry {
     pub duration_ms: u64,
     /// Optional user identifier
     pub user_id: Option<String>,
-    /// What a `/v1/systemone` request decided. Absent on every other request
-    /// type, and on lines written before decisions existed — both of which
-    /// still parse.
+    /// What a `/v1/systemone` request decided, and what the router's
+    /// decision model decided on a `route` line. Absent on every other
+    /// request type, and on lines written before decisions existed — both of
+    /// which still parse.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<DecisionRecord>,
+    /// On a `route` line, which model `"model": "auto"` chose for a request
+    /// and why. Absent on every other line, and on lines written before
+    /// routing existed, which still parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<RoutingRecord>,
 }
 
 impl AuditEntry {
@@ -57,8 +63,56 @@ impl AuditEntry {
             duration_ms: 0,
             user_id: None,
             decision: None,
+            routing: None,
         }
     }
+}
+
+/// The record of one routing decision (`"model": "auto"`, or a dry run on
+/// `POST /api/route`): which model answers, why, and what it was chosen
+/// from. The line's own `id` is the route's: what the response's
+/// `eullm.route.id` and the routed generation's audit line name it by.
+///
+/// The decision model's answer, with the probabilities it was read from, is
+/// the line's `decision`, the record `/v1/systemone` writes; this one holds
+/// what is particular to routing.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RoutingRecord {
+    /// The model the request named: `auto`.
+    pub requested: String,
+    /// The model chosen to answer.
+    pub model: String,
+    /// Why that one: `decided` by the decision model, or the reason the
+    /// fallback answers instead (`no_decision_model`, `timeout`,
+    /// `decision_error`, `no_eligible_candidate`, `only_candidate`).
+    pub reason: String,
+    /// The model that answers whenever the decision model does not decide.
+    pub fallback: String,
+    /// The models offered to the decision model, in the order it read them.
+    pub candidates: Vec<String>,
+    /// The configured models not offered, and why.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excluded: Vec<ExcludedCandidate>,
+    /// The decision model asked, when one was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_model: Option<String>,
+    /// How long routing took, the decision included, in milliseconds.
+    pub decision_ms: f64,
+    /// Asked of `POST /api/route`: decided and recorded, but nothing was
+    /// generated. Written only when true.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dry_run: bool,
+    /// Why the decision failed, for `decision_error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// A configured model the router did not offer for a request, and why: it
+/// cannot read the request's attachments, or its context is too short for it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ExcludedCandidate {
+    pub model: String,
+    pub why: String,
 }
 
 /// The record of one `/v1/systemone` request: every answer with the
@@ -416,6 +470,48 @@ mod tests {
         let old = r#"{"id":"67e55044-10b1-426f-9247-bb680e5fe0c8","timestamp":"2026-09-01T10:00:00Z","model":"qwen3-8b","request_type":"chat","input_tokens":12,"output_tokens":40,"duration_ms":900,"user_id":null}"#;
         let parsed: AuditEntry = serde_json::from_str(old).unwrap();
         assert!(parsed.decision.is_none());
+        assert!(parsed.routing.is_none(), "nor before routing existed");
+    }
+
+    /// A route line keeps which model was chosen, from what, and why; a
+    /// line that routed nothing has no `routing` key at all, and a dry run
+    /// says so only when it is one.
+    #[test]
+    fn a_routing_record_round_trips() {
+        let mut entry = AuditEntry::new("jev-style-0.8b".into(), "route".into());
+        assert!(!serde_json::to_string(&entry).unwrap().contains("routing"));
+        let record = RoutingRecord {
+            requested: "auto".into(),
+            model: "qwen3-4b".into(),
+            reason: "decided".into(),
+            fallback: "qwen3-8b".into(),
+            candidates: vec!["qwen3-4b".into(), "qwen3-8b".into()],
+            excluded: vec![ExcludedCandidate {
+                model: "qwen3-1.7b".into(),
+                why: "its context of 2048 tokens per request is shorter than the request".into(),
+            }],
+            decision_model: Some("jev-style-0.8b".into()),
+            decision_ms: 38.2,
+            dry_run: false,
+            error: None,
+        };
+        entry.routing = Some(record.clone());
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("dry_run") && !json.contains("\"error\""),
+            "{json}"
+        );
+        let parsed: AuditEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.routing.as_ref(), Some(&record));
+
+        entry.routing = Some(RoutingRecord {
+            dry_run: true,
+            excluded: Vec::new(),
+            ..record
+        });
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains(r#""dry_run":true"#), "{json}");
+        assert!(!json.contains("excluded"), "{json}");
     }
 
     #[test]

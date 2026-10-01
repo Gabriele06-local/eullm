@@ -163,6 +163,7 @@ pub fn api_routes() -> Router<S> {
         .route("/pull", post(pull_model))
         .route("/version", get(version))
         .route("/unload", post(unload_model))
+        .route("/route", post(route_request))
         .route("/embed", post(embed))
         .route("/hf/search", get(hf_search))
         .route("/hf/repo", get(hf_repo))
@@ -1242,6 +1243,51 @@ async fn unload_model(
             },
         }),
     }))
+}
+
+/// `POST /api/route` — EuLLM extension: the model `"model": "auto"` would
+/// give this request, and why, without generating anything or loading any
+/// generation model. The body is the one `/api/chat`, `/api/generate` or
+/// `/v1/chat/completions` takes. The answer adds what the decision model
+/// read, the state and the question in `/v1/systemone`'s shape, so that the
+/// same question, worded another way, can be asked about the very state the
+/// server built. Audited as any routing, marked as a dry run.
+async fn route_request(
+    State(state): State<S>,
+    axum::Extension(identity): axum::Extension<super::Identity>,
+    Json(body): Json<Value>,
+) -> Result<Json<super::route::RouteResponse>, ApiError> {
+    let Some(table) = state.router.as_ref() else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "error": "auto routing is not configured: start the server with two or more \
+                          --auto-model to choose between"
+            })),
+        ));
+    };
+    let input = super::route::RouteInput::of(&body).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "the body needs \"messages\" or \"prompt\", as for /api/chat, \
+                          /v1/chat/completions or /api/generate"
+            })),
+        )
+    })?;
+    let overrides = parse_slot_overrides(&body)?;
+    let (contexts, resident) = state.route_candidates(table, overrides).await;
+    let route = super::route::decide_route(
+        &state,
+        table,
+        &input,
+        &contexts,
+        resident,
+        AuditCtx::of(&identity).user_id,
+        true,
+    )
+    .await;
+    Ok(Json(super::route::RouteResponse::new(route, table)))
 }
 
 /// `input`, in either shape the two embedding endpoints accept: one string,

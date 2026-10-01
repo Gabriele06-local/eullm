@@ -20,6 +20,7 @@ mod origin;
 #[cfg(test)]
 mod real_model_tests;
 mod resident;
+mod route;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
 // reuses `routes::sequential_to_channel` so that a model without a scheduler
 // (multimodal forces `batch_size = 0`) streams through exactly the same code
@@ -28,6 +29,7 @@ pub(crate) mod routes;
 mod systemone;
 
 pub use auth::Identity;
+pub use route::{CandidateFacts, CatalogFacts, DEFAULT_AUTO_TIMEOUT_MS};
 
 use axum::Router;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
@@ -230,6 +232,11 @@ pub struct AppState {
     /// with none loaded the request is refused. Resolvable by its name or
     /// path whatever `allow_model_paths` says, as the launch model is.
     pub default_model: Option<NamedModel>,
+
+    /// The models `"model": "auto"` chooses between, and how long it may
+    /// take to (`--auto-model`, `--auto-timeout-ms`); `None` without them,
+    /// and `auto` is then a model name like any other. See `route`.
+    pub(crate) router: Option<route::RouteTable>,
 
     /// Second, independent model slot for text embeddings — see
     /// `ensure_embedding_model`. `None` until the first `/v1/embeddings` or
@@ -1016,6 +1023,43 @@ impl AppState {
         Ok(Some(name))
     }
 
+    /// Per routing candidate, in the table's order, the context one request
+    /// to it gets and whether it is loaded: a resident's, from how it was
+    /// loaded; another's, from how it would load — with the request's own
+    /// `batch_size` and `ctx_size` when it gives them, and on the sequential
+    /// engine, with the whole context, when it has a projector.
+    pub(crate) async fn route_candidates(
+        &self,
+        table: &route::RouteTable,
+        (override_batch_size, override_ctx_size): (Option<usize>, Option<u32>),
+    ) -> (Vec<u32>, Vec<bool>) {
+        let models = self.models.read().await;
+        table
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let resident = models
+                    .find(&candidate.name)
+                    .or_else(|| models.find_file(&candidate.path));
+                match resident {
+                    Some(model) => (
+                        model.facts.ctx_size / model.facts.batch_size.max(1) as u32,
+                        true,
+                    ),
+                    None => {
+                        let ctx = override_ctx_size.unwrap_or(self.ctx_size);
+                        let slots = if candidate.has_projector {
+                            1
+                        } else {
+                            override_batch_size.unwrap_or(self.batch_size).max(1)
+                        };
+                        (ctx / slots as u32, false)
+                    }
+                }
+            })
+            .unzip()
+    }
+
     /// The resident `requested` names, by name or else as its file, or `None`
     /// when it is not loaded. A name that is no model at all is
     /// `ModelError::NotFound`; one the residents answer to is never looked up
@@ -1740,34 +1784,70 @@ mod residency_config_tests {
         assert!(ignored.contains("ignored"), "{ignored}");
     }
 
+    fn flags(max_loaded_models: usize, default_model: Option<&str>) -> ResidencyFlags {
+        ResidencyFlags {
+            max_loaded_models,
+            default_model: default_model.map(str::to_string),
+            auto_models: Vec::new(),
+            auto_timeout_ms: route::DEFAULT_AUTO_TIMEOUT_MS,
+        }
+    }
+
+    /// A store of `qwen3-4b` and `qwen3-8b`, and nothing else.
+    fn lookup(name: &str) -> Option<CandidateFacts> {
+        matches!(name, "qwen3-4b" | "qwen3-8b").then(|| CandidateFacts {
+            model: NamedModel {
+                name: name.to_string(),
+                path: PathBuf::from(format!("/store/{name}/model.gguf")),
+            },
+            store_description: None,
+            catalog: None,
+            has_projector: false,
+        })
+    }
+
     #[test]
     fn the_residency_config_holds_at_least_one_model() {
-        let resolve = |n| ResidencyConfig::resolve(n, None, |_| None).expect("no default");
+        let resolve = |n| ResidencyConfig::resolve(&flags(n, None), |_| None).expect("no default");
         assert_eq!(resolve(0).max_loaded_models, 1);
         assert_eq!(resolve(4).max_loaded_models, 4);
         assert_eq!(resolve(4).default_model, None);
+        assert_eq!(resolve(4).router, None);
     }
 
     /// `--default-model` is resolved at startup: a model the server cannot
     /// find stops it there, rather than failing every request naming none.
     #[test]
     fn the_default_model_is_resolved_at_startup() {
-        let lookup = |name: &str| {
-            (name == "qwen3-8b").then(|| NamedModel {
-                name: name.to_string(),
-                path: PathBuf::from("/store/qwen3-8b/Qwen3-8B-Q4_K_M.gguf"),
-            })
-        };
-        let config = ResidencyConfig::resolve(2, Some(" qwen3-8b "), lookup).expect("found");
+        let config =
+            ResidencyConfig::resolve(&flags(2, Some(" qwen3-8b ")), lookup).expect("found");
         assert_eq!(
             config.default_model.map(|m| m.name).as_deref(),
             Some("qwen3-8b")
         );
-        let refused = ResidencyConfig::resolve(2, Some("qwen3-80b"), lookup).unwrap_err();
+        let refused = ResidencyConfig::resolve(&flags(2, Some("qwen3-80b")), lookup).unwrap_err();
         assert!(
             refused.contains("--default-model 'qwen3-80b'") && refused.contains("eullm pull"),
             "{refused}"
         );
+    }
+
+    /// `--auto-model` is resolved with the rest, its fallback the default
+    /// model when that is one of its candidates.
+    #[test]
+    fn the_route_table_is_resolved_with_the_default_model() {
+        let mut flags = flags(2, Some("qwen3-4b"));
+        flags.auto_models = vec!["qwen3-4b=Small".into(), "qwen3-8b=Large".into()];
+        flags.auto_timeout_ms = 250;
+        let router = ResidencyConfig::resolve(&flags, lookup)
+            .expect("resolved")
+            .router
+            .expect("a table");
+        assert_eq!(router.fallback().name, "qwen3-4b");
+        assert_eq!(router.timeout, std::time::Duration::from_millis(250));
+        flags.auto_models.push("qwen3-80b".into());
+        let refused = ResidencyConfig::resolve(&flags, lookup).unwrap_err();
+        assert!(refused.contains("'qwen3-80b' is not a model"), "{refused}");
     }
 }
 
@@ -2296,9 +2376,9 @@ pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool 
     model_identity_key(loaded) == model_identity_key(normalized_request)
 }
 
-/// How generation models are kept resident and which one answers a request
-/// that names none: the user's flags, resolved once in `main.rs` and handed
-/// to `serve` whole.
+/// How generation models are kept resident, which one answers a request
+/// that names none, and which ones `"model": "auto"` chooses between: the
+/// user's flags, resolved once in `main.rs` and handed to `serve` whole.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidencyConfig {
     /// `--max-loaded-models` (see `RuntimeOpts::max_loaded_models`).
@@ -2306,6 +2386,23 @@ pub struct ResidencyConfig {
     /// `--default-model`, resolved: the model a request that names none is
     /// answered by (see `RuntimeOpts::default_model`).
     pub default_model: Option<NamedModel>,
+    /// `--auto-model` and `--auto-timeout-ms`, resolved; `None` without
+    /// `--auto-model` (see `route`).
+    pub router: Option<route::RouteTable>,
+}
+
+/// The flags `ResidencyConfig` is resolved from, as the command line gave
+/// them.
+#[derive(Debug, Clone, Default)]
+pub struct ResidencyFlags {
+    /// `--max-loaded-models`.
+    pub max_loaded_models: usize,
+    /// `--default-model`.
+    pub default_model: Option<String>,
+    /// Every `--auto-model`, in order.
+    pub auto_models: Vec<String>,
+    /// `--auto-timeout-ms`.
+    pub auto_timeout_ms: u64,
 }
 
 /// A model named on the command line, resolved when the server started:
@@ -2322,17 +2419,18 @@ impl ResidencyConfig {
     /// From the flags as the command line gave them. `lookup` resolves a
     /// model named on the command line the way `--decision-model` is
     /// resolved — a store name or a GGUF path — to the name requests will
-    /// use and its file. A `--default-model` it cannot resolve is an error:
-    /// the server would otherwise start, and fail every request that names
-    /// no model.
+    /// use and its file, with what the store and the catalog say about it.
+    /// A `--default-model` or an `--auto-model` it cannot resolve is an
+    /// error: the server would otherwise start, and fail every request that
+    /// needs it (see `route::RouteTable::resolve` for what else
+    /// `--auto-model` refuses).
     pub fn resolve(
-        max_loaded_models: usize,
-        default_model: Option<&str>,
-        lookup: impl Fn(&str) -> Option<NamedModel>,
+        flags: &ResidencyFlags,
+        lookup: impl Fn(&str) -> Option<CandidateFacts>,
     ) -> Result<Self, String> {
-        let default_model = match default_model.map(str::trim) {
+        let default_model = match flags.default_model.as_deref().map(str::trim) {
             None => None,
-            Some(name) => Some(lookup(name).ok_or_else(|| {
+            Some(name) => Some(lookup(name).map(|facts| facts.model).ok_or_else(|| {
                 format!(
                     "--default-model '{name}' is not a model: give a GGUF path or a name \
                      `eullm list` shows (a catalog model has to be pulled first: eullm pull \
@@ -2340,10 +2438,74 @@ impl ResidencyConfig {
                 )
             })?),
         };
+        let router = route::RouteTable::resolve(
+            &flags.auto_models,
+            default_model.as_ref(),
+            std::time::Duration::from_millis(flags.auto_timeout_ms),
+            &lookup,
+        )?;
         Ok(Self {
-            max_loaded_models: max_loaded_models.max(1),
+            max_loaded_models: flags.max_loaded_models.max(1),
             default_model,
+            router,
         })
+    }
+}
+
+/// What `"model": "auto"` chooses between, as the startup log says it: each
+/// candidate with the description the decision model reads and where it came
+/// from — a warning when it is the catalog's product text or the bare name —
+/// and what will keep routing from working as configured.
+fn log_route_table(
+    table: &route::RouteTable,
+    max_loaded_models: usize,
+    decision_model: bool,
+    keep_alive: bool,
+) {
+    tracing::info!(
+        "\"model\": \"{}\" chooses between {} models, the fallback {}, deciding within {} ms \
+         (--auto-model, --auto-timeout-ms)",
+        route::AUTO,
+        table.candidates.len(),
+        table.fallback().name,
+        table.timeout.as_millis()
+    );
+    for candidate in &table.candidates {
+        let source = candidate.source.describe();
+        if candidate.source.warns() {
+            tracing::warn!(
+                "  {}: \"{}\" — from {source}",
+                candidate.name,
+                candidate.description
+            );
+        } else {
+            tracing::info!(
+                "  {}: \"{}\" — from {source}",
+                candidate.name,
+                candidate.description
+            );
+        }
+    }
+    if !decision_model {
+        tracing::warn!(
+            "--auto-model without --decision-model: until a request loads a decision model, \
+             every routed request is answered by the fallback, {}",
+            table.fallback().name
+        );
+    }
+    if max_loaded_models < table.candidates.len() {
+        tracing::warn!(
+            "--max-loaded-models {max_loaded_models} keeps fewer models loaded than the {} \
+             --auto-model candidates: a request routed to one that is not loaded unloads \
+             another, and alternating between them reloads a model each time",
+            table.candidates.len()
+        );
+    }
+    if keep_alive {
+        tracing::warn!(
+            "--keep-alive with --auto-model: an idle decision model is unloaded like any \
+             other, and routing then falls back until a request loads one again"
+        );
     }
 }
 
@@ -2607,6 +2769,14 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
              model (no --default-model)"
         ),
     }
+    if let Some(table) = &cfg.residency.router {
+        log_route_table(
+            table,
+            max_loaded_models,
+            cfg.launch_decision.is_some(),
+            cfg.keep_alive.is_some(),
+        );
+    }
     if max_loaded_models > 1 && (!cfg.fit || crate::fit::vram_bytes().is_none()) {
         tracing::warn!(
             "--max-loaded-models {max_loaded_models}: generation models are kept up to the \
@@ -2708,6 +2878,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         allow_model_paths,
         launch_model: cfg.launch_model,
         default_model: cfg.residency.default_model,
+        router: cfg.residency.router,
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
@@ -2857,6 +3028,7 @@ impl AppState {
             allow_model_paths: false,
             launch_model: None,
             default_model: None,
+            router: None,
             embedding: tokio::sync::RwLock::new(None),
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
@@ -4157,6 +4329,100 @@ mod http_tests {
         .await;
         assert_eq!(status, 503);
         assert!(body.contains("No model loaded"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A route table over two fixtures of `store`, the second the fallback.
+    fn two_candidates(store: &ModelStore) -> route::RouteTable {
+        let candidate = |name: &str, description: &str| route::RouteCandidate {
+            name: name.to_string(),
+            path: store.gguf_path(name).expect("a fixture"),
+            description: description.to_string(),
+            source: route::DescriptionSource::Flag,
+            has_projector: false,
+        };
+        route::RouteTable {
+            candidates: vec![
+                candidate("small-m", "Short everyday requests"),
+                candidate("large-m", "Reasoning, maths and code"),
+            ],
+            fallback: 1,
+            timeout: std::time::Duration::from_secs(1),
+        }
+    }
+
+    /// Without `--auto-model` there is nothing to route with, and
+    /// `/api/route` says so.
+    #[tokio::test]
+    async fn api_route_without_auto_model_is_a_404() {
+        let tmp = std::env::temp_dir().join(format!("eullm-route-off-{}", uuid::Uuid::new_v4()));
+        let base = spawn(store_with_one_model(&tmp, "a-pulled-model")).await;
+        let (status, text) = post_json(
+            &format!("{base}/api/route"),
+            serde_json::json!({ "model": "auto", "prompt": "hi" }),
+        )
+        .await;
+        assert_eq!(status, 404, "{text}");
+        assert!(text.contains("auto routing is not configured"), "{text}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Routing configured but no decision model: the fallback answers, the
+    /// reason says why, and what the decision model would have read — the
+    /// state and the question, its options in order — is in the answer.
+    /// Nothing is loaded.
+    #[tokio::test]
+    async fn api_route_without_a_decision_model_answers_with_the_fallback() {
+        let tmp = std::env::temp_dir().join(format!("eullm-route-{}", uuid::Uuid::new_v4()));
+        store_with_one_model(&tmp, "small-m");
+        let store = store_with_one_model(&tmp, "large-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state.router = Some(two_candidates(&state.store));
+        let base = spawn_state(state).await;
+        let url = format!("{base}/api/route");
+
+        let (status, text) = post_json(
+            &url,
+            serde_json::json!({ "model": "auto", "messages": [
+                { "role": "user", "content": "What is 2 + 2?" }
+            ] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let route: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(route["model"], "large-m");
+        assert_eq!(route["fallback"], "large-m");
+        assert_eq!(route["reason"], "no_decision_model");
+        assert!(route["decision_model"].is_null() && route["confidence"].is_null());
+        let candidates = route["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 2);
+        for candidate in candidates {
+            assert!(candidate["probability"].is_null(), "{candidate}");
+            assert_eq!(candidate["resident"], false);
+        }
+        let state_text = route["state"].as_str().expect("the state");
+        assert!(
+            state_text.starts_with("Request to answer, with its context.")
+                && state_text.ends_with("Latest message:\nWhat is 2 + 2?"),
+            "{state_text}"
+        );
+        assert_eq!(route["question"]["type"], "choice");
+        assert_eq!(route["question"]["instructions"], route::ROUTE_QUESTION);
+        assert!(
+            text.contains(
+                r#""criteria":{"small-m":"Short everyday requests","large-m":"Reasoning, maths and code"}"#
+            ),
+            "the options in their order: {text}"
+        );
+        assert!(uuid::Uuid::parse_str(route["route_id"].as_str().unwrap()).is_ok());
+
+        // A prompt routes too; a body with neither is refused.
+        let (status, text) = post_json(&url, serde_json::json!({ "prompt": "Why?" })).await;
+        assert_eq!(status, 200, "{text}");
+        assert!(text.contains(r#"Prompt:\nWhy?"#), "{text}");
+        let (status, _) = post_json(&url, serde_json::json!({ "model": "auto" })).await;
+        assert_eq!(status, 400);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
