@@ -14,7 +14,7 @@
 
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 
 use llama_cpp_2::EmbeddingsError;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
@@ -37,7 +37,9 @@ use llama_cpp_2::model::{AddBos, LlamaModel};
 /// and drops its own `LlamaContext`, sized to that call's longest input (see
 /// `embed` for why that size and not the largest one): a short-lived context
 /// means an embedding request never competes with a concurrent one for a
-/// shared KV cache, and holds its memory only while it runs.
+/// shared KV cache, and holds its memory only while it runs. The contexts of
+/// calls running at once hold together no more cells than the largest one
+/// alone (`ContextBudget`).
 pub struct EmbeddingModel {
     backend: Arc<LlamaBackend>,
     model: LlamaModel,
@@ -50,6 +52,100 @@ pub struct EmbeddingModel {
     /// hard error on the first oversized chunk an ingestion pipeline sends
     /// it, which is a worse failure mode than a documented truncation.
     n_ctx: u32,
+    budget: ContextBudget,
+}
+
+/// How many context cells the `embed` calls running at once may hold
+/// together: as many as the largest context one call can build. A call
+/// holds the cells of its own context (`context_size`) from before the
+/// context is built until it is dropped; one that does not fit waits for
+/// the calls before it to end, in the order the calls came, so a large call
+/// is never passed over by a stream of small ones.
+///
+/// A context's memory grows with its cells — for a decoder-based embedder
+/// the compute buffer holds a logits row per token, ~600 KB with Qwen3's
+/// 151k vocabulary, 1.2 GB at 2,048 tokens — and the only bound on calls
+/// at once was one per core (`EMBEDDING_SLOTS` in `api::routes`). Sixteen
+/// requests of ~2,000 tokens each, on an RTX 5070 Ti with 16 GB and the
+/// Jev-Style 2B loaded beside the embedder: eight built their context and
+/// eight failed with "Failed to create embedding context". Under the budget
+/// a burst needs the memory of the largest single request, which the
+/// embedder needs anyway to take one, and waits instead of failing; short
+/// requests, whose contexts are small, still run side by side.
+struct ContextBudget {
+    cells: u64,
+    state: Mutex<BudgetState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct BudgetState {
+    /// Cells held by the calls running now.
+    held: u64,
+    /// The ticket the next call to arrive takes.
+    next: u64,
+    /// The ticket of the call to admit next.
+    serving: u64,
+}
+
+impl ContextBudget {
+    fn new(cells: u64) -> Self {
+        Self {
+            cells: cells.max(1),
+            state: Mutex::default(),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Wait for `cells` — never more than the whole budget, so the call at
+    /// the head of the line always fits once those before it are done —
+    /// and hold them until the returned guard is dropped.
+    fn hold(&self, cells: u64) -> HeldCells<'_> {
+        let cells = cells.min(self.cells);
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let ticket = state.next;
+        state.next += 1;
+        while state.serving != ticket || state.held + cells > self.cells {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        state.held += cells;
+        state.serving += 1;
+        drop(state);
+        // The next call in line may fit beside this one.
+        self.changed.notify_all();
+        HeldCells {
+            budget: self,
+            cells,
+        }
+    }
+}
+
+/// Cells of a [`ContextBudget`], given back when dropped.
+struct HeldCells<'a> {
+    budget: &'a ContextBudget,
+    cells: u64,
+}
+
+impl Drop for HeldCells<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        state.held -= self.cells;
+        drop(state);
+        self.budget.changed.notify_all();
+    }
+}
+
+/// The budget of an embedder that takes inputs of up to `max` tokens: the
+/// cells of the largest context `context_size` builds for it.
+fn context_budget(max: u32) -> u64 {
+    u64::from(max.max(1)).next_multiple_of(u64::from(KV_CELL_STEP))
 }
 
 /// What `EmbeddingModel::embed` produced.
@@ -142,6 +238,7 @@ impl EmbeddingModel {
             path: path.to_path_buf(),
             threads,
             n_ctx,
+            budget: ContextBudget::new(context_budget(n_ctx)),
         })
     }
 
@@ -233,6 +330,9 @@ impl EmbeddingModel {
         }
 
         let (n_ctx, n_batch) = context_size(longest, self.n_ctx);
+        // Declared before the context, so dropped after it: the cells stay
+        // held for as long as the context holds its memory.
+        let _held = self.budget.hold(u64::from(n_ctx));
         let ctx_params = LlamaContextParams::default()
             .with_n_ctx(std::num::NonZeroU32::new(n_ctx))
             .with_n_batch(n_batch)
@@ -337,6 +437,8 @@ fn normalize_l2(vector: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     // A short input gets a small context, not the 2048 default: that
     // context is where a one-word request spent most of its time.
@@ -367,5 +469,96 @@ mod tests {
     fn the_largest_input_gets_the_full_context() {
         assert_eq!(context_size(2048, 2048), (2048, 2048));
         assert_eq!(context_size(1000, 1000), (1024, 1000));
+    }
+
+    // Every context fits the budget whole, so a call is never cut down to it
+    // and the budget bounds what the contexts really hold.
+    #[test]
+    fn every_context_fits_the_budget() {
+        for max in [1, 16, 100, 512, 1000, DEFAULT_EMBEDDING_CTX, 8192] {
+            for longest in [1, 2, 31, 255, 256, 257, 999, 1000, 2047, 2048, 8192] {
+                let longest = longest.min(max as usize);
+                let (n_ctx, _) = context_size(longest, max);
+                assert!(
+                    u64::from(n_ctx) <= context_budget(max),
+                    "{longest} tokens, max {max}"
+                );
+            }
+        }
+        assert_eq!(context_budget(DEFAULT_EMBEDDING_CTX), 2048);
+        assert_eq!(context_budget(1000), 1024);
+    }
+
+    /// Wait until `n` calls have asked `budget` for cells.
+    fn wait_for_calls(budget: &ContextBudget, n: u64) {
+        while budget.state.lock().unwrap().next < n {
+            std::thread::yield_now();
+        }
+    }
+
+    #[test]
+    fn calls_run_side_by_side_until_the_budget_is_held() {
+        let budget = ContextBudget::new(2048);
+        let first = budget.hold(1024);
+        let second = budget.hold(1024);
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = budget.hold(256);
+                tx.send(()).unwrap();
+            });
+            wait_for_calls(&budget, 3);
+            assert!(
+                rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "admitted past the budget"
+            );
+            drop(first);
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("admitted once cells were given back");
+        });
+        drop(second);
+        assert_eq!(budget.state.lock().unwrap().held, 0);
+    }
+
+    // A large call is admitted before a small one that came after it, though
+    // the small one would have fit first: a stream of small requests cannot
+    // keep a large one waiting for ever.
+    #[test]
+    fn calls_are_admitted_in_the_order_they_came() {
+        let budget = ContextBudget::new(2048);
+        let first = budget.hold(2048);
+        let order = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = budget.hold(2048);
+                order.lock().unwrap().push("large");
+            });
+            wait_for_calls(&budget, 2);
+            s.spawn(|| {
+                let _held = budget.hold(256);
+                order.lock().unwrap().push("small");
+            });
+            wait_for_calls(&budget, 3);
+            drop(first);
+        });
+        assert_eq!(*order.lock().unwrap(), ["large", "small"]);
+    }
+
+    #[test]
+    fn a_call_larger_than_the_budget_runs_alone() {
+        let budget = ContextBudget::new(1024);
+        let large = budget.hold(4096);
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = budget.hold(1);
+                tx.send(()).unwrap();
+            });
+            wait_for_calls(&budget, 2);
+            assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
+            drop(large);
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect("admitted once the large call ended");
+        });
     }
 }
