@@ -54,9 +54,17 @@ use crate::inference::decision::{
 
 type S = Arc<AppState>;
 
-/// Where the endpoint is served: the middleware answers requests to it with
-/// [`ApiError`]'s body.
+/// Where the endpoint is served.
 pub(crate) const PATH: &str = "/v1/systemone";
+
+/// Where feedback on its decisions is taken (`decision_traces::feedback`).
+pub(crate) const FEEDBACK_PATH: &str = "/v1/systemone/feedback";
+
+/// Whether the middleware answers a request to `path` with [`ApiError`]'s
+/// body, the one System One clients parse: the endpoint and its feedback.
+pub(crate) fn has_structured_errors(path: &str) -> bool {
+    path == PATH || path == FEEDBACK_PATH
+}
 
 /// Highest `temperature` accepted. Temperature scaling fitted on real data
 /// lands around 0.5–3; anything past this is a mistake, not a calibration.
@@ -98,12 +106,12 @@ impl ApiError {
     }
 
     /// The request as a whole fails validation.
-    fn invalid_request(message: impl Into<String>) -> Self {
+    pub(super) fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request", message)
     }
 
     /// Question `id` fails validation.
-    fn invalid_question(id: &str, message: impl Into<String>) -> Self {
+    pub(super) fn invalid_question(id: &str, message: impl Into<String>) -> Self {
         Self::invalid_request(message).in_question(id)
     }
 
@@ -123,11 +131,12 @@ impl ApiError {
         self
     }
 
-    fn internal(message: impl Into<String>) -> Self {
+    pub(super) fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", message)
     }
 
-    fn body(&self) -> Value {
+    /// `{"error": {"code", "message", "question"?}}`.
+    pub(super) fn body(&self) -> Value {
         let mut error = json!({ "code": self.code, "message": self.message });
         if let Some(question) = &self.question {
             error["question"] = json!(question);
@@ -145,7 +154,7 @@ impl IntoResponse for ApiError {
 /// A body axum could not read as a request: not JSON is `invalid_json`, the
 /// wrong shape an `invalid_request`, both 422 as for any other validation
 /// failure.
-fn rejection(e: JsonRejection) -> ApiError {
+pub(super) fn rejection(e: JsonRejection) -> ApiError {
     let message = e.body_text();
     match e {
         JsonRejection::JsonSyntaxError(_) => {
@@ -204,13 +213,20 @@ pub(crate) fn decision_model_listing(
     (fields, model)
 }
 
-/// Any method but `POST` on the endpoint: the 405 axum answers, with the
-/// body the endpoint's clients read.
-pub(super) async fn method_not_allowed() -> ApiError {
+/// Any method but `POST` on the endpoint or its feedback: the 405 axum
+/// answers, with the body the endpoint's clients read.
+pub(super) async fn method_not_allowed(
+    axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
+) -> ApiError {
+    let path = if uri.path() == FEEDBACK_PATH {
+        FEEDBACK_PATH
+    } else {
+        PATH
+    };
     ApiError::new(
         StatusCode::METHOD_NOT_ALLOWED,
         "method_not_allowed",
-        format!("{PATH} accepts POST only"),
+        format!("{path} accepts POST only"),
     )
 }
 
@@ -1030,6 +1046,11 @@ struct Usage {
 
 #[derive(Debug, Serialize)]
 struct ResponseExtension {
+    /// The decision's audit record, and its trace when traces are on: what
+    /// `/v1/systemone/feedback` names the decision by. Here and not at the
+    /// top level, where the System One SDKs' strict response models would
+    /// refuse a key they do not know.
+    audit_id: uuid::Uuid,
     /// `codes` or `verdict`: how the model's answers were read.
     readout: &'static str,
     mode: &'static str,
@@ -1216,7 +1237,8 @@ fn build_answers(
 #[derive(Debug, Serialize)]
 struct TraceLine<'a> {
     schema: u32,
-    /// The audit record's `id`: the line is that record's text.
+    /// The audit record's `id` — the line is that record's text — and
+    /// what `/v1/systemone/feedback` names the decision by.
     id: uuid::Uuid,
     /// The audit record's.
     timestamp: chrono::DateTime<chrono::Utc>,
@@ -1313,8 +1335,8 @@ impl<'a> From<&'a Answer> for TraceAnswer<'a> {
 }
 
 /// A decision's trace line. Question ids and option names are written as
-/// they are, like in the audit trail: they are what the answers refer to,
-/// and redacting them could make two options one.
+/// they are, like in the audit trail: they are what the answers, and the
+/// feedback, refer to, and redacting them could make two options one.
 fn trace_line<'a>(
     audit: &'a AuditEntry,
     parsed: &'a ParsedRequest,
@@ -1494,22 +1516,41 @@ pub(super) async fn systemone(
         cancel,
         traces: state.decision_traces.clone(),
     };
+    let decided = tokio::task::spawn_blocking(move || job.run())
+        .await
+        .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))??;
+    Ok(Json(response(
+        model_name,
+        decided,
+        readout,
+        temperature,
+        flash_attn,
+    )))
+}
+
+/// The response to a decided request.
+fn response(
+    model: String,
+    decided: Decided,
+    readout: ReadoutKind,
+    temperature: f64,
+    flash_attn: &'static str,
+) -> SystemOneResponse {
     let Decided {
         parsed,
         decision,
         answers,
         input_tokens,
         request_ms,
-    } = tokio::task::spawn_blocking(move || job.run())
-        .await
-        .map_err(|e| ApiError::internal(format!("Decision task failed: {e}")))??;
+        audit_id,
+    } = decided;
     let prior_tokens = decision
         .prior_stats
         .as_ref()
         .map_or(0, |s| s.evaluated_tokens);
 
-    Ok(Json(SystemOneResponse {
-        model: model_name,
+    SystemOneResponse {
+        model,
         answers,
         usage: Usage {
             input_tokens,
@@ -1517,6 +1558,7 @@ pub(super) async fn systemone(
         },
         timing: ResponseTiming::new(request_ms),
         eullm: ResponseExtension {
+            audit_id,
             readout: readout.as_str(),
             mode: decision.stats.mode.as_str(),
             calibration: parsed.calibration.as_str(),
@@ -1538,7 +1580,7 @@ pub(super) async fn systemone(
             request_ms,
             policy_removed: parsed.policy_removed,
         },
-    }))
+    }
 }
 
 /// Cancels a decision when dropped. The handler holds one while its
@@ -1576,6 +1618,8 @@ struct Decided {
     answers: OrderedMap<Answer>,
     input_tokens: usize,
     request_ms: f64,
+    /// The decision's audit record.
+    audit_id: uuid::Uuid,
 }
 
 impl DecisionJob {
@@ -1680,6 +1724,7 @@ impl DecisionJob {
             answers,
             input_tokens,
             request_ms,
+            audit_id: audit.id,
         })
     }
 }
@@ -2389,6 +2434,61 @@ mod tests {
         assert_eq!(json["policy_removed"], json!({ "team": ["delete_all"] }));
         assert_eq!(json["client_disconnected"], false);
         assert!(!text.contains("mario@"), "{text}");
+    }
+
+    /// Every response names its audit record in `eullm.audit_id`, the id
+    /// feedback is given under, and keeps its top level to System One's
+    /// keys: the System One SDKs' strict response models refuse any other.
+    #[test]
+    fn a_response_names_its_audit_record_inside_eullm() {
+        let audit_id = uuid::Uuid::new_v4();
+        let respond = |policy_removed: BTreeMap<String, Vec<String>>| {
+            let mut parsed = parse_text("{}");
+            parsed.policy_removed = policy_removed;
+            let decision = fake_decision(vec![
+                outcome(&[0.95, 0.05], None),
+                outcome(&[0.1, 0.8, 0.1], None),
+                outcome(&[0.2, 0.5, 0.3], None),
+            ]);
+            let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
+            let decided = Decided {
+                parsed,
+                decision,
+                answers,
+                input_tokens: 160,
+                request_ms: 12.34,
+                audit_id,
+            };
+            let response = response(
+                "qwen3-1.7b".into(),
+                decided,
+                ReadoutKind::Codes,
+                1.0,
+                "auto",
+            );
+            serde_json::to_value(response).unwrap()
+        };
+
+        let json = respond(BTreeMap::new());
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["answers", "eullm", "model", "timing", "usage"]);
+        assert_eq!(json["eullm"]["audit_id"], audit_id.to_string());
+        assert_eq!(json["answers"]["team"]["choice"], "billing");
+        // Nothing removed by a policy: no key for it.
+        assert!(json["eullm"].get("policy_removed").is_none(), "{json}");
+
+        let removed = BTreeMap::from([("team".to_string(), vec!["delete_all".to_string()])]);
+        let json = respond(removed);
+        assert_eq!(
+            json["eullm"]["policy_removed"],
+            json!({ "team": ["delete_all"] })
+        );
     }
 
     /// Nothing removed, a decision computed after its client left: the keys

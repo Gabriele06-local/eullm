@@ -569,8 +569,9 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
   },
   "usage": { "input_tokens": 312, "output_tokens": 0 },
   "timing": { "total_ms": 187.4 },
-  "eullm": { "mode": "shared_prefix", "prompt_tokens": 520, "shared_prefix_tokens": 104,
-             "evaluated_tokens": 312, "timings_ms": { ... }, "request_ms": 187.43, ... }
+  "eullm": { "audit_id": "b1149e83-332b-48c0-bab7-53725922c4de", "mode": "shared_prefix",
+             "prompt_tokens": 520, "shared_prefix_tokens": 104, "evaluated_tokens": 312,
+             "timings_ms": { ... }, "request_ms": 187.43, ... }
 }
 ```
 
@@ -578,6 +579,12 @@ curl -s http://localhost:11434/v1/systemone -H 'Content-Type: application/json' 
 jev-style's server reports it and its MCP tools and guard show it:
 `eullm.request_ms` to 0.1 ms. `eullm.timings_ms` splits the decode into its
 phases.
+
+`eullm.audit_id` is the decision's `id` in the audit trail, and in the
+[decision traces](#decision-traces-eullm_decision_traces) when they are on:
+the id to [give feedback](#feedback-post-v1systemonefeedback) under. It is
+inside `eullm`, not at the top level, because the System One SDKs' response
+models are strict and refuse a key they do not know.
 
 Answers and options come back in the order the request listed them; options
 are shown to the model lettered in that order.
@@ -750,6 +757,7 @@ and guard show EuLLM's message instead of failing on the body:
 | 422 | `invalid_question` | One question fails validation — an unknown `type`, one option, 11 levels; `question` names it |
 | 422 | `input_budget_exceeded` | Longer than `--decision-ctx`, or than a Jev-Style model's budgets; `question` names the question when it was one question's. Nothing was truncated |
 | 422 | `policy_denied` | The server's [decision policy](#a-server-side-decision-policy-eullm_decision_policy) leaves a `choice` question fewer than two options; `question` names it |
+| 409 | `traces_disabled` | Feedback sent to a server with [decision traces](#decision-traces-eullm_decision_traces) off |
 | 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
 | 404 | `not_found` | `model` names a model the server does not have |
 | 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
@@ -879,7 +887,7 @@ included — and nothing for a request that was refused or abandoned:
 | Key | Value |
 |---|---|
 | `schema` | `1`, the version of this shape. A change that would break a reader of it gets a new number |
-| `id` | The audit record's `id`: the same decision in the audit trail |
+| `id` | The audit record's `id`, which the response gave as `eullm.audit_id`: the same decision in the audit trail, and what feedback names it by |
 | `timestamp` | The audit record's, RFC 3339 in UTC |
 | `model` | The decision model, named as in the audit record |
 | `readout` | `codes` or `verdict` |
@@ -942,8 +950,8 @@ It is pattern matching, and it misses things:
   (`(202) 555-0123`), a codice fiscale split by spaces, an IBAN or a card
   number with a wrong check digit.
 - Question ids and option names are written as they are, as in the audit
-  trail: they are what the answers refer to, and redacting them could turn
-  two options into one. Keep personal data out of them.
+  trail: they are what the answers and the feedback refer to, and redacting
+  them could turn two options into one. Keep personal data out of them.
 
 And it errs the other way: a four-part version number (`1.2.3.4`) becomes
 `[IP]`; a code of 13 to 19 digits that happens to pass the Luhn check — one
@@ -957,6 +965,67 @@ server log says the trace is missing. A directory that cannot be written at
 startup stops the server instead, since whoever set the variable asked for
 the traces. The file grows with every decision; move it away to start a new
 one, and the next decision creates it again.
+
+### Feedback (`POST /v1/systemone/feedback`)
+
+A model trained on its own answers learns nothing it did not already know;
+what teaches it is the answer that would have been right.
+`POST /v1/systemone/feedback` records that for a decision, named by the
+`eullm.audit_id` its response carried — from a person reviewing it, a rule
+that knows better, or a larger model acting as teacher:
+
+```bash
+curl -s http://localhost:11434/v1/systemone/feedback -H 'Content-Type: application/json' -d '{
+  "id": "094cd37b-9db6-4b58-acb7-54fb92f32a29",
+  "answers": { "action": "refund", "is_urgent": true, "severity": 2 },
+  "outcome": "Rimborsato il 02/10; il cliente ha confermato da mario.rossi@example.com",
+  "source": "user"
+}'
+```
+
+```json
+{"id": "094cd37b-9db6-4b58-acb7-54fb92f32a29", "recorded": true}
+```
+
+| Field | Value |
+|---|---|
+| `id` | Required. The decision's `eullm.audit_id` |
+| `answers` | Required. Question id → the answer that was right: an option's name for a `choice`, `true` or `false` for a `noul`, the level's index from 0 for a `score`. Only the questions there is something to say about; `{}` when the feedback gives an `outcome` alone |
+| `outcome` | Optional. What came of the decision, as text, up to 16 KB |
+| `source` | Optional. Who says so: `user`, `rule` or `teacher` |
+
+It is appended to `feedback.jsonl`, next to `decisions.jsonl`, as one line
+with every key, `null` for what was not given:
+
+| Key | Value |
+|---|---|
+| `schema` | `1` |
+| `kind` | `feedback` |
+| `timestamp` | When the feedback was received, RFC 3339 in UTC |
+| `id` | The decision's audit id, in lower case: the `id` of its line in `decisions.jsonl` |
+| `answers` | As sent, in the order sent |
+| `outcome` | As sent, redacted like every text in the traces, or `null` |
+| `source` | As sent, or `null` |
+
+The line the request above wrote:
+
+```json
+{"schema":1,"kind":"feedback","timestamp":"2026-10-01T13:49:08.356674032Z","id":"094cd37b-9db6-4b58-acb7-54fb92f32a29","answers":{"action":"refund","is_urgent":true,"severity":2},"outcome":"Rimborsato il 02/10; il cliente ha confermato da [EMAIL]","source":"user"}
+```
+
+Several feedbacks on one decision are several lines, and whoever reads them
+decides which counts: the latest, or a person's over a rule's.
+
+The server checks a feedback's shape, not its sense. Types and sizes are
+checked — at most 64 answers, question ids and option names up to 1 KB, an
+unknown key refused — and a wrong answer is refused with a 422
+`invalid_question` naming its question. But the server keeps no index of
+past decisions, so whether `id` names a decision in the traces, and whether
+`"refund"` is one of that question's options, is for whoever joins the two
+files to check. With traces off there is nowhere to keep a feedback, and the
+endpoint answers 409 `traces_disabled`. It sits behind the same API key, IP
+allowlist and origin checks as `/v1/systemone`, and its errors take the same
+shape.
 
 ### Jev-Style decision models
 
@@ -1417,6 +1486,12 @@ Typed decisions (`noul`, `choice`, `score`) about a state, in the System One
 API shape. Not an OpenAI endpoint; it sits under `/v1` because that is where
 System One clients look for it. See
 [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot).
+
+#### `POST /v1/systemone/feedback`
+
+The answers that would have been right for a decision `/v1/systemone`
+made, stored next to its trace when decision traces are on. See
+[Feedback](#feedback-post-v1systemonefeedback).
 
 ## Model Catalog
 

@@ -36,9 +36,10 @@ processed on your machine and are not sent to us or to anyone else.
   decisions made through `/v1/systemone` — the state, the questions and the
   answers — after e-mail addresses, phone numbers, IBANs, codici fiscali,
   payment card numbers and IP addresses have been replaced by placeholders;
-  other personal data, such as names, is not removed. They exist so that you
-  can train a decision model on your own decisions, and they never leave
-  your computer.
+  other personal data, such as names, is not removed. Feedback you send on
+  those decisions is kept there too. They exist so that you can train a
+  decision model on your own decisions, and they never leave your
+  computer.
 - **Prompts and answers** are held in memory while EuLLM runs. EuLLM does
   not write them to disk, except as decision traces when you turn them on.
   The browser chat keeps an API key, if you use one, only for the open tab
@@ -118,8 +119,9 @@ vengono inviati né a noi né ad altri.
   risposte — dopo che indirizzi e-mail, numeri di telefono, IBAN, codici
   fiscali, numeri di carte di pagamento e indirizzi IP sono stati sostituiti
   da segnaposto; altri dati personali, come i nomi, non vengono rimossi.
-  Servono ad addestrare un modello decisionale sulle tue decisioni e non
-  lasciano mai il tuo computer.
+  Lì è conservato anche il feedback che invii su quelle decisioni. Servono
+  ad addestrare un modello decisionale sulle tue decisioni e non lasciano
+  mai il tuo computer.
 - **Prompt e risposte** restano in memoria mentre EuLLM è in esecuzione.
   EuLLM non li scrive su disco, se non come tracce delle decisioni quando le
   attivi. La chat nel browser conserva l'eventuale chiave API solo per la
