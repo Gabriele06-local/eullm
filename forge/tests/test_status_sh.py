@@ -137,3 +137,20 @@ def test_a_named_stage3_link_that_did_nothing_is_flagged(tmp_path, runs):
     out = run_status(tmp_path, queue=[],
                      ended=[("61", "eullm-s3-q35-9b-v04", "COMPLETED", "00:03:00")])
     assert "61 eullm-s3-q35-9b-v04 ended COMPLETED after only 00:03:00" in out
+
+
+def test_grpo_progress_is_shown_and_a_stop_is_flagged(tmp_path, runs):
+    logs = runs.parent / "grpo" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "eullm-grpo-70.out").write_text(
+        "[grpo] step 10/250 reward 0.712 (std 0.301) zero-std 0.45 kl 0.0010 len 88 31s/step\n"
+        " 8%|##  | 20/250 [10:00<1:55:00, 30.0s/it]"     # tqdm's bar, no newline
+        "[grpo] step 20/250 reward 0.744 (std 0.288) zero-std 0.48 kl 0.0021 len 85 30s/step\n")
+    (logs / "eullm-grpo-71.out").write_text(
+        "[grpo] step 10/250 reward 0.990 (std 0.010) zero-std 0.98 kl 0.0001 len 60 30s/step\n"
+        "[grpo] STOP: 20 steps in a row with 98% of groups all-equal (step 30): "
+        "nothing left to learn from these prompts\n")
+    out = run_status(tmp_path, queue=[], ended=[])
+    assert "     [grpo] step 20/250 reward 0.744" in out
+    assert "[!!] eullm-grpo-71.out: STOP: 20 steps in a row" in out
+    assert "1 thing(s) above need a look" in out

@@ -56,7 +56,7 @@ while IFS='|' read -r id name state elapsed; do
             case "$name" in
                 # eullm-s3-*: stage-3 chains submitted under a name of their
                 # own (-J), one per experiment.
-                eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*)
+                eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*)
                     if [ "$(secs "$elapsed")" -lt 600 ]; then
                         # The last link of a chain finds nothing left and
                         # exits in seconds, which is correct. So does a
@@ -113,6 +113,23 @@ for name in $(squeue --me -h -o "%j" | grep '^wait-' | sort -u); do
     fi
 done
 [ "$found" -eq 1 ] || echo "   none queued"
+
+echo
+echo "== GRPO =="
+# grpo_train.py prints a progress line every ten steps and a STOP line when
+# it stops itself (a NaN, or no group disagreeing any more). The last two
+# progress lines are enough to see whether reward is climbing.
+found=0
+for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out 2>/dev/null | head -3); do
+    [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
+    found=1
+    echo "   ${log##*/}"
+    # -o, not ^: tqdm's bar shares the log and the line can follow it.
+    grep -ao '\[grpo\] step .*' "$log" | tail -2 | sed 's/^/     /'
+    stop="$(grep -ao '\[grpo\] STOP.*' "$log" | tail -1)"
+    [ -z "$stop" ] || flag "${log##*/}: ${stop#\[grpo\] }"
+done
+[ "$found" -eq 1 ] || echo "   none since $SINCE"
 
 echo
 echo "== latest measurements =="
