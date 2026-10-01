@@ -803,8 +803,9 @@ def decisions_train(
         at_t = report["dev_after_at_temperature"]["all"]
         console.print(
             f"  At temperature {t:.2f} (fitted on dev) the ECE is {_fmt_num(at_t['ece'])}: "
-            f"serve with \"eullm\": {{\"temperature\": {t:.2f}}} if the qualification "
-            f"confirms it (qualify.py --candidate-temperature {t:.2f})."
+            "`decisions export` writes it into the GGUF (eullm.decision.temperature), "
+            "the engine's default for the model, and qualify.py --candidate-gguf checks "
+            "the server applies it."
         )
     console.print(f"\n[green]Adapter:[/green] {adapter}\nNext:\n"
                   f"  eullm-forge decisions export {output} -o <model>.gguf")
@@ -816,26 +817,51 @@ def decisions_train(
 @click.option("--quant", default="q8_0", show_default=True,
               help="GGUF type: q8_0 keeps a decision's probabilities steadier than q4_k_m")
 @click.option("--base", default=None, help="Base model, when the run does not record it")
-def decisions_export(run: str, output: str, quant: str, base: str | None) -> None:
+@click.option("--temperature", default=None, metavar="T|none",
+              help="Written into the GGUF as eullm.decision.temperature, the temperature "
+                   "the engine applies by default: the one the run fitted on its dev split "
+                   "unless given; none for none")
+def decisions_export(run: str, output: str, quant: str, base: str | None,
+                     temperature: str | None) -> None:
     """Merge a trained decision model and export it to GGUF.
 
+    The temperature the run fitted on its dev split goes into the GGUF
+    (eullm.decision.temperature), and the engine applies it by default.
     Needs llama.cpp (LLAMA_CPP_PATH, or ~/llama.cpp) for the conversion.
 
-    Example:
+    Examples:
 
         eullm-forge decisions export ~/decisions/run1 -o ~/models/decide-q8_0.gguf
-    """
-    from .decisions.train import export_decision_model
 
+        eullm-forge decisions export ~/decisions/run1 -o decide.gguf --temperature 1.5
+    """
+    from .decisions.train import FITTED, export_decision_model, export_temperature
+
+    if temperature is None:
+        asked = FITTED
+    elif temperature.strip().lower() == "none":
+        asked = None
+    else:
+        asked = temperature
     try:
-        gguf = export_decision_model(run, output, quantization=quant, base_model=base)
+        value, source = export_temperature(run, asked)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--temperature") from e
+    try:
+        gguf = export_decision_model(run, output, quantization=quant, base_model=base,
+                                     temperature=value)
     except (FileNotFoundError, ValueError, RuntimeError) as e:
         console.print(f"[red]Error:[/red] {e}")
         raise SystemExit(1) from e
+    if value is None:
+        console.print(f"  No temperature in the GGUF ({source}): the engine applies 1.")
+    else:
+        console.print(f"  eullm.decision.temperature = {value:.6g} ({source}): the "
+                      "temperature the engine applies by default.")
     console.print(f"[green]Done![/green] {gguf}\nServe it, then qualify it:\n"
                   f"  eullm serve --decision-model {gguf}\n"
                   f"  python3 bench/reflexbench/qualify.py --candidate http://localhost:11434 "
-                  f"--data <dataset>/test.labelled.jsonl")
+                  f"--candidate-gguf {gguf} --data <dataset>/test.labelled.jsonl")
 
 
 def _openai_generate_fn(base_url: str, model: str):

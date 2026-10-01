@@ -30,7 +30,15 @@ build` writes the held-out states as one — or a traces directory, where
 every decision with feedback is a request. Give each server an audit
 directory of its own: a run is thousands of decisions.
 
-Only the Python standard library is needed.
+A model is qualified as it will be served, at the temperature the server
+applies. A model Forge exported carries the one fitted on its dev split in
+its GGUF (`eullm.decision.temperature`), for the engine to apply by
+default: with `--candidate-gguf` the test reads it there and checks that the
+server applied it to every answer — an engine that does not read the key
+serves, and would be qualified on, probabilities the fit did not calibrate.
+
+Only the Python standard library is needed: the GGUF is read with Forge's
+own reader (forge/eullm_forge/gguf_metadata.py), the code that writes it.
 """
 
 import argparse
@@ -46,19 +54,33 @@ import qf_data  # noqa: E402
 import qf_metrics  # noqa: E402
 from rb_methods import ServerError, post  # noqa: E402
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "forge"))
+from eullm_forge.decisions.metrics import TEMPERATURE_KEY  # noqa: E402
+from eullm_forge.gguf_metadata import GGUFError, read_metadata  # noqa: E402
+
 MODES = ("separate", "shared_prefix", "batched")
+
+
+def gguf_temperature(path):
+    """The temperature the GGUF at `path` carries for the engine to apply
+    by default, or None when it carries none."""
+    return read_metadata(path, [TEMPERATURE_KEY]).get(TEMPERATURE_KEY)
 
 
 class Server:
     """A `/v1/systemone` to qualify, as `candidate` or `current`.
     `temperature`, when given, goes with every request — the one the model
-    will be served with; otherwise the server's default applies."""
+    will be served with; otherwise the server's default applies, which for
+    a model whose GGUF carries one (`gguf_temperature`, read from `gguf`)
+    should be that one."""
 
-    def __init__(self, role, url, model=None, api_key=None, timeout=600.0, temperature=None):
+    def __init__(self, role, url, model=None, api_key=None, timeout=600.0, temperature=None,
+                 gguf=None, gguf_temperature=None):
         self.role, self.base = role, url.rstrip("/")
         self.url = self.base + "/v1/systemone"
         self.model, self.api_key, self.timeout = model, api_key, timeout
         self.temperature = temperature
+        self.gguf, self.gguf_temperature = gguf, gguf_temperature
 
     def ask(self, state, questions, mode):
         payload = {"state": state, "questions": questions, "eullm": {"mode": mode}}
@@ -123,7 +145,8 @@ def decide(server, item, mode):
         info = body.get("eullm") or {}
         server_info = {"model": body.get("model"), "readout": info.get("readout"),
                        "request_ms": info.get("request_ms"),
-                       "evaluated_tokens": info.get("evaluated_tokens")}
+                       "evaluated_tokens": info.get("evaluated_tokens"),
+                       "temperature": info.get("temperature")}
         return out, ms, server_info, refusals
     return out, None, {}, refusals
 
@@ -139,7 +162,7 @@ def run(server, items, modes, serve_mode, details=None):
     by_key = {(r["item"], r["qid"]): r for r in records}
     latency = {mode: [] for mode in modes}
     server_ms = {mode: [] for mode in modes}
-    seen = {"models": set(), "readouts": set()}
+    seen = {"models": set(), "readouts": set(), "temperatures": set()}
     reasons = {}
     for mode in modes:
         started = shown = time.perf_counter()
@@ -155,6 +178,7 @@ def run(server, items, modes, serve_mode, details=None):
                     server_ms[mode].append(info["request_ms"])
                 seen["models"].add(info.get("model"))
                 seen["readouts"].add(info.get("readout"))
+                seen["temperatures"].add(info.get("temperature"))
             if details:
                 for qid, result in answers.items():
                     details.write(json.dumps({
@@ -171,6 +195,11 @@ def run(server, items, modes, serve_mode, details=None):
         "url": server.base,
         "model_asked": server.model,
         "temperature_asked": server.temperature,
+        "gguf": server.gguf,
+        "temperature_gguf": server.gguf_temperature,
+        # What the server reported applying (eullm.temperature), whatever
+        # was asked: the temperature the numbers below were measured at.
+        "temperatures_applied": sorted(t for t in seen["temperatures"] if t is not None),
         "models": sorted(m for m in seen["models"] if m),
         "readout": ", ".join(sorted(r for r in seen["readouts"] if r)) or None,
         "records": records,
@@ -238,6 +267,22 @@ def table(results):
     return "\n".join(lines)
 
 
+def temperature_line(result):
+    """What temperature a server's numbers were measured at, and the one its
+    GGUF carries; None when there is nothing to say."""
+    applied = ", ".join(f"{t:.4g}" for t in result["temperatures_applied"])
+    if not applied and not result["gguf"]:
+        return None
+    line = f"temperature applied {applied or 'not reported'}"
+    if result["temperature_asked"] is not None:
+        line += f" (asked for {result['temperature_asked']:.4g})"
+    if result["gguf"]:
+        carried = result["temperature_gguf"]
+        line += (f"; its GGUF carries {carried:.4g}" if carried is not None
+                 else "; its GGUF carries none")
+    return line
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--candidate", required=True, help="EuLLM server with the candidate")
@@ -250,6 +295,10 @@ def main(argv=None):
         parser.add_argument(f"--{role}-temperature", type=float, default=None,
                             help=f"the temperature the {role} is served with (eullm."
                                  "temperature; default: the server's own)")
+        parser.add_argument(f"--{role}-gguf", default=None,
+                            help=f"the GGUF the {role}'s server serves: the temperature it "
+                                 "carries (eullm.decision.temperature) is checked against the "
+                                 "one the server applies")
     parser.add_argument("--data", action="append", default=[], help="a labelled JSONL set")
     parser.add_argument("--traces", action="append", default=[],
                         help="a traces directory: every decision with feedback is a request")
@@ -296,11 +345,21 @@ def main(argv=None):
 
     thresholds = {name: getattr(args, name) for name in qf_metrics.THRESHOLDS}
     thresholds["min_answers"] = int(thresholds["min_answers"])
+    carried = {}
+    for role in ("candidate", "current"):
+        path = getattr(args, f"{role}_gguf")
+        if path:
+            try:
+                carried[role] = gguf_temperature(path)
+            except (OSError, GGUFError) as e:
+                parser.error(f"--{role}-gguf {path}: {e}")
     servers = [Server("candidate", args.candidate, args.candidate_model, args.api_key,
-                      args.timeout, args.candidate_temperature)]
+                      args.timeout, args.candidate_temperature, args.candidate_gguf,
+                      carried.get("candidate"))]
     if args.current:
         servers.append(Server("current", args.current, args.current_model, args.api_key,
-                              args.timeout, args.current_temperature))
+                              args.timeout, args.current_temperature, args.current_gguf,
+                              carried.get("current")))
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = pathlib.Path(args.out or f"qualify-{stamp}.json")
     details = open(args.details, "w", encoding="utf-8") if args.details else None
@@ -339,6 +398,10 @@ def main(argv=None):
 
     print(table(results))
     print()
+    for r in results:
+        line = temperature_line(r)
+        if line:
+            print(f"  {r['role']}: {line}")
     for c in found:
         mark = "PASS" if c["passed"] else "FAIL"
         line = f"  [{mark}] {c['type']}: {c['text']}"

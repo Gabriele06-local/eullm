@@ -12,13 +12,24 @@ the classes, the most probable class as the answer.
   from being right nine times in ten;
 * NLL — mean −log p(right answer), which punishes confident mistakes;
 * coverage — the share of the model's probability on a valid code at all.
+
+The temperature fitted on the dev split travels in the exported GGUF, under
+`TEMPERATURE_KEY`, for the engine to apply by default; `check_temperature`
+holds it to what the engine accepts.
 """
 
 from __future__ import annotations
 
 import math
+import struct
 
 ECE_BINS = 15
+#: The GGUF key a decision model carries its temperature in, a float32: the
+#: one the engine applies to a codes-readout model unless a request gives
+#: its own (`eullm-forge decisions export` writes it).
+TEMPERATURE_KEY = "eullm.decision.temperature"
+#: systemone.rs `MAX_TEMPERATURE`: the highest temperature the engine takes.
+MAX_TEMPERATURE = 100.0
 
 
 def class_result(logprobs: list[float], label: int, kind: str, temperature: float = 1.0) -> dict:
@@ -52,8 +63,9 @@ def at_temperature(results: list[dict], temperature: float) -> list[dict]:
 def fit_temperature(results: list[dict]) -> float:
     """The temperature with the lowest NLL on `results`, by golden-section
     search on log T in [0.05, 20] — bench/decision_calibration.py's fit. A
-    fine-tuned model is usually too sure of itself (T > 1); the engine
-    applies a temperature per request (`eullm.temperature`)."""
+    fine-tuned model is usually too sure of itself (T > 1); the exported
+    GGUF carries it (`TEMPERATURE_KEY`), and a request may give another
+    (`eullm.temperature`)."""
 
     def nll(log_t: float) -> float:
         t = math.exp(log_t)
@@ -73,6 +85,27 @@ def fit_temperature(results: list[dict]) -> float:
             b = lo + ratio * (hi - lo)
             fb = nll(b)
     return math.exp((lo + hi) / 2)
+
+
+def check_temperature(value) -> float:
+    """`value` as a GGUF stores it, a float32, when the engine will take it
+    as a temperature: finite, above 0 and at most MAX_TEMPERATURE, the test
+    systemone.rs puts a request's temperature to — passed before the
+    rounding and after it, since 1e-50 is above 0 and its float32 is not.
+    Raises ValueError otherwise."""
+    try:
+        given = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"a temperature is a number, not {value!r}") from None
+    try:
+        stored = struct.unpack("<f", struct.pack("<f", given))[0]
+    except OverflowError:
+        stored = math.inf
+    for t in (given, stored):
+        if not (math.isfinite(t) and 0 < t <= MAX_TEMPERATURE):
+            raise ValueError(f"the engine takes a temperature above 0 and at most "
+                             f"{MAX_TEMPERATURE:g}, not {value!r}")
+    return stored
 
 
 def ece(results: list[dict], bins: int = ECE_BINS) -> float | None:

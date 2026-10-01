@@ -10,6 +10,7 @@ import io
 import json
 import os
 import pathlib
+import struct
 import sys
 import tempfile
 import threading
@@ -74,11 +75,13 @@ def calibrated(state, qid, question, mode):
     return [0.95 if k == target else 0.05 / (n - 1) for k in range(n)]
 
 
-def stand_in(answer=calibrated, refuse=(), batched_shift=0.0, model="stand-in"):
+def stand_in(answer=calibrated, refuse=(), batched_shift=0.0, model="stand-in",
+             temperature=1.0):
     """A stand-in `/v1/systemone`: `answer(state, qid, question, mode)`
     gives each question's class probabilities; in `batched` mode they move
     by `batched_shift` towards the next class; a question named in `refuse`
-    is refused as EuLLM refuses one, with a 422 naming it."""
+    is refused as EuLLM refuses one, with a 422 naming it. It reports the
+    request's temperature as applied, or its own default, `temperature`."""
     sent = []
 
     def post(url, payload, api_key, timeout):
@@ -100,9 +103,25 @@ def stand_in(answer=calibrated, refuse=(), batched_shift=0.0, model="stand-in"):
                 p[(k + 1) % len(p)] += moved
             answers[qid] = answer_json(question, p)
         return {"model": model, "answers": answers,
-                "eullm": {"readout": "codes", "request_ms": 2.0, "evaluated_tokens": 30}}
+                "eullm": {"readout": "codes", "request_ms": 2.0, "evaluated_tokens": 30,
+                          "temperature": payload["eullm"].get("temperature", temperature)}}
 
     return post, sent
+
+
+def gguf_carrying(path, temperature=None):
+    """A GGUF of no tensors, carrying `temperature` as `decisions export`
+    writes it — a float32 under eullm.decision.temperature — when given."""
+
+    def string(text):
+        return struct.pack("<Q", len(text.encode())) + text.encode()
+
+    pairs = [string("general.architecture") + struct.pack("<I", 8) + string("qwen3")]
+    if temperature is not None:
+        pairs.append(string("eullm.decision.temperature") + struct.pack("<If", 6, temperature))
+    pathlib.Path(path).write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, len(pairs))
+                                   + b"".join(pairs))
+    return path
 
 
 class DataTest(unittest.TestCase):
@@ -250,6 +269,23 @@ class MetricsTest(unittest.TestCase):
         for check in qf_metrics.checks(self.candidate(ece=0.5), qf_metrics.defaults()):
             self.assertTrue(check["reason"])
 
+    def test_the_server_must_apply_the_temperature_the_gguf_carries(self):
+        def served(applied, carried=1.37, asked=None):
+            return dict(self.candidate(), temperatures_applied=applied,
+                        temperature_gguf=carried, temperature_asked=asked)
+
+        # The GGUF's float32, read back exactly or as text to six decimals.
+        self.assertEqual(self.failed(served([1.3700000047683716])), set())
+        self.assertEqual(self.failed(served([1.37])), set())
+        # An engine that does not read the key applies 1; none reported fails too.
+        self.assertEqual(self.failed(served([1.0])), {"gguf_temperature"})
+        self.assertEqual(self.failed(served([1.37, 1.0])), {"gguf_temperature"})
+        self.assertEqual(self.failed(served([])), {"gguf_temperature"})
+        # A temperature asked for is the one measured, by choice; no GGUF, no check.
+        self.assertEqual(self.failed(served([2.0], asked=2.0)), set())
+        found = qf_metrics.checks(served([1.0], carried=None), qf_metrics.defaults())
+        self.assertNotIn("gguf_temperature", {c["check"] for c in found})
+
 
 class ClientTest(unittest.TestCase):
     item = qf_data.item_from_row(labelled_rows(2)[1], 1)  # ticket 1: no, tech, level 1
@@ -275,6 +311,13 @@ class ClientTest(unittest.TestCase):
             qualify.decide(qualify.Server("c", "http://x"), self.item, "separate")
         self.assertEqual(sent[0]["eullm"], {"mode": "separate", "temperature": 1.4})
         self.assertEqual(sent[1]["eullm"], {"mode": "separate"})
+
+    def test_the_temperature_a_gguf_carries_is_read_with_forges_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            carrying = gguf_carrying(pathlib.Path(tmp) / "decide.gguf", 1.37)
+            self.assertAlmostEqual(qualify.gguf_temperature(carrying), 1.37, places=6)
+            bare = gguf_carrying(pathlib.Path(tmp) / "bare.gguf")
+            self.assertIsNone(qualify.gguf_temperature(bare))
 
     def test_a_refused_question_is_dropped_and_the_rest_asked_again(self):
         post, sent = stand_in(refuse=("team",))
@@ -371,6 +414,31 @@ class MainTest(unittest.TestCase):
         checks = {c["check"] for c in body["checks"]}
         self.assertIn("max_accuracy_drop", checks)
         self.assertNotIn("max_mode_delta", checks)  # one mode: nothing to compare
+
+    def test_the_temperature_its_gguf_carries_is_the_one_it_is_qualified_at(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data = write(pathlib.Path(tmp) / "set.jsonl", labelled_rows(60))
+            gguf = gguf_carrying(pathlib.Path(tmp) / "decide.gguf", 1.37)
+            report = pathlib.Path(tmp) / "q.json"
+            args = ["--candidate", "http://c", "--candidate-gguf", str(gguf), "--data",
+                    str(data), "--modes", "shared_prefix", "--out", str(report)]
+            # An engine that applies the GGUF's temperature by default.
+            post, sent = stand_in(temperature=1.3700000047683716)
+            status, out = run_main(args, post)
+            self.assertEqual(status, 0, out)
+            self.assertNotIn("temperature", sent[0]["eullm"])  # the server's own default
+            self.assertIn("temperature applied 1.37; its GGUF carries 1.37", out)
+            [result] = json.loads(report.read_text())["results"]
+            self.assertAlmostEqual(result["temperature_gguf"], 1.37, places=6)
+            self.assertEqual(result["temperatures_applied"], [1.3700000047683716])
+            # One that does not read the key applies 1.
+            post, _ = stand_in(temperature=1.0)
+            status, out = run_main(args, post)
+            self.assertEqual(status, 1)
+            self.assertIn("[FAIL] all: temperature applied 1, the GGUF carries 1.37", out)
+            # A file that is not a GGUF is refused before anything is asked.
+            with self.assertRaises(SystemExit), redirect_stderr(io.StringIO()):
+                run_main(args[:3] + [str(data)] + args[4:], post)
 
     def test_too_few_answers_fail_and_sources_filter(self):
         with tempfile.TemporaryDirectory() as tmp:

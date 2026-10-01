@@ -13,7 +13,9 @@ Per question type — noul, choice, score — and over all of them:
   * noise between evaluation modes: the same request in `separate`,
     `shared_prefix` and `batched`; the largest difference in any answer's
     probability from `separate`, and the share of answers that change;
-  * latency: p50 and p95 of a request as the client sees it, per mode.
+  * latency: p50 and p95 of a request as the client sees it, per mode;
+  * the temperature: when the candidate's GGUF carries one, whether the
+    server applied it to every answer.
 
 Every threshold is configurable; the defaults are below, each next to its
 reason, and a check that fails says which reason it broke.
@@ -73,7 +75,15 @@ THRESHOLDS = {
 FIXED = {
     "beats_majority": "a model no more often right than one that gives every question its "
                       "commonest answer has learnt nothing about the states",
+    "gguf_temperature": "the temperature fitted on the model's dev split travels in its GGUF "
+                        "(eullm.decision.temperature) for the engine to apply by default; a "
+                        "server that applies another — an engine that does not read the key — "
+                        "serves, and was measured on, probabilities the fit did not calibrate: "
+                        "update the engine, or have every request send eullm.temperature",
 }
+#: How far an applied temperature may be from the GGUF's float32 and still
+#: be it: an engine may read the key as text, printed to six decimals.
+TEMPERATURE_TOLERANCE = 1e-5
 
 
 def defaults():
@@ -233,6 +243,16 @@ def checks(candidate, thresholds, current=None):
             check(m["accuracy"] >= c["accuracy"] - t["max_accuracy_drop"], "max_accuracy_drop",
                   kind, f"accuracy {m['accuracy']:.3f} against {c['accuracy']:.3f} for the "
                         f"current model (at most {t['max_accuracy_drop']} lower)")
+    carried = candidate.get("temperature_gguf")
+    if carried is not None and candidate.get("temperature_asked") is None:
+        # Asked for a temperature of its own, the server applies that one:
+        # what the GGUF carries is then not what is measured, by choice.
+        applied = candidate.get("temperatures_applied") or []
+        check(applied and all(math.isclose(t, carried, rel_tol=TEMPERATURE_TOLERANCE,
+                                           abs_tol=TEMPERATURE_TOLERANCE) for t in applied),
+              "gguf_temperature", "all",
+              f"temperature applied {', '.join(f'{t:.4g}' for t in applied) or 'not reported'}"
+              f", the GGUF carries {carried:.4g}")
     serve = candidate["serve_mode"]
     p95 = candidate["latency_ms"].get(serve, {}).get("p95")
     if t.get("max_p95_ms") is not None and p95 is not None:

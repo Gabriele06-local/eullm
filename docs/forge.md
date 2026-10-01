@@ -583,9 +583,9 @@ moves them by 0.23.
 It writes the adapter and `decision-model.json`: what was trained on what,
 and the dev split's accuracy, ECE, NLL and coverage per question type,
 before and after. A fine-tuned model is usually too sure of itself, so the
-report also fits a temperature on dev; the engine applies one per request
-(`"eullm": {"temperature": T}`), and `qualify.py --candidate-temperature`
-qualifies the model as it will be served. bf16 on a GPU, fp32 on a CPU.
+report also fits a temperature on dev (`dev_temperature`), which `export`
+writes into the GGUF for the engine to apply by default. bf16 on a GPU,
+fp32 on a CPU.
 Not measured on a GPU yet; by estimate, Qwen3-1.7B at the defaults peaks
 around 7 GB with gradient checkpointing (3.4 GB of weights, the layer
 inputs of 8 × 2,048 tokens, one position's logits), which leaves a 16 GB
@@ -601,6 +601,26 @@ Q4_K_M**: a decision is a probability, and quantization noise moves it —
 Qwen3-0.6B answers the same question differently in two evaluation modes by
 up to 0.017 at F16, 0.13 at Q8_0 and 0.34 at Q4_K_M on a CPU
 ([engine.md](engine.md)). `--quant f16` needs only the converter.
+
+**The temperature travels in the GGUF.** The one the run fitted on its dev
+split is written into the exported file as `eullm.decision.temperature`, a
+FLOAT32, for the engine to apply by default to a code-readout model it
+loads: every client gets the calibrated probabilities without saying how,
+and a request's own `"eullm": {"temperature": T}` still overrides it. An
+engine from before it read the key applies 1, and the qualification test
+says so.
+`--temperature 1.5` writes another, `--temperature none` none (the engine
+then applies 1); a run with no dev split fitted none and writes none. It is
+written only when the engine would take it — finite, above 0 and at most
+100, `MAX_TEMPERATURE` in systemone.rs, as the float32 the file holds — and
+checked before the merge, not after the conversion. Forge writes it with
+`gguf_metadata.py`, from the standard library: the key-value pairs are
+written again with the new one last, and every tensor is copied byte for
+byte, whatever its quantization. On a Qwen3-0.6B Q4_K_M, llama.cpp's own
+readers, in C and in Python, read the key as an f32 of 1.37, and the engine
+loads the file and answers with log-probabilities identical to the
+original's. `qualify.py --candidate-gguf` reads the key back and checks that
+the server applies it ([the qualification test](../bench/reflexbench/README.md#the-qualification-test-qualifypy)).
 
 ### How many labelled decisions
 
@@ -631,6 +651,7 @@ pytest tests/ -v
 | `test_identity.py` | Identity dataset generation (EN, IT, DE, FR) |
 | `test_decisions.py` | Decision models: the prompt against decision.rs, traces, labels, splits, CLI, a tiny CPU training run |
 | `test_decisions_rag.py` | The RAG gate's cases as traces: the prompt byte for byte against what the gate sends, both trace readers, the split by question and document, `build` following it, the CLI |
+| `test_gguf_metadata.py` | Metadata written into a GGUF: kept, replaced and removed to the byte, alignment, damaged files refused, read back by llama.cpp's `gguf` package; the export path against a stand-in llama.cpp, and a decision model's temperature in its GGUF |
 | `test_decisions_engine.py` | A trained decision model served by the engine binary (needs `EULLM_E2E_BIN`, `EULLM_E2E_TOKENIZER`, `LLAMA_CPP_PATH`) |
 
 ## Implementation Status

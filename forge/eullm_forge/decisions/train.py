@@ -32,6 +32,10 @@ Two things differ from instruction tuning, both deliberate:
   the same question answered in two evaluation modes differs by up to 0.017
   at F16, 0.13 at Q8_0 and 0.34 at Q4_K_M (docs/engine.md). A 1.7B model at
   Q8_0 is under 2 GB; the qualification test measures the noise either way.
+
+The temperature fitted on the dev split goes into the GGUF the export
+writes (`metrics.TEMPERATURE_KEY`), which the engine applies by default:
+the model is served calibrated without every client having to say how.
 """
 
 from __future__ import annotations
@@ -44,7 +48,14 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from .dataset import Example, read_examples
-from .metrics import at_temperature, class_result, fit_temperature, summarize
+from .metrics import (
+    TEMPERATURE_KEY,
+    at_temperature,
+    check_temperature,
+    class_result,
+    fit_temperature,
+    summarize,
+)
 from .prompt import CodeReadout
 
 logger = logging.getLogger(__name__)
@@ -56,6 +67,9 @@ DEFAULT_BASE = "Qwen/Qwen3-1.7B"
 DEFAULT_QUANT = "q8_0"
 #: Written next to the adapter: what was trained, on what, and how it did.
 REPORT = "decision-model.json"
+#: `export_decision_model(temperature=FITTED)`: the temperature the run
+#: fitted on its dev split, the one its probabilities are calibrated at.
+FITTED = "fitted"
 
 
 @dataclass
@@ -366,10 +380,34 @@ def recorded_base(run_dir: str | Path) -> str | None:
     return None
 
 
+def export_temperature(run_dir: str | Path, temperature=FITTED) -> tuple[float | None, str]:
+    """The temperature the run's GGUF is to carry, as the engine will read
+    it, and where it comes from: FITTED for the one the run fitted on its
+    dev split (none when it had no dev split to fit it on), a number for
+    that one, None for none — the engine then applies 1. Raises ValueError
+    for a temperature the engine would refuse."""
+    if temperature is None:
+        return None, "none asked for"
+    if temperature == FITTED:
+        try:
+            report = json.loads((Path(run_dir) / REPORT).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            report = {}
+        fitted = report.get("dev_temperature")
+        if fitted is None:
+            return None, "the run fitted none: it had no dev split"
+        return check_temperature(fitted), "fitted on the dev split"
+    return check_temperature(temperature), "given"
+
+
 def export_decision_model(run_dir: str, output: str, quantization: str = DEFAULT_QUANT,
-                          base_model: str | None = None) -> str:
+                          base_model: str | None = None, temperature=FITTED) -> str:
     """Merge the run's adapter into its base and export it to GGUF; return
-    the GGUF's path. The merged model is written to `<run_dir>/merged`."""
+    the GGUF's path. The merged model is written to `<run_dir>/merged`.
+
+    `temperature` goes into the GGUF as `eullm.decision.temperature`, the
+    one the engine applies by default (see `export_temperature`): the
+    dev-fitted one unless given, None for none."""
     from ..export import ExportConfig, export_gguf
     from ..identity import merge_identity_adapter
 
@@ -380,10 +418,15 @@ def export_decision_model(run_dir: str, output: str, quantization: str = DEFAULT
     base = base_model or recorded_base(run)
     if not base:
         raise ValueError(f"{run} does not say which base it was trained on: pass --base")
+    # Before the merge: a temperature the engine would refuse costs nothing yet.
+    value, _ = export_temperature(run, temperature)
     merged = run / "merged"
     if merged.exists():
         # Stale shards beside new ones load without complaint and are wrong.
         shutil.rmtree(merged)
     merge_identity_adapter(base, str(adapter), str(merged))
+    # None as well as a value: a GGUF exported without a temperature must
+    # not carry one, whatever wrote it before.
+    metadata = {TEMPERATURE_KEY: None if value is None else ("float32", value)}
     return export_gguf(ExportConfig(model_path=str(merged), output_path=output,
-                                    quantization=quantization))
+                                    quantization=quantization, metadata=metadata))

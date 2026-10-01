@@ -253,7 +253,8 @@ EULLM_AUDIT_DIR=/tmp/qualify-current \
   eullm serve --port 11501 --decision-model jev-style-2b-decision-v3-gguf-q4_k_m
 
 python3 bench/reflexbench/qualify.py \
-  --candidate http://localhost:11500 --current http://localhost:11501 \
+  --candidate http://localhost:11500 --candidate-gguf ~/models/decide-q8_0.gguf \
+  --current http://localhost:11501 \
   --data ~/decisions/data/test.labelled.jsonl --out qualify.json
 ```
 
@@ -314,16 +315,30 @@ accuracy is more than the luck of the set.
 | `--max-accuracy-drop` | 0.02 | against `--current`: a replacement may be faster or better calibrated, not less often right |
 | `--max-latency-ratio` | 1.5 | against `--current`, p95 in `--serve-mode`: callers budget for the decision they have; half again as slow is another budget |
 | `--max-p95-ms` | none | depends on the hardware and the caller: set it for the machine that will serve |
+| the GGUF's temperature | — | with `--candidate-gguf`: the temperature fitted on the model's dev split travels in its GGUF for the engine to apply by default, and a server that applies another serves — and was measured on — probabilities the fit did not calibrate |
 
-A failed check prints why it matters. A model served with a temperature
-(`eullm.temperature`; `eullm-forge decisions train` fits one on its dev
-split) is qualified with it: `--candidate-temperature`,
-`--current-temperature`.
+A failed check prints why it matters.
+
+**The temperature.** A model is qualified at the temperature the server
+applies, which every response reports (`eullm.temperature`) and the report
+records per server (`temperatures_applied`). A model `eullm-forge decisions
+export` wrote carries the one fitted on its dev split in its GGUF
+(`eullm.decision.temperature`), for the engine to apply by default; give
+the file with `--candidate-gguf` and the test reads the key — with Forge's
+own reader, the code that wrote it — and checks that the server applied it
+to every answer. An engine from before it read the key applies 1, and the
+check fails: the probabilities measured are not the calibrated ones, nor
+would be the ones served. `--candidate-temperature` sends a temperature
+with every request instead, as a client that sets its own would, and the
+GGUF's is then recorded, not checked; `--current-gguf` and
+`--current-temperature` do the same for the current model.
 
 | Option | Default | |
 |---|---|---|
 | `--candidate`, `--current` | — | the servers; `--current` is optional |
 | `--candidate-model`, `--current-model` | the one loaded | decision model to ask for |
+| `--candidate-gguf`, `--current-gguf` | none | the GGUF the server serves: its temperature is checked against the one applied |
+| `--candidate-temperature`, `--current-temperature` | the server's | a temperature sent with every request |
 | `--data` | none | a labelled set, repeatable |
 | `--traces` | none | a traces directory, repeatable |
 | `--sources` | all | keep the answers whose source starts with one of these, comma-separated |

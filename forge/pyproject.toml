@@ -35,6 +35,10 @@ dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
     "ruff>=0.4",
+    # llama.cpp's own GGUF package (MIT), for the tests alone: the metadata
+    # Forge writes into a GGUF (gguf_metadata.py, standard library only) is
+    # read back with it, a reader Forge's code did not write.
+    "gguf>=0.19.0",
 ]
 # `distill` intentionally has no extra packages. It carried
 # `nvidia-modelopt[torch]`, which is distributed under NVIDIA's own licence

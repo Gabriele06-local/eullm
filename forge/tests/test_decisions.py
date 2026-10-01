@@ -698,6 +698,25 @@ def test_a_fitted_temperature_undoes_overconfidence():
     assert at_temperature(results, 1.0)[0]["probabilities"] == results[0]["probabilities"]
 
 
+SYSTEMONE_RS = REPO / "engine" / "src" / "api" / "systemone.rs"
+
+
+def test_the_temperature_a_gguf_carries_is_one_the_engine_takes():
+    """systemone.rs accepts a temperature that is finite, above 0 and at
+    most MAX_TEMPERATURE; the GGUF holds a float32, checked as stored."""
+    from eullm_forge.decisions.metrics import MAX_TEMPERATURE, check_temperature
+
+    assert check_temperature(1.37) == pytest.approx(1.37, rel=1e-7)
+    assert check_temperature("2.5") == 2.5 and check_temperature(MAX_TEMPERATURE) == 100.0
+    for refused in (0, -1, 100.5, float("nan"), float("inf"), 1e-50, 1e300, "warm", None):
+        with pytest.raises(ValueError):
+            check_temperature(refused)
+    if SYSTEMONE_RS.exists():
+        source = SYSTEMONE_RS.read_text(encoding="utf-8")
+        assert f"const MAX_TEMPERATURE: f64 = {MAX_TEMPERATURE};" in source
+        assert "t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE" in source
+
+
 # --- the CLI ------------------------------------------------------------------------------
 
 def test_the_decisions_commands_are_wired():
@@ -751,8 +770,8 @@ def test_decisions_train_and_export_pass_their_options_through(tmp_path, monkeyp
             "dev_after_at_temperature": summary}))
         return str(Path(config.output_dir) / "adapter")
 
-    def fake_export(run, output, quantization, base_model):
-        seen["export"] = (run, output, quantization, base_model)
+    def fake_export(run, output, quantization, base_model, temperature):
+        seen["export"] = (run, output, quantization, base_model, temperature)
         return output
 
     monkeypatch.setattr(train_mod, "train_decision_model", fake_train)
@@ -768,12 +787,23 @@ def test_decisions_train_and_export_pass_their_options_through(tmp_path, monkeyp
             config.baseline, config.learning_rate) == (train_mod.DEFAULT_BASE, 3.0, 8, 16,
                                                        False, 2e-4)
     assert "75.0%" in result.output
-    assert "--candidate-temperature 1.37" in result.output
-    result = CliRunner().invoke(main, ["decisions", "export", str(tmp_path / "run"), "-o",
-                                       str(tmp_path / "m.gguf")])
+    assert "temperature 1.37" in result.output and "--candidate-gguf" in result.output
+    run, gguf = str(tmp_path / "run"), str(tmp_path / "m.gguf")
+    result = CliRunner().invoke(main, ["decisions", "export", run, "-o", gguf])
     assert result.exit_code == 0, result.output
-    assert seen["export"] == (str(tmp_path / "run"), str(tmp_path / "m.gguf"), "q8_0", None)
-    assert "qualify.py" in result.output
+    # The temperature the run fitted, as the GGUF will hold it: a float32.
+    assert seen["export"][:4] == (run, gguf, "q8_0", None)
+    assert seen["export"][4] == pytest.approx(1.37, rel=1e-7)
+    assert "qualify.py" in result.output and "1.37" in result.output
+    for given, written in (("2.5", 2.5), ("none", None), ("NONE", None)):
+        result = CliRunner().invoke(main, ["decisions", "export", run, "-o", gguf,
+                                           "--temperature", given])
+        assert result.exit_code == 0, result.output
+        assert seen["export"][4] == written
+    for refused in ("0", "-1", "101", "nan", "inf", "1e-50", "warm"):
+        result = CliRunner().invoke(main, ["decisions", "export", run, "-o", gguf,
+                                           "--temperature", refused])
+        assert result.exit_code == 2 and "--temperature" in result.output, refused
 
 
 # --- training, on a tiny model on the CPU ----------------------------------------------------
@@ -887,11 +917,15 @@ def test_training_learns_the_answer_code_and_exports_through_forge(tmp_path, mon
     def fake_export(config):
         exported["path"] = config.model_path
         exported["quant"] = config.quantization
+        exported["metadata"] = config.metadata
         return config.output_path
 
     monkeypatch.setattr(export_mod, "export_gguf", fake_export)
     gguf = export_decision_model(str(tmp_path / "run"), str(tmp_path / "m.gguf"))
     assert gguf == str(tmp_path / "m.gguf") and exported["quant"] == "q8_0"
+    # The temperature fitted on dev goes into the GGUF, as a float32.
+    kind, value = exported["metadata"]["eullm.decision.temperature"]
+    assert kind == "float32" and value == pytest.approx(report["dev_temperature"], rel=1e-6)
     merged = Path(exported["path"])
     assert (merged / "config.json").exists()
     # The template the weights were trained under travels into the GGUF.
