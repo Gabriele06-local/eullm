@@ -819,7 +819,7 @@ pub fn cache_type_name(t: KvCacheType) -> &'static str {
 /// stock llama.cpp: the SWA bypass to f16 has not yet been merged upstream.
 /// Auto-correct all non-f16 KV to f16/f16 for Gemma 4.
 ///
-/// Applied to every model load path (CLI `run`, and `swap_model` for both
+/// Applied to every model load path (CLI `run`, and `load_generation_model` for both
 /// `run`'s later swaps and any `serve` swap) so the correction can't be
 /// bypassed by the entry point — a request-driven swap on `serve` hits the
 /// same architecture constraint as a CLI launch.

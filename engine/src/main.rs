@@ -827,7 +827,7 @@ async fn main() {
             });
             // Gemma 4 requires f16 KV cache (mixed SWA architecture) — see
             // `inference::correct_kv_cache_for_model` for the rationale. The
-            // same correction also applies inside `swap_model` so it can't
+            // same correction also applies inside `load_generation_model` so it can't
             // be bypassed by swapping models after startup.
             let (corrected_k, corrected_v, corrected) =
                 inference::correct_kv_cache_for_model(&model, ctk, ctv);
@@ -952,7 +952,7 @@ async fn main() {
             // off, --no-fit turns it off outright, and `fit` stays true for
             // the default path so the engine sizes the offload itself.
             // No `fit_explicit` here: `serve` never prompts either way
-            // (see `api::swap_model`), so the distinction has no meaning.
+            // (see `api::load_generation_model`), so the distinction has no meaning.
             // An explicit `--gpu-layers` is a ceiling, not an off switch.
             let fit = !no_fit;
             let gpu_layers = gpu_layers.unwrap_or(-1);
@@ -2518,7 +2518,7 @@ async fn cmd_run(
         // "mismatch between text model (n_embd = 2048) and mmproj
         // (n_embd = 2560)" and a failed load, after launching a vision
         // model and switching to anything else from the chat UI. Every
-        // model that has its own projector still finds it in swap_model,
+        // model that has its own projector still finds it in load_generation_model,
         // by store entry or by the file sitting beside its weights.
         api_mmproj = mmproj.clone();
 
@@ -2551,7 +2551,7 @@ async fn cmd_run(
         }
         // …for THIS model. The server keeps the batch size the user asked
         // for, so a later swap to a text-only model gets the scheduler back:
-        // `swap_model` re-applies the same sequential fallback for whatever
+        // `load_generation_model` re-applies the same sequential fallback for whatever
         // model actually carries a projector. Passing the zeroed value on
         // pinned every subsequent model to sequential mode — the same shape
         // of bug as handing the launch model's projector to its successors.
@@ -2850,7 +2850,7 @@ async fn cmd_serve(
 
     // The one `LlamaBackend` this process will ever create — shared by the
     // embedding model below and by every generation model this server loads
-    // later via `swap_model`. See `inference::init_shared_backend`.
+    // later via `load_generation_model`. See `inference::init_shared_backend`.
     let backend = inference::init_shared_backend().unwrap_or_else(|e| {
         eprintln!("Error initializing llama.cpp backend: {e}");
         std::process::exit(1);
@@ -2860,7 +2860,7 @@ async fn cmd_serve(
     // generation model loaded yet to size against, so the reservation only
     // starts to matter once one is loaded later via a request's "model"
     // field, through `AppState::reserved_embedding_bytes` inside
-    // `swap_model`. See the flag's doc comment on `RuntimeOpts`.
+    // `load_generation_model`. See the flag's doc comment on `RuntimeOpts`.
     let launch_embedding = embedding_model.map(|emb_arg| {
         let emb_path = resolve_model_path(&emb_arg, &store).unwrap_or_else(|| {
             eprintln!("Error: embedding model '{emb_arg}' not found.");
@@ -2885,7 +2885,7 @@ async fn cmd_serve(
             is_reserved_companion: true,
         }
     });
-    // --decision-model: same as above; `swap_model` protects its reserve
+    // --decision-model: same as above; `load_generation_model` protects its reserve
     // through `AppState::reserved_decision_bytes` once a generation model
     // is loaded.
     let launch_decision = decision_model.map(|arg| {

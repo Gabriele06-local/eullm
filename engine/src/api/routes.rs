@@ -47,7 +47,7 @@ const MAX_BATCH_SIZE_OVERRIDE: usize = 64;
 /// Bounds accepted for a request's `ctx_size` override. The lower bound leaves
 /// room for a prompt plus at least one output token; the upper bound is the
 /// largest context any current architecture declares, and keeps the value from
-/// becoming a KV-cache allocation that fails *after* `swap_model` has already
+/// becoming a KV-cache allocation that fails *after* `load_generation_model` has already
 /// unloaded the previous model.
 const MIN_CTX_SIZE_OVERRIDE: u32 = 512;
 const MAX_CTX_SIZE_OVERRIDE: u32 = 1_048_576;
@@ -62,7 +62,7 @@ type SlotOverrides = (Option<usize>, Option<u32>);
 /// Read the `batch_size` / `ctx_size` slot overrides from a request body,
 /// rejecting anything outside a serviceable range with HTTP 400.
 ///
-/// Both fields are forwarded to `AppState::swap_model`, which rebuilds the
+/// Both fields are forwarded to `AppState::load_generation_model`, which rebuilds the
 /// scheduler and reallocates the KV cache. A value that is merely *parsed*
 /// rather than *validated* therefore turns a single request into a
 /// configuration change that can leave the server unable to serve anything
@@ -283,13 +283,15 @@ pub fn openai_routes() -> Router<S> {
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────
 
-/// Ensure the requested model is loaded and return a snapshot of the slot,
-/// with a lease on the model for this request (see `resident::Lease`).
+/// Ensure the requested model is loaded and return a snapshot of it, with a
+/// lease on the model for this request (see `resident::Lease`).
 ///
-/// If `requested` differs from the currently loaded model, triggers a
-/// dynamic model swap (unloads old, loads new).
+/// A model that is resident answers at once: finding it takes the residents'
+/// read guard and nothing else. One that is not is loaded, which makes room
+/// for it first (see `AppState::load_generation_model`).
 ///
-/// If no model is specified in the request, uses whatever is loaded.
+/// If no model is specified in the request, uses the most recently used
+/// resident.
 ///
 /// `keep_alive` is the request's own: it applies to the model that answers
 /// it, from the moment the response is over.
@@ -302,15 +304,13 @@ async fn ensure_model(
 ) -> Result<SlotSnapshot, (StatusCode, Json<Value>)> {
     {
         // The lease is taken under this guard: see `resident::Usage::lease`.
-        let slot = state.slot.read().await;
-        let loaded = slot.engine.is_some() || slot.scheduler.is_some();
-        let wanted = match (requested, slot.model_name.as_deref()) {
-            (None, _) => true,
-            (Some(name), Some(current)) => model_names_match(current, &name.replace(':', "-")),
-            (Some(_), None) => false,
+        let models = state.models.read().await;
+        let found = match requested {
+            Some(name) => models.find(name),
+            None => models.most_recently_used(),
         };
-        if loaded && wanted {
-            return Ok(state.lease_slot(&slot, keep_alive));
+        if let Some(model) = found {
+            return Ok(state.lease(model, keep_alive));
         }
     }
 
@@ -323,7 +323,7 @@ async fn ensure_model(
         ));
     };
     state
-        .swap_model(name, override_batch_size, override_ctx_size, keep_alive)
+        .load_generation_model(name, override_batch_size, override_ctx_size, keep_alive)
         .await
         .map_err(|e| match e {
             // A model that does not exist is a client mistake, and a
@@ -1081,17 +1081,11 @@ async fn version(State(state): State<S>) -> Json<Value> {
 /// embedding server used during RAG document ingestion) without restarting
 /// eullm. Send a request with a `model` field afterwards (or run `eullm run
 /// <model>` again) to load a model back in.
-async fn unload_model(State(state): State<S>) -> (StatusCode, Json<Value>) {
-    match state.unload().await {
-        Ok(Some(name)) => (StatusCode::OK, Json(json!({ "unloaded": name }))),
-        Ok(None) => (
-            StatusCode::OK,
-            Json(json!({ "unloaded": null, "message": "no model was loaded" })),
-        ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": format!("Failed to unload model: {e}") })),
-        ),
+async fn unload_model(State(state): State<S>) -> Json<Value> {
+    // A string, or null: `eullm unload` reads it as one.
+    match state.unload_all().await.first() {
+        Some(name) => Json(json!({ "unloaded": name })),
+        None => Json(json!({ "unloaded": null, "message": "no model was loaded" })),
     }
 }
 
@@ -1369,34 +1363,40 @@ mod embedding_input_tests {
     }
 }
 
-/// List models — returns the currently loaded model (like Ollama) plus catalog entries.
+/// List models — returns the loaded models (like Ollama) plus catalog entries.
 ///
 /// Ollama's `/api/tags` returns all locally available models.  We return the
-/// currently loaded model first (so health-check dashboards see it), followed
+/// loaded models first, the most recently used first (so health-check
+/// dashboards see them, and the chat UI preselects the one in use), followed
 /// by catalog entries for discoverability.
 async fn list_models(State(state): State<S>) -> Json<Value> {
-    let mut models: Vec<Value> = Vec::new();
+    let loaded: Vec<String> = state
+        .models
+        .read()
+        .await
+        .by_recent_use()
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
 
-    let loaded_name = {
-        let slot = state.slot.read().await;
-        slot.model_name.clone()
-    };
-
-    // If a model is loaded, include it first (this is what dashboards check)
-    if let Some(ref name) = loaded_name {
-        models.push(json!({
-            "name": name,
-            "size": 0,
-            "digest": "",
-            "loaded": true,
-            "details": {
-                "format": "gguf",
-                "family": "",
-                "parameter_size": "",
-                "quantization_level": "Q4_K_M",
-            }
-        }));
-    }
+    // The loaded models first (this is what dashboards check).
+    let mut models: Vec<Value> = loaded
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "size": 0,
+                "digest": "",
+                "loaded": true,
+                "details": {
+                    "format": "gguf",
+                    "family": "",
+                    "parameter_size": "",
+                    "quantization_level": "Q4_K_M",
+                }
+            })
+        })
+        .collect();
 
     // Add catalog entries (skip duplicates if the loaded model is in the catalog).
     // The Ollama-compatible `name` field MUST be the addressable id — clients
@@ -1405,9 +1405,7 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
     // catalog name is exposed alongside as `details.display_name` for UIs that
     // want to show it.
     for m in EU_CATALOG.iter() {
-        if loaded_name.as_deref() == Some(m.name.as_str())
-            || loaded_name.as_deref() == Some(m.id.as_str())
-        {
+        if let Some(i) = loaded.iter().position(|n| *n == m.name || *n == m.id) {
             // Replace the placeholder entry above with full catalog metadata.
             // `loaded` must survive that replacement: it is the only thing in
             // the response that says which model is in the slot. Clients used
@@ -1417,24 +1415,22 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
             // been downloaded, while a loaded raw `.gguf` path (which never
             // reaches this branch) looked correct. That is why the chat UI
             // reported "No model loaded" only after picking from the picker.
-            if let Some(first) = models.first_mut() {
-                *first = json!({
-                    "name": m.id,
-                    "size": m.size_bytes,
-                    "digest": m.digest,
-                    "loaded": true,
-                    "downloaded": true,
-                    "details": {
-                        "format": "gguf",
-                        "family": m.base(),
-                        "parameter_size": format!("{:.1}B", m.params_b),
-                        "quantization_level": m.quantization,
-                        "domain": m.domain,
-                        "source_model": m.source_model(),
-                        "display_name": m.name,
-                    }
-                });
-            }
+            models[i] = json!({
+                "name": m.id,
+                "size": m.size_bytes,
+                "digest": m.digest,
+                "loaded": true,
+                "downloaded": true,
+                "details": {
+                    "format": "gguf",
+                    "family": m.base(),
+                    "parameter_size": format!("{:.1}B", m.params_b),
+                    "quantization_level": m.quantization,
+                    "domain": m.domain,
+                    "source_model": m.source_model(),
+                    "display_name": m.name,
+                }
+            });
             continue;
         }
         // Whether the weights are on disk. Ollama has no equivalent field
@@ -1722,7 +1718,7 @@ async fn chat(
 
     // ── Attachments ────────────────────────────────────────────────────
     // A conversation carrying any goes through the sequential mtmd path,
-    // whole. `swap_model` forces sequential mode when the loaded model has an
+    // whole. `load_generation_model` forces sequential mode when the loaded model has an
     // mmproj, so a model that can read them has `snap.engine` with a
     // projector in it. One that cannot is refused when the current turn has
     // its own attachments — the question is about them — and otherwise gets
@@ -2168,17 +2164,25 @@ async fn list_models_openai(State(state): State<S>) -> Json<Value> {
         }
     }
 
-    // The model in the slot, when it was launched from a path rather than
-    // pulled, has no manifest and so is not in the list above.
-    if let Some(name) = state.slot.read().await.model_name.clone()
-        && seen.insert(name.clone())
-    {
-        data.push(json!({
-            "id": name,
-            "object": "model",
-            "created": 1700000000_u64,
-            "owned_by": "eullm"
-        }));
+    // A loaded model launched from a path rather than pulled has no manifest,
+    // and so is not in the list above.
+    let loaded: Vec<String> = state
+        .models
+        .read()
+        .await
+        .by_recent_use()
+        .iter()
+        .map(|m| m.name.clone())
+        .collect();
+    for name in loaded {
+        if seen.insert(name.clone()) {
+            data.push(json!({
+                "id": name,
+                "object": "model",
+                "created": 1700000000_u64,
+                "owned_by": "eullm"
+            }));
+        }
     }
 
     // The decision model, when one is loaded, for System One clients
@@ -2847,26 +2851,10 @@ fn format_done_event(
     }
 }
 
-/// Check if a loaded model name matches a requested name.
-///
-/// Handles the common case where the loaded model is a full path
-/// (e.g. `/models/qwen3-8b.gguf`) but the request uses a short name
-/// (e.g. `qwen3-8b` or `qwen3:8b`).
-fn model_names_match(loaded: &str, normalized_request: &str) -> bool {
-    // Exact match.
-    if loaded == normalized_request {
-        return true;
-    }
-    // Otherwise compare identity keys: last path component, `.gguf` stripped,
-    // case-insensitive. See `api::model_identity_key` for why this is not
-    // `file_stem` — model names contain dots, and cutting at the last one
-    // made every quant of a repo look like the same model (#345).
-    crate::api::model_identity_key(loaded) == crate::api::model_identity_key(normalized_request)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::model_names_match;
 
     // A reasoning model doing free-text tool-calling can burn through
     // hundreds of tokens of <think> before producing anything else — a
@@ -2919,7 +2907,7 @@ mod tests {
     // validation existed, `{"batch_size": 4294967296}` truncated to zero
     // usable slots — the model reported as loaded while no request could
     // ever be served again — and an absurd `ctx_size` failed the context
-    // allocation *after* swap_model had already unloaded the previous
+    // allocation *after* load_generation_model had already unloaded the previous
     // model, leaving the slot empty.
 
     fn overrides(body: Value) -> Result<SlotOverrides, StatusCode> {

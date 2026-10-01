@@ -423,6 +423,11 @@ The `model` field accepts:
 | Directory | `/models/mymodel/` | Picks the first `.gguf` file inside |
 | Registered name | `legal-it-4b` | Looked up in `~/.eullm/models/` |
 
+A model is its file, whatever it is called: a request that names the loaded
+model's GGUF another way — its path, or a second name `eullm pull` linked to
+the same weights — is answered by the model already loaded, under the name it
+was loaded with, instead of loading the same weights again.
+
 ### Concurrent swap safety
 
 Multiple requests arriving simultaneously for a different model are handled safely:

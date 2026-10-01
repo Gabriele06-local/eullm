@@ -25,7 +25,7 @@ use crate::inference::{self, KvCacheType};
 /// Everything the banner reports about a loaded model.
 ///
 /// A plain data struct rather than a long argument list: the caller in
-/// `api::swap_model` has to fill exactly the same set as the one in `cmd_run`,
+/// `api::load_generation_model` has to fill exactly the same set as the one in `cmd_run`,
 /// and a named field is the only version of that which stays readable.
 pub struct ModelBanner {
     /// Display name, already stripped of any `eullm/` prefix.

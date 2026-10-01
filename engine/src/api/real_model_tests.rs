@@ -90,16 +90,25 @@ async fn start(names: &[&str], configure: impl FnOnce(&mut AppState)) -> TestSer
 }
 
 impl TestServer {
-    /// The generation models loaded right now.
+    /// The generation models loaded right now, by name, sorted.
     async fn loaded(&self) -> Vec<String> {
-        self.state
-            .slot
+        let mut names: Vec<String> = self
+            .state
+            .models
             .read()
             .await
-            .model_name
-            .clone()
-            .into_iter()
-            .collect()
+            .by_recent_use()
+            .iter()
+            .map(|m| m.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Which load of `name` is resident, to tell a model kept from one
+    /// unloaded and loaded again.
+    async fn load_id(&self, name: &str) -> Option<u64> {
+        self.state.models.read().await.find(name).map(|m| m.id)
     }
 
     /// Wait up to `limit` for exactly `expected` to be loaded.
@@ -258,4 +267,51 @@ async fn real_model_a_long_generation_outlives_a_short_keep_alive() {
 
     // And once it is over, keep_alive runs out and the model goes.
     server.wait_for_loaded(&[], keep_alive + 10 * tick).await;
+}
+
+/// One model at a time, as before: each request for another model replaces
+/// the resident one, and coming back loads it again. A request for the
+/// resident model under another spelling of its name, or by the path of its
+/// file, is answered by it without a reload.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_one_model_swaps_exactly_as_before() {
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.allow_model_paths = true
+    })
+    .await;
+    let ask = |model: &str| {
+        json!({
+            "model": model, "prompt": "Once upon a time", "stream": false,
+            "options": { "num_predict": 8 },
+        })
+    };
+
+    let mut loads = Vec::new();
+    for model in ["tiny-a", "tiny-b", "tiny-a"] {
+        let (status, lines) = server.generate(ask(model)).await;
+        assert_eq!(status, 200, "{lines:?}");
+        assert_finished(&lines);
+        assert_eq!(lines[0]["model"], model);
+        assert_eq!(server.loaded().await, [model]);
+        loads.push(server.load_id(model).await.expect("loaded"));
+    }
+    assert!(
+        loads[0] != loads[2],
+        "coming back to tiny-a loads it again: {loads:?}"
+    );
+
+    let kept = loads[2];
+    let path = server.dir.join("tiny-a").join("model.gguf");
+    for spelling in ["tiny:a", "TINY-A", path.to_str().expect("utf-8 path")] {
+        let (status, lines) = server.generate(ask(spelling)).await;
+        assert_eq!(status, 200, "{spelling}: {lines:?}");
+        assert_finished(&lines);
+        assert_eq!(lines[0]["model"], "tiny-a", "{spelling}");
+        assert_eq!(
+            server.load_id("tiny-a").await,
+            Some(kept),
+            "{spelling} reloaded it"
+        );
+    }
 }

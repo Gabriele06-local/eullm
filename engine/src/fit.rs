@@ -1110,7 +1110,7 @@ fn run_fit_impl(
     // runs and so already show up as used VRAM in the free-VRAM figure this
     // reads.
     // Zero from every call site except the initial `eullm run`/`eullm
-    // serve` launch when that flag was given — a later `swap_model`
+    // serve` launch when that flag was given — a later `load_generation_model`
     // reserves it too, but only while the resident embedder is the
     // reserved companion and not an ad-hoc one (see
     // `EmbeddingSlot::is_reserved_companion`).

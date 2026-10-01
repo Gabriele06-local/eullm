@@ -7,9 +7,10 @@
 //! - **Sequential** (`InferenceEngine`): one request at a time.
 //! - **Continuous batching** (`SchedulerHandle`): multiple concurrent requests.
 //!
-//! Supports **dynamic model swapping**: when a request specifies a different
-//! model name, the server automatically unloads the current model and loads
-//! the new one.  In-flight requests on the old model complete normally.
+//! Supports **dynamic model swapping**: when a request specifies a model that
+//! is not loaded, the server unloads the current model and loads the new one.
+//! Requests the old model was still answering are cut off with an error, as
+//! they always were; the residents are kept in `resident::ResidentModels`.
 
 mod auth;
 mod ip_allowlist;
@@ -43,22 +44,7 @@ use crate::inference::{
 };
 use crate::models::ModelStore;
 
-/// The currently loaded model — swapped atomically when a different model
-/// is requested via the API.
-pub struct ModelSlot {
-    /// Currently loaded model name (if any).
-    pub model_name: Option<String>,
-    /// Sequential inference engine (fallback, one request at a time).
-    pub engine: Option<Arc<InferenceEngine>>,
-    /// Continuous batching scheduler (preferred when available).
-    pub scheduler: Option<SchedulerHandle>,
-    /// How the loaded model is in use: the requests holding it, and when its
-    /// keep_alive runs out (see `resident::Usage`). A fresh one with every
-    /// load.
-    pub(crate) usage: Arc<resident::Usage>,
-}
-
-/// The embedding slot — independent of `ModelSlot` on purpose. See
+/// The embedding slot — independent of the generation models on purpose. See
 /// `AppState::ensure_embedding_model` for why this coexists with the
 /// generation model rather than sharing its slot.
 pub struct EmbeddingSlot {
@@ -68,7 +54,7 @@ pub struct EmbeddingSlot {
     /// (`true`) or loaded ad hoc by a runtime `/api/embed`/`/v1/embeddings`
     /// request (`false`). The distinction is what `--embedding-model` is
     /// *for*: a reserved companion is never evicted just because the
-    /// generation model is being swapped (`swap_model`'s own `--fit`
+    /// generation model is being swapped (`load_generation_model`'s own `--fit`
     /// reserves its footprint instead, so it keeps its place), where an ad
     /// hoc embedder has no such guarantee and is evicted on any generation
     /// swap that needs the room back (`evict_embedding_if_present_for_generation_load`).
@@ -97,17 +83,21 @@ pub struct DecisionSlot {
 pub struct AppState {
     /// The one `LlamaBackend` this process created (see
     /// `inference::init_shared_backend`), shared by every model load —
-    /// the launch model, every later `swap_model`, and every embedding
+    /// the launch model, every later `load_generation_model`, and every embedding
     /// model. `LlamaBackend::init()` is a process-wide one-time marker;
     /// a second independent instance fails with `BackendAlreadyInitialized`
     /// while the first is still alive, so this must be the same `Arc` the
     /// launch model itself loaded with, not a fresh one.
     pub backend: Arc<LlamaBackend>,
-    /// Mutable model slot — protected by RwLock for concurrent reads,
-    /// exclusive writes during model swap.
-    pub slot: tokio::sync::RwLock<ModelSlot>,
-    /// Serializes model swaps — prevents multiple concurrent requests
-    /// from triggering parallel swaps (which would OOM the GPU).
+    /// The generation models in memory. A request takes the read guard just
+    /// long enough to find its model and take a lease on it; the write guard
+    /// is taken only to install a model or take one out, never across a load
+    /// or a scheduler's shutdown.
+    pub(crate) models: tokio::sync::RwLock<resident::ResidentModels>,
+    /// Serializes loads and unloads of every slot — generation, embedding
+    /// and decision — so that two loads never size themselves against the
+    /// same free VRAM. Taken before any other lock here, never after one:
+    /// `swap_lock` → `models` → `embedding`/`decision`.
     swap_lock: tokio::sync::Mutex<()>,
 
     // ── Immutable inference settings (from CLI flags) ────────────────
@@ -238,10 +228,10 @@ pub struct AppState {
     /// visible over time rather than only as an unexplained slowdown.
     pub cross_slot_evictions: std::sync::atomic::AtomicU64,
 
-    /// Woken when the last request on the generation model finishes, so the
+    /// Woken when the last request on a generation model finishes, so the
     /// idle-unload loop acts on `keep_alive: 0` as soon as the request is
-    /// over instead of at its next tick. The generation model's own
-    /// deadline lives in `ModelSlot::usage`, set when its requests end.
+    /// over instead of at its next tick. Each generation model's own
+    /// deadline lives in its `resident::Usage`, set when its requests end.
     idle: Arc<tokio::sync::Notify>,
     /// How often the idle-unload loop looks for an expired keep_alive: 30 s,
     /// shorter in tests.
@@ -292,9 +282,10 @@ impl From<String> for ModelError {
 }
 
 impl AppState {
-    /// Swap the currently loaded model.  Drops the old engine/scheduler
-    /// (in-flight requests on cloned handles still complete) and loads
-    /// the new model with the same inference settings.
+    /// Load a generation model that is not resident, making room for it
+    /// first: the resident gives way, and in-flight requests on it are cut off
+    /// as they always were. The new model loads with the same inference
+    /// settings as every other.
     ///
     /// `override_batch_size` allows the caller to change the number of
     /// concurrent batch slots for the new model (e.g. more slots for a
@@ -303,42 +294,51 @@ impl AppState {
     ///
     /// Returns the model with a lease on it for the request that asked,
     /// taken under the same guard that found or installed it, so the request
-    /// is answered by the model it named even when another swap follows
+    /// is answered by the model it named even when another load follows
     /// straight after. `keep_alive` is that request's.
     ///
-    /// This is the **write** path — only one swap can run at a time.
-    pub(crate) async fn swap_model(
+    /// This is the **write** path — only one load runs at a time.
+    pub(crate) async fn load_generation_model(
         &self,
         name: &str,
         override_batch_size: Option<usize>,
         override_ctx_size: Option<u32>,
         keep_alive: KeepAlive,
     ) -> Result<resident::SlotSnapshot, ModelError> {
-        // Serialize swaps — if another request is already swapping,
-        // wait for it to finish instead of starting a parallel swap.
+        // Serialize loads — if another request is already loading, wait for
+        // it to finish instead of starting a parallel load.
         let _swap_guard = self.swap_lock.lock().await;
 
         // Normalize Ollama-style names: "qwen3:14b" → "qwen3-14b"
         let normalized = normalize_model_name(name);
 
-        // Re-check after acquiring the lock — another thread may have
-        // already completed the swap while we were waiting.
-        {
-            let slot = self.slot.read().await;
-            if let Some(ref loaded) = slot.model_name {
-                let loaded_stem = model_identity_key(loaded);
-                let req_stem = model_identity_key(&normalized);
-                if loaded_stem == req_stem {
-                    tracing::info!(
-                        "Model {} already loaded (swapped by another request)",
-                        crate::audit::sanitize_for_log(&normalized)
-                    );
-                    return Ok(self.lease_slot(&slot, keep_alive));
-                }
-            }
+        // Re-check after acquiring the lock — another request may have
+        // loaded it while this one waited.
+        if let Some(snapshot) = self.lease_resident(&normalized, keep_alive).await {
+            tracing::info!(
+                "Model {} already loaded (by another request)",
+                crate::audit::sanitize_for_log(&normalized)
+            );
+            return Ok(snapshot);
         }
 
+        // Resolved before anything is unloaded, so that a name that does not
+        // exist is a 404 that costs nobody their model.
         let gguf_path = self.resolve_model(&normalized)?;
+        // The same file under another of its names — a store name for a model
+        // launched by its path, or another name `eullm pull` linked to the
+        // same weights: loading it again would hold it twice.
+        {
+            let models = self.models.read().await;
+            if let Some(model) = models.find_file(&gguf_path) {
+                tracing::info!(
+                    "{} is {}, already loaded",
+                    crate::audit::sanitize_for_log(&normalized),
+                    crate::audit::sanitize_for_log(&model.name)
+                );
+                return Ok(self.lease(model, keep_alive));
+            }
+        }
         // Resolve an mmproj sibling (vision projector) if the model store
         // declares one. Presence of a projector is the signal that this is
         // a multimodal model — we then force sequential loading (next step)
@@ -371,14 +371,13 @@ impl AppState {
             gguf_path.display()
         );
 
-        // ── 1. Unload the current model and WAIT for the scheduler
-        //       thread to fully exit before loading the new model.
+        // ── 1. Make room: unload the resident that gives way and WAIT for
+        //       its scheduler thread to fully exit before loading the new
+        //       model.
         //
-        // Without this, both old and new LlamaBackend instances would
-        // coexist, and both models would be in VRAM simultaneously —
+        // Without this, both models would be in VRAM simultaneously —
         // causing OOM or a C-level crash in llama.cpp.
-        self.unload_current().await?;
-        tracing::info!("Previous model fully unloaded");
+        self.make_room_for(&normalized).await;
 
         // An embedder left resident from an earlier ingestion run would
         // otherwise shrink the free VRAM `--fit` measures below, sizing this
@@ -501,7 +500,7 @@ impl AppState {
         }
 
         let config = InferenceConfig {
-            model_path: gguf_path,
+            model_path: gguf_path.clone(),
             gpu_layers,
             context_size: effective_ctx,
             threads: self.threads,
@@ -586,12 +585,14 @@ impl AppState {
 
         // ── 3. Install the new model in the slot ─────────────────────
         let snapshot = {
-            let mut slot = self.slot.write().await;
-            slot.model_name = Some(model_name.clone());
-            slot.engine = new_engine;
-            slot.scheduler = new_scheduler;
-            slot.usage = resident::Usage::new();
-            self.lease_slot(&slot, keep_alive)
+            let mut models = self.models.write().await;
+            let model = models.insert(resident::LoadedModel::new(
+                model_name.clone(),
+                gguf_path,
+                new_engine,
+                new_scheduler,
+            ));
+            self.lease(model, keep_alive)
         };
 
         tracing::info!(
@@ -635,101 +636,146 @@ impl AppState {
         Ok(snapshot)
     }
 
-    /// The loaded model's handles, with a lease on it for one request. Only
-    /// with a guard on the slot held — see `resident::Usage::lease`.
-    fn lease_slot(&self, slot: &ModelSlot, keep_alive: KeepAlive) -> resident::SlotSnapshot {
+    /// A resident's handles, with a lease on it for one request. Only with a
+    /// guard on the residents held — see `resident::Usage::lease`.
+    pub(crate) fn lease(
+        &self,
+        model: &resident::LoadedModel,
+        keep_alive: KeepAlive,
+    ) -> resident::SlotSnapshot {
         resident::SlotSnapshot {
-            model_name: slot.model_name.clone().unwrap_or_else(|| "unknown".into()),
-            engine: slot.engine.clone(),
-            scheduler: slot.scheduler.clone(),
-            lease: slot
+            model_name: model.name.clone(),
+            engine: model.engine.clone(),
+            scheduler: model.scheduler.clone(),
+            lease: model
                 .usage
                 .lease(keep_alive, self.default_keep_alive, &self.idle),
         }
     }
 
-    /// Unload the currently loaded model, freeing its VRAM, and leave the
-    /// slot empty. Unlike `swap_model`, this does not load a replacement —
-    /// a later request with a `model` field (or another `eullm run`) loads
-    /// a model again.
+    /// The resident `requested` names, with a lease on it, if it is loaded.
+    async fn lease_resident(
+        &self,
+        requested: &str,
+        keep_alive: KeepAlive,
+    ) -> Option<resident::SlotSnapshot> {
+        let models = self.models.read().await;
+        models
+            .find(requested)
+            .map(|model| self.lease(model, keep_alive))
+    }
+
+    /// Unload residents until there is room for one more model, in the order
+    /// `resident::next_step` gives. One model is resident at a time, so this
+    /// unloads the one there is, busy or not, exactly as a swap always did.
+    async fn make_room_for(&self, incoming: &str) {
+        loop {
+            let views = self.models.read().await.views();
+            match resident::next_step(&views, 1, std::time::Instant::now()) {
+                resident::Step::Load => return,
+                resident::Step::Evict(i) => {
+                    if let Some(name) = self.remove_generation(views[i].id, Removal::Always).await {
+                        tracing::info!(
+                            "Unloaded {} to make room for {}",
+                            crate::audit::sanitize_for_log(&name),
+                            crate::audit::sanitize_for_log(incoming)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Take the generation model `id` out of the residents — if `when` still
+    /// holds for it under their write guard, where no lease can be taken, so
+    /// that a request which took one in the meantime keeps its model — and
+    /// free its memory. Returns its name. Call with `swap_lock` held.
+    async fn remove_generation(&self, id: u64, when: Removal) -> Option<String> {
+        let model = {
+            let mut models = self.models.write().await;
+            let usage = models.get(id)?.usage.view();
+            let allowed = match when {
+                Removal::Always => true,
+                Removal::IfDue => resident::due(&usage, std::time::Instant::now()),
+            };
+            if !allowed {
+                return None;
+            }
+            models.remove(id)?
+        };
+        let name = model.name.clone();
+        retire(model).await;
+        Some(name)
+    }
+
+    /// Unload every generation model, freeing its VRAM, without loading a
+    /// replacement — a later request with a `model` field (or another
+    /// `eullm run`) loads one again. Requests still running on one are cut
+    /// off: an explicit unload means now.
     ///
     /// The primary use case is freeing VRAM for a co-resident process (e.g.
     /// an embedding model used during RAG document ingestion) without
-    /// restarting the eullm server. Serialized against `swap_model` via the
-    /// same lock, so an unload can't race a concurrent swap.
+    /// restarting the eullm server. Serialized against loads via the same
+    /// lock, so an unload can't race a concurrent load.
     ///
-    /// Returns the name of the model that was unloaded, or `None` if the
-    /// slot was already empty (a no-op, not an error).
-    pub async fn unload(&self) -> Result<Option<String>, String> {
+    /// Returns the names of the models unloaded, none if nothing was loaded
+    /// (a no-op, not an error).
+    pub(crate) async fn unload_all(&self) -> Vec<String> {
         let _swap_guard = self.swap_lock.lock().await;
-
-        let previous = {
-            let slot = self.slot.read().await;
-            slot.model_name.clone()
-        };
-        if previous.is_none() {
-            return Ok(None);
+        let unloaded = self.unload_generation_models().await;
+        if !unloaded.is_empty() {
+            tracing::info!("Generation models unloaded — none resident");
         }
-
-        self.unload_current().await?;
-        tracing::info!("Model unloaded — slot empty");
-        Ok(previous)
+        unloaded
     }
 
-    /// Shared unload step used by both `swap_model` and `unload`: take the
-    /// scheduler/engine out of the slot and wait for the scheduler's
-    /// dedicated OS thread to fully exit before returning, so the old
-    /// model's VRAM is guaranteed freed by the time this resolves — critical
-    /// both for swap (avoids two models coexisting in VRAM → OOM) and for a
-    /// standalone unload (the caller needs the VRAM actually free before
-    /// handing it to another process).
-    async fn unload_current(&self) -> Result<(), String> {
-        let old_scheduler = {
-            let mut slot = self.slot.write().await;
-            let sched = slot.scheduler.take();
-            slot.engine = None;
-            slot.model_name = None;
-            sched
-        };
-        shut_down_scheduler(old_scheduler).await
+    /// Shared by `unload_all` and the companions that need the whole card:
+    /// take every generation model out and wait for each one's scheduler
+    /// thread to fully exit, so their VRAM is guaranteed freed by the time
+    /// this resolves — the caller needs the VRAM actually free before handing
+    /// it to another model or process. Call with `swap_lock` held.
+    async fn unload_generation_models(&self) -> Vec<String> {
+        let ids: Vec<u64> = self
+            .models
+            .read()
+            .await
+            .views()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let mut unloaded = Vec::new();
+        for id in ids {
+            unloaded.extend(self.remove_generation(id, Removal::Always).await);
+        }
+        unloaded
     }
 
-    /// Unload the generation model if it is due (`resident::due`): no request
-    /// is using it, and the last one to finish asked for `keep_alive: 0` or
-    /// left a deadline that has passed. Checked again under the slot's write
-    /// guard, where no lease can be taken, so a request that arrived in the
-    /// meantime keeps its model.
-    async fn unload_generation_if_due(&self) {
-        let due_now = {
-            let slot = self.slot.read().await;
-            slot.model_name.is_some()
-                && resident::due(&slot.usage.view(), std::time::Instant::now())
-        };
-        if !due_now {
-            return;
-        }
-        let _swap_guard = self.swap_lock.lock().await;
-        let (name, immediate, old_scheduler) = {
-            let mut slot = self.slot.write().await;
-            let usage = slot.usage.view();
-            if slot.model_name.is_none() || !resident::due(&usage, std::time::Instant::now()) {
-                return;
+    /// Unload every generation model that is due (`resident::due`): no
+    /// request is using it, and the last one to finish asked for
+    /// `keep_alive: 0` or left a deadline that has passed. Each is checked
+    /// again under the residents' write guard, where no lease can be taken,
+    /// so a request that arrived in the meantime keeps its model.
+    async fn unload_due_generation_models(&self) {
+        let now = std::time::Instant::now();
+        let due: Vec<resident::ResidentView> = self
+            .models
+            .read()
+            .await
+            .views()
+            .into_iter()
+            .filter(|r| resident::due(&r.usage, now))
+            .collect();
+        for model in due {
+            let _swap_guard = self.swap_lock.lock().await;
+            let Some(name) = self.remove_generation(model.id, Removal::IfDue).await else {
+                continue;
+            };
+            let name = crate::audit::sanitize_for_log(&name);
+            if model.usage.unload_when_idle {
+                tracing::info!("keep_alive 0 — unloading {name} now that its request is over");
+            } else {
+                tracing::info!("keep_alive expired — unloading idle generation model {name}");
             }
-            slot.engine = None;
-            (
-                slot.model_name.take().unwrap_or_default(),
-                usage.unload_when_idle,
-                slot.scheduler.take(),
-            )
-        };
-        let name = crate::audit::sanitize_for_log(&name);
-        if immediate {
-            tracing::info!("keep_alive 0 — unloading {name} now that its request is over");
-        } else {
-            tracing::info!("keep_alive expired — unloading idle generation model {name}");
-        }
-        if let Err(e) = shut_down_scheduler(old_scheduler).await {
-            tracing::warn!("{e}");
         }
     }
 
@@ -794,7 +840,7 @@ impl AppState {
         }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
 
-        let main_loaded = self.slot.read().await.model_name.is_some();
+        let main_loaded = !self.models.read().await.is_empty();
         let fits_alongside =
             fits_in_free_vram(weights_bytes, crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES)
                 .unwrap_or(true);
@@ -804,9 +850,9 @@ impl AppState {
                  evicting it to make room (will reload on the next generation request)",
                 crate::audit::sanitize_for_log(&normalized)
             );
-            self.unload_current().await?;
+            let evicted = self.unload_generation_models().await;
             self.cross_slot_evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
 
         tracing::info!(
@@ -844,7 +890,7 @@ impl AppState {
     }
 
     /// The mirror of the eviction inside `ensure_embedding_model`: called
-    /// from `swap_model` before sizing a generation load, so an embedder
+    /// from `load_generation_model` before sizing a generation load, so an embedder
     /// left resident from a prior ingestion run does not silently shrink
     /// the VRAM budget `--fit` sizes against. Cheap when nothing is loaded
     /// (`RwLock::read` + an `Option` check) and a no-op unless `--fit` is
@@ -858,7 +904,7 @@ impl AppState {
     /// point of reserving its footprint up front is that it survives a
     /// later chat-model swap instead of being kicked out for one. Its
     /// footprint is subtracted from free VRAM by the caller
-    /// (`swap_model`'s `reserve_bytes`) instead of it being evicted.
+    /// (`load_generation_model`'s `reserve_bytes`) instead of it being evicted.
     async fn evict_embedding_if_present_for_generation_load(&self) {
         if !self.fit {
             return;
@@ -944,7 +990,7 @@ impl AppState {
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
 
-        let main_loaded = self.slot.read().await.model_name.is_some();
+        let main_loaded = !self.models.read().await.is_empty();
         let fits_alongside =
             fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0).unwrap_or(true);
         if main_loaded && !fits_alongside {
@@ -953,9 +999,9 @@ impl AppState {
                  evicting it to make room (will reload on the next generation request)",
                 crate::audit::sanitize_for_log(&normalized)
             );
-            self.unload_current().await?;
+            let evicted = self.unload_generation_models().await;
             self.cross_slot_evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
 
         tracing::info!(
@@ -1086,7 +1132,7 @@ impl AppState {
             let mut went_idle = std::pin::pin!(self.idle.notified());
             went_idle.as_mut().enable();
 
-            self.unload_generation_if_due().await;
+            self.unload_due_generation_models().await;
 
             let now = tokio::time::Instant::now();
             let embedding_expired = {
@@ -1218,16 +1264,25 @@ impl AppState {
     }
 }
 
-/// Stop a scheduler taken out of the slot and wait for its thread to exit,
-/// so its model's memory is free when this returns. On a blocking thread:
-/// the join waits for the decode loop to notice.
-async fn shut_down_scheduler(scheduler: Option<SchedulerHandle>) -> Result<(), String> {
-    if let Some(handle) = scheduler {
-        tokio::task::spawn_blocking(move || handle.shutdown())
-            .await
-            .map_err(|e| format!("Failed to join scheduler thread: {e}"))?;
+/// When `AppState::remove_generation` may take a model out.
+#[derive(Debug, Clone, Copy)]
+enum Removal {
+    /// Whatever it is doing: requests still running on it are cut off.
+    Always,
+    /// Only if it is still due — idle, and its keep_alive over.
+    IfDue,
+}
+
+/// Free a generation model taken out of the residents. A scheduler is
+/// stopped, and its thread joined on a blocking thread — the join waits for
+/// the decode loop to notice — so its model's memory is free when this
+/// returns.
+async fn retire(model: resident::LoadedModel) {
+    if let Some(handle) = model.scheduler
+        && let Err(e) = tokio::task::spawn_blocking(move || handle.shutdown()).await
+    {
+        tracing::warn!("Failed to join scheduler thread: {e}");
     }
-    Ok(())
 }
 
 /// Find the first `.gguf` file in a directory.
@@ -1745,6 +1800,23 @@ pub(crate) fn model_identity_key(name: &str) -> String {
     base.to_ascii_lowercase()
 }
 
+/// Check if a loaded model name matches a requested name.
+///
+/// Handles the common case where the loaded model is a full path
+/// (e.g. `/models/qwen3-8b.gguf`) but the request uses a short name
+/// (e.g. `qwen3-8b` or `qwen3:8b`).
+pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool {
+    // Exact match.
+    if loaded == normalized_request {
+        return true;
+    }
+    // Otherwise compare identity keys: last path component, `.gguf` stripped,
+    // case-insensitive. See `model_identity_key` for why this is not
+    // `file_stem` — model names contain dots, and cutting at the last one
+    // made every quant of a repo look like the same model (#345).
+    model_identity_key(loaded) == model_identity_key(normalized_request)
+}
+
 /// Configuration for starting the API server.
 pub struct ServeConfig {
     /// The one `LlamaBackend` the process created at startup — see
@@ -1926,16 +1998,26 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
+    // `eullm run`'s model, loaded before the server started, is the first
+    // resident; `serve` starts with none.
+    let mut models = resident::ResidentModels::default();
+    if let Some(name) = cfg.model_name
+        && (cfg.engine.is_some() || cfg.scheduler.is_some())
+    {
+        let path = cfg
+            .launch_model
+            .as_ref()
+            .map_or_else(|| PathBuf::from(&name), |(_, path)| path.clone());
+        let mut launch = resident::LoadedModel::new(name, path, cfg.engine, cfg.scheduler);
+        launch.launch = true;
+        models.insert(launch);
+    }
+
     let state = Arc::new(AppState {
         backend: cfg.backend,
         fallback_mmproj: cfg.mmproj.clone(),
         mmproj_offload: cfg.mmproj_offload,
-        slot: tokio::sync::RwLock::new(ModelSlot {
-            model_name: cfg.model_name,
-            engine: cfg.engine,
-            scheduler: cfg.scheduler,
-            usage: resident::Usage::new(),
-        }),
+        models: tokio::sync::RwLock::new(models),
         swap_lock: tokio::sync::Mutex::new(()),
         gpu_layers: cfg.gpu_layers,
         fit: cfg.fit,
@@ -2063,12 +2145,7 @@ impl AppState {
             backend: crate::inference::test_backend(),
             fallback_mmproj: None,
             mmproj_offload: None,
-            slot: tokio::sync::RwLock::new(ModelSlot {
-                model_name: None,
-                engine: None,
-                scheduler: None,
-                usage: resident::Usage::new(),
-            }),
+            models: tokio::sync::RwLock::new(resident::ResidentModels::default()),
             swap_lock: tokio::sync::Mutex::new(()),
             gpu_layers: 0,
             fit: false,
@@ -2498,8 +2575,12 @@ mod http_tests {
 
     /// `spawn`, with API keys configured.
     async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
-        let state = Arc::new(AppState::for_tests(store, api_keys));
+        spawn_state(AppState::for_tests(store, api_keys)).await
+    }
 
+    /// `spawn`, for a state the test has prepared.
+    async fn spawn_state(state: AppState) -> String {
+        let state = Arc::new(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let app = api_router(state);
@@ -2554,6 +2635,69 @@ mod http_tests {
             names.iter().any(|n| n.contains("a-pulled-model")),
             "a model in the store must appear in /api/tags, got {names:?}"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Every resident is listed as loaded, the most recently used first —
+    /// the one the chat UI preselects — and a catalog model keeps its
+    /// catalog metadata while marked so.
+    #[tokio::test]
+    async fn every_resident_is_marked_loaded_and_keeps_catalog_metadata() {
+        let tmp = std::env::temp_dir().join(format!("eullm-tags-loaded-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        let catalog = &crate::models::EU_CATALOG[0];
+        {
+            let mut models = state.models.write().await;
+            for name in [catalog.id.as_str(), "/elsewhere/Custom-Model-Q4_K_M.gguf"] {
+                models.insert(resident::LoadedModel::new(
+                    name.into(),
+                    name.into(),
+                    None,
+                    None,
+                ));
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let base = spawn_state(state).await;
+
+        let (status, body) = get_json(&format!("{base}/api/tags")).await;
+        assert_eq!(status, 200);
+        let models = body["models"].as_array().expect("models array");
+        let loaded: Vec<&serde_json::Value> =
+            models.iter().filter(|m| m["loaded"] == true).collect();
+        let names: Vec<&str> = loaded.iter().filter_map(|m| m["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            ["/elsewhere/Custom-Model-Q4_K_M.gguf", catalog.id.as_str()],
+            "every resident, the most recently used first"
+        );
+        assert_eq!(loaded[1]["digest"], catalog.digest.as_str());
+        assert_eq!(loaded[1]["details"]["family"], catalog.base());
+        assert_eq!(
+            models
+                .iter()
+                .filter(|m| m["name"] == catalog.id.as_str())
+                .count(),
+            1,
+            "listed once, as loaded"
+        );
+
+        let (_, body) = get_json(&format!("{base}/v1/models")).await;
+        let ids: Vec<&str> = body["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        for name in names {
+            assert_eq!(
+                ids.iter().filter(|id| **id == name).count(),
+                1,
+                "{name} in {ids:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
