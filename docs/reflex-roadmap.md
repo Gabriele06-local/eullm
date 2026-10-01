@@ -280,9 +280,17 @@ when it may stop at most about one sufficient case in ten:
 
 ## MVP 3 — several chat models resident, then `model: "auto"`  [🆕 next]
 
-- [🔧 now] The implementation plan: how the engine's one generation slot
-  becomes several, how they are sized, evicted and locked, and where Reflex
-  picks the model — read from the code before any of it changes.
+- [✅ done] The implementation plan, [`reflex-mvp3-plan.md`](reflex-mvp3-plan.md):
+  how the engine's one generation slot becomes several, how they are sized,
+  evicted and locked, where Reflex picks the model, the benchmark that
+  decides whether it should, and fourteen commits in order, each behind the
+  flag with its tests and its GPU checks. Reading the code for it found six
+  defects in today's engine, fixed first: `keep_alive: 0` with a prompt
+  unloads the model before it answers; the idle deadline is counted from the
+  start of a request, so a long generation can be unloaded mid-stream; a
+  swap aborts the requests still running on the old model, though the docs
+  say they finish; a sequential model's weights can outlive its unload and
+  its idle context is not counted as taken; there is no `/api/ps`.
 - **The engine keeps one chat model loaded today**, next to the embedding
   and decision slots; asking for another model swaps it, which takes
   seconds. Choosing per request between two local chat models needs both
