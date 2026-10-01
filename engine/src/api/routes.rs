@@ -335,8 +335,9 @@ pub fn openai_routes() -> Router<S> {
 /// read guard and nothing else. One that is not is loaded, which makes room
 /// for it first (see `AppState::load_generation_model`).
 ///
-/// If no model is specified in the request, uses the most recently used
-/// resident.
+/// A request that names no model (see [`requested_model`]) is answered by
+/// `--default-model` when the server has one, as if it had named it, and
+/// otherwise by the most recently used resident.
 ///
 /// `keep_alive` is the request's own: it applies to the model that answers
 /// it, from the moment the response is over.
@@ -347,6 +348,7 @@ async fn ensure_model(
     override_ctx_size: Option<u32>,
     keep_alive: super::KeepAlive,
 ) -> Result<SlotSnapshot, Refusal> {
+    let requested = requested.or(state.default_model.as_ref().map(|m| m.name.as_str()));
     {
         // The lease is taken under this guard: see `resident::Usage::lease`.
         let models = state.models.read().await;
@@ -396,20 +398,31 @@ async fn ensure_model(
     Ok(snapshot)
 }
 
+/// The model a request names in its `model` field; `None` when the field is
+/// absent or empty, which leaves the choice to the server (`ensure_model`).
+fn requested_model(body: &Value) -> Option<&str> {
+    body.get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+}
+
 /// A duration in nanoseconds, the unit Ollama's response timings are in.
 fn nanos(d: std::time::Duration) -> u64 {
     u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
 }
 
-/// `keep_alive: 0` on an empty request: unload the model it names — the
-/// most recently used one when it names none — without loading it first
-/// (`AppState::expire_model`), and say which. A model that exists but is not
-/// loaded is answered as unloaded, as Ollama does; with no model named and
-/// none loaded there is nothing to answer for, as on the load path.
+/// `keep_alive: 0` on an empty request: unload the model it names — when it
+/// names none, `--default-model`, or else the most recently used one —
+/// without loading it first (`AppState::expire_model`), and say which. A
+/// model that exists but is not loaded is answered as unloaded, as Ollama
+/// does; with no model named and none loaded there is nothing to answer for,
+/// as on the load path.
 async fn unload_for_keep_alive_zero(
     state: &AppState,
     requested: Option<&str>,
 ) -> Result<String, Refusal> {
+    let requested = requested.or(state.default_model.as_ref().map(|m| m.name.as_str()));
     match state.expire_model(requested).await {
         Ok(Some(name)) => Ok(requested.map_or(name, str::to_string)),
         Ok(None) => match requested {
@@ -1848,7 +1861,7 @@ async fn generate(
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
-    let requested = body.get("model").and_then(|v| v.as_str());
+    let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
     let prompt = body
@@ -2040,7 +2053,7 @@ async fn chat(
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
-    let requested = body.get("model").and_then(|v| v.as_str());
+    let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
     let messages = body
@@ -2633,7 +2646,7 @@ async fn chat_completions(
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
     let user_id = identity.key_id().map(str::to_string);
-    let requested = body.get("model").and_then(|v| v.as_str());
+    let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape, not part
     // of it — accepted here too so the idle-unload timer works the same way

@@ -490,6 +490,20 @@ struct RuntimeOpts {
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=16)
     )]
     max_loaded_models: usize,
+
+    /// The generation model a request that names none is answered by: a
+    /// store name or a GGUF path, like --decision-model.
+    ///
+    /// A request with no `model` field, or an empty one, goes to this model,
+    /// which is loaded for it when it is not loaded, as if the request had
+    /// named it. Without the flag such a request is answered by the most
+    /// recently used generation model — with one model at a time, the one
+    /// there is — and refused when none is loaded.
+    ///
+    /// Checked at startup: a name that is no model stops the server there,
+    /// rather than letting every request that names none fail.
+    #[arg(long, value_name = "NAME_OR_PATH")]
+    default_model: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -808,8 +822,10 @@ async fn main() {
                 decision_model,
                 decision_ctx,
                 max_loaded_models,
+                default_model,
             } = opts;
-            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
+            let residency =
+                residency_config(&store, max_loaded_models, default_model.as_deref());
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -972,8 +988,10 @@ async fn main() {
                 decision_model,
                 decision_ctx,
                 max_loaded_models,
+                default_model,
             } = opts;
-            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
+            let residency =
+                residency_config(&store, max_loaded_models, default_model.as_deref());
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -1882,9 +1900,39 @@ fn resolve_model_path(model: &str, store: &ModelStore) -> Option<PathBuf> {
     store.gguf_path(model)
 }
 
+/// `--max-loaded-models` and `--default-model`, resolved against the store;
+/// exits when the default model is no model, as for `--decision-model`.
+fn residency_config(
+    store: &ModelStore,
+    max_loaded_models: usize,
+    default_model: Option<&str>,
+) -> api::ResidencyConfig {
+    api::ResidencyConfig::resolve(max_loaded_models, default_model, |arg| {
+        named_model(arg, store)
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    })
+}
+
+/// A generation model named on the command line, under the name requests
+/// will use for it (see `launch_companion_name`), and its GGUF. An Ollama
+/// tag (`qwen3:8b`) is taken as the store name it stands for.
+fn named_model(arg: &str, store: &ModelStore) -> Option<api::NamedModel> {
+    let normalized = arg.replace(':', "-");
+    let (arg, path) = resolve_model_path(arg, store)
+        .map(|path| (arg, path))
+        .or_else(|| resolve_model_path(&normalized, store).map(|path| (normalized.as_str(), path)))?;
+    Some(api::NamedModel {
+        name: launch_companion_name(arg, &path),
+        path,
+    })
+}
+
 /// The name a request would use to ask for a model loaded at launch by
-/// `--embedding-model` or `--decision-model`: what was typed for a store
-/// name, the file name for a path.
+/// `--embedding-model` or `--decision-model`, or named by `--default-model`:
+/// what was typed for a store name, the file name for a path.
 ///
 /// The embedder used to take its file name in both cases. A stored model is
 /// asked for by its store name, as `eullm list` shows it, and its file is
@@ -1956,6 +2004,26 @@ mod launch_companion_name_tests {
             launch_companion_name("Qwen3-Embedding-0.6B-Q8_0.gguf", path),
             "Qwen3-Embedding-0.6B-Q8_0"
         );
+    }
+
+    /// A model named on the command line goes by its store name, an Ollama
+    /// tag of it included, or by its file's stem; one not there is none.
+    #[test]
+    fn a_named_model_is_found_under_the_name_requests_use() {
+        let dir = std::env::temp_dir().join(format!("eullm-named-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("qwen3-8b")).unwrap();
+        let weights = dir.join("qwen3-8b").join("Qwen3-8B-Q4_K_M.gguf");
+        std::fs::write(&weights, b"GGUF").unwrap();
+        let store = super::ModelStore::at(dir.clone());
+        for arg in ["qwen3-8b", "qwen3:8b"] {
+            let named = super::named_model(arg, &store).expect(arg);
+            assert_eq!(named.name, "qwen3-8b", "{arg}");
+            assert_eq!(named.path, weights);
+        }
+        let by_path = super::named_model(weights.to_str().unwrap(), &store).expect("a path");
+        assert_eq!(by_path.name, "Qwen3-8B-Q4_K_M");
+        assert!(super::named_model("qwen3-14b", &store).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -4616,6 +4684,16 @@ mod cli_default_parity_tests {
                     "--max-loaded-models {refused} must be refused"
                 );
             }
+        }
+    }
+
+    /// `--default-model` is on both commands, and unset unless given.
+    #[test]
+    fn default_model_is_a_shared_flag_unset_by_default() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            assert_eq!(runtime_opts(sub).default_model, None);
+            let named = runtime_opts(&[sub, &["--default-model", "qwen3-8b"]].concat());
+            assert_eq!(named.default_model.as_deref(), Some("qwen3-8b"));
         }
     }
 

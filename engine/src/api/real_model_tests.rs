@@ -890,3 +890,36 @@ async fn real_model_every_resident_is_listed_with_its_own_expiry() {
         "{ids:?}"
     );
 }
+
+/// With `--default-model`, a request that names no model is answered by that
+/// model, loaded for it beside the others, and not by the one used last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_request_naming_no_model_goes_to_the_default_one() {
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        let path = state.store.gguf_path("tiny-b").expect("tiny-b in the store");
+        state.default_model = Some(super::NamedModel {
+            name: "tiny-b".into(),
+            path,
+        });
+    })
+    .await;
+    let (status, _) = server.generate(short("tiny-a")).await;
+    assert_eq!(status, 200);
+    let unnamed = json!({
+        "prompt": "Once upon a time", "stream": false, "options": { "num_predict": 8 },
+    });
+    let (status, lines) = server.generate(unnamed.clone()).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_finished(&lines);
+    assert_eq!(lines[0]["model"], "tiny-b", "not tiny-a, the one used last");
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
+    let kept = server.load_id("tiny-b").await;
+
+    // Loaded now: the same load answers.
+    let (status, lines) = server.generate(unnamed).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(lines[0]["model"], "tiny-b");
+    assert_eq!(server.load_id("tiny-b").await, kept);
+}

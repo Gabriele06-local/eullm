@@ -224,6 +224,13 @@ pub struct AppState {
     /// back to it.
     pub launch_model: Option<(String, PathBuf)>,
 
+    /// `--default-model`: the model a request that names none — no `model`
+    /// field, or an empty one — is answered by, loaded for it when it is not
+    /// loaded. `None`: the most recently used generation model answers, and
+    /// with none loaded the request is refused. Resolvable by its name or
+    /// path whatever `allow_model_paths` says, as the launch model is.
+    pub default_model: Option<NamedModel>,
+
     /// Second, independent model slot for text embeddings — see
     /// `ensure_embedding_model`. `None` until the first `/v1/embeddings` or
     /// `/api/embed` request names a model.
@@ -1530,19 +1537,26 @@ impl AppState {
     ///
     /// The launch path is always accepted regardless: `/api/tags` reports it as
     /// the loaded model's name, clients echo back what they were told, and
-    /// refusing our own answer would break `eullm run ./model.gguf`.
+    /// refusing our own answer would break `eullm run ./model.gguf`. So is
+    /// `--default-model`'s: it was named on the command line, not in a
+    /// request.
     fn resolve_model(&self, name: &str) -> Result<PathBuf, ModelError> {
         let path = PathBuf::from(name);
 
-        // 0. The model this process was launched with, by the name the API
-        //    advertises for it or by its literal path. Exact match on either —
-        //    never a stem or prefix comparison, which would turn this
-        //    allowance into a way to reach any similarly named file.
-        if let Some((launch_name, launch_path)) = &self.launch_model
-            && (name == launch_name.as_str() || &path == launch_path)
-            && launch_path.is_file()
-        {
-            return Ok(launch_path.clone());
+        // 0. The model this process was launched with, or the one
+        //    `--default-model` names, by the name the API uses for it or by
+        //    its literal path. Exact match on either — never a stem or prefix
+        //    comparison, which would turn this allowance into a way to reach
+        //    any similarly named file.
+        let named = self
+            .launch_model
+            .iter()
+            .map(|(name, path)| (name.as_str(), path))
+            .chain(self.default_model.iter().map(|m| (m.name.as_str(), &m.path)));
+        for (named, named_path) in named {
+            if (name == named || &path == named_path) && named_path.is_file() {
+                return Ok(named_path.clone());
+            }
         }
 
         if self.allow_model_paths {
@@ -1724,8 +1738,32 @@ mod residency_config_tests {
 
     #[test]
     fn the_residency_config_holds_at_least_one_model() {
-        assert_eq!(ResidencyConfig::from_flags(0).max_loaded_models, 1);
-        assert_eq!(ResidencyConfig::from_flags(4).max_loaded_models, 4);
+        let resolve = |n| ResidencyConfig::resolve(n, None, |_| None).expect("no default");
+        assert_eq!(resolve(0).max_loaded_models, 1);
+        assert_eq!(resolve(4).max_loaded_models, 4);
+        assert_eq!(resolve(4).default_model, None);
+    }
+
+    /// `--default-model` is resolved at startup: a model the server cannot
+    /// find stops it there, rather than failing every request naming none.
+    #[test]
+    fn the_default_model_is_resolved_at_startup() {
+        let lookup = |name: &str| {
+            (name == "qwen3-8b").then(|| NamedModel {
+                name: name.to_string(),
+                path: PathBuf::from("/store/qwen3-8b/Qwen3-8B-Q4_K_M.gguf"),
+            })
+        };
+        let config = ResidencyConfig::resolve(2, Some(" qwen3-8b "), lookup).expect("found");
+        assert_eq!(
+            config.default_model.map(|m| m.name).as_deref(),
+            Some("qwen3-8b")
+        );
+        let refused = ResidencyConfig::resolve(2, Some("qwen3-80b"), lookup).unwrap_err();
+        assert!(
+            refused.contains("--default-model 'qwen3-80b'") && refused.contains("eullm pull"),
+            "{refused}"
+        );
     }
 }
 
@@ -2254,20 +2292,54 @@ pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool 
     model_identity_key(loaded) == model_identity_key(normalized_request)
 }
 
-/// How generation models are kept resident: the user's flags, built once in
-/// `main.rs` and handed to `serve` whole.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How generation models are kept resident and which one answers a request
+/// that names none: the user's flags, resolved once in `main.rs` and handed
+/// to `serve` whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidencyConfig {
     /// `--max-loaded-models` (see `RuntimeOpts::max_loaded_models`).
     pub max_loaded_models: usize,
+    /// `--default-model`, resolved: the model a request that names none is
+    /// answered by (see `RuntimeOpts::default_model`).
+    pub default_model: Option<NamedModel>,
+}
+
+/// A model named on the command line, resolved when the server started:
+/// the name requests use for it, and its GGUF. The server loads it by that
+/// name, or that path, even when a request's `model` may not name a path
+/// (`EULLM_ALLOW_MODEL_PATHS`): whoever started the server named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedModel {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 impl ResidencyConfig {
-    /// From the flags as the command line gave them.
-    pub fn from_flags(max_loaded_models: usize) -> Self {
-        Self {
+    /// From the flags as the command line gave them. `lookup` resolves a
+    /// model named on the command line the way `--decision-model` is
+    /// resolved — a store name or a GGUF path — to the name requests will
+    /// use and its file. A `--default-model` it cannot resolve is an error:
+    /// the server would otherwise start, and fail every request that names
+    /// no model.
+    pub fn resolve(
+        max_loaded_models: usize,
+        default_model: Option<&str>,
+        lookup: impl Fn(&str) -> Option<NamedModel>,
+    ) -> Result<Self, String> {
+        let default_model = match default_model.map(str::trim) {
+            None => None,
+            Some(name) => Some(lookup(name).ok_or_else(|| {
+                format!(
+                    "--default-model '{name}' is not a model: give a GGUF path or a name \
+                     `eullm list` shows (a catalog model has to be pulled first: eullm pull \
+                     {name})"
+                )
+            })?),
+        };
+        Ok(Self {
             max_loaded_models: max_loaded_models.max(1),
-        }
+            default_model,
+        })
     }
 }
 
@@ -2358,7 +2430,7 @@ pub struct ServeConfig {
     pub launch_decision: Option<DecisionSlot>,
     /// `--decision-ctx`: see `AppState::decision_ctx`.
     pub decision_ctx: u32,
-    /// `--max-loaded-models`, as the user gave it.
+    /// `--max-loaded-models` and `--default-model`, as the user gave them.
     pub residency: ResidencyConfig,
     /// How many layers the launch model actually put on the GPU, after its
     /// own sizing: reported by `/api/ps`, and nothing else. Never a setting
@@ -2520,6 +2592,17 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         "Generation models kept resident: up to {max_loaded_models} (--max-loaded-models)"
     );
+    match &cfg.residency.default_model {
+        Some(model) => tracing::info!(
+            "A request that names no model is answered by {} ({}; --default-model)",
+            model.name,
+            model.path.display()
+        ),
+        None => tracing::info!(
+            "A request that names no model is answered by the most recently used generation \
+             model (no --default-model)"
+        ),
+    }
     if max_loaded_models > 1 && (!cfg.fit || crate::fit::vram_bytes().is_none()) {
         tracing::warn!(
             "--max-loaded-models {max_loaded_models}: generation models are kept up to the \
@@ -2620,6 +2703,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         web_policy,
         allow_model_paths,
         launch_model: cfg.launch_model,
+        default_model: cfg.residency.default_model,
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
@@ -2768,6 +2852,7 @@ impl AppState {
             web_policy: crate::tools::guard::WebPolicy::from_env(),
             allow_model_paths: false,
             launch_model: None,
+            default_model: None,
             embedding: tokio::sync::RwLock::new(None),
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
@@ -4068,6 +4153,52 @@ mod http_tests {
         .await;
         assert_eq!(status, 503);
         assert!(body.contains("No model loaded"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// With `--default-model`, a request that names no model — or names it
+    /// empty — goes to that model, on every endpoint: here a fixture whose
+    /// weights are not a GGUF, so the load fails with a 500 that names it,
+    /// where without the flag the answer is the 503 above. Unloading with
+    /// an empty request and `keep_alive: 0` names it too.
+    #[tokio::test]
+    async fn a_request_that_names_no_model_goes_to_the_default_model() {
+        let tmp = std::env::temp_dir().join(format!("eullm-default-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let path = store.gguf_path("a-pulled-model").expect("the fixture");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state.default_model = Some(NamedModel {
+            name: "a-pulled-model".into(),
+            path,
+        });
+        let base = spawn_state(state).await;
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        for (endpoint, body) in [
+            ("/api/generate", serde_json::json!({ "prompt": "hi" })),
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "", "prompt": "hi" }),
+            ),
+            ("/api/chat", serde_json::json!({ "messages": hi })),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": " ", "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body.clone()).await;
+            assert_eq!(status, 500, "{endpoint} {body}: {text}");
+            assert!(text.contains("a-pulled-model"), "{endpoint}: {text}");
+        }
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(answer["done_reason"], "unload");
+        assert_eq!(answer["model"], "a-pulled-model");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
