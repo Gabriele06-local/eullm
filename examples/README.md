@@ -1,20 +1,23 @@
 # examples/
 
-Small programs that use EuLLM the way an application would. Python, standard
-library only: copy one and change it.
+Small programs that use EuLLM the way an application would: copy one and
+change it. The Python ones need only the standard library, except
+`decision-langgraph/`, which is about LangGraph; `decision-n8n/` is an n8n
+workflow.
 
 ## Decisions with `/v1/systemone`
 
-Both examples ask a decision model typed questions and act on the
-probabilities it answers with — nothing is generated. Start the server with a
-decision model first; a Jev-Style model is the one trained for this:
+The examples ask a decision model typed questions and act on the
+probabilities it answers with — a decision generates nothing. Start the
+server with a decision model first; a Jev-Style model is the one trained for
+this:
 
 ```bash
 eullm pull hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M
 eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
 ```
 
-`--url` points either script at another server, and `--api-key` (or
+`--url` points any of the scripts at another server, and `--api-key` (or
 `EULLM_API_KEY`) sends a key when the server requires one.
 
 ### `decision-snake/` — a model plays Snake
@@ -159,3 +162,30 @@ your own organisation:
 
 Nothing leaves the server, and every decision is in its audit trail, the email
 itself only as a SHA-256.
+
+### Reflex in an orchestrator: `decision-langgraph/` and `decision-n8n/`
+
+EuLLM does not orchestrate: LangGraph, n8n and code of your own already do.
+These two show an orchestrator calling `/v1/systemone` for the decisions it
+routes on, with a chat model on the same EuLLM doing the writing.
+
+- [`decision-langgraph/`](decision-langgraph/README.md) — two LangGraph
+  graphs. Support triage: Reflex picks the team, whether the customer is
+  blocked and whether a person must handle the ticket, a conditional edge
+  routes on the probabilities, the team's node drafts the reply, and a ticket
+  the model is unsure of waits for a person. A RAG loop: Reflex judges
+  whether the passages retrieved can answer the question, and the graph
+  answers from them, retrieves more, or abstains without generating
+  anything. `pip install -r examples/decision-langgraph/requirements.txt`.
+
+  ```bash
+  eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m \
+              --embedding-model qwen3-embedding-0.6b-gguf-q8_0
+  python examples/decision-langgraph/triage_graph.py --chat-model qwen3-8b
+  python examples/decision-langgraph/rag_graph.py --chat-model qwen3-8b
+  ```
+
+- [`decision-n8n/`](decision-n8n/README.md) — the same triage as an n8n
+  workflow to import: Webhook → HTTP Request to `/v1/systemone`, the API key
+  as a header credential → Switch on the decision → one branch per team and
+  one for a person.

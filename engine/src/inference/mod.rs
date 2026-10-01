@@ -65,6 +65,19 @@ pub fn init_shared_backend()
     Ok(std::sync::Arc::new(backend))
 }
 
+/// The one backend every test in this binary shares, for the reason
+/// [`init_shared_backend`] gives: a second `init()` fails while the first
+/// backend is alive, and a backend a test dropped can still be held by a
+/// model thread that has not exited yet. One per module was not enough once
+/// tests of several modules ran in one process (`--ignored real_model_`).
+#[cfg(test)]
+pub(crate) fn test_backend() -> std::sync::Arc<LlamaBackend> {
+    static BACKEND: std::sync::OnceLock<std::sync::Arc<LlamaBackend>> = std::sync::OnceLock::new();
+    BACKEND
+        .get_or_init(|| init_shared_backend().expect("llama backend init"))
+        .clone()
+}
+
 /// Report the binary's GPU capability and return the layer count that may
 /// actually be handed to llama.cpp.
 ///
@@ -806,7 +819,7 @@ pub fn cache_type_name(t: KvCacheType) -> &'static str {
 /// stock llama.cpp: the SWA bypass to f16 has not yet been merged upstream.
 /// Auto-correct all non-f16 KV to f16/f16 for Gemma 4.
 ///
-/// Applied to every model load path (CLI `run`, and `swap_model` for both
+/// Applied to every model load path (CLI `run`, and `load_generation_model` for both
 /// `run`'s later swaps and any `serve` swap) so the correction can't be
 /// bypassed by the entry point — a request-driven swap on `serve` hits the
 /// same architecture constraint as a CLI launch.

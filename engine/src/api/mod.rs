@@ -7,15 +7,19 @@
 //! - **Sequential** (`InferenceEngine`): one request at a time.
 //! - **Continuous batching** (`SchedulerHandle`): multiple concurrent requests.
 //!
-//! Supports **dynamic model swapping**: when a request specifies a different
-//! model name, the server automatically unloads the current model and loads
-//! the new one.  In-flight requests on the old model complete normally.
+//! Supports **dynamic model swapping**: when a request specifies a model that
+//! is not loaded, the server unloads the current model and loads the new one.
+//! Requests the old model was still answering are cut off with an error, as
+//! they always were; the residents are kept in `resident::ResidentModels`.
 
 mod auth;
 mod decision_policy;
 mod decision_traces;
 mod ip_allowlist;
 mod origin;
+#[cfg(test)]
+mod real_model_tests;
+mod resident;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
 // reuses `routes::sequential_to_channel` so that a model without a scheduler
 // (multimodal forces `batch_size = 0`) streams through exactly the same code
@@ -42,18 +46,7 @@ use crate::inference::{
 };
 use crate::models::ModelStore;
 
-/// The currently loaded model — swapped atomically when a different model
-/// is requested via the API.
-pub struct ModelSlot {
-    /// Currently loaded model name (if any).
-    pub model_name: Option<String>,
-    /// Sequential inference engine (fallback, one request at a time).
-    pub engine: Option<Arc<InferenceEngine>>,
-    /// Continuous batching scheduler (preferred when available).
-    pub scheduler: Option<SchedulerHandle>,
-}
-
-/// The embedding slot — independent of `ModelSlot` on purpose. See
+/// The embedding slot — independent of the generation models on purpose. See
 /// `AppState::ensure_embedding_model` for why this coexists with the
 /// generation model rather than sharing its slot.
 pub struct EmbeddingSlot {
@@ -63,7 +56,7 @@ pub struct EmbeddingSlot {
     /// (`true`) or loaded ad hoc by a runtime `/api/embed`/`/v1/embeddings`
     /// request (`false`). The distinction is what `--embedding-model` is
     /// *for*: a reserved companion is never evicted just because the
-    /// generation model is being swapped (`swap_model`'s own `--fit`
+    /// generation model is being swapped (`load_generation_model`'s own `--fit`
     /// reserves its footprint instead, so it keeps its place), where an ad
     /// hoc embedder has no such guarantee and is evicted on any generation
     /// swap that needs the room back (`evict_embedding_if_present_for_generation_load`).
@@ -92,18 +85,39 @@ pub struct DecisionSlot {
 pub struct AppState {
     /// The one `LlamaBackend` this process created (see
     /// `inference::init_shared_backend`), shared by every model load —
-    /// the launch model, every later `swap_model`, and every embedding
+    /// the launch model, every later `load_generation_model`, and every embedding
     /// model. `LlamaBackend::init()` is a process-wide one-time marker;
     /// a second independent instance fails with `BackendAlreadyInitialized`
     /// while the first is still alive, so this must be the same `Arc` the
     /// launch model itself loaded with, not a fresh one.
     pub backend: Arc<LlamaBackend>,
-    /// Mutable model slot — protected by RwLock for concurrent reads,
-    /// exclusive writes during model swap.
-    pub slot: tokio::sync::RwLock<ModelSlot>,
-    /// Serializes model swaps — prevents multiple concurrent requests
-    /// from triggering parallel swaps (which would OOM the GPU).
+    /// The generation models in memory. A request takes the read guard just
+    /// long enough to find its model and take a lease on it; the write guard
+    /// is taken only to install a model or take one out, never across a load
+    /// or a scheduler's shutdown.
+    pub(crate) models: tokio::sync::RwLock<resident::ResidentModels>,
+    /// Serializes loads and unloads of every slot — generation, embedding
+    /// and decision — so that two loads never size themselves against the
+    /// same free VRAM. Taken before any other lock here, never after one:
+    /// `swap_lock` → `models` → `embedding`/`decision`. A load waiting for a
+    /// busy model to finish lets go of it meanwhile.
     swap_lock: tokio::sync::Mutex<()>,
+    /// `--max-loaded-models`: how many generation models may be resident at
+    /// once. At 1, the default, a request for another model replaces the
+    /// resident one, as every release before the flag did.
+    pub max_loaded_models: usize,
+    /// How long a load waits for a busy resident to finish before it gives
+    /// up with a 503: `BUSY_EVICTION_WAIT`, shorter in tests.
+    busy_wait: std::time::Duration,
+    /// How many generation models were unloaded to make room for another
+    /// one (`/api/version`'s `generation_evictions`). With one model at a
+    /// time that is every swap; with several, a steady rate of one per
+    /// request means the models asked for do not fit together.
+    pub generation_evictions: std::sync::atomic::AtomicU64,
+    /// Holds every generation load just before it starts, until the test
+    /// lets it go — to prove what a request does while a load is running.
+    #[cfg(test)]
+    load_gate: Option<Arc<LoadGate>>,
 
     // ── Immutable inference settings (from CLI flags) ────────────────
     pub gpu_layers: i32,
@@ -240,14 +254,20 @@ pub struct AppState {
     /// visible over time rather than only as an unexplained slowdown.
     pub cross_slot_evictions: std::sync::atomic::AtomicU64,
 
-    /// Idle-unload deadline for the main slot — `None` means no timer is
-    /// running (slot empty, or the model that loaded it asked to be kept
+    /// Woken when the last request on a generation model finishes, so the
+    /// idle-unload loop acts on `keep_alive: 0` as soon as the request is
+    /// over instead of at its next tick. Each generation model's own
+    /// deadline lives in its `resident::Usage`, set when its requests end.
+    idle: Arc<tokio::sync::Notify>,
+    /// How often the idle-unload loop looks for an expired keep_alive: 30 s,
+    /// shorter in tests.
+    idle_tick: std::time::Duration,
+    /// Idle-unload deadline for the embedding slot — `None` means no timer
+    /// is running (slot empty, or the model that loaded it asked to be kept
     /// forever). Reset on every request that touches the slot; checked by
     /// the background task spawned in `serve()`. See `KeepAlive`.
-    main_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    /// Same as `main_deadline`, for the embedding slot.
     embedding_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    /// Same as `main_deadline`, for the decision slot.
+    /// Same as `embedding_deadline`, for the decision slot.
     decision_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     /// Applied when a request does not set its own `keep_alive` field —
     /// see `RuntimeOpts`/`ServeConfig::keep_alive`. `None` disables the
@@ -270,12 +290,16 @@ pub enum ModelError {
     /// The model exists but could not be loaded: out of VRAM, corrupt GGUF,
     /// a context that will not allocate. The caller should get a 500.
     LoadFailed(String),
+    /// Loading the model needs room only a resident model still answering
+    /// requests can give, and none finished in time. The caller should get a
+    /// 503 with `Retry-After`: the same request can succeed in a moment.
+    Busy(String),
 }
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::LoadFailed(m) => f.write_str(m),
+            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) => f.write_str(m),
         }
     }
 }
@@ -288,47 +312,54 @@ impl From<String> for ModelError {
 }
 
 impl AppState {
-    /// Swap the currently loaded model.  Drops the old engine/scheduler
-    /// (in-flight requests on cloned handles still complete) and loads
-    /// the new model with the same inference settings.
+    /// Load a generation model that is not resident, making room for it
+    /// first (see `make_room`). The new model loads with the same inference
+    /// settings as every other.
     ///
     /// `override_batch_size` allows the caller to change the number of
     /// concurrent batch slots for the new model (e.g. more slots for a
     /// smaller model that uses less VRAM).  Pass `None` to keep the
     /// batch size from the CLI launch.
     ///
-    /// This is the **write** path — only one swap can run at a time.
-    pub async fn swap_model(
+    /// Returns the model with a lease on it for the request that asked,
+    /// taken under the same guard that found or installed it, so the request
+    /// is answered by the model it named even when another load follows
+    /// straight after. `keep_alive` is that request's.
+    ///
+    /// This is the **write** path — only one load runs at a time, and a load
+    /// that waits for a busy model to finish lets go of the lock meanwhile.
+    pub(crate) async fn load_generation_model(
         &self,
         name: &str,
         override_batch_size: Option<usize>,
         override_ctx_size: Option<u32>,
-    ) -> Result<(), ModelError> {
-        // Serialize swaps — if another request is already swapping,
-        // wait for it to finish instead of starting a parallel swap.
-        let _swap_guard = self.swap_lock.lock().await;
+        keep_alive: KeepAlive,
+    ) -> Result<resident::SlotSnapshot, ModelError> {
+        // Serialize loads — if another request is already loading, wait for
+        // it to finish instead of starting a parallel load.
+        let mut swap_guard = Some(self.swap_lock.lock().await);
 
         // Normalize Ollama-style names: "qwen3:14b" → "qwen3-14b"
         let normalized = normalize_model_name(name);
 
-        // Re-check after acquiring the lock — another thread may have
-        // already completed the swap while we were waiting.
-        {
-            let slot = self.slot.read().await;
-            if let Some(ref loaded) = slot.model_name {
-                let loaded_stem = model_identity_key(loaded);
-                let req_stem = model_identity_key(&normalized);
-                if loaded_stem == req_stem {
-                    tracing::info!(
-                        "Model {} already loaded (swapped by another request)",
-                        crate::audit::sanitize_for_log(&normalized)
-                    );
-                    return Ok(());
-                }
-            }
+        // Re-check after acquiring the lock — another request may have
+        // loaded it while this one waited.
+        if let Some(snapshot) = self.lease_loaded(&normalized, None, keep_alive).await {
+            return Ok(snapshot);
         }
 
+        // Resolved before anything is unloaded, so that a name that does not
+        // exist is a 404 that costs nobody their model.
         let gguf_path = self.resolve_model(&normalized)?;
+        // The same file under another of its names — a store name for a model
+        // launched by its path, or another name `eullm pull` linked to the
+        // same weights: loading it again would hold it twice.
+        if let Some(snapshot) = self
+            .lease_loaded(&normalized, Some(&gguf_path), keep_alive)
+            .await
+        {
+            return Ok(snapshot);
+        }
         // Resolve an mmproj sibling (vision projector) if the model store
         // declares one. Presence of a projector is the signal that this is
         // a multimodal model — we then force sequential loading (next step)
@@ -356,29 +387,11 @@ impl AppState {
             tracing::info!("Multimodal model detected — mmproj: {}", p.display());
         }
         tracing::info!(
-            "Swapping model → {} ({})",
+            "Loading model → {} ({})",
             crate::audit::sanitize_for_log(&normalized),
             gguf_path.display()
         );
 
-        // ── 1. Unload the current model and WAIT for the scheduler
-        //       thread to fully exit before loading the new model.
-        //
-        // Without this, both old and new LlamaBackend instances would
-        // coexist, and both models would be in VRAM simultaneously —
-        // causing OOM or a C-level crash in llama.cpp.
-        self.unload_current().await?;
-        tracing::info!("Previous model fully unloaded");
-
-        // An embedder left resident from an earlier ingestion run would
-        // otherwise shrink the free VRAM `--fit` measures below, sizing this
-        // load as if the card were smaller than it actually is once the
-        // embedder itself is later evicted by `ensure_embedding_model`. See
-        // `evict_embedding_if_present_for_generation_load`.
-        self.evict_embedding_if_present_for_generation_load().await;
-        self.evict_decision_if_present_for_generation_load().await;
-
-        // ── 2. Load the new model ───────────────────────────────────
         // Gemma 4 requires f16 KV cache regardless of the server's configured
         // baseline (mixed SWA architecture) — see
         // `inference::correct_kv_cache_for_model` for the rationale. This
@@ -398,280 +411,664 @@ impl AppState {
                 crate::audit::sanitize_for_log(&normalized)
             );
         }
-        // ── 2a. Size the offload for THIS model (--fit) ─────────────
+
+        // What sizing reads about the model, read once for every attempt.
         // The launch flags describe the launch model; whatever is being
-        // swapped in has its own size, layer count, and (possibly) expert
-        // layout. Runs after the unload above so the measured free VRAM is
-        // real. Never prompts — same decision order as the `run` startup
-        // flow: MoE auto-sizing first (always resolves), then the dense
-        // split, headless.
+        // loaded has its own size, layer count, and (possibly) expert
+        // layout.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
-        let mut gpu_layers = self.gpu_layers;
-        let mut cpu_moe = self.cpu_moe;
-        let mut n_cpu_moe = self.n_cpu_moe;
-        // The projector is loaded with the model, always, so sizing has to
-        // count it — see `fit::place_mmproj` for where it goes and why.
-        let mmproj_bytes = crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref());
-        let mut mmproj_placement = crate::fit::MmprojPlacement::from_flag(self.mmproj_offload);
-        if self.fit {
-            // Counted below as reserved; the context the decision model
-            // keeps between requests must not show up as used as well.
-            self.release_decision_context().await;
-            let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
-            let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
-            let mut reserve_bytes = self
-                .reserved_embedding_bytes()
-                .await
-                .saturating_add(self.reserved_decision_bytes().await);
-            if self.mmproj_offload.is_none() {
-                mmproj_placement = crate::fit::decide_mmproj_placement(
-                    &gguf_path,
-                    mmproj_bytes,
-                    effective_ctx,
-                    kv_bpe_k,
-                    kv_bpe_v,
-                    reserve_bytes,
-                );
+        let info = crate::fit::read_gguf_info(&gguf_path);
+        let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
+        let layout = match (&info, file_size) {
+            (Some(i), size) if self.fit && size > 0 => {
+                crate::fit::read_gguf_moe_layout(&gguf_path, size, i.n_layers)
             }
-            reserve_bytes = reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
-            let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
-                crate::fit::run_moe_fit(&gguf_path, effective_ctx, kv_bpe_k, kv_bpe_v, reserve_bytes)
-            } else {
-                crate::fit::MoeFitDecision::NotMoe
-            };
-            match moe_decision {
-                crate::fit::MoeFitDecision::Proceed { n_cpu_moe: computed } if computed > 0 => {
-                    tracing::info!(
-                        "--fit: MoE model — keeping expert tensors on CPU RAM for the \
-                         first {computed} layers so the rest fits in VRAM"
-                    );
-                    n_cpu_moe = computed;
-                    gpu_layers = -1;
-                }
-                crate::fit::MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
-                    tracing::info!(
-                        "--fit: MoE model — even with every expert tensor on CPU RAM the \
-                         rest doesn't fit fully; offloading a reduced layer split ({gl})"
-                    );
-                    cpu_moe = true;
-                    gpu_layers = gl;
-                }
-                _ => match crate::fit::run_fit_headless(
+            _ => None,
+        };
+        let sizing = Sizing {
+            info: info.as_ref(),
+            layout: layout.as_ref(),
+            file_size,
+            ctx_size: effective_ctx,
+            kv_bpe_k: crate::inference::cache_type_bytes_per_elem(&cache_type_k),
+            kv_bpe_v: crate::inference::cache_type_bytes_per_elem(&cache_type_v),
+            // The projector is loaded with the model, always, so sizing has
+            // to count it — see `fit::place_mmproj` for where it goes and why.
+            mmproj_bytes: crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref()),
+            flags: crate::fit::OffloadFlags {
+                gpu_layers: self.gpu_layers,
+                cpu_moe: self.cpu_moe,
+                n_cpu_moe: self.n_cpu_moe,
+                mmproj_offload: self.mmproj_offload,
+            },
+        };
+
+        let mut make_more_room = false;
+        loop {
+            // ── 1. Make room, and size the load for THIS model (--fit) ──
+            // Never prompts — same decision order as the `run` startup
+            // flow: projector placement, MoE auto-sizing (always resolves),
+            // then the dense split, headless — all in one `fit::plan_offload`.
+            let fits_now = make_more_room.then_some(false);
+            let plan = match self
+                .make_room(
+                    &mut swap_guard,
+                    &normalized,
                     &gguf_path,
+                    &sizing,
+                    fits_now,
+                    keep_alive,
+                )
+                .await?
+            {
+                Room::Loaded(snapshot) => return Ok(snapshot),
+                Room::Ready(plan) => plan,
+            };
+            if let Some(plan) = &plan {
+                plan.print_decision(file_size, self.fit_strict);
+                if self.fit_strict && plan.refused_by_strict() {
+                    return Err(ModelError::LoadFailed(format!(
+                        "--fit-strict: model '{normalized}' does not fully fit in the \
+                         currently free VRAM; not loading. Retry without --fit-strict \
+                         to allow a partial CPU/GPU split."
+                    )));
+                }
+                // A `--gpu-layers` given at startup is an upper bound for
+                // every model this server loads, not a count to apply blindly
+                // to a model it was never chosen for.
+                if plan.capped_from.is_some() {
+                    tracing::info!(
+                        "--gpu-layers {}: offloading {} layers for {}",
+                        self.gpu_layers,
+                        plan.gpu_layers,
+                        crate::audit::sanitize_for_log(&normalized)
+                    );
+                }
+            }
+            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
+                Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+                None => (
                     self.gpu_layers,
-                    effective_ctx,
-                    self.fit_strict,
-                    kv_bpe_k,
-                    kv_bpe_v,
-                    reserve_bytes,
-                ) {
-                    crate::fit::FitOutcome::Proceed(n) => gpu_layers = n,
-                    crate::fit::FitOutcome::Abort => {
-                        return Err(ModelError::LoadFailed(format!(
-                            "--fit-strict: model '{normalized}' does not fully fit in the \
-                             currently free VRAM; not loading. Retry without --fit-strict \
-                             to allow a partial CPU/GPU split."
-                        )));
-                    }
-                },
+                    self.cpu_moe,
+                    self.n_cpu_moe,
+                    crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
+                ),
+            };
+
+            // ── 2. Load the new model ───────────────────────────────
+            let config = InferenceConfig {
+                model_path: gguf_path.clone(),
+                gpu_layers,
+                context_size: effective_ctx,
+                threads: self.threads,
+                flash_attn: self.flash_attn,
+                n_batch: self.n_batch,
+                cache_type_k,
+                cache_type_v,
+                // Multimodal: when the model store declares an mmproj sibling
+                // we load it here so HTTP requests with `images` can route
+                // through `engine.generate_multimodal()`. Models without an
+                // mmproj keep the text-only fast path (None → no extra VRAM,
+                // no init cost).
+                mmproj_path: mmproj_path.clone(),
+                mmproj_on_gpu: mmproj_placement.on_gpu(),
+                cpu_moe,
+                n_cpu_moe,
+                rs_seq: self.rs_seq,
+            };
+            if mmproj_path.is_some() {
+                tracing::info!("{}", mmproj_placement.describe());
             }
 
-            // A `--gpu-layers` given at startup is an upper bound for every
-            // model this server loads, not a count to apply blindly to a
-            // model it was never chosen for.
-            let capped = crate::fit::apply_gpu_layers_ceiling(gpu_layers, self.gpu_layers);
-            if capped != gpu_layers {
-                tracing::info!(
-                    "--gpu-layers {}: offloading {capped} layers for {}",
-                    self.gpu_layers,
+            // The continuous-batching scheduler is text-only — it does not
+            // route mtmd chunks. For multimodal models we therefore force the
+            // sequential `InferenceEngine` (batch_size=0). Vision is
+            // interactive single-user anyway, so losing batching here is not
+            // a practical regression.
+            let batch_size = if mmproj_path.is_some() {
+                0
+            } else {
+                override_batch_size.unwrap_or(self.batch_size)
+            };
+            let ctx_checkpoints_for_swap = self.ctx_checkpoints;
+            let checkpoint_min_step_for_swap = self.checkpoint_min_step;
+            let rust_debug_for_swap = self.rust_debug;
+            // What the banner shows unless the sequential engine has to
+            // shrink it. The scheduler never shrinks: if its context does not
+            // fit, the whole load fails, so requested and actual are always
+            // the same there.
+            let requested_ctx_size = effective_ctx;
+            let backend_for_swap = self.backend.clone();
+
+            #[cfg(test)]
+            if let Some(gate) = &self.load_gate {
+                gate.arrived.notify_one();
+                gate.proceed.notified().await;
+            }
+            // Loads are serialized, so what free VRAM loses across this one
+            // is what this model holds: `/api/ps`'s `size_vram`.
+            let free_before = crate::fit::vram_bytes().map(|(free, _)| free);
+
+            let (new_engine, new_scheduler, ready_info, effective_ctx_size) =
+                tokio::task::spawn_blocking(move || {
+                    if batch_size > 0 {
+                        let sched_config = SchedulerConfig {
+                            max_batch_size: batch_size,
+                            queue_capacity: batch_size * 8,
+                            ctx_checkpoints: ctx_checkpoints_for_swap,
+                            checkpoint_min_step: checkpoint_min_step_for_swap,
+                            debug_logit_check: rust_debug_for_swap,
+                        };
+                        let sched = BatchScheduler::new(config, sched_config);
+                        match sched.start(backend_for_swap) {
+                            Ok((handle, model_info)) => {
+                                Ok((None, Some(handle), Some(model_info), requested_ctx_size))
+                            }
+                            Err(e) => Err(format!("Failed to start scheduler: {e}")),
+                        }
+                    } else {
+                        match InferenceEngine::load(config, backend_for_swap) {
+                            Ok(eng) => {
+                                // Read it here, on the blocking thread that
+                                // already owns the model, rather than after
+                                // the move into the slot: the estimate needs
+                                // the model's own metadata.
+                                let info = eng.ready_info();
+                                // May be smaller than `requested_ctx_size`:
+                                // `load()` shrinks it automatically when the
+                                // requested size does not fit, and the banner
+                                // has to say what actually loaded — `info`'s
+                                // KV estimate already reflects the shrunk
+                                // size, so showing the requested one here
+                                // would state a KV cost that belongs to a
+                                // different context than the one printed next
+                                // to it.
+                                let actual_ctx_size = eng.context_size();
+                                Ok((Some(Arc::new(eng)), None, Some(info), actual_ctx_size))
+                            }
+                            Err(e) => Err(format!("Failed to load model: {e}")),
+                        }
+                    }
+                })
+                .await
+                .map_err(|e| format!("Task join error: {e}"))??;
+
+            // A sequential engine shrinks its context, silently, when the one
+            // asked for does not fit. Beside other resident models that is
+            // the card being divided after all: give it back, make more room,
+            // and load once more. Alone, or the second time, the shrunk
+            // context is what there is, as it always was.
+            if self.fit
+                && !make_more_room
+                && effective_ctx_size < requested_ctx_size
+                && !self.models.read().await.is_empty()
+            {
+                tracing::warn!(
+                    "{}: its context had to shrink from {requested_ctx_size} to \
+                     {effective_ctx_size} tokens beside the other resident models — \
+                     making more room and loading it again",
                     crate::audit::sanitize_for_log(&normalized)
                 );
-                gpu_layers = capped;
+                drop(new_engine);
+                make_more_room = true;
+                continue;
             }
+
+            let size_vram = free_before
+                .zip(crate::fit::vram_bytes().map(|(free, _)| free))
+                .map(|(before, after)| before.saturating_sub(after));
+            let kv_bytes = ready_info.as_ref().map_or(0, |info| {
+                ((info.kv_k_mib + info.kv_v_mib) * 1024.0 * 1024.0) as u64
+            });
+            let projector_bytes = mmproj_path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map_or(0, |m| m.len());
+            let facts = resident::LoadFacts {
+                ctx_size: effective_ctx_size,
+                batch_size,
+                gpu_layers,
+                n_layers: sizing.info.map(|info| info.n_layers),
+                size_bytes: file_size
+                    .saturating_add(projector_bytes)
+                    .saturating_add(kv_bytes),
+                size_vram,
+                family: sizing.info.and_then(|info| info.architecture.clone()),
+            };
+
+            // ── 3. Install the new model among the residents ─────────
+            // A sequential engine creates its context per request, so the
+            // memory that context takes is free while it is idle; it is held
+            // back from everything sized next to it instead (F5).
+            let unallocated_reserve = match &new_engine {
+                Some(engine) if gpu_layers != 0 => crate::fit::context_reserve_bytes(
+                    sizing.info,
+                    engine.context_size(),
+                    sizing.kv_bpe_k,
+                    sizing.kv_bpe_v,
+                ),
+                _ => 0,
+            };
+            let snapshot = {
+                let mut models = self.models.write().await;
+                let mut model = resident::LoadedModel::new(
+                    normalized.clone(),
+                    gguf_path,
+                    new_engine,
+                    new_scheduler,
+                );
+                model.unallocated_reserve = unallocated_reserve;
+                model.facts = facts;
+                let model = models.insert(model);
+                self.lease(model, keep_alive)
+            };
+            drop(swap_guard);
+
+            tracing::info!(
+                "Model swap complete → {} (batch_size={batch_size})",
+                crate::audit::sanitize_for_log(&normalized)
+            );
+
+            // The diagnostic banner `run` prints at startup. `serve` starts
+            // with no model, so this is the only place it can be emitted — and
+            // until it was here, anyone driving the engine as a daemon never
+            // saw which backend actually initialised, how many layers were
+            // offloaded, or what the KV cache costs. That is the audience
+            // least able to guess and most likely to be filing a report. See
+            // `crate::banner`.
+            let info = ready_info.unwrap_or_default();
+            crate::banner::ModelBanner {
+                model_name: normalized
+                    .strip_prefix("eullm/")
+                    .unwrap_or(&normalized)
+                    .to_string(),
+                gpu_layers: self.gpu_layers,
+                cpu_moe: self.cpu_moe,
+                n_cpu_moe: self.n_cpu_moe,
+                rs_seq: self.rs_seq,
+                ctx_checkpoints: self.ctx_checkpoints,
+                checkpoint_min_step: self.checkpoint_min_step,
+                batch_size,
+                ctx_size: effective_ctx_size,
+                n_ctx_train: info.n_ctx_train,
+                flash_attn: self.flash_attn,
+                cache_type_k,
+                cache_type_v,
+                kv_k_mib: info.kv_k_mib,
+                kv_v_mib: info.kv_v_mib,
+                web: self.web_enabled,
+                threads: self.threads,
+                n_batch: self.n_batch,
+                rust_debug: self.rust_debug,
+            }
+            .print();
+
+            return Ok(snapshot);
         }
-
-        let config = InferenceConfig {
-            model_path: gguf_path,
-            gpu_layers,
-            context_size: effective_ctx,
-            threads: self.threads,
-            flash_attn: self.flash_attn,
-            n_batch: self.n_batch,
-            cache_type_k,
-            cache_type_v,
-            // Multimodal: when the model store declares an mmproj sibling we
-            // load it here so HTTP requests with `images` can route through
-            // `engine.generate_multimodal()`. Models without an mmproj keep
-            // the text-only fast path (None → no extra VRAM, no init cost).
-            mmproj_path: mmproj_path.clone(),
-            mmproj_on_gpu: mmproj_placement.on_gpu(),
-            cpu_moe,
-            n_cpu_moe,
-            rs_seq: self.rs_seq,
-        };
-        if mmproj_path.is_some() {
-            tracing::info!("{}", mmproj_placement.describe());
-        }
-
-        // The continuous-batching scheduler is text-only — it does not route
-        // mtmd chunks. For multimodal models we therefore force the sequential
-        // `InferenceEngine` (batch_size=0). Vision is interactive single-user
-        // anyway, so losing batching here is not a practical regression.
-        let batch_size = if mmproj_path.is_some() {
-            0
-        } else {
-            override_batch_size.unwrap_or(self.batch_size)
-        };
-        let model_name = normalized.clone();
-        let ctx_checkpoints_for_swap = self.ctx_checkpoints;
-        let checkpoint_min_step_for_swap = self.checkpoint_min_step;
-        let rust_debug_for_swap = self.rust_debug;
-        // What the banner shows unless the sequential engine has to shrink it.
-        // The scheduler never shrinks: if its context does not fit, the whole
-        // swap fails, so requested and actual are always the same there.
-        let requested_ctx_size = override_ctx_size.unwrap_or(self.ctx_size);
-        let backend_for_swap = self.backend.clone();
-
-        let (new_engine, new_scheduler, ready_info, effective_ctx_size) =
-            tokio::task::spawn_blocking(move || {
-                if batch_size > 0 {
-                    let sched_config = SchedulerConfig {
-                        max_batch_size: batch_size,
-                        queue_capacity: batch_size * 8,
-                        ctx_checkpoints: ctx_checkpoints_for_swap,
-                        checkpoint_min_step: checkpoint_min_step_for_swap,
-                        debug_logit_check: rust_debug_for_swap,
-                    };
-                    let sched = BatchScheduler::new(config, sched_config);
-                    match sched.start(backend_for_swap) {
-                        Ok((handle, model_info)) => {
-                            Ok((None, Some(handle), Some(model_info), requested_ctx_size))
-                        }
-                        Err(e) => Err(format!("Failed to start scheduler: {e}")),
-                    }
-                } else {
-                    match InferenceEngine::load(config, backend_for_swap) {
-                        Ok(eng) => {
-                            // Read it here, on the blocking thread that already
-                            // owns the model, rather than after the move into the
-                            // slot: the estimate needs the model's own metadata.
-                            let info = eng.ready_info();
-                            // May be smaller than `requested_ctx_size`: `load()`
-                            // shrinks it automatically when the requested size
-                            // does not fit, and the banner has to say what
-                            // actually loaded — `info`'s KV estimate already
-                            // reflects the shrunk size, so showing the
-                            // requested one here would state a KV cost that
-                            // belongs to a different context than the one
-                            // printed next to it.
-                            let actual_ctx_size = eng.context_size();
-                            Ok((Some(Arc::new(eng)), None, Some(info), actual_ctx_size))
-                        }
-                        Err(e) => Err(format!("Failed to load model: {e}")),
-                    }
-                }
-            })
-            .await
-            .map_err(|e| format!("Task join error: {e}"))??;
-
-        // ── 3. Install the new model in the slot ─────────────────────
-        {
-            let mut slot = self.slot.write().await;
-            slot.model_name = Some(model_name.clone());
-            slot.engine = new_engine;
-            slot.scheduler = new_scheduler;
-        }
-
-        tracing::info!(
-            "Model swap complete → {} (batch_size={batch_size})",
-            crate::audit::sanitize_for_log(&model_name)
-        );
-
-        // The diagnostic banner `run` prints at startup. `serve` starts with no
-        // model, so this is the only place it can be emitted — and until it was
-        // here, anyone driving the engine as a daemon never saw which backend
-        // actually initialised, how many layers were offloaded, or what the KV
-        // cache costs. That is the audience least able to guess and most likely
-        // to be filing a report. See `crate::banner`.
-        let info = ready_info.unwrap_or_default();
-        crate::banner::ModelBanner {
-            model_name: model_name
-                .strip_prefix("eullm/")
-                .unwrap_or(&model_name)
-                .to_string(),
-            gpu_layers: self.gpu_layers,
-            cpu_moe: self.cpu_moe,
-            n_cpu_moe: self.n_cpu_moe,
-            rs_seq: self.rs_seq,
-            ctx_checkpoints: self.ctx_checkpoints,
-            checkpoint_min_step: self.checkpoint_min_step,
-            batch_size,
-            ctx_size: effective_ctx_size,
-            n_ctx_train: info.n_ctx_train,
-            flash_attn: self.flash_attn,
-            cache_type_k,
-            cache_type_v,
-            kv_k_mib: info.kv_k_mib,
-            kv_v_mib: info.kv_v_mib,
-            web: self.web_enabled,
-            threads: self.threads,
-            n_batch: self.n_batch,
-            rust_debug: self.rust_debug,
-        }
-        .print();
-
-        Ok(())
     }
 
-    /// Unload the currently loaded model, freeing its VRAM, and leave the
-    /// slot empty. Unlike `swap_model`, this does not load a replacement —
-    /// a later request with a `model` field (or another `eullm run`) loads
-    /// a model again.
+    /// A resident's handles, with a lease on it for one request. Only with a
+    /// guard on the residents held — see `resident::Usage::lease`.
+    pub(crate) fn lease(
+        &self,
+        model: &resident::LoadedModel,
+        keep_alive: KeepAlive,
+    ) -> resident::SlotSnapshot {
+        resident::SlotSnapshot {
+            model_name: model.name.clone(),
+            engine: model.engine.clone(),
+            scheduler: model.scheduler.clone(),
+            lease: model
+                .usage
+                .lease(keep_alive, self.default_keep_alive, &self.idle),
+            load_duration: std::time::Duration::ZERO,
+        }
+    }
+
+    /// The resident `requested` names — or, given `path`, the one loaded
+    /// from that file under any name — with a lease on it, if it is loaded.
+    async fn lease_loaded(
+        &self,
+        requested: &str,
+        path: Option<&std::path::Path>,
+        keep_alive: KeepAlive,
+    ) -> Option<resident::SlotSnapshot> {
+        let models = self.models.read().await;
+        let model = match path {
+            None => models.find(requested)?,
+            Some(path) => models.find_file(path)?,
+        };
+        tracing::info!(
+            "Model {} already loaded (as {})",
+            crate::audit::sanitize_for_log(requested),
+            crate::audit::sanitize_for_log(&model.name)
+        );
+        Some(self.lease(model, keep_alive))
+    }
+
+    /// Make room for `incoming` among the residents, then size its load: the
+    /// steps `resident::next_step` gives, until it says load.
+    ///
+    /// Room is a place in the count (`--max-loaded-models`) and, under
+    /// `--fit`, VRAM: a model that would not fit whole beside the residents
+    /// makes one more of them go, until it does or is alone — when it is
+    /// sized as any model loaded by itself, partial split included. A busy
+    /// resident is unloaded mid-request only when one model is kept at a
+    /// time, as a swap always did; with several, the load waits for one to go
+    /// idle, up to `busy_wait`, with `swap_lock` released meanwhile, and
+    /// gives up with `ModelError::Busy`. Once the count is satisfied, ad-hoc
+    /// companions are evicted under `--fit` before sizing, as before.
+    ///
+    /// `fits_now` starts the planning: `Some(false)` makes one more resident
+    /// go before anything is sized.
+    async fn make_room<'a>(
+        &'a self,
+        swap_guard: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
+        incoming: &str,
+        path: &std::path::Path,
+        sizing: &Sizing<'_>,
+        mut fits_now: Option<bool>,
+        keep_alive: KeepAlive,
+    ) -> Result<Room, ModelError> {
+        let busy = if self.max_loaded_models <= 1 {
+            resident::BusyPolicy::Abort
+        } else {
+            resident::BusyPolicy::Wait
+        };
+        let give_up_at = std::time::Instant::now() + self.busy_wait;
+        let mut companions_evicted = false;
+        loop {
+            // Registered before the residents are read: a request that ends
+            // in between still wakes the wait below.
+            let mut went_idle = std::pin::pin!(self.idle.notified());
+            went_idle.as_mut().enable();
+            let views = self.models.read().await.views();
+            let now = std::time::Instant::now();
+            match resident::next_step(&views, self.max_loaded_models, busy, fits_now, now) {
+                resident::Step::Evict(i) => {
+                    let view = views[i];
+                    let removal = match busy {
+                        resident::BusyPolicy::Abort => Removal::Always,
+                        resident::BusyPolicy::Wait => Removal::IfIdle,
+                    };
+                    if let Some(name) = self.remove_generation(view.id, removal).await {
+                        self.generation_evictions
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let why = if resident::due(&view.usage, now) {
+                            "its keep_alive was over"
+                        } else if fits_now == Some(false) {
+                            "the new model would not fit whole beside it"
+                        } else if self.max_loaded_models <= 1 {
+                            "one generation model is kept at a time"
+                        } else {
+                            "the least recently used, with --max-loaded-models reached"
+                        };
+                        let state = if view.usage.in_flight > 0 {
+                            format!("answering {} request(s)", view.usage.in_flight)
+                        } else {
+                            format!(
+                                "idle for {} s",
+                                now.duration_since(view.usage.last_used).as_secs()
+                            )
+                        };
+                        tracing::info!(
+                            "Unloaded {} ({state}; {why}) to make room for {}",
+                            crate::audit::sanitize_for_log(&name),
+                            crate::audit::sanitize_for_log(incoming)
+                        );
+                    }
+                    fits_now = None;
+                }
+                resident::Step::WaitFor => {
+                    let remaining = give_up_at.saturating_duration_since(now);
+                    if remaining.is_zero() {
+                        return Err(ModelError::Busy(format!(
+                            "Loading '{incoming}' needs room that only a model still \
+                             answering requests can give, and none finished within {} s. \
+                             Retry shortly.",
+                            self.busy_wait.as_secs()
+                        )));
+                    }
+                    tracing::info!(
+                        "{}: every model that could make room is answering a request — \
+                         waiting up to {} s for one to finish",
+                        crate::audit::sanitize_for_log(incoming),
+                        remaining.as_secs()
+                    );
+                    // Embedding and decision loads are not held up meanwhile.
+                    swap_guard.take();
+                    let _ = tokio::time::timeout(remaining, went_idle).await;
+                    *swap_guard = Some(self.swap_lock.lock().await);
+                    // Loaded by another request in the meantime?
+                    if let Some(snapshot) =
+                        self.lease_loaded(incoming, Some(path), keep_alive).await
+                    {
+                        return Ok(Room::Loaded(snapshot));
+                    }
+                    fits_now = None;
+                }
+                resident::Step::Load => {
+                    // An embedder left resident from an earlier ingestion run
+                    // would otherwise shrink the free VRAM `--fit` measures
+                    // below, sizing this load as if the card were smaller
+                    // than it actually is once the embedder itself is later
+                    // evicted by `ensure_embedding_model`. See
+                    // `evict_embedding_if_present_for_generation_load`.
+                    if !companions_evicted {
+                        self.evict_embedding_if_present_for_generation_load().await;
+                        self.evict_decision_if_present_for_generation_load().await;
+                        companions_evicted = true;
+                    }
+                    if !self.fit {
+                        return Ok(Room::Ready(None));
+                    }
+                    let plan = self.size_load(sizing).await;
+                    // A second model gets what the first one left: whole, or
+                    // not beside it — never a split it did not ask for.
+                    if plan.sized() && !plan.full && !self.models.read().await.is_empty() {
+                        tracing::info!(
+                            "{} would not fit whole beside the resident models — \
+                             making room",
+                            crate::audit::sanitize_for_log(incoming)
+                        );
+                        fits_now = Some(false);
+                        continue;
+                    }
+                    return Ok(Room::Ready(Some(plan)));
+                }
+            }
+        }
+    }
+
+    /// Size a load against the VRAM free right now (see `fit::plan_offload`),
+    /// less what the free figure does not show yet: the reserved companions'
+    /// requests, and the context every sequential resident creates per
+    /// request.
+    async fn size_load(&self, sizing: &Sizing<'_>) -> crate::fit::OffloadPlan {
+        // Counted below as reserved; the context the decision model keeps
+        // between requests must not show up as used as well.
+        self.release_decision_context().await;
+        let reserve_bytes = self
+            .reserved_embedding_bytes()
+            .await
+            .saturating_add(self.reserved_decision_bytes().await)
+            .saturating_add(self.models.read().await.unallocated_reserve());
+        crate::fit::plan_offload(
+            crate::fit::vram_bytes(),
+            sizing.info,
+            sizing.layout,
+            sizing.file_size,
+            sizing.ctx_size,
+            sizing.kv_bpe_k,
+            sizing.kv_bpe_v,
+            reserve_bytes,
+            sizing.mmproj_bytes,
+            sizing.flags,
+        )
+    }
+
+    /// Take the generation model `id` out of the residents — if `when` still
+    /// holds for it under their write guard, where no lease can be taken, so
+    /// that a request which took one in the meantime keeps its model — and
+    /// free its memory. Returns its name. Call with `swap_lock` held.
+    async fn remove_generation(&self, id: u64, when: Removal) -> Option<String> {
+        let model = {
+            let mut models = self.models.write().await;
+            let usage = models.get(id)?.usage.view();
+            let allowed = match when {
+                Removal::Always => true,
+                Removal::IfIdle => usage.in_flight == 0,
+                Removal::IfDue => resident::due(&usage, std::time::Instant::now()),
+            };
+            if !allowed {
+                return None;
+            }
+            models.remove(id)?
+        };
+        let name = model.name.clone();
+        retire(model).await;
+        Some(name)
+    }
+
+    /// Unload every generation model, freeing its VRAM, without loading a
+    /// replacement — a later request with a `model` field (or another
+    /// `eullm run`) loads one again. Requests still running on one are cut
+    /// off: an explicit unload means now.
     ///
     /// The primary use case is freeing VRAM for a co-resident process (e.g.
     /// an embedding model used during RAG document ingestion) without
-    /// restarting the eullm server. Serialized against `swap_model` via the
-    /// same lock, so an unload can't race a concurrent swap.
+    /// restarting the eullm server. Serialized against loads via the same
+    /// lock, so an unload can't race a concurrent load.
     ///
-    /// Returns the name of the model that was unloaded, or `None` if the
-    /// slot was already empty (a no-op, not an error).
-    pub async fn unload(&self) -> Result<Option<String>, String> {
+    /// Returns the names of the models unloaded, none if nothing was loaded
+    /// (a no-op, not an error).
+    pub(crate) async fn unload_all(&self) -> Vec<String> {
         let _swap_guard = self.swap_lock.lock().await;
-
-        let previous = {
-            let slot = self.slot.read().await;
-            slot.model_name.clone()
-        };
-        if previous.is_none() {
-            return Ok(None);
+        let unloaded = self.unload_generation_models().await;
+        if !unloaded.is_empty() {
+            tracing::info!("Generation models unloaded — none resident");
         }
-
-        self.unload_current().await?;
-        tracing::info!("Model unloaded — slot empty");
-        Ok(previous)
+        unloaded
     }
 
-    /// Shared unload step used by both `swap_model` and `unload`: take the
-    /// scheduler/engine out of the slot and wait for the scheduler's
-    /// dedicated OS thread to fully exit before returning, so the old
-    /// model's VRAM is guaranteed freed by the time this resolves — critical
-    /// both for swap (avoids two models coexisting in VRAM → OOM) and for a
-    /// standalone unload (the caller needs the VRAM actually free before
-    /// handing it to another process).
-    async fn unload_current(&self) -> Result<(), String> {
-        let old_scheduler = {
-            let mut slot = self.slot.write().await;
-            let sched = slot.scheduler.take();
-            slot.engine = None;
-            slot.model_name = None;
-            sched
+    /// Unload the generation model `requested` names, now — requests still
+    /// running on it are cut off, as with `unload_all` — and leave every
+    /// other resident alone. `None` when it was not loaded, under that name or
+    /// as the same file under another.
+    pub(crate) async fn unload_named(&self, requested: &str) -> Option<String> {
+        let _swap_guard = self.swap_lock.lock().await;
+        let id = self.resident_id(requested).await.ok().flatten()?;
+        let name = self.remove_generation(id, Removal::Always).await?;
+        tracing::info!(
+            "Generation model {} unloaded",
+            crate::audit::sanitize_for_log(&name)
+        );
+        Some(name)
+    }
+
+    /// `keep_alive: 0` on a request that asks for nothing else — Ollama's way
+    /// to unload one model: the model the request names, or the most recently
+    /// used one when it names none, goes without being loaded first. Idle, it
+    /// is unloaded before this returns; answering other requests, it goes
+    /// when they are over, as `keep_alive: 0` on any request does. Every other
+    /// resident stays.
+    ///
+    /// Returns its name, `None` when it was not loaded; a name that is no
+    /// model at all is `ModelError::NotFound`.
+    pub(crate) async fn expire_model(
+        &self,
+        requested: Option<&str>,
+    ) -> Result<Option<String>, ModelError> {
+        let id = match requested {
+            Some(name) => self.resident_id(name).await?,
+            None => self.models.read().await.most_recently_used().map(|m| m.id),
         };
-        if let Some(handle) = old_scheduler {
-            tokio::task::spawn_blocking(move || handle.shutdown())
-                .await
-                .map_err(|e| format!("Failed to join scheduler thread: {e}"))?;
+        let Some(id) = id else {
+            return Ok(None);
+        };
+        let name = {
+            let models = self.models.read().await;
+            let Some(model) = models.get(id) else {
+                return Ok(None);
+            };
+            // As a request that asked for keep_alive 0 and is now over.
+            drop(
+                model
+                    .usage
+                    .lease(KeepAlive::Immediate, self.default_keep_alive, &self.idle),
+            );
+            model.name.clone()
+        };
+        let _swap_guard = self.swap_lock.lock().await;
+        if self.remove_generation(id, Removal::IfDue).await.is_some() {
+            tracing::info!(
+                "keep_alive 0 — unloaded {}",
+                crate::audit::sanitize_for_log(&name)
+            );
         }
-        Ok(())
+        Ok(Some(name))
+    }
+
+    /// The resident `requested` names, by name or else as its file, or `None`
+    /// when it is not loaded. A name that is no model at all is
+    /// `ModelError::NotFound`; one the residents answer to is never looked up
+    /// on disk.
+    async fn resident_id(&self, requested: &str) -> Result<Option<u64>, ModelError> {
+        if let Some(model) = self.models.read().await.find(requested) {
+            return Ok(Some(model.id));
+        }
+        let path = self.resolve_model(&normalize_model_name(requested))?;
+        Ok(self.models.read().await.find_file(&path).map(|m| m.id))
+    }
+
+    /// Shared by `unload_all` and the companions that need the whole card:
+    /// take every generation model out and wait for each one's scheduler
+    /// thread to fully exit, so their VRAM is guaranteed freed by the time
+    /// this resolves — the caller needs the VRAM actually free before handing
+    /// it to another model or process. Call with `swap_lock` held.
+    async fn unload_generation_models(&self) -> Vec<String> {
+        let ids: Vec<u64> = self
+            .models
+            .read()
+            .await
+            .views()
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        let mut unloaded = Vec::new();
+        for id in ids {
+            unloaded.extend(self.remove_generation(id, Removal::Always).await);
+        }
+        unloaded
+    }
+
+    /// Unload every generation model that is due (`resident::due`): no
+    /// request is using it, and the keep_alive that applies — the last
+    /// request's to arrive — is 0, or ran out. Each is checked
+    /// again under the residents' write guard, where no lease can be taken,
+    /// so a request that arrived in the meantime keeps its model.
+    async fn unload_due_generation_models(&self) {
+        let now = std::time::Instant::now();
+        let due: Vec<resident::ResidentView> = self
+            .models
+            .read()
+            .await
+            .views()
+            .into_iter()
+            .filter(|r| resident::due(&r.usage, now))
+            .collect();
+        for model in due {
+            let _swap_guard = self.swap_lock.lock().await;
+            let Some(name) = self.remove_generation(model.id, Removal::IfDue).await else {
+                continue;
+            };
+            let name = crate::audit::sanitize_for_log(&name);
+            if model.usage.unload_when_idle {
+                tracing::info!("keep_alive 0 — unloading {name} now that its request is over");
+            } else {
+                tracing::info!("keep_alive expired — unloading idle generation model {name}");
+            }
+        }
     }
 
     /// Ensure the named embedding model is loaded, loading or swapping it in
@@ -735,19 +1132,25 @@ impl AppState {
         }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
 
-        let main_loaded = self.slot.read().await.model_name.is_some();
-        let fits_alongside =
-            fits_in_free_vram(weights_bytes, crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES)
-                .unwrap_or(true);
+        let (main_loaded, unallocated) = {
+            let models = self.models.read().await;
+            (!models.is_empty(), models.unallocated_reserve())
+        };
+        let fits_alongside = fits_in_free_vram(
+            weights_bytes,
+            crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES,
+            unallocated,
+        )
+        .unwrap_or(true);
         if main_loaded && !fits_alongside {
             tracing::info!(
                 "Embedding model {} does not fit alongside the loaded generation model — \
                  evicting it to make room (will reload on the next generation request)",
                 crate::audit::sanitize_for_log(&normalized)
             );
-            self.unload_current().await?;
+            let evicted = self.unload_generation_models().await;
             self.cross_slot_evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
 
         tracing::info!(
@@ -785,7 +1188,7 @@ impl AppState {
     }
 
     /// The mirror of the eviction inside `ensure_embedding_model`: called
-    /// from `swap_model` before sizing a generation load, so an embedder
+    /// from `load_generation_model` before sizing a generation load, so an embedder
     /// left resident from a prior ingestion run does not silently shrink
     /// the VRAM budget `--fit` sizes against. Cheap when nothing is loaded
     /// (`RwLock::read` + an `Option` check) and a no-op unless `--fit` is
@@ -799,7 +1202,7 @@ impl AppState {
     /// point of reserving its footprint up front is that it survives a
     /// later chat-model swap instead of being kicked out for one. Its
     /// footprint is subtracted from free VRAM by the caller
-    /// (`swap_model`'s `reserve_bytes`) instead of it being evicted.
+    /// (`load_generation_model`'s `reserve_bytes`) instead of it being evicted.
     async fn evict_embedding_if_present_for_generation_load(&self) {
         if !self.fit {
             return;
@@ -885,18 +1288,22 @@ impl AppState {
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
 
-        let main_loaded = self.slot.read().await.model_name.is_some();
+        let (main_loaded, unallocated) = {
+            let models = self.models.read().await;
+            (!models.is_empty(), models.unallocated_reserve())
+        };
         let fits_alongside =
-            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0).unwrap_or(true);
+            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0, unallocated)
+                .unwrap_or(true);
         if main_loaded && !fits_alongside {
             tracing::info!(
                 "Decision model {} does not fit alongside the loaded generation model — \
                  evicting it to make room (will reload on the next generation request)",
                 crate::audit::sanitize_for_log(&normalized)
             );
-            self.unload_current().await?;
+            let evicted = self.unload_generation_models().await;
             self.cross_slot_evictions
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
         }
 
         tracing::info!(
@@ -987,19 +1394,11 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    /// Reset the main slot's idle-unload deadline. Called on every request
-    /// that uses the main slot (after `ensure_model` in `routes.rs`), so an
-    /// active conversation is never unloaded out from under it. `Immediate`
-    /// unloads right away instead of scheduling a deadline — see
+    /// Reset the embedding slot's idle-unload deadline. Called on every
+    /// request that uses the slot, so an active ingestion run is never
+    /// unloaded out from under it. `Immediate` empties the slot right away:
+    /// the request holds its own `Arc` to the model and finishes on it. See
     /// `KeepAlive`.
-    pub async fn touch_main_slot(&self, keep_alive: KeepAlive) {
-        touch_deadline(&self.main_deadline, keep_alive, self.default_keep_alive);
-        if keep_alive == KeepAlive::Immediate {
-            let _ = self.unload().await;
-        }
-    }
-
-    /// Same as `touch_main_slot`, for the embedding slot.
     pub async fn touch_embedding_slot(&self, keep_alive: KeepAlive) {
         touch_deadline(
             &self.embedding_deadline,
@@ -1011,7 +1410,7 @@ impl AppState {
         }
     }
 
-    /// Same as `touch_main_slot`, for the decision slot.
+    /// Same as `touch_embedding_slot`, for the decision slot.
     pub async fn touch_decision_slot(&self, keep_alive: KeepAlive) {
         touch_deadline(&self.decision_deadline, keep_alive, self.default_keep_alive);
         if keep_alive == KeepAlive::Immediate {
@@ -1019,31 +1418,25 @@ impl AppState {
         }
     }
 
-    /// Background loop spawned once from `serve()`: every 30 seconds, unload
-    /// any slot whose idle deadline has passed. 30s is coarse on purpose
-    /// — this is a power-saving idle timer, not a latency-sensitive path,
-    /// and checking every request would mean taking the slot locks on
-    /// every single generation/embedding/decision call for a comparison
-    /// that is false almost all the time.
+    /// Background loop spawned once from `serve()`: unload whatever is due.
+    /// It looks every `idle_tick` (30 s), which is coarse on purpose — this
+    /// is a power-saving idle timer, not a latency-sensitive path, and
+    /// checking on every request would mean taking the slot locks on every
+    /// single call for a comparison that is false almost all the time — and
+    /// also whenever the generation model's last request finishes, so that
+    /// `keep_alive: 0` takes effect when the request is over rather than up
+    /// to 30 s later.
     async fn run_idle_unload_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            interval.tick().await;
+            // Registered before anything is checked: a request that ends
+            // while this pass runs wakes the next pass instead of being
+            // missed until the tick after.
+            let mut went_idle = std::pin::pin!(self.idle.notified());
+            went_idle.as_mut().enable();
+
+            self.unload_due_generation_models().await;
+
             let now = tokio::time::Instant::now();
-
-            let main_expired = {
-                let mut deadline = self.main_deadline.lock().await;
-                let expired = deadline.is_some_and(|d| now >= d);
-                if expired {
-                    *deadline = None;
-                }
-                expired
-            };
-            if main_expired {
-                tracing::info!("keep_alive expired — unloading idle generation model");
-                let _ = self.unload().await;
-            }
-
             let embedding_expired = {
                 let mut deadline = self.embedding_deadline.lock().await;
                 let expired = deadline.is_some_and(|d| now >= d);
@@ -1068,6 +1461,11 @@ impl AppState {
             if decision_expired {
                 tracing::info!("keep_alive expired — unloading idle decision model");
                 *self.decision.write().await = None;
+            }
+
+            tokio::select! {
+                () = went_idle.as_mut() => {}
+                () = tokio::time::sleep(self.idle_tick) => {}
             }
         }
     }
@@ -1168,6 +1566,82 @@ impl AppState {
     }
 }
 
+/// When `AppState::remove_generation` may take a model out.
+#[derive(Debug, Clone, Copy)]
+enum Removal {
+    /// Whatever it is doing: requests still running on it are cut off.
+    Always,
+    /// Only if no request is running on it.
+    IfIdle,
+    /// Only if it is still due — idle, and its keep_alive over.
+    IfDue,
+}
+
+/// What `AppState::make_room` ends with.
+enum Room {
+    /// Another request loaded the model while this one waited for room.
+    Loaded(resident::SlotSnapshot),
+    /// There is room, and this is the load's plan (`None` without `--fit`).
+    Ready(Option<crate::fit::OffloadPlan>),
+}
+
+/// What sizing a load reads about the model: once per load, however many
+/// times it is sized while room is made for it.
+struct Sizing<'a> {
+    info: Option<&'a crate::fit::GgufInfo>,
+    layout: Option<&'a crate::fit::MoeLayout>,
+    file_size: u64,
+    ctx_size: u32,
+    kv_bpe_k: f64,
+    kv_bpe_v: f64,
+    mmproj_bytes: u64,
+    flags: crate::fit::OffloadFlags,
+}
+
+/// Free a generation model taken out of the residents, so that its memory
+/// is free when this returns — the next load is sized against what is free.
+///
+/// A scheduler is stopped, and its thread joined on a blocking thread: the
+/// join waits for the decode loop to notice. A sequential engine has no
+/// thread to join; it is freed when the last `Arc` to it goes, and every
+/// request running on it holds one. Those are waited for (F4): taking it out
+/// of the residents used to be all, so the next load measured free VRAM with
+/// the old weights still in it.
+async fn retire(model: resident::LoadedModel) {
+    if let Some(handle) = model.scheduler
+        && let Err(e) = tokio::task::spawn_blocking(move || handle.shutdown()).await
+    {
+        tracing::warn!("Failed to join scheduler thread: {e}");
+    }
+    if let Some(engine) = model.engine {
+        let released = resident::wait_for_release(
+            &engine,
+            &model.usage,
+            ENGINE_RELEASE_LIMIT,
+            ENGINE_RELEASE_GRACE,
+        )
+        .await;
+        if !released {
+            tracing::warn!(
+                "{} is still held elsewhere — the terminal chat, or a request \
+                 whose client left before it finished; its memory is freed when \
+                 that ends",
+                crate::audit::sanitize_for_log(&model.name)
+            );
+        }
+    }
+}
+
+/// The longest a sequential engine's in-flight requests are waited for
+/// before its memory is given up on (see `retire`): a load waits behind it.
+const ENGINE_RELEASE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a sequential engine still held after its last request ended is
+/// waited for: the moment the blocking thread that ran the request takes to
+/// let go. A holder that outlasts it is not a request — `eullm run`'s
+/// terminal chat holds the launch model for as long as it runs.
+const ENGINE_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Find the first `.gguf` file in a directory.
 fn find_gguf_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(dir).ok()?;
@@ -1195,6 +1669,56 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
+    }
+}
+
+#[cfg(test)]
+mod residency_config_tests {
+    use super::*;
+
+    #[test]
+    fn ollamas_variable_gets_a_hint_and_is_never_read() {
+        assert_eq!(ollama_env_hint(None, true), None);
+        assert_eq!(ollama_env_hint(Some("  "), true), None);
+        let hint = ollama_env_hint(Some("3"), true).expect("a hint");
+        assert!(
+            hint.contains("OLLAMA_MAX_LOADED_MODELS=3") && hint.contains("--max-loaded-models")
+        );
+        let ignored = ollama_env_hint(Some("3"), false).expect("a hint");
+        assert!(ignored.contains("ignored"), "{ignored}");
+    }
+
+    #[test]
+    fn the_residency_config_holds_at_least_one_model() {
+        assert_eq!(ResidencyConfig::from_flags(0).max_loaded_models, 1);
+        assert_eq!(ResidencyConfig::from_flags(4).max_loaded_models, 4);
+    }
+}
+
+#[cfg(test)]
+mod fits_tests {
+    use super::fits_in;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    /// A sequential generation model creates its context per request, so
+    /// while it is idle that memory looks free. An embedder sized into it
+    /// left the next image request without room for its context (F5).
+    #[test]
+    fn a_sequential_resident_reserves_its_context_for_a_companion() {
+        // 16 GiB card, 8 GiB free; the floor keeps 12% of it back.
+        let card = (8 * GIB, 16 * GIB);
+        let embedder = 2 * GIB;
+        assert_eq!(fits_in(card, embedder, 256 * MIB, 0), Some(true));
+        let vision_model_context = 4 * GIB;
+        assert_eq!(
+            fits_in(card, embedder, 256 * MIB, vision_model_context),
+            Some(false)
+        );
+        // Saturating, not wrapping, when the reservations exceed what is free.
+        assert_eq!(fits_in(card, 0, 256 * MIB, 64 * GIB), Some(true));
+        assert_eq!(fits_in(card, 1, 256 * MIB, 64 * GIB), Some(false));
     }
 }
 
@@ -1240,12 +1764,34 @@ mod same_file_tests {
 /// decides what "unknown" means for it; `ensure_embedding_model` treats it as
 /// "assume yes" so a build that cannot measure VRAM behaves as it always has,
 /// letting a real allocation failure surface as a normal load error.
-fn fits_in_free_vram(additional_bytes: u64, compute_reserve_bytes: u64) -> Option<bool> {
-    let (free, total) = crate::fit::vram_bytes()?;
+///
+/// `unallocated_bytes` is memory the free figure shows but is already
+/// spoken for: the contexts sequential residents create per request (F5).
+fn fits_in_free_vram(
+    additional_bytes: u64,
+    compute_reserve_bytes: u64,
+    unallocated_bytes: u64,
+) -> Option<bool> {
+    fits_in(
+        crate::fit::vram_bytes()?,
+        additional_bytes,
+        compute_reserve_bytes,
+        unallocated_bytes,
+    )
+}
+
+/// [`fits_in_free_vram`] against a given `(free, total)`.
+fn fits_in(
+    (free, total): (u64, u64),
+    additional_bytes: u64,
+    compute_reserve_bytes: u64,
+    unallocated_bytes: u64,
+) -> Option<bool> {
     let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
     let usable = free
         .saturating_sub(floor)
-        .saturating_sub(compute_reserve_bytes);
+        .saturating_sub(compute_reserve_bytes)
+        .saturating_sub(unallocated_bytes);
     Some(additional_bytes <= usable)
 }
 
@@ -1271,6 +1817,18 @@ pub enum KeepAlive {
     /// A positive duration to keep the model resident, counted from the end
     /// of this request.
     For(std::time::Duration),
+}
+
+impl KeepAlive {
+    /// `Default` replaced by what it stands for: the server's `--keep-alive`
+    /// (`default`), or `Forever` when none was given. Every other value is
+    /// the request's own and is returned as it is.
+    pub(crate) fn resolve(self, default: Option<std::time::Duration>) -> KeepAlive {
+        match self {
+            KeepAlive::Default => default.map_or(KeepAlive::Forever, KeepAlive::For),
+            other => other,
+        }
+    }
 }
 
 /// Parse a request body's `keep_alive` field. Accepts what Ollama accepts:
@@ -1360,7 +1918,7 @@ fn parse_duration_string(s: &str) -> Option<f64> {
     }
 }
 
-/// Shared implementation behind `touch_main_slot`/`touch_embedding_slot`:
+/// Shared implementation behind `touch_embedding_slot`/`touch_decision_slot`:
 /// resolve `keep_alive` (falling back to `default` when it is `Default`)
 /// into a new deadline, or clear it for `Forever`/`Immediate` (the caller
 /// handles the actual unload for `Immediate`).
@@ -1369,12 +1927,11 @@ fn touch_deadline(
     keep_alive: KeepAlive,
     default: Option<std::time::Duration>,
 ) {
-    let resolved = match keep_alive {
-        KeepAlive::Default => default.map(KeepAlive::For).unwrap_or(KeepAlive::Forever),
-        other => other,
-    };
-    let new_deadline = match resolved {
-        KeepAlive::For(d) => Some(tokio::time::Instant::now() + d),
+    let new_deadline = match keep_alive.resolve(default) {
+        // `checked_add`: a duration a request may carry (up to ~584 billion
+        // years) overflows an `Instant`, and `+` panics on that. A deadline
+        // that far away is no deadline.
+        KeepAlive::For(d) => tokio::time::Instant::now().checked_add(d),
         KeepAlive::Forever | KeepAlive::Immediate | KeepAlive::Default => None,
     };
     // `try_lock`: this runs on the hot request path (once per request, to
@@ -1523,6 +2080,17 @@ mod keep_alive_tests {
         assert!(deadline.try_lock().unwrap().is_some());
     }
 
+    /// 1e19 seconds is a `Duration`, so it parses, and is not an `Instant`
+    /// away from now: adding it panicked the embedding and decision handlers.
+    #[test]
+    fn a_keep_alive_past_the_end_of_time_is_no_deadline_not_a_panic() {
+        let huge = parse_keep_alive(Some(&v("1e19")));
+        assert!(matches!(huge, KeepAlive::For(_)), "{huge:?}");
+        let deadline = tokio::sync::Mutex::new(None);
+        touch_deadline(&deadline, huge, None);
+        assert!(deadline.try_lock().unwrap().is_none());
+    }
+
     #[test]
     fn touch_deadline_forever_and_immediate_both_clear_any_running_timer() {
         let deadline = tokio::sync::Mutex::new(Some(tokio::time::Instant::now()));
@@ -1661,6 +2229,58 @@ pub(crate) fn model_identity_key(name: &str) -> String {
     base.to_ascii_lowercase()
 }
 
+/// Check if a loaded model name matches a requested name.
+///
+/// Handles the common case where the loaded model is a full path
+/// (e.g. `/models/qwen3-8b.gguf`) but the request uses a short name
+/// (e.g. `qwen3-8b` or `qwen3:8b`).
+pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool {
+    // Exact match.
+    if loaded == normalized_request {
+        return true;
+    }
+    // Otherwise compare identity keys: last path component, `.gguf` stripped,
+    // case-insensitive. See `model_identity_key` for why this is not
+    // `file_stem` — model names contain dots, and cutting at the last one
+    // made every quant of a repo look like the same model (#345).
+    model_identity_key(loaded) == model_identity_key(normalized_request)
+}
+
+/// How generation models are kept resident: the user's flags, built once in
+/// `main.rs` and handed to `serve` whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResidencyConfig {
+    /// `--max-loaded-models` (see `RuntimeOpts::max_loaded_models`).
+    pub max_loaded_models: usize,
+}
+
+impl ResidencyConfig {
+    /// From the flags as the command line gave them.
+    pub fn from_flags(max_loaded_models: usize) -> Self {
+        Self {
+            max_loaded_models: max_loaded_models.max(1),
+        }
+    }
+}
+
+/// The startup line for `OLLAMA_MAX_LOADED_MODELS`, when it is set: EuLLM
+/// does not read it. Ollama counts every model, embedders included, and takes
+/// it from the environment; here the number is a flag, model configuration
+/// rather than perimeter, and counts generation models only. `flag_default`:
+/// `--max-loaded-models` was left at its default.
+fn ollama_env_hint(env: Option<&str>, flag_default: bool) -> Option<String> {
+    let value = env.map(str::trim).filter(|v| !v.is_empty())?;
+    Some(if flag_default {
+        format!(
+            "OLLAMA_MAX_LOADED_MODELS={value} is set, but EuLLM does not read it: pass \
+             --max-loaded-models to keep several generation models resident (embedding \
+             and decision models are not counted)"
+        )
+    } else {
+        format!("OLLAMA_MAX_LOADED_MODELS={value} is set and ignored: --max-loaded-models decides")
+    })
+}
+
 /// Configuration for starting the API server.
 pub struct ServeConfig {
     /// The one `LlamaBackend` the process created at startup — see
@@ -1730,6 +2350,12 @@ pub struct ServeConfig {
     pub launch_decision: Option<DecisionSlot>,
     /// `--decision-ctx`: see `AppState::decision_ctx`.
     pub decision_ctx: u32,
+    /// `--max-loaded-models`, as the user gave it.
+    pub residency: ResidencyConfig,
+    /// How many layers the launch model actually put on the GPU, after its
+    /// own sizing: reported by `/api/ps`, and nothing else. Never a setting
+    /// for the next load — that is `gpu_layers`, the user's flag.
+    pub launch_gpu_layers: Option<i32>,
 }
 
 /// Start the API server on the given port with graceful shutdown support.
@@ -1882,16 +2508,85 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         ),
     }
 
+    let max_loaded_models = cfg.residency.max_loaded_models;
+    tracing::info!(
+        "Generation models kept resident: up to {max_loaded_models} (--max-loaded-models)"
+    );
+    if max_loaded_models > 1 && (!cfg.fit || crate::fit::vram_bytes().is_none()) {
+        tracing::warn!(
+            "--max-loaded-models {max_loaded_models}: generation models are kept up to the \
+             count only; whether they fit together is not checked ({})",
+            if cfg.fit {
+                "free VRAM cannot be read on this build"
+            } else {
+                "--no-fit"
+            }
+        );
+    }
+    if let Some(hint) = ollama_env_hint(
+        std::env::var("OLLAMA_MAX_LOADED_MODELS").ok().as_deref(),
+        max_loaded_models == 1,
+    ) {
+        tracing::warn!("{hint}");
+    }
+
+    // `eullm run`'s model, loaded before the server started, is the first
+    // resident; `serve` starts with none.
+    let mut models = resident::ResidentModels::default();
+    if let Some(name) = cfg.model_name
+        && (cfg.engine.is_some() || cfg.scheduler.is_some())
+    {
+        let path = cfg
+            .launch_model
+            .as_ref()
+            .map_or_else(|| PathBuf::from(&name), |(_, path)| path.clone());
+        // A sequential launch model reserves its per-request context like
+        // any other (see `LoadedModel::unallocated_reserve`).
+        let unallocated_reserve = match &cfg.engine {
+            Some(engine) if cfg.gpu_layers != 0 => crate::fit::context_reserve_bytes(
+                crate::fit::read_gguf_info(&path).as_ref(),
+                engine.context_size(),
+                crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_k),
+                crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_v),
+            ),
+            _ => 0,
+        };
+        let info = crate::fit::read_gguf_info(&path);
+        let file_size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let facts = resident::LoadFacts {
+            ctx_size: cfg
+                .engine
+                .as_ref()
+                .map_or(cfg.ctx_size, |engine| engine.context_size()),
+            batch_size: if cfg.scheduler.is_some() {
+                cfg.batch_size
+            } else {
+                0
+            },
+            gpu_layers: cfg.launch_gpu_layers.unwrap_or(cfg.gpu_layers),
+            n_layers: info.as_ref().map(|info| info.n_layers),
+            size_bytes: file_size,
+            size_vram: None,
+            family: info.and_then(|info| info.architecture),
+        };
+        let mut launch = resident::LoadedModel::new(name, path, cfg.engine, cfg.scheduler);
+        launch.launch = true;
+        launch.unallocated_reserve = unallocated_reserve;
+        launch.facts = facts;
+        models.insert(launch);
+    }
+
     let state = Arc::new(AppState {
         backend: cfg.backend,
         fallback_mmproj: cfg.mmproj.clone(),
         mmproj_offload: cfg.mmproj_offload,
-        slot: tokio::sync::RwLock::new(ModelSlot {
-            model_name: cfg.model_name,
-            engine: cfg.engine,
-            scheduler: cfg.scheduler,
-        }),
+        models: tokio::sync::RwLock::new(models),
         swap_lock: tokio::sync::Mutex::new(()),
+        max_loaded_models,
+        busy_wait: BUSY_EVICTION_WAIT,
+        generation_evictions: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(test)]
+        load_gate: None,
         gpu_layers: cfg.gpu_layers,
         fit: cfg.fit,
         fit_strict: cfg.fit_strict,
@@ -1923,7 +2618,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         decision_policy,
         decision_traces,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
-        main_deadline: tokio::sync::Mutex::new(None),
+        idle: Arc::new(tokio::sync::Notify::new()),
+        idle_tick: IDLE_TICK,
         embedding_deadline: tokio::sync::Mutex::new(None),
         decision_deadline: tokio::sync::Mutex::new(None),
         default_keep_alive: cfg.keep_alive,
@@ -2001,6 +2697,82 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Server shut down gracefully.");
     Ok(())
+}
+
+/// How often the idle-unload loop looks for an expired keep_alive — see
+/// `AppState::run_idle_unload_loop`.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a load waits for a busy resident model to finish its requests
+/// when it needs that model's room, before it answers 503: long enough for
+/// a long answer to end, short enough that a client is not left hanging.
+const BUSY_EVICTION_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Holds a generation load just before it starts (`AppState::load_gate`):
+/// `arrived` is notified when one gets there, and it goes on when `proceed`
+/// is.
+#[cfg(test)]
+pub(crate) struct LoadGate {
+    pub(crate) arrived: tokio::sync::Notify,
+    pub(crate) proceed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl AppState {
+    /// A server with nothing loaded, and every other field at a test's
+    /// starting value — named once, here, so that adding a field does not
+    /// break every test that builds a state. Perimeter settings take their
+    /// defaults: `.env` is read from a path that does not exist.
+    pub(crate) fn for_tests(store: ModelStore, api_keys: auth::ApiKeys) -> Self {
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        Self {
+            backend: crate::inference::test_backend(),
+            fallback_mmproj: None,
+            mmproj_offload: None,
+            models: tokio::sync::RwLock::new(resident::ResidentModels::default()),
+            swap_lock: tokio::sync::Mutex::new(()),
+            max_loaded_models: 1,
+            busy_wait: BUSY_EVICTION_WAIT,
+            generation_evictions: std::sync::atomic::AtomicU64::new(0),
+            load_gate: None,
+            gpu_layers: 0,
+            fit: false,
+            fit_strict: false,
+            ctx_size: 4096,
+            threads: 1,
+            flash_attn: false,
+            n_batch: 512,
+            cache_type_k: crate::inference::KvCacheType::F16,
+            cache_type_v: crate::inference::KvCacheType::F16,
+            batch_size: 1,
+            cpu_moe: false,
+            n_cpu_moe: 0,
+            rs_seq: 0,
+            ctx_checkpoints: 0,
+            checkpoint_min_step: 8192,
+            rust_debug: false,
+            web_enabled: false,
+            api_port: 0,
+            store,
+            ip_allowlist: ip_allowlist::IpAllowlist::load(absent),
+            api_keys: Arc::new(api_keys),
+            allowed_origins: origin::AllowedOrigins::load(absent),
+            web_policy: crate::tools::guard::WebPolicy::from_env(),
+            allow_model_paths: false,
+            launch_model: None,
+            embedding: tokio::sync::RwLock::new(None),
+            decision: tokio::sync::RwLock::new(None),
+            decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
+            decision_policy: decision_policy::DecisionPolicy::none(),
+            decision_traces: None,
+            cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
+            idle: Arc::new(tokio::sync::Notify::new()),
+            idle_tick: IDLE_TICK,
+            embedding_deadline: tokio::sync::Mutex::new(None),
+            decision_deadline: tokio::sync::Mutex::new(None),
+            default_keep_alive: None,
+        }
+    }
 }
 
 /// Wait for a shutdown signal (SIGTERM, SIGINT, or Ctrl+C).
@@ -2376,21 +3148,6 @@ mod http_tests {
         ModelStore::at(dir.to_path_buf())
     }
 
-    /// The one `LlamaBackend` shared by every `spawn()` call in this test
-    /// binary. `LlamaBackend::init()` marks a process-wide `AtomicBool` and
-    /// fails on a second call while the first instance is still alive, and
-    /// these tests run in parallel by default — a fresh `init()` per test
-    /// would make the second test to reach it fail with
-    /// `BackendAlreadyInitialized`, not a real bug in either test.
-    fn test_backend() -> Arc<LlamaBackend> {
-        static BACKEND: std::sync::OnceLock<Arc<LlamaBackend>> = std::sync::OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                crate::inference::init_shared_backend().expect("llama backend init")
-            })
-            .clone()
-    }
-
     /// Start the API on 127.0.0.1:0 and return its base URL.
     ///
     /// Port 0 rather than a fixed one: these run in parallel with every other
@@ -2419,7 +3176,7 @@ mod http_tests {
         decision: Option<DecisionSlot>,
     }
 
-    /// Start the API with this setup.
+    /// Start the API with this setup, on `AppState::for_tests`.
     async fn spawn_with(store: ModelStore, setup: Setup) -> String {
         // A path that does not exist, so the perimeter types fall back to
         // their defaults instead of reading a developer's real `.env`.
@@ -2427,55 +3184,18 @@ mod http_tests {
         let api_keys = setup
             .api_keys
             .unwrap_or_else(|| auth::ApiKeys::load(absent).expect("no keys configured"));
-        let state = Arc::new(AppState {
-            backend: test_backend(),
-            fallback_mmproj: None,
-            mmproj_offload: None,
-            slot: tokio::sync::RwLock::new(ModelSlot {
-                model_name: None,
-                engine: None,
-                scheduler: None,
-            }),
-            swap_lock: tokio::sync::Mutex::new(()),
-            gpu_layers: 0,
-            fit: false,
-            fit_strict: false,
-            ctx_size: 4096,
-            threads: 1,
-            flash_attn: false,
-            n_batch: 512,
-            cache_type_k: crate::inference::KvCacheType::F16,
-            cache_type_v: crate::inference::KvCacheType::F16,
-            batch_size: 1,
-            cpu_moe: false,
-            n_cpu_moe: 0,
-            rs_seq: 0,
-            ctx_checkpoints: 0,
-            checkpoint_min_step: 8192,
-            rust_debug: false,
-            web_enabled: false,
-            api_port: 0,
-            store,
-            ip_allowlist: ip_allowlist::IpAllowlist::load(absent),
-            api_keys: Arc::new(api_keys),
-            allowed_origins: origin::AllowedOrigins::load(absent),
-            web_policy: crate::tools::guard::WebPolicy::from_env(),
-            allow_model_paths: false,
-            launch_model: None,
-            embedding: tokio::sync::RwLock::new(None),
-            decision: tokio::sync::RwLock::new(setup.decision),
-            decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
-            decision_policy: setup
-                .decision_policy
-                .unwrap_or_else(decision_policy::DecisionPolicy::none),
-            decision_traces: setup.decision_traces.map(Arc::new),
-            cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
-            main_deadline: tokio::sync::Mutex::new(None),
-            embedding_deadline: tokio::sync::Mutex::new(None),
-            decision_deadline: tokio::sync::Mutex::new(None),
-            default_keep_alive: None,
-        });
+        let mut state = AppState::for_tests(store, api_keys);
+        if let Some(policy) = setup.decision_policy {
+            state.decision_policy = policy;
+        }
+        state.decision_traces = setup.decision_traces.map(Arc::new);
+        state.decision = tokio::sync::RwLock::new(setup.decision);
+        spawn_state(state).await
+    }
 
+    /// `spawn`, for a state the test has prepared.
+    async fn spawn_state(state: AppState) -> String {
+        let state = Arc::new(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let app = api_router(state);
@@ -2530,6 +3250,69 @@ mod http_tests {
             names.iter().any(|n| n.contains("a-pulled-model")),
             "a model in the store must appear in /api/tags, got {names:?}"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Every resident is listed as loaded, the most recently used first —
+    /// the one the chat UI preselects — and a catalog model keeps its
+    /// catalog metadata while marked so.
+    #[tokio::test]
+    async fn every_resident_is_marked_loaded_and_keeps_catalog_metadata() {
+        let tmp = std::env::temp_dir().join(format!("eullm-tags-loaded-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        let catalog = &crate::models::EU_CATALOG[0];
+        {
+            let mut models = state.models.write().await;
+            for name in [catalog.id.as_str(), "/elsewhere/Custom-Model-Q4_K_M.gguf"] {
+                models.insert(resident::LoadedModel::new(
+                    name.into(),
+                    name.into(),
+                    None,
+                    None,
+                ));
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let base = spawn_state(state).await;
+
+        let (status, body) = get_json(&format!("{base}/api/tags")).await;
+        assert_eq!(status, 200);
+        let models = body["models"].as_array().expect("models array");
+        let loaded: Vec<&serde_json::Value> =
+            models.iter().filter(|m| m["loaded"] == true).collect();
+        let names: Vec<&str> = loaded.iter().filter_map(|m| m["name"].as_str()).collect();
+        assert_eq!(
+            names,
+            ["/elsewhere/Custom-Model-Q4_K_M.gguf", catalog.id.as_str()],
+            "every resident, the most recently used first"
+        );
+        assert_eq!(loaded[1]["digest"], catalog.digest.as_str());
+        assert_eq!(loaded[1]["details"]["family"], catalog.base());
+        assert_eq!(
+            models
+                .iter()
+                .filter(|m| m["name"] == catalog.id.as_str())
+                .count(),
+            1,
+            "listed once, as loaded"
+        );
+
+        let (_, body) = get_json(&format!("{base}/v1/models")).await;
+        let ids: Vec<&str> = body["data"]
+            .as_array()
+            .expect("data array")
+            .iter()
+            .filter_map(|m| m["id"].as_str())
+            .collect();
+        for name in names {
+            assert_eq!(
+                ids.iter().filter(|id| **id == name).count(),
+                1,
+                "{name} in {ids:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2649,6 +3432,12 @@ mod http_tests {
             Some(0),
             "a fresh server has evicted nothing yet"
         );
+        assert_eq!(
+            body["max_loaded_models"], 1,
+            "one model at a time by default"
+        );
+        assert_eq!(body["loaded_models"], 0);
+        assert_eq!(body["generation_evictions"], 0);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -2819,6 +3608,93 @@ mod http_tests {
         let (status, body) = get_json(&format!("{base}/api/tags")).await;
         assert_eq!(status, 401);
         assert!(body["error"].is_string(), "{body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Ollama clients call `/api/ps` to see what is loaded; it answered 404.
+    #[tokio::test]
+    async fn api_ps_answers_with_no_model() {
+        let tmp = std::env::temp_dir().join(format!("eullm-ps-{}", uuid::Uuid::new_v4()));
+        let base = spawn(ModelStore::at(tmp.clone())).await;
+        let (status, body) = get_json(&format!("{base}/api/ps")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, serde_json::json!({ "models": [] }));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Unloading a model that is not loaded is not an error: it is already
+    /// what was asked for. `unloaded` stays a string or null, which `eullm
+    /// unload` from earlier releases reads.
+    #[tokio::test]
+    async fn api_unload_of_a_model_not_loaded_is_a_200_null() {
+        let tmp = std::env::temp_dir().join(format!("eullm-unload-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        let url = format!("{base}/api/unload");
+        for body in [
+            serde_json::json!({ "model": "a-pulled-model" }),
+            serde_json::json!({ "model": "this-model-does-not-exist" }),
+            serde_json::json!({}),
+        ] {
+            let (status, text) = post_json(&url, body.clone()).await;
+            assert_eq!(status, 200, "{body}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert!(answer["unloaded"].is_null(), "{answer}");
+            assert_eq!(answer["unloaded_all"], serde_json::json!([]));
+        }
+        // No body at all, as `eullm unload` sends.
+        let r = reqwest::Client::new()
+            .post(&url)
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 200);
+        let answer: serde_json::Value = r.json().await.expect("json");
+        assert!(answer["unloaded"].is_null(), "{answer}");
+
+        let (status, _) = post_json(&url, serde_json::json!({ "model": 7 })).await;
+        assert_eq!(status, 400);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `keep_alive: 0` with an empty prompt or empty messages unloads the
+    /// model without loading it first. The fixture's weights are not a GGUF,
+    /// so a load would answer 500: this one answers `done_reason: "unload"`.
+    #[tokio::test]
+    async fn an_empty_request_with_keep_alive_zero_unloads_without_loading() {
+        let tmp = std::env::temp_dir().join(format!("eullm-expire-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        for (path, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "a-pulled-model", "prompt": "", "keep_alive": 0 }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "a-pulled-model", "messages": [], "keep_alive": 0 }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{path}"), body).await;
+            assert_eq!(status, 200, "{path}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert_eq!(answer["done_reason"], "unload", "{path}: {answer}");
+            assert_eq!(answer["model"], "a-pulled-model");
+            assert_eq!(answer["done"], true);
+        }
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "model": "this-model-does-not-exist", "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 404, "{text}");
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 503, "{text}");
+        assert!(text.contains("No model loaded"), "{text}");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -3053,7 +3929,7 @@ mod http_tests {
     async fn real_model_a_decision_is_traced_and_takes_feedback() {
         let path = std::env::var("EULLM_DECISION_TEST_MODEL")
             .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file");
-        let backend = test_backend();
+        let backend = crate::inference::test_backend();
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
         let model = tokio::task::spawn_blocking(move || {
             DecisionModel::load(

@@ -79,6 +79,11 @@
 #   - `context/kv_cache.rs`: `clear_kv_cache_cells` (`llama_memory_clear`
 #     with `data = false`) — a recurrent or hybrid model's memory refuses
 #     `seq_rm(-1, ...)`, so clearing every sequence needs it.
+#   - `gguf/mod.rs`: `GgufContext::val_f32` / `val_f64` (`gguf_get_val_f32`
+#     / `_f64`) — a float metadata value read with its type and in full:
+#     `LlamaModel::meta_val_str` prints any float to six decimals. A decision
+#     model's calibration temperature (`eullm.decision.temperature`) is read
+#     with them; the engine's tests on that read cover both.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"

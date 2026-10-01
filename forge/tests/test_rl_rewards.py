@@ -37,6 +37,7 @@ def test_the_shortcuts_to_a_deadline_do_not(answer):
 
 
 @pytest.mark.parametrize("answer", [
+
     "Non è prevista alcuna proroga: il ricorso va proposto entro 60 giorni.",
     "Non esiste alcuna proroga: il ricorso va proposto entro 60 giorni.",
     "Non esiste alcun termine perentorio: il ricorso va proposto entro 60 giorni.",
@@ -69,6 +70,23 @@ def test_denying_the_article_itself_is_still_a_refusal(answer):
 ])
 def test_a_decorative_negation_does_not_buy_a_wrong_or_a_listed_deadline(answer):
     assert score_answer(answer, "termine", SIXTY) == 0.0
+
+    "entro 120 giorni.",          # ends in the 20 of "20 giorni"
+    "entro 1020 giorni.",
+    "entro 160 giorni.",          # ends in the 60 of "60 giorni"
+    "entro 360 giorni.",
+    "entro centoventi giorni.",   # same, in words
+    "entro centosessanta giorni.",
+    "entro duecentoventi giorni.",
+])
+def test_a_wrong_deadline_containing_the_right_one_scores_nothing(answer):
+    """The keyword is a substring test, so the right digits are enough.
+
+    The value is parsed a few lines up to count the deadlines an answer
+    names; it is also what says whether the one it named is the right one.
+    """
+    keyword = SIXTY if "60" in answer or "sessanta" in answer else ["20 giorni|venti giorni"]
+    assert score_answer(answer, "termine", keyword) == 0.0
 
 
 def test_the_deadline_the_article_also_mentions_is_allowed():
@@ -175,3 +193,61 @@ def test_nonexistent_articles_are_capped_and_nothing_else_is_dropped():
     kept = mod.cap_share(rows, "inesistente", 0.2, random.Random(0))
     assert sum(r["tipo"] == "termine" for r in kept) == 433
     assert sum(r["tipo"] == "inesistente" for r in kept) == 108   # 20% of 541
+
+
+def test_an_absent_prompt_drops_the_whole_article_not_just_its_first_chunk(tmp_path):
+    """An assente row is paid for abstaining, so the article's own text must
+    not be in the prompt at all.
+
+    A long article is chunked, and only the first chunk carries a header, so
+    the chunks that continue it report no article number -- the answer is
+    still in them, and a question about that article ranks them first.
+    """
+    import importlib.util
+
+    from eullm_forge.eval import EvalItem, NormIndex
+
+    filler = " Il presente articolo contiene disposizioni di dettaglio sufficienti."
+    records = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+                "text": f"Art. {n}. \n \n (Materia numero {n}). \n \n "
+                        f"Il ricorso è proposto entro sessanta giorni dalla notifica."
+                        f"{filler * 2}"} for n in range(1, 21)]
+    # art. 15 is long: chunk 0 holds the header, 1 and 2 continue it, and the
+    # text the question is about is in the continuation.
+    records += [
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 15. \n \n (Azione di accertamento). \n \n "
+                 f"Disposizione generale in materia di accertamento.{filler * 2}"},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+         "text": "Il ricorso è proposto entro venti giorni dalla notifica all'atto "
+                 f"emanato, secondo le modalità previste.{filler * 2}"},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 2,
+         "text": "L'azione di accertamento decade dopo un anno dalla notifica, salvo "
+                 f"i casi tassativamente previsti.{filler * 2}"},
+    ]
+    chunks = tmp_path / "legislazione_y.chunks.jsonl"
+    chunks.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+                      encoding="utf-8")
+    index = NormIndex.from_files([chunks])
+
+    question = ("Entro quanti giorni dalla notifica si propone il ricorso di cui "
+                "all'articolo 15 del codice civile?")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_grpo_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_grpo_prompts2", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    item = EvalItem(id="a15", domain="legal", lang="it", question=question,
+                    reference="venti giorni", keywords=["20 giorni|venti giorni"],
+                    metadata={"code": "codice_civile", "articolo": "15",
+                              "tipo": "termine_argomento"})
+
+    row = mod.prompt_row(item, index, k=3, absent=True)
+    assert row is not None and row["tipo"] == "assente"
+    content = row["prompt"][0]["content"]
+    assert "Art. 15." not in content
+    # The continuation chunks carry neither a header nor an article_num, so
+    # these are the lines the article's own text would put in the prompt.
+    assert "entro venti giorni dalla notifica all'atto" not in content
+    assert "L'azione di accertamento decade dopo un anno dalla notifica" not in content
+    # ...and the other articles are still there, or there is no prompt at all.
+    assert "Art. 20." in content

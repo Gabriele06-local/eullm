@@ -503,6 +503,367 @@ def eval_cmd(
     )
 
 
+@main.group()
+def decisions() -> None:
+    """Decision models trained on your own decisions (Reflex, MVP 4).
+
+    From the traces a server writes with EULLM_DECISION_TRACES to a GGUF
+    that `eullm serve --decision-model` loads unchanged:
+
+        eullm-forge decisions build  TRACES_DIR -o DATASET
+
+        eullm-forge decisions train  DATASET -o RUN
+
+        eullm-forge decisions export RUN -o model.gguf
+
+    Then bench/reflexbench/qualify.py says whether it may replace the
+    decision model in service. For the RAG gate, whose cases are labelled
+    already, `import-rag` writes the traces to start from.
+    """
+
+
+@decisions.command("import-rag")
+@click.option("--sets", default="",
+              help="ReflexBench's public RAG gate sets, comma-separated: musique "
+                   "(downloaded on first use, as ragbench.py does)")
+@click.option("--data", multiple=True, type=click.Path(exists=True, dir_okay=False),
+              help="A RAG gate set of your own, as ragbench.py --data reads it "
+                   "(rg_openbook.py writes one); repeatable")
+@click.option("--output", "-o", required=True, help="The traces directory to write")
+@click.option("--questions", default="reflex-gate,reflex-yesno", show_default=True,
+              help="The gate's questions to ask of every case, by ragbench.py method")
+@click.option("--limit", type=int, default=0, show_default=True,
+              help="Questions per public set, 0 for all")
+@click.option("--passages", type=int, default=5, show_default=True,
+              help="Passages per MuSiQue case, as ragbench.py --passages")
+@click.option("--seed", type=int, default=1, show_default=True,
+              help="Which MuSiQue questions and passages, as ragbench.py --seed")
+@click.option("--dev-share", type=float, default=0.1, show_default=True)
+@click.option("--test-share", type=float, default=0.1, show_default=True)
+@click.option("--split-seed", default="eullm-rag-gate", show_default=True,
+              help="Changes which questions are held out")
+def decisions_import_rag(
+    sets: str,
+    data: tuple[str, ...],
+    output: str,
+    questions: str,
+    limit: int,
+    passages: int,
+    seed: int,
+    dev_share: float,
+    test_share: float,
+    split_seed: str,
+) -> None:
+    """Write the RAG gate's labelled cases as decision traces.
+
+    Every case of bench/reflexbench's RAG gate sets becomes a decision —
+    the state and the questions exactly as ragbench.py's Reflex methods
+    send them — with its label as a person's feedback. Train, dev and test
+    hold out whole questions, and every question about one document; the
+    split goes in splits.jsonl, which `decisions build` follows, and the
+    test cases also in rag-test/, for ragbench.py.
+
+    Examples:
+
+        eullm-forge decisions import-rag --sets musique -o ~/rag-gate/traces
+
+        eullm-forge decisions import-rag --sets musique \\
+            --data ~/rag-gate/rag-legal-it.jsonl -o ~/rag-gate/traces
+    """
+    from .decisions.rag import import_rag
+
+    try:
+        report = import_rag(
+            output,
+            sets=tuple(s.strip() for s in sets.split(",") if s.strip()),
+            data=data,
+            questions=tuple(q.strip() for q in questions.split(",") if q.strip()),
+            limit=limit, seed=seed, passages=passages, dev_share=dev_share,
+            test_share=test_share, split_seed=split_seed,
+            progress=lambda msg: console.print(f"  {msg}"),
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, OSError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1) from e
+
+    for s in report["sets"]:
+        documents = f", {s['documents']} documents" if s["documents"] else ""
+        console.print(f"  {s['name']} ({s['source']}): {s['cases']} cases, "
+                      f"{s['questions']} questions{documents}")
+    table = Table(title=f"RAG gate traces — {output}")
+    table.add_column("Split")
+    table.add_column("Cases", justify="right")
+    table.add_column("Questions", justify="right")
+    table.add_column("Documents", justify="right")
+    table.add_column("answer / retrieve_more / abstain", justify="right")
+    for split, s in report["splits"].items():
+        labels = s["labels"]
+        table.add_row(split, str(s["cases"]), str(s["questions"]), str(s["documents"]),
+                      f"{labels.get('answer', 0)} / {labels.get('retrieve_more', 0)} / "
+                      f"{labels.get('abstain', 0)}")
+    console.print(table)
+    for name, path in report["held_out"].items():
+        console.print(f"  Held out for ragbench.py: {Path(output) / path}")
+    console.print(f"\nNext:\n  eullm-forge decisions build {output} -o <dataset>")
+
+
+@decisions.command("build")
+@click.argument("traces", nargs=-1, required=True, type=click.Path(exists=True, file_okay=False))
+@click.option("--output", "-o", required=True, help="Directory for the dataset")
+@click.option("--rules", default=None,
+              help="Label with a function of yours: FILE.py:FUNCTION or MODULE:FUNCTION, "
+                   "called as f(state, question_id, question, record); None abstains")
+@click.option("--teacher-url", default=None,
+              help="Label with a large model: an OpenAI-compatible base URL "
+                   "(e.g. an EuLLM server with a large chat model)")
+@click.option("--teacher-model", default=None, help="The model to ask at --teacher-url")
+@click.option("--teacher-api-key", envvar="EULLM_TEACHER_API_KEY", default=None,
+              help="API key for --teacher-url (default: $EULLM_TEACHER_API_KEY)")
+@click.option("--teacher-workers", type=int, default=1, show_default=True,
+              help="Questions put to the teacher at once")
+@click.option("--teacher-max-tokens", type=int, default=1024, show_default=True,
+              help="Room for a teacher that reasons before it answers")
+@click.option("--allow-logged", is_flag=True,
+              help="Label what nobody else labelled with the logged decision itself")
+@click.option("--dev-share", type=float, default=0.1, show_default=True)
+@click.option("--test-share", type=float, default=0.1, show_default=True)
+@click.option("--split-seed", default="eullm-decisions", show_default=True,
+              help="Changes which states are held out")
+def decisions_build(
+    traces: tuple[str, ...],
+    output: str,
+    rules: str | None,
+    teacher_url: str | None,
+    teacher_model: str | None,
+    teacher_api_key: str | None,
+    teacher_workers: int,
+    teacher_max_tokens: int,
+    allow_logged: bool,
+    dev_share: float,
+    test_share: float,
+    split_seed: str,
+) -> None:
+    """Turn decision traces and their feedback into a training set.
+
+    The label of each question is the feedback's when there is one, else a
+    teacher's (--rules first, then --teacher-url), else — with
+    --allow-logged only — the decision that was logged. Dev and test hold
+    out whole states, or follow the splits.jsonl beside the traces when
+    there is one (`import-rag` writes it).
+
+    Examples:
+
+        eullm-forge decisions build ~/traces -o ~/decisions/data --rules rules.py:label
+
+        eullm-forge decisions build ~/traces -o ~/decisions/data \\
+            --teacher-url http://localhost:11434 --teacher-model qwen3-32b
+    """
+    from .decisions.dataset import build_dataset
+    from .decisions.teachers import ChatTeacher, ReplyCache, RulesTeacher, load_rules
+
+    if bool(teacher_url) != bool(teacher_model):
+        console.print("[red]--teacher-url and --teacher-model go together.[/red]")
+        raise SystemExit(1)
+    try:
+        rules_teacher = RulesTeacher(load_rules(rules)) if rules else None
+        chat_teacher = None
+        if teacher_url:
+            chat_teacher = ChatTeacher(
+                teacher_url, teacher_model, teacher_api_key,
+                max_tokens=teacher_max_tokens,
+                cache=ReplyCache(Path(output) / "teacher-cache.jsonl"),
+            )
+        stats = build_dataset(
+            list(traces), output, rules=rules_teacher, teacher=chat_teacher,
+            allow_logged=allow_logged, dev_share=dev_share, test_share=test_share,
+            split_seed=split_seed, teacher_workers=teacher_workers,
+            progress=lambda msg: console.print(f"  {msg}"),
+        )
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1) from e
+
+    for read in stats["traces"]:
+        feedback = read["feedback"]
+        line = (f"  {read['directory']}: {read['decisions']} decisions, "
+                f"{feedback['decisions_with_feedback']} with feedback")
+        if read["malformed_lines"]:
+            line += f"; {read['malformed_lines']} lines that are not JSON objects skipped"
+        if feedback["orphans"]:
+            line += f"; feedback on {feedback['orphans']} decisions not in the traces"
+        if read["recorded_splits"]:
+            line += f"; the split of {read['recorded_splits']} from splits.jsonl"
+        console.print(line)
+    table = Table(title=f"Decision dataset — {output}")
+    table.add_column("Split")
+    table.add_column("Examples", justify="right")
+    table.add_column("States", justify="right")
+    table.add_column("noul / choice / score", justify="right")
+    for split, s in stats["splits"].items():
+        types = s["by_type"]
+        table.add_row(split, str(s["examples"]), str(s["states"]),
+                      f"{types.get('noul', 0)} / {types.get('choice', 0)} / "
+                      f"{types.get('score', 0)}")
+    console.print(table)
+    sources = ", ".join(f"{k} {v}" for k, v in stats["sources"].items())
+    console.print(f"  Labels: {sources}; unlabelled {stats['unlabelled']}")
+    for reason, n in {**stats["skipped_questions"], **stats["unusable_feedback"]}.items():
+        console.print(f"  [yellow]Left out {n}:[/yellow] {reason}")
+    if stats["teacher_unparsed"]:
+        console.print(f"  [yellow]Teacher replies with no code in them:[/yellow] "
+                      f"{stats['teacher_unparsed']}")
+    console.print(f"\nStats in {Path(output) / 'stats.json'}. Next:\n"
+                  f"  eullm-forge decisions train {output} -o <run>")
+
+
+@decisions.command("train")
+@click.argument("dataset", type=click.Path(exists=True, file_okay=False))
+@click.option("--output", "-o", required=True, help="Directory for checkpoints and the adapter")
+@click.option("--base", default=None,
+              help="Base chat model, HF id or path (default: Qwen/Qwen3-1.7B)")
+@click.option("--epochs", type=float, default=2.0, show_default=True)
+@click.option("--lr", type=float, default=2e-4, show_default=True)
+@click.option("--rank", type=int, default=16, show_default=True, help="LoRA rank (alpha = 2 x)")
+@click.option("--batch-size", type=int, default=8, show_default=True)
+@click.option("--grad-accum", type=int, default=2, show_default=True)
+@click.option("--max-length", type=int, default=2048, show_default=True,
+              help="Longest prompt kept, in tokens; longer ones are dropped, never cut")
+@click.option("--save-steps", type=int, default=0, show_default=True,
+              help="Checkpoint every N steps (0: every epoch)")
+@click.option("--no-baseline", is_flag=True, help="Do not score the base model on dev first")
+@click.option("--seed", type=int, default=0, show_default=True)
+def decisions_train(
+    dataset: str,
+    output: str,
+    base: str | None,
+    epochs: float,
+    lr: float,
+    rank: int,
+    batch_size: int,
+    grad_accum: int,
+    max_length: int,
+    save_steps: int,
+    no_baseline: bool,
+    seed: int,
+) -> None:
+    """LoRA-train a decision model on the answer code alone.
+
+    Example:
+
+        eullm-forge decisions train ~/decisions/data -o ~/decisions/run1
+    """
+    from .decisions.train import DEFAULT_BASE, REPORT, DecisionTrainConfig, train_decision_model
+
+    config = DecisionTrainConfig(
+        dataset_dir=dataset,
+        output_dir=output,
+        base_model=base or DEFAULT_BASE,
+        lora_rank=rank,
+        lora_alpha=2 * rank,
+        num_epochs=epochs,
+        learning_rate=lr,
+        batch_size=batch_size,
+        gradient_accumulation_steps=grad_accum,
+        max_length=max_length,
+        save_steps=save_steps,
+        baseline=not no_baseline,
+        seed=seed,
+    )
+    console.print(f"[bold blue]EULLM Forge[/bold blue] — decision model on "
+                  f"[cyan]{config.base_model}[/cyan]")
+    try:
+        adapter = train_decision_model(config)
+    except (FileNotFoundError, ValueError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1) from e
+    except ImportError as e:
+        console.print(f"[red]Missing dependency:[/red] {e}")
+        raise SystemExit(1) from e
+
+    import json
+
+    report = json.loads((Path(output) / REPORT).read_text(encoding="utf-8"))
+    table = Table(title="Dev split")
+    table.add_column("Type")
+    table.add_column("n", justify="right")
+    for when in ("before", "after"):
+        table.add_column(f"Accuracy {when}", justify="right")
+        table.add_column(f"ECE {when}", justify="right")
+    after = report.get("dev_after", {})
+    before = report.get("dev_before", {})
+    for kind, s in after.items():
+        b = before.get(kind, {})
+        table.add_row(kind, str(s["n"]),
+                      _fmt_pct(b.get("accuracy")), _fmt_num(b.get("ece")),
+                      _fmt_pct(s["accuracy"]), _fmt_num(s["ece"]))
+    if after:
+        console.print(table)
+    if report.get("dev_temperature"):
+        t = report["dev_temperature"]
+        at_t = report["dev_after_at_temperature"]["all"]
+        console.print(
+            f"  At temperature {t:.2f} (fitted on dev) the ECE is {_fmt_num(at_t['ece'])}: "
+            "`decisions export` writes it into the GGUF (eullm.decision.temperature), "
+            "the engine's default for the model, and qualify.py --candidate-gguf checks "
+            "the server applies it."
+        )
+    console.print(f"\n[green]Adapter:[/green] {adapter}\nNext:\n"
+                  f"  eullm-forge decisions export {output} -o <model>.gguf")
+
+
+@decisions.command("export")
+@click.argument("run", type=click.Path(exists=True, file_okay=False))
+@click.option("--output", "-o", required=True, help="The GGUF file to write")
+@click.option("--quant", default="q8_0", show_default=True,
+              help="GGUF type: q8_0 keeps a decision's probabilities steadier than q4_k_m")
+@click.option("--base", default=None, help="Base model, when the run does not record it")
+@click.option("--temperature", default=None, metavar="T|none",
+              help="Written into the GGUF as eullm.decision.temperature, the temperature "
+                   "the engine applies by default: the one the run fitted on its dev split "
+                   "unless given; none for none")
+def decisions_export(run: str, output: str, quant: str, base: str | None,
+                     temperature: str | None) -> None:
+    """Merge a trained decision model and export it to GGUF.
+
+    The temperature the run fitted on its dev split goes into the GGUF
+    (eullm.decision.temperature), and the engine applies it by default.
+    Needs llama.cpp (LLAMA_CPP_PATH, or ~/llama.cpp) for the conversion.
+
+    Examples:
+
+        eullm-forge decisions export ~/decisions/run1 -o ~/models/decide-q8_0.gguf
+
+        eullm-forge decisions export ~/decisions/run1 -o decide.gguf --temperature 1.5
+    """
+    from .decisions.train import FITTED, export_decision_model, export_temperature
+
+    if temperature is None:
+        asked = FITTED
+    elif temperature.strip().lower() == "none":
+        asked = None
+    else:
+        asked = temperature
+    try:
+        value, source = export_temperature(run, asked)
+    except ValueError as e:
+        raise click.BadParameter(str(e), param_hint="--temperature") from e
+    try:
+        gguf = export_decision_model(run, output, quantization=quant, base_model=base,
+                                     temperature=value)
+    except (FileNotFoundError, ValueError, RuntimeError) as e:
+        console.print(f"[red]Error:[/red] {e}")
+        raise SystemExit(1) from e
+    if value is None:
+        console.print(f"  No temperature in the GGUF ({source}): the engine applies 1.")
+    else:
+        console.print(f"  eullm.decision.temperature = {value:.6g} ({source}): the "
+                      "temperature the engine applies by default.")
+    console.print(f"[green]Done![/green] {gguf}\nServe it, then qualify it:\n"
+                  f"  eullm serve --decision-model {gguf}\n"
+                  f"  python3 bench/reflexbench/qualify.py --candidate http://localhost:11434 "
+                  f"--candidate-gguf {gguf} --data <dataset>/test.labelled.jsonl")
+
+
 def _openai_generate_fn(base_url: str, model: str):
     """Return a ``generate_fn`` calling an OpenAI-compatible chat endpoint.
 
@@ -533,6 +894,12 @@ def _fmt_pct(value: float | None) -> str:
     if value is None or value != value:  # None or NaN
         return "—"
     return f"{value * 100:.1f}%"
+
+
+def _fmt_num(value: float | None) -> str:
+    if value is None or value != value:
+        return "—"
+    return f"{value:.3f}"
 
 
 def _guess_params_from_name(model_name: str) -> float:

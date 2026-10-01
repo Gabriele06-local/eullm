@@ -309,26 +309,36 @@ impl SchedulerHandle {
         let (tx, rx) = mpsc::channel::<StreamEvent>(256);
 
         // Best-effort send — if the queue is full the request is rejected.
-        if self
-            .tx
-            .try_send(ScheduledRequest {
-                request,
-                tx: tx.clone(),
-            })
-            .is_err()
-        {
-            let _ = tx.try_send(StreamEvent::Error(
-                "Scheduler queue full — try again later".into(),
-            ));
-        } else {
-            // Wake up the scheduler thread.
-            let _lock = self.notify_mutex.lock().unwrap();
-            self.notify.notify_one();
+        match self.tx.try_send(ScheduledRequest {
+            request,
+            tx: tx.clone(),
+        }) {
+            Ok(()) => {
+                // Wake up the scheduler thread.
+                let _lock = self.notify_mutex.lock().unwrap();
+                self.notify.notify_one();
+            }
+            Err(crossbeam_channel::TrySendError::Full(_)) => {
+                let _ = tx.try_send(StreamEvent::Error(
+                    "Scheduler queue full — try again later".into(),
+                ));
+            }
+            // The decode thread has exited: the model was unloaded between
+            // this request finding it and reaching it. This used to say the
+            // queue was full, which sent people looking for a load problem.
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
+                let _ = tx.try_send(StreamEvent::Error(MODEL_UNLOADED.into()));
+            }
         }
 
         rx
     }
 }
+
+/// What a request gets when the model it was sent to is unloaded before it
+/// starts: it was queued, or on its way to the queue.
+const MODEL_UNLOADED: &str =
+    "The model was unloaded before this request started — send it again to load it back";
 
 /// Info reported by the scheduler after model load.
 ///
@@ -983,6 +993,15 @@ fn run_scheduler_loop(
                 let _ = seq
                     .tx
                     .try_send(StreamEvent::Error("Server shutting down".into()));
+            }
+            // Requests still queued are told too. Left there, they were never
+            // answered: the queue keeps its messages for as long as any
+            // handle to it is alive, and a request waiting for its answer
+            // holds one itself.
+            while let Ok(queued) = req_rx.try_recv() {
+                let _ = queued
+                    .tx
+                    .try_send(StreamEvent::Error(MODEL_UNLOADED.into()));
             }
             return Ok(());
         }

@@ -76,6 +76,18 @@ impl GgufContext {
         unsafe { llama_cpp_sys_2::gguf_get_val_u64(self.ctx.as_ptr(), idx) }
     }
 
+    /// Read a `float32` value. Panics (inside llama.cpp) if the stored type
+    /// is not `GGUF_TYPE_FLOAT32` — check `kv_type` first if unsure.
+    pub fn val_f32(&self, idx: i64) -> f32 {
+        unsafe { llama_cpp_sys_2::gguf_get_val_f32(self.ctx.as_ptr(), idx) }
+    }
+
+    /// Read a `float64` value. Panics (inside llama.cpp) if the stored type
+    /// is not `GGUF_TYPE_FLOAT64` — check `kv_type` first if unsure.
+    pub fn val_f64(&self, idx: i64) -> f64 {
+        unsafe { llama_cpp_sys_2::gguf_get_val_f64(self.ctx.as_ptr(), idx) }
+    }
+
     /// Read a string value. Returns `None` if the pointer is null or not
     /// valid UTF-8.
     pub fn val_str(&self, idx: i64) -> Option<&str> {

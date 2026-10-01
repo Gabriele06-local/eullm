@@ -63,10 +63,14 @@ while IFS='|' read -r id name state elapsed; do
                         # stage-3 link that resumed from the final checkpoint
                         # and only wrote the adapter out (before stage3_sft.py
                         # learnt to stop when the adapter is already there).
+                        # grpo_train.py prints the same line with its own
+                        # prefix when it saves, so a GRPO link that resumed
+                        # at the last step is the same case and was flagged
+                        # as one that did no work.
                         log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
                         if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
                             echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
-                        elif [ -n "$log" ] && grep -q "^\[stage3\] adapter /" "$log"; then
+                        elif [ -n "$log" ] && grep -qE "^\[(stage3|grpo)\] adapter /" "$log"; then
                             echo "   $id $name: ended in $elapsed, training finished (fine)"
                         else
                             flag "$id $name ended $state after only $elapsed — a link that short did no work"

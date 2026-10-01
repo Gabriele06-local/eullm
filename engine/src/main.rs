@@ -137,18 +137,13 @@ struct Cli {
 /// rather than forbidden: a flag added here exists on both, with the same
 /// default and the same help text, and there is no second place to forget.
 ///
-/// Two things deliberately stay out:
-///
-/// * `batch_size`, because `run` defaults to 1 and `serve` to 8. That is not
-///   drift: `run` is one interactive conversation which should get the whole
-///   context window, `serve` is a daemon fielding concurrent requests. The
-///   scheduler's own "each of the N slots gets only M tokens" warning is
-///   written against the `serve` default.
-/// * `--fit` / `--fit-strict`, which pick a layer count against measured free
-///   VRAM before the model is loaded. `serve` loads its models inside
-///   `api::swap_model`, which has no such step, so exposing the flags there
-///   would parse them and silently do nothing — worse than not offering them.
-///   Wiring auto-fit into the swap path is its own piece of work.
+/// Nothing stays out any more. The two flags that once did are both here:
+/// `batch_size`, whose two defaults (1 for `run`, 8 for `serve`) became one
+/// when eight slots were found to give each request an eighth of
+/// `--ctx-size`; and `--fit`/`--fit-strict`, since every load `serve` makes
+/// is sized too (`api::AppState::load_generation_model`). A flag that
+/// reaches a model `serve` loads must still be carried there through
+/// `api::ServeConfig` by hand — see `engine/CLAUDE.md`.
 #[derive(clap::Args, Debug, PartialEq)]
 struct RuntimeOpts {
     /// Port for the API server
@@ -464,6 +459,37 @@ struct RuntimeOpts {
         value_parser = clap::value_parser!(u32).range(512..=131_072)
     )]
     decision_ctx: u32,
+
+    /// How many generation models to keep loaded at once, 1 to 16. The
+    /// embedding and decision models have slots of their own and are not
+    /// counted.
+    ///
+    /// A model a request names that is not loaded is loaded beside the
+    /// others while fewer than this many are; past that, the least recently
+    /// used idle one is unloaded first. A model answering requests is never
+    /// unloaded to make room: the load waits up to 120 s for one to finish,
+    /// then answers 503 with Retry-After.
+    ///
+    /// A model loads beside others only if it fits whole on the GPU in what
+    /// they leave free — every layer, and its projector — and otherwise
+    /// models are unloaded until it does, or until it is alone, when it is
+    /// sized like any model loaded by itself. Without automatic sizing
+    /// (--no-fit, or a build that cannot read free VRAM) only the count is
+    /// kept.
+    ///
+    /// Default 1: one model at a time, as before — a request for another
+    /// model replaces it, even mid-answer. A default above 1 would not be a
+    /// default but a decision to divide the card, because a second model
+    /// only ever gets what the first one left. Ollama's
+    /// OLLAMA_MAX_LOADED_MODELS counts every model and is read from the
+    /// environment; this is a flag, and counts generation models only.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 1,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=16)
+    )]
+    max_loaded_models: usize,
 }
 
 #[derive(Subcommand)]
@@ -541,21 +567,29 @@ enum Commands {
         #[arg(long)]
         ui: bool,
     },
-    /// Unload the currently loaded model from a running eullm server,
-    /// freeing its VRAM — without restarting the server.
+    /// Unload generation models from a running eullm server, freeing their
+    /// VRAM — without restarting the server.
     ///
-    /// A later request with a `model` field (or another `eullm run
-    /// <model>`) loads a model back in. Useful for temporarily handing GPU
-    /// memory to another process — e.g. an embedding model needed during
+    /// Every loaded generation model, or with --model only that one, the
+    /// others staying loaded. Requests still running on an unloaded model
+    /// are cut off. A later request with a `model` field (or another `eullm
+    /// run <model>`) loads a model back in. Useful for temporarily handing
+    /// GPU memory to another process — e.g. an embedding model needed during
     /// RAG document ingestion — then reloading the LLM once it's done.
     ///
     /// Examples:
     ///   eullm unload
+    ///   eullm unload --model qwen3-8b
     ///   eullm unload --port 11500
     Unload {
         /// Port of the running eullm API server
         #[arg(short, long, default_value_t = 11434)]
         port: u16,
+
+        /// Unload only this model (as `/api/tags` names it), and keep the
+        /// others loaded
+        #[arg(long, value_name = "NAME")]
+        model: Option<String>,
     },
     /// Import a model from a local Ollama installation
     ///
@@ -773,7 +807,9 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                max_loaded_models,
             } = opts;
+            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -827,7 +863,7 @@ async fn main() {
             });
             // Gemma 4 requires f16 KV cache (mixed SWA architecture) — see
             // `inference::correct_kv_cache_for_model` for the rationale. The
-            // same correction also applies inside `swap_model` so it can't
+            // same correction also applies inside `load_generation_model` so it can't
             // be bypassed by swapping models after startup.
             let (corrected_k, corrected_v, corrected) =
                 inference::correct_kv_cache_for_model(&model, ctk, ctv);
@@ -891,6 +927,7 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                residency,
             )
             .await;
         }
@@ -934,7 +971,9 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                max_loaded_models,
             } = opts;
+            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -952,7 +991,7 @@ async fn main() {
             // off, --no-fit turns it off outright, and `fit` stays true for
             // the default path so the engine sizes the offload itself.
             // No `fit_explicit` here: `serve` never prompts either way
-            // (see `api::swap_model`), so the distinction has no meaning.
+            // (see `api::load_generation_model`), so the distinction has no meaning.
             // An explicit `--gpu-layers` is a ceiling, not an off switch.
             let fit = !no_fit;
             let gpu_layers = gpu_layers.unwrap_or(-1);
@@ -1008,10 +1047,11 @@ async fn main() {
                 embedding_model,
                 decision_model,
                 decision_ctx,
+                residency,
             )
             .await;
         }
-        Commands::Unload { port } => cmd_unload(port).await,
+        Commands::Unload { port, model } => cmd_unload(port, model.as_deref()).await,
         Commands::ImportOllama { model, ollama_dir } => {
             cmd_import_ollama(&store, &model, ollama_dir.as_deref())
         }
@@ -2075,6 +2115,7 @@ async fn cmd_run(
     embedding_model: Option<String>,
     decision_model: Option<String>,
     decision_ctx: u32,
+    residency: api::ResidencyConfig,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -2518,7 +2559,7 @@ async fn cmd_run(
         // "mismatch between text model (n_embd = 2048) and mmproj
         // (n_embd = 2560)" and a failed load, after launching a vision
         // model and switching to anything else from the chat UI. Every
-        // model that has its own projector still finds it in swap_model,
+        // model that has its own projector still finds it in load_generation_model,
         // by store entry or by the file sitting beside its weights.
         api_mmproj = mmproj.clone();
 
@@ -2551,7 +2592,7 @@ async fn cmd_run(
         }
         // …for THIS model. The server keeps the batch size the user asked
         // for, so a later swap to a text-only model gets the scheduler back:
-        // `swap_model` re-applies the same sequential fallback for whatever
+        // `load_generation_model` re-applies the same sequential fallback for whatever
         // model actually carries a projector. Passing the zeroed value on
         // pinned every subsequent model to sequential mode — the same shape
         // of bug as handing the launch model's projector to its successors.
@@ -2768,6 +2809,9 @@ async fn cmd_run(
             launch_embedding,
             launch_decision,
             decision_ctx,
+            residency,
+            // What the launch model itself got, for `/api/ps` only.
+            launch_gpu_layers: Some(gpu_layers),
             backend,
         })
         .await
@@ -2835,6 +2879,7 @@ async fn cmd_serve(
     embedding_model: Option<String>,
     decision_model: Option<String>,
     decision_ctx: u32,
+    residency: api::ResidencyConfig,
 ) {
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
@@ -2850,7 +2895,7 @@ async fn cmd_serve(
 
     // The one `LlamaBackend` this process will ever create — shared by the
     // embedding model below and by every generation model this server loads
-    // later via `swap_model`. See `inference::init_shared_backend`.
+    // later via `load_generation_model`. See `inference::init_shared_backend`.
     let backend = inference::init_shared_backend().unwrap_or_else(|e| {
         eprintln!("Error initializing llama.cpp backend: {e}");
         std::process::exit(1);
@@ -2860,7 +2905,7 @@ async fn cmd_serve(
     // generation model loaded yet to size against, so the reservation only
     // starts to matter once one is loaded later via a request's "model"
     // field, through `AppState::reserved_embedding_bytes` inside
-    // `swap_model`. See the flag's doc comment on `RuntimeOpts`.
+    // `load_generation_model`. See the flag's doc comment on `RuntimeOpts`.
     let launch_embedding = embedding_model.map(|emb_arg| {
         let emb_path = resolve_model_path(&emb_arg, &store).unwrap_or_else(|| {
             eprintln!("Error: embedding model '{emb_arg}' not found.");
@@ -2885,7 +2930,7 @@ async fn cmd_serve(
             is_reserved_companion: true,
         }
     });
-    // --decision-model: same as above; `swap_model` protects its reserve
+    // --decision-model: same as above; `load_generation_model` protects its reserve
     // through `AppState::reserved_decision_bytes` once a generation model
     // is loaded.
     let launch_decision = decision_model.map(|arg| {
@@ -2943,6 +2988,8 @@ async fn cmd_serve(
         launch_embedding,
         launch_decision,
         decision_ctx,
+        residency,
+        launch_gpu_layers: None,
         backend,
     })
     .await
@@ -2990,13 +3037,14 @@ fn load_launch_decision(
     }
 }
 
-/// `eullm unload` — free the currently loaded model's VRAM on a running
-/// `eullm serve`/`eullm run` server, without restarting the process.
+/// `eullm unload` — free generation models' VRAM on a running `eullm
+/// serve`/`eullm run` server, without restarting the process: every one, or
+/// with `--model` that one only.
 ///
-/// Thin CLI wrapper around `POST /api/unload`. The server keeps running
-/// with an empty model slot; a later request with a `model` field (or
-/// another `eullm run <model>`) loads a model back in.
-async fn cmd_unload(port: u16) {
+/// Thin CLI wrapper around `POST /api/unload`. The server keeps running; a
+/// later request with a `model` field (or another `eullm run <model>`) loads
+/// a model back in.
+async fn cmd_unload(port: u16, model: Option<&str>) {
     let url = format!("http://127.0.0.1:{port}/api/unload");
     let client = match reqwest::Client::builder().build() {
         Ok(c) => c,
@@ -3005,7 +3053,13 @@ async fn cmd_unload(port: u16) {
             std::process::exit(1);
         }
     };
-    let response = match client.post(&url).send().await {
+    let request = match model {
+        Some(name) => client
+            .post(&url)
+            .json(&serde_json::json!({ "model": name })),
+        None => client.post(&url),
+    };
+    let response = match request.send().await {
         Ok(r) => r,
         Err(e) => {
             eprintln!(
@@ -3020,12 +3074,41 @@ async fn cmd_unload(port: u16) {
         std::process::exit(1);
     }
     match response.json::<serde_json::Value>().await {
-        Ok(body) => match body.get("unloaded").and_then(|v| v.as_str()) {
-            Some(name) => println!("Unloaded '{name}'. VRAM freed."),
-            None => println!("No model was loaded."),
-        },
+        Ok(body) => {
+            for line in unload_report(&body, model) {
+                println!("{line}");
+            }
+        }
         Err(e) => eprintln!("Error reading response: {e}"),
     }
+}
+
+/// What `eullm unload` prints for the server's answer: every model the
+/// server unloaded, or that there was none. `unloaded_all` lists them; a
+/// server from before it did names one, in `unloaded`.
+fn unload_report(body: &serde_json::Value, asked_for: Option<&str>) -> Vec<String> {
+    let mut names: Vec<&str> = body
+        .get("unloaded_all")
+        .and_then(|v| v.as_array())
+        .map(|all| all.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if names.is_empty()
+        && let Some(name) = body.get("unloaded").and_then(|v| v.as_str())
+    {
+        names.push(name);
+    }
+    if names.is_empty() {
+        return vec![match asked_for {
+            Some(name) => format!("'{name}' was not loaded."),
+            None => "No model was loaded.".to_string(),
+        }];
+    }
+    let mut lines: Vec<String> = names
+        .iter()
+        .map(|name| format!("Unloaded '{name}'."))
+        .collect();
+    lines.push("VRAM freed.".to_string());
+    lines
 }
 
 // ── Import from Ollama ────────────────────────────────────────────────────
@@ -4481,6 +4564,58 @@ mod cli_default_parity_tests {
             let both =
                 Cli::try_parse_from([sub, &["--mmproj-offload", "--no-mmproj-offload"]].concat());
             assert!(both.is_err(), "both flags at once must be refused");
+        }
+    }
+
+    #[test]
+    fn eullm_unload_names_every_model_the_server_unloaded() {
+        let report = |body: serde_json::Value, model| unload_report(&body, model);
+        assert_eq!(
+            report(
+                serde_json::json!({ "unloaded": "a", "unloaded_all": ["a", "b"] }),
+                None
+            ),
+            ["Unloaded 'a'.", "Unloaded 'b'.", "VRAM freed."]
+        );
+        // A server from before `unloaded_all`.
+        assert_eq!(
+            report(serde_json::json!({ "unloaded": "a" }), None),
+            ["Unloaded 'a'.", "VRAM freed."]
+        );
+        assert_eq!(
+            report(
+                serde_json::json!({ "unloaded": null, "unloaded_all": [] }),
+                None
+            ),
+            ["No model was loaded."]
+        );
+        assert_eq!(
+            report(serde_json::json!({ "unloaded": null }), Some("qwen3-8b")),
+            ["'qwen3-8b' was not loaded."]
+        );
+        let parsed = Cli::parse_from(["eullm", "unload", "--model", "qwen3-8b"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::Unload { model: Some(ref m), .. }) if m == "qwen3-8b"
+        ));
+    }
+
+    /// One generation model at a time unless asked: a second one only ever
+    /// gets what the first left, so a default above 1 would divide the card
+    /// for whoever loads second. Sixteen at most, and never none.
+    #[test]
+    fn max_loaded_models_defaults_to_one_on_both_commands() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            assert_eq!(runtime_opts(sub).max_loaded_models, 1);
+            let four = runtime_opts(&[sub, &["--max-loaded-models", "4"]].concat());
+            assert_eq!(four.max_loaded_models, 4);
+            for refused in ["0", "17", "-1", "two"] {
+                let parsed = Cli::try_parse_from([sub, &["--max-loaded-models", refused]].concat());
+                assert!(
+                    parsed.is_err(),
+                    "--max-loaded-models {refused} must be refused"
+                );
+            }
         }
     }
 
