@@ -1,0 +1,554 @@
+{
+  "name": "Support triage: Reflex decides",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Reflex decides, n8n routes\n**Ask Reflex** sends the ticket to EuLLM's `/v1/systemone` with three questions; **Route** reads the probabilities it answers with.\n\nBefore publishing: in **Ask Reflex**, set the URL to your EuLLM server and create the **Header Auth** credential: Name `X-Api-Key`, Value your EuLLM key.\n\nReplace each branch with what your team uses: a message, a ticket, an email.",
+        "height": 300,
+        "width": 420
+      },
+      "id": "6146baf8-79b1-5ffd-addd-c5444ef7dc5c",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "eullm-triage",
+        "responseMode": "lastNode",
+        "responseData": "firstEntryJson",
+        "options": {}
+      },
+      "id": "b66469a9-73b6-521f-95d0-b606c929f946",
+      "name": "Ticket",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        300
+      ],
+      "webhookId": "09d86ca1-a03f-5ebd-a129-905aa58f69de"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:11434/v1/systemone",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"state\": {{ JSON.stringify({ from: $json.body.from, subject: $json.body.subject, message: $json.body.message }) }},\n  \"questions\": {\n    \"team\": {\n      \"type\": \"choice\",\n      \"instructions\": \"Which team should handle this ticket?\",\n      \"criteria\": {\n        \"billing\": \"invoices, charges, refunds, payment methods, changes of plan\",\n        \"technical\": \"bugs, errors, crashes, notes not syncing, the app or the API not working\",\n        \"account\": \"signing in, passwords, two-factor authentication, lost phones, changing or closing an account\",\n        \"sales\": \"quotes, plans for teams and companies, discounts, partnerships\"\n      }\n    },\n    \"blocked\": {\n      \"type\": \"noul\",\n      \"instructions\": \"The customer is blocked or has a deadline today.\"\n    },\n    \"person\": {\n      \"type\": \"noul\",\n      \"instructions\": \"A person must handle this ticket: it threatens legal action, or says that someone else may have got into the account or seen its notes.\"\n    }\n  }\n}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "1e2004d9-44d9-5272-8f3a-56fad0f8e114",
+      "name": "Ask Reflex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "48db8ef4-132d-553f-891a-ca978ada8661",
+                    "leftValue": "={{ $json.answers.person.noul }}",
+                    "rightValue": 0.5,
+                    "operator": {
+                      "type": "number",
+                      "operation": "gte"
+                    }
+                  },
+                  {
+                    "id": "0271bf5f-a7d5-5f61-a32f-c5804545e810",
+                    "leftValue": "={{ $json.answers.team.probabilities[$json.answers.team.choice] }}",
+                    "rightValue": 0.6,
+                    "operator": {
+                      "type": "number",
+                      "operation": "lt"
+                    }
+                  }
+                ],
+                "combinator": "or"
+              },
+              "renameOutput": true,
+              "outputKey": "person"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "389b7180-d77b-52d9-8c66-68293f1868b0",
+                    "leftValue": "={{ $json.answers.team.choice }}",
+                    "rightValue": "billing",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "billing"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "95d0a00e-d8a0-57c6-856f-283fe1e66a2a",
+                    "leftValue": "={{ $json.answers.team.choice }}",
+                    "rightValue": "technical",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "technical"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "aec5c925-8fbd-55e6-bde8-e72693198e97",
+                    "leftValue": "={{ $json.answers.team.choice }}",
+                    "rightValue": "account",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "account"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "62e02182-feb8-5f54-a780-5c4bc3242f05",
+                    "leftValue": "={{ $json.answers.team.choice }}",
+                    "rightValue": "sales",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "sales"
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "unmatched"
+        }
+      },
+      "id": "5e21992c-3043-56d1-837b-634e48edf174",
+      "name": "Route",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        480,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "ad95d3a8-181f-57b1-a519-f9a71f580095",
+              "name": "route",
+              "value": "person",
+              "type": "string"
+            },
+            {
+              "id": "da145d59-96d6-5a97-95e5-bfd1206f662d",
+              "name": "reason",
+              "value": "={{ $json.answers.person.noul >= 0.5 ? 'a person must handle it' : 'unsure of the team' }}",
+              "type": "string"
+            },
+            {
+              "id": "49deb57a-3463-55dd-b384-036ffc3c5d70",
+              "name": "priority",
+              "value": "={{ $json.answers.blocked.noul >= 0.5 ? 'high' : 'normal' }}",
+              "type": "string"
+            },
+            {
+              "id": "7b5439d9-02c3-5083-8200-d8a579660a06",
+              "name": "subject",
+              "value": "={{ $('Ticket').item.json.body.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "7eb3253b-b14f-5f5a-9c98-8f63f5a3b3af",
+              "name": "team",
+              "value": "={{ $json.answers.team.probabilities }}",
+              "type": "object"
+            },
+            {
+              "id": "dbeff91f-d8f0-5247-a98f-c8568a171d8f",
+              "name": "blocked",
+              "value": "={{ $json.answers.blocked.noul }}",
+              "type": "number"
+            },
+            {
+              "id": "55743ed6-3248-573b-a905-e9b021c4c48e",
+              "name": "person",
+              "value": "={{ $json.answers.person.noul }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "0ef1b53c-62ed-5b31-a62b-2ed38af6b2dc",
+      "name": "To a person",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "80d449c1-f7dd-5103-8515-1867d792a770",
+              "name": "route",
+              "value": "billing",
+              "type": "string"
+            },
+            {
+              "id": "3d302086-aa86-52e1-a1ec-81be01cd2036",
+              "name": "priority",
+              "value": "={{ $json.answers.blocked.noul >= 0.5 ? 'high' : 'normal' }}",
+              "type": "string"
+            },
+            {
+              "id": "5e05b0d4-12c2-50b0-8024-ade9a372440e",
+              "name": "subject",
+              "value": "={{ $('Ticket').item.json.body.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "5ef40809-9109-505f-9f24-2d0d71477b13",
+              "name": "team",
+              "value": "={{ $json.answers.team.probabilities }}",
+              "type": "object"
+            },
+            {
+              "id": "a556c3e7-0ba6-5086-8334-46c37727561b",
+              "name": "blocked",
+              "value": "={{ $json.answers.blocked.noul }}",
+              "type": "number"
+            },
+            {
+              "id": "5eed0c9f-ec68-54dd-8fc4-40dbd013d6af",
+              "name": "person",
+              "value": "={{ $json.answers.person.noul }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "106788cb-1292-54a3-9a4a-41b6b2fbfb54",
+      "name": "Billing",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        760,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "dfc455b2-a821-54df-9046-d1cc81ac91a6",
+              "name": "route",
+              "value": "technical",
+              "type": "string"
+            },
+            {
+              "id": "c819e634-64ba-5fbc-b3bc-0afa1487f389",
+              "name": "priority",
+              "value": "={{ $json.answers.blocked.noul >= 0.5 ? 'high' : 'normal' }}",
+              "type": "string"
+            },
+            {
+              "id": "2f1840a1-cdd9-5367-8c3f-110e5f5dc3b2",
+              "name": "subject",
+              "value": "={{ $('Ticket').item.json.body.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "0bead473-3baf-52d0-b3e6-ad2b7be46fcc",
+              "name": "team",
+              "value": "={{ $json.answers.team.probabilities }}",
+              "type": "object"
+            },
+            {
+              "id": "c2e36725-7d6d-5af9-92a2-48de5c78e17c",
+              "name": "blocked",
+              "value": "={{ $json.answers.blocked.noul }}",
+              "type": "number"
+            },
+            {
+              "id": "ebb34815-0c8f-5bb1-8ba9-d2f9c17840c8",
+              "name": "person",
+              "value": "={{ $json.answers.person.noul }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "526b43f9-546f-531b-b86c-1de6447df3ef",
+      "name": "Technical",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        760,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "1741ec4b-943b-5686-980d-3b8e95129dd1",
+              "name": "route",
+              "value": "account",
+              "type": "string"
+            },
+            {
+              "id": "39956b94-1f4f-5683-9858-572e1e157950",
+              "name": "priority",
+              "value": "={{ $json.answers.blocked.noul >= 0.5 ? 'high' : 'normal' }}",
+              "type": "string"
+            },
+            {
+              "id": "a6c4c9fe-d6f3-55de-a8fe-c60220f9b47f",
+              "name": "subject",
+              "value": "={{ $('Ticket').item.json.body.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "79192814-cfbc-5ffe-b5e4-dcf94fd8f3f2",
+              "name": "team",
+              "value": "={{ $json.answers.team.probabilities }}",
+              "type": "object"
+            },
+            {
+              "id": "19cbd795-8717-503c-a18c-a3948fbea4af",
+              "name": "blocked",
+              "value": "={{ $json.answers.blocked.noul }}",
+              "type": "number"
+            },
+            {
+              "id": "44fe8a1d-6283-5602-9f9d-c3f9a77d1c05",
+              "name": "person",
+              "value": "={{ $json.answers.person.noul }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "b6375642-56d9-511d-948e-27efd49bcb99",
+      "name": "Account",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        760,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "180aaedd-de3d-5472-be26-70c38663d236",
+              "name": "route",
+              "value": "sales",
+              "type": "string"
+            },
+            {
+              "id": "9dcbc97a-0fe3-5b24-9db4-7789e5fadcfc",
+              "name": "priority",
+              "value": "={{ $json.answers.blocked.noul >= 0.5 ? 'high' : 'normal' }}",
+              "type": "string"
+            },
+            {
+              "id": "60a23b24-5b03-5ea6-b072-a1f27cd5d7eb",
+              "name": "subject",
+              "value": "={{ $('Ticket').item.json.body.subject }}",
+              "type": "string"
+            },
+            {
+              "id": "88e33386-5cc6-56bb-b121-2595cbea72ab",
+              "name": "team",
+              "value": "={{ $json.answers.team.probabilities }}",
+              "type": "object"
+            },
+            {
+              "id": "c54d1349-b308-5276-a7ae-212d4db18f4a",
+              "name": "blocked",
+              "value": "={{ $json.answers.blocked.noul }}",
+              "type": "number"
+            },
+            {
+              "id": "a4c14da3-3c48-59fb-ae8a-037fa3fd835b",
+              "name": "person",
+              "value": "={{ $json.answers.person.noul }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9fd3e3cb-0176-582f-9629-f426215997ee",
+      "name": "Sales",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [
+        760,
+        640
+      ]
+    }
+  ],
+  "connections": {
+    "Ticket": {
+      "main": [
+        [
+          {
+            "node": "Ask Reflex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask Reflex": {
+      "main": [
+        [
+          {
+            "node": "Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route": {
+      "main": [
+        [
+          {
+            "node": "To a person",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Billing",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Technical",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Account",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Sales",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "To a person",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
