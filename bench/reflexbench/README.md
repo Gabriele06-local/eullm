@@ -2,7 +2,9 @@
 
 Two benchmarks share this directory: `reflexbench.py`, tool selection (MVP
 0), and `ragbench.py`, whether retrieved passages suffice to answer
-([below](#the-rag-gate-ragbenchpy), MVP 1).
+([below](#the-rag-gate-ragbenchpy), MVP 1). Beside them, `qualify.py` says
+whether one decision model may replace another
+([below](#the-qualification-test-qualifypy), MVP 4).
 
 MVP 0 of the [Reflex roadmap](../../docs/reflex-roadmap.md). Before Reflex
 selects tools for anyone, this benchmark measures it on public labelled sets
@@ -216,11 +218,114 @@ method is scored on the test half, the same cases for all.
 | 3-way accuracy, macro-F1 | the decision among the three: Reflex's own choice, the embeddings' two fitted thresholds |
 | ECE | how far Reflex's probability of `answer` is from how often it is right |
 
+## The qualification test: `qualify.py`
+
+MVP 4 of the roadmap. A decision model replaces another because it passed
+this test on the domain's own labelled decisions, not because a
+configuration line names it. The candidate — a model trained with
+`eullm-forge decisions` ([docs/forge.md](../../docs/forge.md#decision-models-trained-on-your-decisions)),
+say — and, optionally, the model it would replace answer the same labelled
+requests, each request in the three evaluation modes of `/v1/systemone`
+(`eullm.mode`), and the test prints PASS or FAIL.
+
+```bash
+# Each model on a server of its own, each with an audit directory of its
+# own: a run is thousands of decisions.
+EULLM_AUDIT_DIR=/tmp/qualify-candidate \
+  eullm serve --port 11500 --decision-model ~/models/decide-q8_0.gguf
+EULLM_AUDIT_DIR=/tmp/qualify-current \
+  eullm serve --port 11501 --decision-model jev-style-2b-decision-v3-gguf-q4_k_m
+
+python3 bench/reflexbench/qualify.py \
+  --candidate http://localhost:11500 --current http://localhost:11501 \
+  --data ~/decisions/data/test.labelled.jsonl --out qualify.json
+```
+
+The exit status is 0 for PASS, 1 for FAIL, 2 when a server could not be
+asked at all (none listening, no decision model loaded, a wrong key). One
+server with both models loaded by name (`--candidate-model`,
+`--current-model`) works too: every request of the candidate is asked
+before the first of the current model, so the decision slot swaps once.
+
+**The labelled requests.** One JSON object per line: a request as
+`/v1/systemone` takes it, and the right answer to each question — an
+option's name for a `choice`, a level's number (from 0) for a `score`,
+true or false for a `noul`. `sources`, optional, says where each answer
+came from:
+
+```json
+{"id": "t1", "state": "Payouts failing for 3 days", "questions": {"team": {"type": "choice", "instructions": "Which team?", "criteria": {"billing": "Payments", "tech": "Bugs"}}, "is_urgent": {"type": "noul", "instructions": "Is it urgent?"}}, "answers": {"team": "billing", "is_urgent": true}, "sources": {"team": "feedback:user", "is_urgent": "rules"}}
+```
+
+A question with no answer is not asked; a line in
+`bench/decision_calibration.py`'s format (`state`, `question`, `label`) is
+a request of one question. `eullm-forge decisions build` writes the states
+it held out in this format (`test.labelled.jsonl`), so a model is qualified
+on states it was not trained on. `--traces DIR` reads a directory a server
+wrote with `EULLM_DECISION_TRACES` instead: every decision with feedback is
+a request, with the questions it asked and the answers the feedback gave.
+`--sources feedback` keeps only the answers people (or rules) gave after
+the fact, leaving out those a teacher model labelled — against a teacher's
+labels, accuracy is agreement with the teacher.
+
+**What it measures**, per question type and over all of them:
+
+| Column | |
+|---|---|
+| answers, refused | labelled answers, and those the server would not give (a `choice` of 30 options for a model that reads 26; a state over its context): a refused answer counts as wrong |
+| accuracy, 95% CI | right answers in `--serve-mode` (default `shared_prefix`, the engine's), with the Wilson interval |
+| commonest | the accuracy of giving each question its commonest right answer every time: what a model has to beat to have learnt anything |
+| ECE, NLL | expected calibration error of the top answer (15 equal-width bins, as `decision_calibration.py`), and −log p(right answer) |
+| coverage | code readout: the model's probability on a valid answer code |
+| max Δ between modes | the largest change in any answer's probability between `separate` and the other modes: the same request, batched differently |
+| changed | the share of answers a mode changed |
+| p50 ms, p95 ms | a request as the client sees it, in `--serve-mode`; every mode's are in the JSON report |
+
+With `--current`, the report also counts the answers only one of the two got
+right and gives McNemar's exact p-value: whether the difference in
+accuracy is more than the luck of the set.
+
+**The thresholds.** Every one is an option; the defaults, and why:
+
+| Check | Default | Why |
+|---|---|---|
+| `--min-answers` | 50 | below 50 answers of a type, its accuracy is known to no better than ±14 points (95% Wilson interval at 50%): too little to rest a verdict on |
+| better than the commonest answer | — | a model no more often right than one that gives every question its commonest answer has learnt nothing about the states |
+| `--max-ece` | 0.10 | a decision's probability is what thresholds are set on ("above 0.9, automate"): on average it may sit at most 10 points from how often the model is right |
+| `--max-mode-delta` | 0.05 | a decision must not depend on how it was batched: models trained for decisions stay under it (Jev-Style 0.8B Q4_K_M: 0.024 on a CPU, 0.039 on a GPU), Qwen3-0.6B Q4_K_M, which is not, moves by up to 0.53 ([docs/engine.md](../../docs/engine.md)) |
+| `--max-mode-flips` | 0.01 | an answer that changes with the evaluation mode cannot be replayed: at most one answer in a hundred near a tie |
+| `--min-coverage` | 0.90 | below it, much of the model's probability goes to something other than an answer code, and its probabilities describe a minority of what it would say |
+| `--max-accuracy-drop` | 0.02 | against `--current`: a replacement may be faster or better calibrated, not less often right |
+| `--max-latency-ratio` | 1.5 | against `--current`, p95 in `--serve-mode`: callers budget for the decision they have; half again as slow is another budget |
+| `--max-p95-ms` | none | depends on the hardware and the caller: set it for the machine that will serve |
+
+A failed check prints why it matters. A model served with a temperature
+(`eullm.temperature`; `eullm-forge decisions train` fits one on its dev
+split) is qualified with it: `--candidate-temperature`,
+`--current-temperature`.
+
+| Option | Default | |
+|---|---|---|
+| `--candidate`, `--current` | — | the servers; `--current` is optional |
+| `--candidate-model`, `--current-model` | the one loaded | decision model to ask for |
+| `--data` | none | a labelled set, repeatable |
+| `--traces` | none | a traces directory, repeatable |
+| `--sources` | all | keep the answers whose source starts with one of these, comma-separated |
+| `--modes` | `separate,shared_prefix,batched` | the modes compared; noise needs two |
+| `--serve-mode` | `shared_prefix` | the mode accuracy, calibration and latency are measured in |
+| `--limit` | 0 (all) | requests per set |
+| `--out`, `--details` | `qualify-<time>.json`, none | the report; every answer, one JSON line each |
+
+Each request is asked once per mode and per server. On a CPU, where a
+Jev-Style 0.8B takes about three seconds a request of three questions,
+100 requests against two servers take about half an hour.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s bench/reflexbench
 ```
 
-Offline: the metrics, BM25, the loaders on made-up files, and both
-benchmarks' methods against a stand-in server.
+Offline: the metrics, BM25, the loaders on made-up files, the
+qualification test's sets, metrics and thresholds, and every client
+against a stand-in server.
