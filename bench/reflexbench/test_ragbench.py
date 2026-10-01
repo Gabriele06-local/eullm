@@ -134,6 +134,30 @@ class DataTest(unittest.TestCase):
             self.assertEqual(held, wanted[c.label], c.id)
         self.assertEqual({c.group for c in dataset.cases}, {"q0", "q1"})
         self.assertTrue(dataset.cases[0].passages[0].startswith("T"))
+        # The two questions rest on the same paragraphs here: one document.
+        self.assertEqual({c.document for c in dataset.cases}, {"musique/q0"})
+
+    def test_questions_resting_on_one_paragraph_are_one_document(self):
+        def para(title, supporting=True):
+            return {"title": title, "paragraph_text": f"about {title}", "is_supporting": supporting}
+
+        rows = [
+            {"id": "2hop__1_2", "paragraphs": [para("A"), para("B")]},
+            {"id": "2hop__2_3", "paragraphs": [para("B"), para("C")]},
+            # A paragraph only retrieved, not needed, ties nothing.
+            {"id": "2hop__4_5", "paragraphs": [para("D"), para("E"), para("A", False)]},
+            # Tied to the first through the second.
+            {"id": "2hop__3_6", "paragraphs": [para("C"), para("F")]},
+        ]
+        self.assertEqual(
+            rg_data.shared_paragraphs(rows),
+            {
+                "2hop__1_2": "musique/2hop__1_2",
+                "2hop__2_3": "musique/2hop__1_2",
+                "2hop__4_5": "musique/2hop__4_5",
+                "2hop__3_6": "musique/2hop__1_2",
+            },
+        )
 
     def test_own_set(self):
         rows = [
@@ -144,7 +168,14 @@ class DataTest(unittest.TestCase):
                 "label": "answer",
                 "group": "g",
             },
-            {"id": "y", "question": "q", "passages": ["a"], "label": "abstain", "group": "g"},
+            {
+                "id": "y",
+                "question": "q",
+                "passages": ["a"],
+                "label": "abstain",
+                "group": "g",
+                "document": "doc-1",
+            },
         ]
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "mine.jsonl"
@@ -152,6 +183,7 @@ class DataTest(unittest.TestCase):
             dataset = rg_data.from_jsonl(path)
             self.assertEqual(dataset.cases[0].passages, ["a", "B: b"])
             self.assertTrue(dataset.cases[0].sufficient)
+            self.assertEqual([c.document for c in dataset.cases], [None, "doc-1"])
             path.write_text(json.dumps(dict(rows[1], label="maybe")), encoding="utf-8")
             with self.assertRaises(ValueError):
                 rg_data.from_jsonl(path)
@@ -197,6 +229,29 @@ class MethodsTest(unittest.TestCase):
         with mock.patch.object(rg_methods, "post", post):
             decision = rg_methods.ReflexYesNo("http://x", "m", None, 10).decide(self.c)
         self.assertEqual((decision.score, decision.choice), (0.3, "not answer"))
+
+    def test_what_is_sent_is_the_request_and_each_method_knows_its_right_answer(self):
+        """Forge's RAG-gate traces are built from `request` and the methods'
+        questions: what a method sends must be exactly that."""
+        for name, method in rg_methods.REFLEX.items():
+            sent = []
+
+            def post(url, payload, api_key, timeout):
+                sent.append(payload)
+                answer = {"noul": 0.9, "choice": "answer", "probabilities": {"answer": 0.9}}
+                return {"answers": {"q": answer}}
+
+            with mock.patch.object(rg_methods, "post", post):
+                method("http://x", "m", None, 10).decide(self.c)
+            self.assertEqual(sent, [rg_methods.request(self.c, method.question, "m")], name)
+        self.assertEqual(
+            [rg_methods.ReflexGate.right(case("g", label)) for label in rg_data.LABELS],
+            list(rg_data.LABELS),
+        )
+        self.assertEqual(
+            [rg_methods.ReflexYesNo.right(case("g", label)) for label in rg_data.LABELS],
+            [True, False, False],
+        )
 
     def test_embed_max_scores_the_closest_passage(self):
         vectors = {"Book: written by Ann": [1.0, 0.0], "Ann: a writer": [0.0, 1.0]}
@@ -264,6 +319,8 @@ class OpenBookTest(unittest.TestCase):
         self.assertTrue(any(p.startswith(own) for p in answer["passages"]))
         self.assertTrue(abstain["passages"])
         self.assertFalse(any(p.startswith(own) for p in abstain["passages"]))
+        # Both name the article, which the pair's other questions share.
+        self.assertEqual({answer["document"], abstain["document"]}, {"codice_civile/2043"})
 
         # What it writes is a set the gate reads.
         with tempfile.TemporaryDirectory() as tmp:
@@ -271,6 +328,20 @@ class OpenBookTest(unittest.TestCase):
             path.write_text("\n".join(json.dumps(c) for c in (answer, abstain)), "utf-8")
             loaded = rg_data.from_jsonl(path)
         self.assertEqual([c.sufficient for c in loaded.cases], [True, False])
+        self.assertEqual([c.document for c in loaded.cases], ["codice_civile/2043"] * 2)
+
+    def test_a_set_written_before_cases_named_their_article_gets_it_from_the_key(self):
+        import rg_openbook
+
+        self.assertEqual(rg_openbook.document("ob-g-codice_civile-2043"), "codice_civile/2043")
+        # Another question about the same article, and an article with a suffix.
+        self.assertEqual(rg_openbook.document("ob-g-codice_civile-2043-v3"), "codice_civile/2043")
+        self.assertEqual(
+            rg_openbook.document("ob-g-codice_civile-2043-bis-v1"), "codice_civile/2043-bis"
+        )
+        self.assertEqual(rg_openbook.document("h-codice_penale-52"), "codice_penale/52")
+        for key in ("2hop__1_2", "ob-g-codice_civile", "ob-m-codice_civile-9000-3", ""):
+            self.assertIsNone(rg_openbook.document(key), key)
 
     def test_questions_by_rubrica_without_the_pairs(self):
         import rg_openbook
@@ -299,6 +370,7 @@ class OpenBookTest(unittest.TestCase):
         self.assertFalse(any("necessità" in q for q in questions))
         one = [c for c in drawn if c["group"] == "h-codice_civile-2043"]
         self.assertEqual([c["label"] for c in one], ["answer", "abstain"])
+        self.assertEqual({c["document"] for c in one}, {"codice_civile/2043"})
         self.assertEqual(len(rg_openbook.heading_cases(index, k=3, limit=1)), 2)
 
     def test_only_questions_asked_by_topic(self):

@@ -12,6 +12,11 @@ its choice among `answer`, `retrieve_more` and `abstain`.
     state, one `choice` among the three;
   * `reflex-yesno`: the same state, one `noul`: do the passages hold every
     fact the answer needs?
+
+The request the two Reflex methods send is built by `request` and their
+`question`, and nothing else: `eullm-forge decisions import-rag` builds its
+training traces with the same code, so a model trained on them is trained
+on the prompt the gate shows it.
 """
 
 import time
@@ -44,6 +49,14 @@ def state(case):
     return f"Question: {case.question}\n\nPassages:\n{passages}"
 
 
+def request(case, question, model=None):
+    """The `/v1/systemone` body that asks `question` about `case`."""
+    payload = {"state": state(case), "questions": {"q": question}}
+    if model:
+        payload["model"] = model
+    return payload
+
+
 class EmbedMax:
     """The passages are embedded once, as an index would hold them; a case
     costs the embedding of its question."""
@@ -69,16 +82,21 @@ class EmbedMax:
 
 
 class Reflex:
-    """One question about the case, asked of `/v1/systemone`."""
+    """One question about the case, asked of `/v1/systemone`: the subclass's
+    `question`, whose right answer for a labelled case is `right(case)`."""
+
+    question = None
 
     def __init__(self, url, model, api_key, timeout):
         self.url = url.rstrip("/") + "/v1/systemone"
         self.model, self.api_key, self.timeout = model, api_key, timeout
 
-    def ask(self, case, question):
-        payload = {"state": state(case), "questions": {"q": question}}
-        if self.model:
-            payload["model"] = self.model
+    @staticmethod
+    def right(case):
+        raise NotImplementedError
+
+    def ask(self, case):
+        payload = request(case, self.question, self.model)
         started = time.perf_counter()
         body = post(self.url, payload, self.api_key, self.timeout)
         ms = (time.perf_counter() - started) * 1000
@@ -94,21 +112,36 @@ class Reflex:
 
 class ReflexGate(Reflex):
     name = "reflex-gate"
+    question = {"type": "choice", "instructions": GATE, "criteria": OPTIONS}
+
+    @staticmethod
+    def right(case):
+        """The option the case's label names."""
+        return case.label
 
     def decide(self, case):
-        question = {"type": "choice", "instructions": GATE, "criteria": OPTIONS}
-        answer, ms, server = self.ask(case, question)
+        answer, ms, server = self.ask(case)
         probabilities = answer["probabilities"]
         return Decision(probabilities["answer"], answer["choice"], probabilities, ms, server)
 
 
 class ReflexYesNo(Reflex):
     name = "reflex-yesno"
+    question = {"type": "noul", "instructions": YESNO}
+
+    @staticmethod
+    def right(case):
+        """Yes only when the passages hold every fact the answer needs."""
+        return case.sufficient
 
     def decide(self, case):
-        answer, ms, server = self.ask(case, {"type": "noul", "instructions": YESNO})
+        answer, ms, server = self.ask(case)
         p = answer["noul"]
         # A yes/no says whether to answer; it cannot tell a missing fact from
         # an irrelevant context, so its own decision is two-way.
         choice = "answer" if p >= 0.5 else "not answer"
         return Decision(p, choice, {"yes": p}, ms, server)
+
+
+#: The Reflex methods by name, as ragbench.py's --methods names them.
+REFLEX = {method.name: method for method in (ReflexGate, ReflexYesNo)}

@@ -450,7 +450,23 @@ struct SamplingParams {
     num_ctx: Option<u32>,
 }
 
+/// Sampling parameters of a request to `/api/generate` or `/api/chat`.
 fn parse_generate_params(body: &Value) -> SamplingParams {
+    parse_sampling_params(body, false)
+}
+
+/// Sampling parameters of a `/v1/chat/completions` request: those of
+/// [`parse_generate_params`], with the output limit also read from
+/// `max_completion_tokens`, the name OpenAI's Chat Completions API gives it
+/// now.
+fn parse_chat_completions_params(body: &Value) -> SamplingParams {
+    parse_sampling_params(body, true)
+}
+
+/// Read a request's sampling parameters. `with_max_completion_tokens` says
+/// whether that field names the output limit too: it does on
+/// `/v1/chat/completions` only, Ollama's API having no such field.
+fn parse_sampling_params(body: &Value, with_max_completion_tokens: bool) -> SamplingParams {
     // Check top-level first (OpenAI format), then Ollama's options object.
     let options = body.get("options");
 
@@ -458,13 +474,24 @@ fn parse_generate_params(body: &Value) -> SamplingParams {
         body.get(key).or_else(|| options.and_then(|o| o.get(key)))
     };
 
+    // OpenAI's Chat Completions API names the output limit
+    // `max_completion_tokens` and keeps `max_tokens` only as a deprecated
+    // alias, which older clients still send, so a request carrying both is
+    // limited by the current name. A `null` is how JSON leaves a field
+    // unset, and must not discard a `max_tokens` the same request did set.
+    // Whichever name is used, its value is then read in the same way.
+    let limit = with_max_completion_tokens
+        .then(|| get("max_completion_tokens"))
+        .flatten()
+        .filter(|v| !v.is_null())
+        .or_else(|| get("max_tokens"))
+        .or_else(|| get("num_predict"));
     // Ollama's real default is unbounded (-1: generate until context is
     // full or a stop condition), not a small fixed cap — confirmed against
     // Ollama's own docs/source, see ollama/ollama#7691. Leaving this
     // unbounded here is safe because prefill_sequence() always clamps it to
     // the remaining context budget regardless of what's requested.
-    let max_tokens = get("max_tokens")
-        .or_else(|| get("num_predict"))
+    let max_tokens = limit
         .and_then(|v| v.as_u64())
         .unwrap_or(u32::MAX as u64) as u32;
     // Defaults match Ollama: temperature=0.8, top_k=40, top_p=0.9, repeat_penalty=1.1
@@ -2714,7 +2741,7 @@ async fn chat_completions(
         Some(tmpl) => (tmpl.prompt.clone(), Vec::new()),
         None => build_chat_prompt(&snap, &messages, think, model_name_ref),
     };
-    let sp = parse_generate_params(&body);
+    let sp = parse_chat_completions_params(&body);
     let grammar = parse_format_grammar(&body);
 
     let request = GenerateRequest {
@@ -3365,6 +3392,86 @@ mod tests {
 
         let sp = parse_generate_params(&json!({ "options": { "num_predict": 256 } }));
         assert_eq!(sp.max_tokens, 256);
+    }
+
+    // ── `max_completion_tokens` on /v1/chat/completions ─────────────────
+    //
+    // OpenAI's current name for the output limit. Clients written against
+    // the current API send only it, older ones only `max_tokens`.
+
+    #[test]
+    fn chat_completions_read_the_limit_under_either_name() {
+        let sp = parse_chat_completions_params(&json!({ "max_completion_tokens": 64 }));
+        assert_eq!(sp.max_tokens, 64);
+        let sp = parse_chat_completions_params(&json!({ "max_tokens": 128 }));
+        assert_eq!(sp.max_tokens, 128);
+    }
+
+    /// Both ways round, so what is pinned is "the current name wins", not
+    /// "the smaller limit wins".
+    #[test]
+    fn max_completion_tokens_wins_over_max_tokens() {
+        let sp = parse_chat_completions_params(&json!({
+            "max_completion_tokens": 64,
+            "max_tokens": 128,
+        }));
+        assert_eq!(sp.max_tokens, 64);
+        let sp = parse_chat_completions_params(&json!({
+            "max_completion_tokens": 256,
+            "max_tokens": 128,
+        }));
+        assert_eq!(sp.max_tokens, 256);
+    }
+
+    #[test]
+    fn chat_completions_without_a_limit_stay_unbounded() {
+        let sp = parse_chat_completions_params(&json!({}));
+        assert_eq!(sp.max_tokens, u32::MAX);
+        // Ollama's `options.num_predict`, accepted here before, still is.
+        let sp = parse_chat_completions_params(&json!({ "options": { "num_predict": 256 } }));
+        assert_eq!(sp.max_tokens, 256);
+    }
+
+    #[test]
+    fn a_null_max_completion_tokens_leaves_max_tokens_in_force() {
+        let sp = parse_chat_completions_params(&json!({
+            "max_completion_tokens": null,
+            "max_tokens": 128,
+        }));
+        assert_eq!(sp.max_tokens, 128);
+        let sp = parse_chat_completions_params(&json!({ "max_completion_tokens": null }));
+        assert_eq!(sp.max_tokens, u32::MAX);
+    }
+
+    /// A value that is not a non-negative integer reads under the current
+    /// name exactly as it always has under `max_tokens`, as no limit, and
+    /// being set it still takes precedence over a `max_tokens`.
+    #[test]
+    fn an_invalid_max_completion_tokens_reads_as_an_invalid_max_tokens_does() {
+        for value in [json!(-1), json!("64"), json!(1.5), json!(true)] {
+            let as_max_tokens = parse_generate_params(&json!({ "max_tokens": value })).max_tokens;
+            assert_eq!(as_max_tokens, u32::MAX, "max_tokens: {value}");
+            for body in [
+                json!({ "max_completion_tokens": value }),
+                json!({ "max_completion_tokens": value, "max_tokens": 128 }),
+            ] {
+                let sp = parse_chat_completions_params(&body);
+                assert_eq!(sp.max_tokens, as_max_tokens, "{body}");
+            }
+        }
+    }
+
+    /// Ollama's API has no `max_completion_tokens`, so `/api/generate` and
+    /// `/api/chat` do not read one.
+    #[test]
+    fn ollama_endpoints_do_not_read_max_completion_tokens() {
+        let sp = parse_generate_params(&json!({ "max_completion_tokens": 64 }));
+        assert_eq!(sp.max_tokens, u32::MAX);
+        let sp = parse_generate_params(&json!({
+            "max_completion_tokens": 64,
+            "max_tokens": 128,
+        }));
+        assert_eq!(sp.max_tokens, 128);
     }
 
     // ── Slot override validation ────────────────────────────────────────
