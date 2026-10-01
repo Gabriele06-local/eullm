@@ -16,7 +16,8 @@ Two channels, and the choice is not a matter of taste.
   effective source logged at startup. `EULLM_API_KEYS`, `EULLM_API_KEYS_FILE`,
   `EULLM_ALLOWED_IPS`, `EULLM_ALLOWED_ORIGINS`, `EULLM_WEB_ALLOWED_DOMAINS`,
   `EULLM_WEB_ALLOW_HTTP`, `EULLM_WEB_ALLOW_PRIVATE_HOSTS`,
-  `EULLM_ALLOW_MODEL_PATHS`, `EULLM_AUDIT_DIR`, `EULLM_MODELS_DIR`.
+  `EULLM_ALLOW_MODEL_PATHS`, `EULLM_AUDIT_DIR`, `EULLM_MODELS_DIR`,
+  `EULLM_DECISION_POLICY`, `EULLM_DECISION_TRACES`.
 
 Three reasons, in order of how expensive they are to get wrong: a secret on a
 command line is visible in `ps` to every local user on the box; every
@@ -33,10 +34,10 @@ variables** (which race against every other test in the binary — see
 `api::ip_allowlist::resolve`, `api::auth::ApiKeys::resolve`,
 `api::origin::AllowedOrigins::resolve`, `tools::guard::WebPolicy::resolve`),
 log the effective value *and its source* at startup, and decide explicitly
-whether unusable configuration is fatal. It is fatal for `EULLM_API_KEYS` and
-for an explicitly set `EULLM_AUDIT_DIR`: someone who configured a control and
-gets it silently disabled is worse off than someone whose process refused to
-start.
+whether unusable configuration is fatal. It is fatal for `EULLM_API_KEYS`,
+for an explicitly set `EULLM_AUDIT_DIR`, and for a set `EULLM_DECISION_POLICY`
+or `EULLM_DECISION_TRACES`: someone who configured a control and gets it
+silently disabled is worse off than someone whose process refused to start.
 
 ## One `RuntimeOpts`, flattened into `run` and `serve`
 

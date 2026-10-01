@@ -317,6 +317,74 @@ pub fn patch_gguf_if_needed(src: &Path, dst: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
+/// Copy the GGUF at `src` to `dst` with one metadata entry added after the
+/// others: `key`, of GGUF type `value_type`, holding `value` as the file
+/// stores it (little-endian). For tests that need a real model carrying
+/// metadata no exporter writes yet, such as a decision model's calibration
+/// temperature. The tensor data moves to wherever the longer header and the
+/// file's own alignment put it; the tensors' offsets are relative to it.
+#[cfg(test)]
+pub(crate) fn add_metadata(
+    src: &Path,
+    dst: &Path,
+    key: &str,
+    value_type: u32,
+    value: &[u8],
+) -> io::Result<()> {
+    let mut f = std::fs::File::open(src)?;
+    if read_u32(&mut f)? != GGUF_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a GGUF file",
+        ));
+    }
+    let _version = read_u32(&mut f)?;
+    let tensor_count = read_u64(&mut f)?;
+    let kv_count = read_u64(&mut f)?;
+    let mut alignment = DEFAULT_ALIGNMENT;
+    for _ in 0..kv_count {
+        let k = read_gguf_string(&mut f)?;
+        let vtype = read_u32(&mut f)?;
+        if k == KEY_ALIGNMENT && vtype == TYPE_UINT32 {
+            alignment = accept_alignment(read_u32(&mut f)?)?;
+        } else {
+            skip_gguf_value(&mut f, vtype)?;
+        }
+    }
+    let end_of_metadata = f.stream_position()?;
+    for _ in 0..tensor_count {
+        let _name = read_gguf_string(&mut f)?;
+        let n_dims = read_u32(&mut f)?;
+        // Its dimensions, then its type and its data offset.
+        skip_n(&mut f, u64::from(n_dims) * 8 + 4 + 8)?;
+    }
+    let end_of_header = f.stream_position()?;
+
+    let mut entry = Vec::new();
+    entry.extend_from_slice(&(key.len() as u64).to_le_bytes());
+    entry.extend_from_slice(key.as_bytes());
+    entry.extend_from_slice(&value_type.to_le_bytes());
+    entry.extend_from_slice(value);
+    let new_end_of_header = end_of_header + entry.len() as u64;
+
+    f.seek(SeekFrom::Start(0))?;
+    let mut w = io::BufWriter::new(std::fs::File::create(dst)?);
+    // Magic, version and tensor count as they are; the entry count one up.
+    copy_exact(&mut f, &mut w, 16)?;
+    let _ = read_u64(&mut f)?;
+    w.write_all(&(kv_count + 1).to_le_bytes())?;
+    copy_exact(&mut f, &mut w, end_of_metadata - 24)?;
+    w.write_all(&entry)?;
+    copy_exact(&mut f, &mut w, end_of_header - end_of_metadata)?;
+    write_zeros(
+        &mut w,
+        align_up(new_end_of_header, alignment) - new_end_of_header,
+    )?;
+    f.seek(SeekFrom::Start(align_up(end_of_header, alignment)))?;
+    io::copy(&mut f, &mut w)?;
+    w.flush()
+}
+
 // ── I/O helpers ──────────────────────────────────────────────────────────
 
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
@@ -711,6 +779,54 @@ mod tests {
         // A count large enough to overflow the multiplication stops there
         // instead, which is the same refusal by the earlier of the two gates.
         assert!(check_string_array_fits(&mut Cursor::new(vec![0u8; 64]), u64::MAX).is_err());
+    }
+
+    /// The helper the decision tests build a model with: the entry lands
+    /// after the others and the count says so, the tensor infos follow
+    /// unchanged, and the data sits where the longer header and the file's
+    /// own alignment put it.
+    #[test]
+    fn a_metadata_entry_is_added_after_the_others() {
+        let data = b"TENSOR-BYTES";
+        let (bytes, end_of_header) = gguf_with(Some(64), &[1, 2, 3], data);
+        let end_of_header = end_of_header as usize;
+        // The fixture's one tensor info: name, one dimension, type, offset.
+        let tensor_info = 8 + 3 + 4 + 8 + 4 + 8;
+        let end_of_metadata = end_of_header - tensor_info;
+
+        let (src, dst) = temp_pair("add-metadata");
+        std::fs::write(&src, &bytes).unwrap();
+        let value = 0.5f32.to_le_bytes();
+        let added = add_metadata(&src, &dst, "eullm.test", TYPE_FLOAT32, &value);
+        let out = std::fs::read(&dst);
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+        added.unwrap();
+        let out = out.unwrap();
+
+        let mut entry = Vec::new();
+        entry.extend_from_slice(&10u64.to_le_bytes());
+        entry.extend_from_slice(b"eullm.test");
+        entry.extend_from_slice(&TYPE_FLOAT32.to_le_bytes());
+        entry.extend_from_slice(&value);
+        let after_entry = end_of_metadata + entry.len();
+        let data_start = align_up((end_of_header + entry.len()) as u64, 64) as usize;
+
+        assert_eq!(out[..16], bytes[..16], "magic, version, tensor count");
+        assert_eq!(out[16..24], 3u64.to_le_bytes(), "one entry more");
+        assert_eq!(out[24..end_of_metadata], bytes[24..end_of_metadata]);
+        assert_eq!(out[end_of_metadata..after_entry], entry[..]);
+        assert_eq!(
+            out[after_entry..after_entry + tensor_info],
+            bytes[end_of_metadata..end_of_header]
+        );
+        assert!(
+            out[after_entry + tensor_info..data_start]
+                .iter()
+                .all(|&b| b == 0),
+            "the gap before the data must be padding"
+        );
+        assert_eq!(&out[data_start..], data);
     }
 
     #[test]

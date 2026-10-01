@@ -18,6 +18,12 @@ Only questions asked by topic are used: one that names its article gets it
 by lookup, and there is nothing for a gate to judge. The set is written
 where the pairs are; nothing of it belongs in the repository.
 
+Each case names the article its question was written from (`document`,
+`code/number`): the pairs ask up to four questions of one article, and a
+model trained on one of them and tested on another has read the answer.
+`eullm-forge decisions import-rag` keeps every question about an article
+on one side of its split.
+
 Without the pairs, which a large model writes on the cluster, `--by-heading`
 asks by an article's rubrica instead — "Che cosa prevede la legge in materia
 di risarcimento per fatto illecito?" — for the articles whose rubrica is
@@ -53,17 +59,34 @@ def passage(record):
     return f"{label(record)}\n{body}"
 
 
+def article(key):
+    """The article a question was written from, `(code, number)`, read from
+    its key: `ob-g-<code>-<number>` for a pair, `-v<n>` after it for each
+    further question about the same article, or `h-<code>-<number>` for one
+    asked by rubrica. None for a key of another shape."""
+    for prefix in ("ob-g-", "h-"):
+        if key.startswith(prefix):
+            code, _, number = key[len(prefix) :].partition("-")
+            if prefix == "ob-g-":
+                number = re.sub(r"-v\d+$", "", number)
+            return (code, number) if code and number else None
+    return None
+
+
+def document(key):
+    """A case's `document`, the article of the question `key` as
+    `code/number`, or None. For a set written before cases carried it."""
+    found = article(key)
+    return f"{found[0]}/{found[1]}" if found else None
+
+
 def cases(pair, index, k=3):
     """The two cases of one by-topic grounded pair, or none."""
     key = str(pair.get("key", ""))
-    if (
-        pair.get("task") != "openbook_grounded"
-        or pair.get("named", True)
-        or not key.startswith("ob-g-")
-    ):
+    found = article(key) if key.startswith("ob-g-") else None
+    if pair.get("task") != "openbook_grounded" or pair.get("named", True) or not found:
         return []
-    code, _, number = key[len("ob-g-") :].partition("-")
-    number = re.sub(r"-v\d+$", "", number)
+    code, number = found
     question = pair["instruction"].rsplit("Domanda: ", 1)[-1].strip()
     return contexts(key, question, code, number, index, k)
 
@@ -92,6 +115,7 @@ def contexts(key, question, code, number, index, k):
         {
             "id": f"{key}:{name}",
             "group": key,
+            "document": f"{code}/{number}",
             "question": question,
             "passages": [passage(r) for r in records],
             "label": name,
