@@ -42,6 +42,8 @@ def test_the_shortcuts_to_a_deadline_do_not(answer):
     "Non esiste alcun termine perentorio: il ricorso va proposto entro 60 giorni.",
     "Non esiste alcuna eccezione: il termine è di 60 giorni.",
     "Non esiste alcuna decadenza; il ricorso va proposto entro 60 giorni.",
+    "Secondo l'articolo 10 il termine è di 60 giorni e non esiste proroga.",
+    "Ai sensi dell'art. 10 il ricorso si propone entro 60 giorni, e non esiste deroga.",
 ])
 def test_opening_with_a_negation_about_something_else_still_scores(answer):
     """"Non è prevista" was carved out of the refusal set because it opens right
