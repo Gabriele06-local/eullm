@@ -164,6 +164,7 @@ jobs:
       hub: ${{ steps.filter.outputs.hub }}
       forge: ${{ steps.filter.outputs.forge }}
       bench: ${{ steps.filter.outputs.bench }}
+      reflex_mcp: ${{ steps.filter.outputs.reflex_mcp }}
       windows_packaging: ${{ steps.filter.outputs.windows_packaging }}
     steps:
       - uses: actions/checkout@v5
@@ -196,6 +197,12 @@ jobs:
               - '.github/workflows/ci.yml'
             bench:
               - 'bench/**'
+              - '.github/workflows/ci.yml'
+            # ReflexBench too: the adapter asks its questions word for word,
+            # and a test checks they have not drifted apart.
+            reflex_mcp:
+              - 'adapters/reflex-mcp/**'
+              - 'bench/reflexbench/**'
               - '.github/workflows/ci.yml'
             windows_packaging:
               - 'installer/**'
@@ -504,6 +511,50 @@ jobs:
         run: ruff check bench/reflexbench
       - name: Test
         run: pytest -q bench/reflexbench
+
+  # ── Reflex MCP adapter ───────────────────────────────────────────────
+  # adapters/reflex-mcp, a Python package of its own on the MCP SDK. Its
+  # tests need no model and no network: a stand-in EuLLM on 127.0.0.1, the
+  # MCP SDK's in-memory client, and the command itself on stdio and HTTP.
+  # Python 3.10 is the oldest the package declares; 3.13 a current one.
+  reflex_mcp:
+    name: Reflex MCP adapter (lint + test, Python ${{ matrix.python }})
+    needs: changes
+    if: needs.changes.outputs.reflex_mcp == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.13"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-reflex-mcp-${{ matrix.python }}-${{ hashFiles('adapters/reflex-mcp/pyproject.toml') }}
+          restore-keys: pip-reflex-mcp-${{ matrix.python }}-
+      - name: Install
+        # setuptools upgraded as in the forge job: the audit below scans the
+        # whole environment, the build tooling included.
+        run: |
+          pip install --upgrade pip setuptools
+          pip install "./adapters/reflex-mcp[dev]"
+      - name: Lint
+        working-directory: adapters/reflex-mcp
+        run: |
+          ruff check src tests
+          ruff format --check src tests
+      - name: Test
+        run: python -m unittest discover -s adapters/reflex-mcp/tests -v
+      - name: Audit dependencies
+        # Blocking, as in the forge job, and not `--strict` for the same
+        # reason: the package itself is not on PyPI, so it cannot be audited.
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit --desc
 
   # ── Windows packaging (runs where it can fail: on Windows) ──────────
   # Three things that only run on Windows and would otherwise be exercised

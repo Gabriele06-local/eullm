@@ -1,0 +1,5 @@
+# LangGraph, and LangChain's chat model for OpenAI-compatible servers, which
+# talks to EuLLM's /v1/chat/completions. Both MIT; the latest releases on
+# 1 October 2026.
+langgraph==1.2.12
+langchain-openai==1.6.7
