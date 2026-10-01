@@ -19,14 +19,22 @@
 #    unloads what it must, and is never split while another is resident.
 # 6. Optional, VISION=<model>: image requests to a vision model beside a
 #    text model, without a failed context allocation.
+# 7. An embedding model loaded by a request beside the two (V5): it unloads
+#    the least recently used of them when it does not fit, and only it — it
+#    used to unload both — and the churn counters say what each round costs.
+#    The other half of V5, a third model while two answers stream, is check 3.
 #
 # Models are catalog names, pulled when missing (SKIP_PULL=1 to skip):
 # SMALL=qwen3-1.7b A=qwen3-4b B=qwen3-8b; BIG and VISION only when set.
+# EMBED=qwen3-embedding-0.6b-gguf-q8_0, pulled from EMBED_PULL
+# (hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0); EMBED= skips check 7.
+# EMBED_CTX=20480: the context A and B get in check 7, large enough that the
+# two leave the embedder too little room on a 16 GB card.
 # PORT=11500, OUT=/tmp/residency-check. Needs curl and python3.
 set -u
 
 if [ $# -ne 2 ]; then
-    sed -n '2,25p' "$0"
+    sed -n '2,33p' "$0"
     exit 2
 fi
 MAIN=$(realpath "$1")
@@ -38,6 +46,9 @@ A=${A:-qwen3-4b}
 B=${B:-qwen3-8b}
 BIG=${BIG:-}
 VISION=${VISION:-}
+EMBED=${EMBED-qwen3-embedding-0.6b-gguf-q8_0}
+EMBED_PULL=${EMBED_PULL:-hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0}
+EMBED_CTX=${EMBED_CTX:-20480}
 URL=http://127.0.0.1:$PORT
 mkdir -p "$OUT"
 : > "$OUT/summary.txt"
@@ -143,10 +154,13 @@ if [ "${SKIP_PULL:-0}" != 1 ]; then
     for m in "$SMALL" "$A" "$B" ${BIG:+"$BIG"} ${VISION:+"$VISION"}; do
         "$BRANCH" list 2> /dev/null | grep -q "^$m[[:space:]]" || "$BRANCH" pull "$m" || exit 1
     done
+    if [ -n "$EMBED" ]; then
+        "$BRANCH" list 2> /dev/null | grep -q "^$EMBED[[:space:]]" || "$BRANCH" pull "$EMBED_PULL" || exit 1
+    fi
 fi
 echo "main:   $("$MAIN" -V)"
 echo "branch: $("$BRANCH" -V)"
-echo "models: SMALL=$SMALL A=$A B=$B${BIG:+ BIG=$BIG}${VISION:+ VISION=$VISION}"
+echo "models: SMALL=$SMALL A=$A B=$B${BIG:+ BIG=$BIG}${VISION:+ VISION=$VISION}${EMBED:+ EMBED=$EMBED}"
 others=$(nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader 2> /dev/null)
 if [ -n "$others" ]; then
     echo "Other programs hold VRAM, so the sizes will not compare; stop them first:"
@@ -293,6 +307,67 @@ if [ -n "$VISION" ]; then
         result PASS "6 images beside text: 20 requests, no errors"
     else
         result FAIL "6 images beside text: $errors errors, $alloc allocation failures (see $OUT/6.log)"
+    fi
+fi
+
+# 7. An embedder loaded by a request beside two generation models (V5).
+#    Each round asks A, then B — B is then the more recently used — and embeds
+#    once. When the embedder does not fit beside both, A must go and B stay:
+#    one model unloaded, never both, never the more recent one. The next
+#    round's request to A loads it back, which unloads the embedder (it is
+#    not reserved): the counters below are that churn, round after round.
+embed() {
+    post /api/embed "{\"model\":\"$1\",\"input\":[\"A lighthouse keeper's log, first entry.\",\"Second entry: the lamp is lit.\"]}" |
+        python3 -c 'import json,sys
+t=sys.stdin.read()
+try:
+    d=json.loads(t)
+except ValueError:
+    print("ERROR", t[:200].replace("\n"," ")); sys.exit()
+print("ERROR", d["error"]) if "error" in d else print("ok", len(d.get("embeddings",[])))'
+}
+# "<model_swaps> <generation_evictions>" from /api/version.
+counters() {
+    curl -s "$URL/api/version" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d.get("model_swaps"), d.get("generation_evictions"))'
+}
+if [ -n "$EMBED" ]; then
+    up "$BRANCH" "$OUT/7.log" --max-loaded-models 2 --ctx-size "$EMBED_CTX" || exit 1
+    pair=$(printf '%s\n' "$A" "$B" | sort | tr '\n' ' ' | sed 's/ $//')
+    rounds=""
+    ok=1
+    evicting=0
+    for round in 1 2 3; do
+        a=$(ask "$A")
+        b=$(ask "$B")
+        before_round=$(resident)
+        read -r swaps0 _ <<< "$(counters)"
+        e=$(embed "$EMBED")
+        read -r swaps1 gen1 <<< "$(counters)"
+        after_round=$(resident)
+        went=$((swaps1 - swaps0))
+        rounds="$rounds [$round: $went unloaded, left '$after_round']"
+        if [[ $a == ERROR* || $b == ERROR* || $e == ERROR* ]]; then
+            ok=0
+            rounds="$rounds (answers '$a' / '$b', embed '$e')"
+        elif [ "$before_round" != "$pair" ]; then
+            ok=0
+            rounds="$rounds ($A and $B were not both loaded before embedding: '$before_round'; lower EMBED_CTX)"
+        elif [ "$went" = 0 ]; then
+            [ "$after_round" = "$pair" ] || ok=0
+        else
+            evicting=1
+            { [ "$went" = 1 ] && [ "$after_round" = "$B" ]; } || ok=0
+        fi
+    done
+    down
+    if [ $ok = 1 ] && [ $evicting = 1 ]; then
+        result PASS "7 an embedder beside two models: the least recently used goes, and only it —$rounds; model_swaps $swaps1, generation_evictions $gen1"
+    elif [ $ok = 1 ]; then
+        result PASS "7 an embedder beside two models: it fit beside both, nothing unloaded —$rounds (raise EMBED_CTX to see the eviction order)"
+    else
+        result FAIL "7 an embedder beside two models:$rounds; model_swaps $swaps1 (see $OUT/7.log)"
     fi
 fi
 

@@ -1021,11 +1021,10 @@ impl AppState {
         Ok(self.models.read().await.find_file(&path).map(|m| m.id))
     }
 
-    /// Shared by `unload_all` and the companions that need the whole card:
-    /// take every generation model out and wait for each one's scheduler
-    /// thread to fully exit, so their VRAM is guaranteed freed by the time
-    /// this resolves — the caller needs the VRAM actually free before handing
-    /// it to another model or process. Call with `swap_lock` held.
+    /// `unload_all`'s work: take every generation model out and wait for each
+    /// one's scheduler thread to fully exit, so their VRAM is guaranteed
+    /// freed by the time this resolves — the caller needs the VRAM actually
+    /// free before handing it to another process. Call with `swap_lock` held.
     async fn unload_generation_models(&self) -> Vec<String> {
         let ids: Vec<u64> = self
             .models
@@ -1040,6 +1039,66 @@ impl AppState {
             unloaded.extend(self.remove_generation(id, Removal::Always).await);
         }
         unloaded
+    }
+
+    /// Unload generation models until a companion `companion` — the
+    /// `kind` (embedding or decision) model about to load, needing `need`
+    /// bytes of VRAM and `compute_reserve` beside them — fits in what is free,
+    /// or none is left: the least recently used and idle ones first, and no
+    /// more than it takes (`resident::companion_evictions`). Each one unloaded
+    /// counts in `cross_slot_evictions`. Without a free-VRAM figure nothing is
+    /// unloaded, and the companion loads beside them as it always did. Call
+    /// with `swap_lock` held.
+    ///
+    /// What each resident gives back is what its load measured, or an
+    /// estimate; the free figure is read again after each round, and another
+    /// round follows while the companion still does not fit.
+    async fn make_room_for_companion(
+        &self,
+        companion: &str,
+        kind: &str,
+        need: u64,
+        compute_reserve: u64,
+    ) {
+        loop {
+            let (views, unallocated) = {
+                let models = self.models.read().await;
+                (models.views(), models.unallocated_reserve())
+            };
+            let usable = crate::fit::vram_bytes()
+                .map(|card| usable_vram(card, compute_reserve, unallocated));
+            let now = std::time::Instant::now();
+            let plan = resident::companion_evictions(&views, usable, need, now);
+            let mut unloaded = 0;
+            for id in plan {
+                let Some(view) = views.iter().find(|v| v.id == id) else {
+                    continue;
+                };
+                let Some(name) = self.remove_generation(id, Removal::Always).await else {
+                    continue;
+                };
+                unloaded += 1;
+                self.cross_slot_evictions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let state = if view.usage.in_flight > 0 {
+                    format!("answering {} request(s)", view.usage.in_flight)
+                } else {
+                    format!(
+                        "idle for {} s",
+                        now.duration_since(view.usage.last_used).as_secs()
+                    )
+                };
+                tracing::info!(
+                    "Unloaded {} ({state}) to make room for the {kind} model {}, which does \
+                     not fit beside it; it reloads on its next request",
+                    crate::audit::sanitize_for_log(&name),
+                    crate::audit::sanitize_for_log(companion)
+                );
+            }
+            if unloaded == 0 {
+                return;
+            }
+        }
     }
 
     /// Unload every generation model that is due (`resident::due`): no
@@ -1082,13 +1141,13 @@ impl AppState {
     /// process can tell which situation it is in right now.
     ///
     /// 1. Already loaded under this name → return it, no eviction, no load.
-    /// 2. Not loaded, and it fits in free VRAM alongside whatever is in the
-    ///    main slot → load it into the embedding slot; the main slot is
-    ///    untouched.
-    /// 3. Not loaded, and it does not fit → evict the main slot first (a
-    ///    generation request will reload it later; `resolve_model` and the
-    ///    embedded chat UI both work unchanged against an empty main slot),
-    ///    then load the embedder, which now has the whole card.
+    /// 2. Not loaded, and it fits in free VRAM beside the generation models
+    ///    → load it into the embedding slot; they are untouched.
+    /// 3. Not loaded, and it does not fit → unload generation models first,
+    ///    the least recently used and idle ones before the others, until it
+    ///    fits or none is left (`make_room_for_companion`; a generation
+    ///    request reloads one later, and `resolve_model` and the embedded
+    ///    chat UI work unchanged without it), then load the embedder.
     ///
     /// On a non-CUDA build `fit::vram_bytes()` cannot answer "does it fit",
     /// so this always takes the coexist path (case 2) and lets a real
@@ -1131,27 +1190,13 @@ impl AppState {
             }
         }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
-
-        let (main_loaded, unallocated) = {
-            let models = self.models.read().await;
-            (!models.is_empty(), models.unallocated_reserve())
-        };
-        let fits_alongside = fits_in_free_vram(
+        self.make_room_for_companion(
+            &normalized,
+            "embedding",
             weights_bytes,
             crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES,
-            unallocated,
         )
-        .unwrap_or(true);
-        if main_loaded && !fits_alongside {
-            tracing::info!(
-                "Embedding model {} does not fit alongside the loaded generation model — \
-                 evicting it to make room (will reload on the next generation request)",
-                crate::audit::sanitize_for_log(&normalized)
-            );
-            let evicted = self.unload_generation_models().await;
-            self.cross_slot_evictions
-                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        .await;
 
         tracing::info!(
             "Loading embedding model {} ({})",
@@ -1259,10 +1304,10 @@ impl AppState {
 
     /// Ensure the named decision model is loaded into the decision slot and
     /// return it. The same residency rules as `ensure_embedding_model` —
-    /// already loaded: reuse it; fits next to the generation model: load it
-    /// alongside; does not: evict the generation model first — with the VRAM
-    /// a request's context needs (`fit::decision_reserve_bytes`) counted in,
-    /// not only the weights.
+    /// already loaded: reuse it; fits next to the generation models: load it
+    /// alongside; does not: unload them, least recently used first, until it
+    /// does — with the VRAM a request's context needs
+    /// (`fit::decision_reserve_bytes`) counted in, not only the weights.
     ///
     /// A different decision model already in the slot is dropped before the
     /// new one loads, so the free-VRAM check sees the room it leaves. A
@@ -1287,24 +1332,13 @@ impl AppState {
         *self.decision.write().await = None;
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
-
-        let (main_loaded, unallocated) = {
-            let models = self.models.read().await;
-            (!models.is_empty(), models.unallocated_reserve())
-        };
-        let fits_alongside =
-            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0, unallocated)
-                .unwrap_or(true);
-        if main_loaded && !fits_alongside {
-            tracing::info!(
-                "Decision model {} does not fit alongside the loaded generation model — \
-                 evicting it to make room (will reload on the next generation request)",
-                crate::audit::sanitize_for_log(&normalized)
-            );
-            let evicted = self.unload_generation_models().await;
-            self.cross_slot_evictions
-                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.make_room_for_companion(
+            &normalized,
+            "decision",
+            weights_bytes.saturating_add(reserve_bytes),
+            0,
+        )
+        .await;
 
         tracing::info!(
             "Loading decision model {} ({})",
@@ -1697,7 +1731,7 @@ mod residency_config_tests {
 
 #[cfg(test)]
 mod fits_tests {
-    use super::fits_in;
+    use super::usable_vram;
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -1710,15 +1744,11 @@ mod fits_tests {
         // 16 GiB card, 8 GiB free; the floor keeps 12% of it back.
         let card = (8 * GIB, 16 * GIB);
         let embedder = 2 * GIB;
-        assert_eq!(fits_in(card, embedder, 256 * MIB, 0), Some(true));
+        assert!(embedder <= usable_vram(card, 256 * MIB, 0));
         let vision_model_context = 4 * GIB;
-        assert_eq!(
-            fits_in(card, embedder, 256 * MIB, vision_model_context),
-            Some(false)
-        );
+        assert!(embedder > usable_vram(card, 256 * MIB, vision_model_context));
         // Saturating, not wrapping, when the reservations exceed what is free.
-        assert_eq!(fits_in(card, 0, 256 * MIB, 64 * GIB), Some(true));
-        assert_eq!(fits_in(card, 1, 256 * MIB, 64 * GIB), Some(false));
+        assert_eq!(usable_vram(card, 256 * MIB, 64 * GIB), 0);
     }
 }
 
@@ -1747,52 +1777,30 @@ mod same_file_tests {
     }
 }
 
-/// Whether `additional_bytes` fits in currently free VRAM, applying the same
-/// floor `fit.rs` reserves for a normal model load
-/// (`fit::MIN_FREE_TOTAL_RATIO`) plus `compute_reserve_bytes` for the
-/// model's own compute buffer — `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an
-/// embedder, 256 MiB rather than `fit.rs`'s 640 MiB, since an embedding
-/// model's context and micro-batch are both a fraction of an LLM's. A
-/// decision model passes 0 and counts its whole per-request context in
-/// `additional_bytes` instead (`fit::decision_reserve_bytes`).
+/// What a card with `(free, total)` VRAM leaves for a companion model — an
+/// embedder or a decision model — beside what is loaded: free VRAM, less the
+/// floor `fit.rs` keeps for every load (`fit::MIN_FREE_TOTAL_RATIO`), less
+/// `compute_reserve_bytes` for the companion's own compute buffer —
+/// `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an embedder, 256 MiB rather
+/// than `fit.rs`'s 640 MiB, since an embedding model's context and
+/// micro-batch are both a fraction of an LLM's; a decision model passes 0 and
+/// counts its whole per-request context in what it needs instead
+/// (`fit::decision_reserve_bytes`) — and less `unallocated_bytes`, memory the
+/// free figure shows but is already spoken for: the contexts sequential
+/// residents create per request (F5).
 ///
 /// Deliberately not the layer-by-layer machinery in `fit.rs`: an embedding
 /// model loads fully onto the GPU or not at all (see `EmbeddingModel::load`),
-/// so this only ever needs a yes/no answer, never a partial split.
-///
-/// `None` when VRAM cannot be probed at all (non-CUDA build) — the caller
-/// decides what "unknown" means for it; `ensure_embedding_model` treats it as
-/// "assume yes" so a build that cannot measure VRAM behaves as it always has,
-/// letting a real allocation failure surface as a normal load error.
-///
-/// `unallocated_bytes` is memory the free figure shows but is already
-/// spoken for: the contexts sequential residents create per request (F5).
-fn fits_in_free_vram(
-    additional_bytes: u64,
-    compute_reserve_bytes: u64,
-    unallocated_bytes: u64,
-) -> Option<bool> {
-    fits_in(
-        crate::fit::vram_bytes()?,
-        additional_bytes,
-        compute_reserve_bytes,
-        unallocated_bytes,
-    )
-}
-
-/// [`fits_in_free_vram`] against a given `(free, total)`.
-fn fits_in(
+/// so a companion only ever needs a yes/no answer, never a partial split.
+fn usable_vram(
     (free, total): (u64, u64),
-    additional_bytes: u64,
     compute_reserve_bytes: u64,
     unallocated_bytes: u64,
-) -> Option<bool> {
+) -> u64 {
     let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
-    let usable = free
-        .saturating_sub(floor)
+    free.saturating_sub(floor)
         .saturating_sub(compute_reserve_bytes)
-        .saturating_sub(unallocated_bytes);
-    Some(additional_bytes <= usable)
+        .saturating_sub(unallocated_bytes)
 }
 
 /// How long a loaded model should be kept resident after a request, decoded

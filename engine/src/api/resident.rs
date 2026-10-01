@@ -15,7 +15,8 @@
 //!
 //! Which resident gives way when another model has to load is decided here
 //! too, by pure functions over a [`ResidentView`] of each: [`next_step`] and
-//! [`eviction_order`].
+//! [`eviction_order`] for another generation model, [`companion_evictions`]
+//! for an embedding or decision model.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -274,6 +275,8 @@ impl LoadedModel {
             id: self.id,
             usage: self.usage.view(),
             launch: self.launch,
+            holds: self.facts.vram_bytes(),
+            reserve: self.unallocated_reserve,
         }
     }
 }
@@ -395,6 +398,12 @@ pub(crate) struct ResidentView {
     pub(crate) id: u64,
     pub(crate) usage: UsageView,
     pub(crate) launch: bool,
+    /// The VRAM it holds, measured at its load or estimated
+    /// ([`LoadFacts::vram_bytes`]): what unloading it gives back.
+    pub(crate) holds: u64,
+    /// Its [`LoadedModel::unallocated_reserve`]: kept free for it while it
+    /// is resident, and free for anything else once it goes.
+    pub(crate) reserve: u64,
 }
 
 /// What to do about a resident that would have to give way while a request
@@ -468,6 +477,44 @@ pub(crate) fn eviction_order(residents: &[ResidentView], now: Instant) -> Vec<us
         )
     });
     order
+}
+
+/// The residents to unload, as ids in the order to unload them, so that a
+/// companion — an embedding or decision model a request loads — fits beside
+/// the others: [`eviction_order`]'s, idle before busy and the least recently
+/// used first, until what they give back covers what the companion needs, and
+/// every resident when even that would not be enough. None when it fits
+/// already.
+///
+/// It used to be every resident, whatever the companion needed: one model at
+/// a time made that the same thing, and with several it would empty the card
+/// to make room for a model a fraction of the size of the first one to go.
+///
+/// `usable` is the VRAM free for the companion with every resident still
+/// there — beyond the floor sizing keeps, the companion's own compute margin,
+/// and the residents' reserves (see `api::usable_vram`) — or `None` when free
+/// VRAM cannot be read, and the companion loads beside them as it always did.
+/// `need` is the companion's weights and whatever its requests take beyond
+/// the margin. What a resident gives back is what it holds and its reserve.
+pub(crate) fn companion_evictions(
+    residents: &[ResidentView],
+    usable: Option<u64>,
+    need: u64,
+    now: Instant,
+) -> Vec<u64> {
+    let Some(mut usable) = usable else {
+        return Vec::new();
+    };
+    let mut evict = Vec::new();
+    for i in eviction_order(residents, now) {
+        if need <= usable {
+            break;
+        }
+        let r = &residents[i];
+        usable = usable.saturating_add(r.holds).saturating_add(r.reserve);
+        evict.push(r.id);
+    }
+    evict
 }
 
 #[cfg(test)]
@@ -595,6 +642,8 @@ mod tests {
                 keep_alive: KeepAlive::Forever,
             },
             launch: false,
+            holds: 0,
+            reserve: 0,
         }
     }
 
@@ -797,6 +846,56 @@ mod tests {
         assert_eq!(
             eviction_order(&[launch, forever, later, expired, unload_now], now),
             [3, 4, 2, 1, 0]
+        );
+    }
+
+    /// An embedding or decision model loaded by a request unloads the
+    /// generation models it needs the room of, least recently used and idle
+    /// first, and no more: it used to unload every one of them.
+    #[test]
+    fn a_companion_unloads_the_least_recently_used_models_it_needs_and_no_more() {
+        const GIB: u64 = 1 << 30;
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let now = t0 + s(100);
+        let holding = |id, last_used, gib| ResidentView {
+            holds: gib * GIB,
+            ..resident(id, t0 + s(last_used))
+        };
+        let (old, recent) = (holding(1, 10, 4), holding(2, 50, 6));
+
+        // Unknown VRAM, or room enough already: nothing goes.
+        assert!(companion_evictions(&[old, recent], None, 3 * GIB, now).is_empty());
+        assert!(companion_evictions(&[old, recent], Some(3 * GIB), 3 * GIB, now).is_empty());
+        // The least recently used is enough.
+        assert_eq!(
+            companion_evictions(&[recent, old], Some(GIB), 3 * GIB, now),
+            [1]
+        );
+        // Not enough with it: the next one too.
+        assert_eq!(
+            companion_evictions(&[recent, old], Some(GIB), 9 * GIB, now),
+            [1, 2]
+        );
+        // Not enough with all of them: all of them, the companion then loads
+        // into the whole card or fails as any load does.
+        assert_eq!(
+            companion_evictions(&[recent, old], Some(GIB), 64 * GIB, now),
+            [1, 2]
+        );
+        // An idle model before one answering a request, however recent.
+        let mut busy_old = old;
+        busy_old.usage.in_flight = 1;
+        assert_eq!(
+            companion_evictions(&[busy_old, recent], Some(GIB), 3 * GIB, now),
+            [2]
+        );
+        // A sequential engine's reserve is room once it is gone.
+        let mut sequential = holding(3, 10, 1);
+        sequential.reserve = 3 * GIB;
+        assert_eq!(
+            companion_evictions(&[recent, sequential], Some(0), 4 * GIB, now),
+            [3]
         );
     }
 
