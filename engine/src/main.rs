@@ -824,8 +824,7 @@ async fn main() {
                 max_loaded_models,
                 default_model,
             } = opts;
-            let residency =
-                residency_config(&store, max_loaded_models, default_model.as_deref());
+            let residency = residency_config(&store, max_loaded_models, default_model.as_deref());
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -990,8 +989,7 @@ async fn main() {
                 max_loaded_models,
                 default_model,
             } = opts;
-            let residency =
-                residency_config(&store, max_loaded_models, default_model.as_deref());
+            let residency = residency_config(&store, max_loaded_models, default_model.as_deref());
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -1923,7 +1921,9 @@ fn named_model(arg: &str, store: &ModelStore) -> Option<api::NamedModel> {
     let normalized = arg.replace(':', "-");
     let (arg, path) = resolve_model_path(arg, store)
         .map(|path| (arg, path))
-        .or_else(|| resolve_model_path(&normalized, store).map(|path| (normalized.as_str(), path)))?;
+        .or_else(|| {
+            resolve_model_path(&normalized, store).map(|path| (normalized.as_str(), path))
+        })?;
     Some(api::NamedModel {
         name: launch_companion_name(arg, &path),
         path,

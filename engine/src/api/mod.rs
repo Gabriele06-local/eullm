@@ -1552,7 +1552,11 @@ impl AppState {
             .launch_model
             .iter()
             .map(|(name, path)| (name.as_str(), path))
-            .chain(self.default_model.iter().map(|m| (m.name.as_str(), &m.path)));
+            .chain(
+                self.default_model
+                    .iter()
+                    .map(|m| (m.name.as_str(), &m.path)),
+            );
         for (named, named_path) in named {
             if (name == named || &path == named_path) && named_path.is_file() {
                 return Ok(named_path.clone());

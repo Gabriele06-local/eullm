@@ -898,7 +898,10 @@ async fn real_model_every_resident_is_listed_with_its_own_expiry() {
 async fn real_model_a_request_naming_no_model_goes_to_the_default_one() {
     let server = start(&["tiny-a", "tiny-b"], |state| {
         state.max_loaded_models = 2;
-        let path = state.store.gguf_path("tiny-b").expect("tiny-b in the store");
+        let path = state
+            .store
+            .gguf_path("tiny-b")
+            .expect("tiny-b in the store");
         state.default_model = Some(super::NamedModel {
             name: "tiny-b".into(),
             path,

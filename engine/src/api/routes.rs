@@ -1860,7 +1860,7 @@ async fn generate(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let user_id = identity.key_id().map(str::to_string);
+    let audit = AuditCtx::of(&identity);
     let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
@@ -1947,7 +1947,7 @@ async fn generate(
                 rx,
                 model,
                 StreamFormat::OllamaGenerate,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             ))
@@ -1965,12 +1965,13 @@ async fn generate(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "generate".to_string());
-            audit.input_tokens = tokens_prompt;
-            audit.output_tokens = tokens_generated;
-            audit.duration_ms = duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OllamaGenerate,
+                tokens_prompt,
+                tokens_generated,
+                duration_ms,
+            );
 
             Ok(Json(json!({
                 "model": model,
@@ -1997,7 +1998,7 @@ async fn generate(
                 rx,
                 model,
                 StreamFormat::OllamaGenerate,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             ))
@@ -2020,12 +2021,13 @@ async fn generate(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "generate".to_string());
-            audit.input_tokens = result.tokens_prompt;
-            audit.output_tokens = result.tokens_generated;
-            audit.duration_ms = result.duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OllamaGenerate,
+                result.tokens_prompt,
+                result.tokens_generated,
+                result.duration_ms,
+            );
 
             Ok(Json(json!({
                 "model": model,
@@ -2052,7 +2054,7 @@ async fn chat(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let user_id = identity.key_id().map(str::to_string);
+    let audit = AuditCtx::of(&identity);
     let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
@@ -2181,7 +2183,7 @@ async fn chat(
                 rx,
                 model,
                 StreamFormat::OllamaChat,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             ));
@@ -2199,12 +2201,13 @@ async fn chat(
                 Json(json!({ "error": e })),
             )
         })?;
-        let mut audit = AuditEntry::new(model.clone(), "chat".to_string());
-        audit.input_tokens = tokens_prompt;
-        audit.output_tokens = tokens_generated;
-        audit.duration_ms = duration_ms;
-        audit.user_id = user_id.clone();
-        AuditLogger::new().log(&audit);
+        audit.log(
+            &model,
+            StreamFormat::OllamaChat,
+            tokens_prompt,
+            tokens_generated,
+            duration_ms,
+        );
         return Ok(Json(json!({
             "model": model,
             "created_at": chrono::Utc::now().to_rfc3339(),
@@ -2254,7 +2257,7 @@ async fn chat(
                 rx,
                 model,
                 StreamFormat::OllamaChat,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             ))
@@ -2272,12 +2275,13 @@ async fn chat(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "chat".to_string());
-            audit.input_tokens = tokens_prompt;
-            audit.output_tokens = tokens_generated;
-            audit.duration_ms = duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OllamaChat,
+                tokens_prompt,
+                tokens_generated,
+                duration_ms,
+            );
 
             Ok(Json(json!({
                 "model": model,
@@ -2306,7 +2310,7 @@ async fn chat(
                 rx,
                 model,
                 StreamFormat::OllamaChat,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             ))
@@ -2329,12 +2333,13 @@ async fn chat(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "chat".to_string());
-            audit.input_tokens = result.tokens_prompt;
-            audit.output_tokens = result.tokens_generated;
-            audit.duration_ms = result.duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OllamaChat,
+                result.tokens_prompt,
+                result.tokens_generated,
+                result.duration_ms,
+            );
 
             Ok(Json(json!({
                 "model": model,
@@ -2645,7 +2650,7 @@ async fn chat_completions(
     axum::Extension(identity): axum::Extension<super::Identity>,
     Json(body): Json<Value>,
 ) -> Result<axum::response::Response, Refusal> {
-    let user_id = identity.key_id().map(str::to_string);
+    let audit = AuditCtx::of(&identity);
     let requested = requested_model(&body);
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
     // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape, not part
@@ -2781,12 +2786,13 @@ async fn chat_completions(
             )
         })?;
 
-        let mut audit = AuditEntry::new(model.clone(), "chat.completions".to_string());
-        audit.input_tokens = tokens_prompt;
-        audit.output_tokens = tokens_generated;
-        audit.duration_ms = duration_ms;
-        audit.user_id = user_id.clone();
-        AuditLogger::new().log(&audit);
+        audit.log(
+            &model,
+            StreamFormat::OpenAI,
+            tokens_prompt,
+            tokens_generated,
+            duration_ms,
+        );
 
         let (message, called_tools) = match tmpl.parse_output(&text) {
             Some(parsed) => {
@@ -2859,7 +2865,7 @@ async fn chat_completions(
                 rx,
                 model,
                 StreamFormat::OpenAI,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             );
@@ -2878,12 +2884,13 @@ async fn chat_completions(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "chat.completions".to_string());
-            audit.input_tokens = tokens_prompt;
-            audit.output_tokens = tokens_generated;
-            audit.duration_ms = duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OpenAI,
+                tokens_prompt,
+                tokens_generated,
+                duration_ms,
+            );
 
             Ok(Json(json!({
                 "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -2915,7 +2922,7 @@ async fn chat_completions(
                 rx,
                 model,
                 StreamFormat::OpenAI,
-                user_id,
+                audit,
                 snap.lease,
                 snap.load_duration,
             );
@@ -2939,12 +2946,13 @@ async fn chat_completions(
                 )
             })?;
 
-            let mut audit = AuditEntry::new(model.clone(), "chat.completions".to_string());
-            audit.input_tokens = result.tokens_prompt;
-            audit.output_tokens = result.tokens_generated;
-            audit.duration_ms = result.duration_ms;
-            audit.user_id = user_id.clone();
-            AuditLogger::new().log(&audit);
+            audit.log(
+                &model,
+                StreamFormat::OpenAI,
+                result.tokens_prompt,
+                result.tokens_generated,
+                result.duration_ms,
+            );
 
             Ok(Json(json!({
                 "id": format!("chatcmpl-{}", uuid::Uuid::new_v4()),
@@ -3016,11 +3024,79 @@ fn buffered_message_sse(
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StreamFormat {
     OllamaGenerate,
     OllamaChat,
     OpenAI,
+}
+
+impl StreamFormat {
+    /// The audit trail's `request_type` of a generation answered in this
+    /// format: the endpoint it came through.
+    fn request_type(self) -> &'static str {
+        match self {
+            Self::OllamaGenerate => "generate",
+            Self::OllamaChat => "chat",
+            Self::OpenAI => "chat.completions",
+        }
+    }
+}
+
+/// What a generation's audit entry records besides the model and what it
+/// read and wrote: who asked. One builder for every way a generation can
+/// end — buffered or streamed, on the scheduler or the sequential engine,
+/// text or images — each of which used to build the entry field by field,
+/// ten copies of the same six lines that any new field had to reach in all
+/// ten places.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct AuditCtx {
+    /// The id of the API key the request presented, when it presented one.
+    user_id: Option<String>,
+}
+
+impl AuditCtx {
+    /// The context of a request from `identity`.
+    fn of(identity: &super::Identity) -> Self {
+        Self {
+            user_id: identity.key_id().map(str::to_string),
+        }
+    }
+
+    /// The audit entry of one finished generation on `model`.
+    fn entry(
+        &self,
+        model: &str,
+        format: StreamFormat,
+        tokens_prompt: u32,
+        tokens_generated: u32,
+        duration_ms: u64,
+    ) -> AuditEntry {
+        let mut entry = AuditEntry::new(model.to_string(), format.request_type().to_string());
+        entry.input_tokens = tokens_prompt;
+        entry.output_tokens = tokens_generated;
+        entry.duration_ms = duration_ms;
+        entry.user_id = self.user_id.clone();
+        entry
+    }
+
+    /// Write that entry to the audit trail.
+    fn log(
+        &self,
+        model: &str,
+        format: StreamFormat,
+        tokens_prompt: u32,
+        tokens_generated: u32,
+        duration_ms: u64,
+    ) {
+        AuditLogger::new().log(&self.entry(
+            model,
+            format,
+            tokens_prompt,
+            tokens_generated,
+            duration_ms,
+        ));
+    }
 }
 
 /// Convert an mpsc channel of StreamEvents into an SSE event stream.
@@ -3034,7 +3110,7 @@ fn stream_from_channel_sse(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
-    user_id: Option<String>,
+    audit: AuditCtx,
     lease: Lease,
     load_duration: std::time::Duration,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
@@ -3050,16 +3126,7 @@ fn stream_from_channel_sse(
                 }
                 StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
                     // Audit log
-                    let mut audit = AuditEntry::new(model.clone(), match format {
-                        StreamFormat::OllamaGenerate => "generate",
-                        StreamFormat::OllamaChat => "chat",
-                        StreamFormat::OpenAI => "chat.completions",
-                    }.to_string());
-                    audit.input_tokens = tokens_prompt;
-                    audit.output_tokens = tokens_generated;
-                    audit.duration_ms = duration_ms;
-                    audit.user_id = user_id.clone();
-                    AuditLogger::new().log(&audit);
+                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
 
                     let data = format_done_event(
                         &model, &completion_id, format,
@@ -3096,7 +3163,7 @@ fn ndjson_stream_response(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
-    user_id: Option<String>,
+    audit: AuditCtx,
     lease: Lease,
     load_duration: std::time::Duration,
 ) -> axum::response::Response {
@@ -3113,16 +3180,7 @@ fn ndjson_stream_response(
                     yield Ok::<_, std::convert::Infallible>(line);
                 }
                 StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
-                    let mut audit = AuditEntry::new(model.clone(), match format {
-                        StreamFormat::OllamaGenerate => "generate",
-                        StreamFormat::OllamaChat => "chat",
-                        StreamFormat::OpenAI => "chat.completions",
-                    }.to_string());
-                    audit.input_tokens = tokens_prompt;
-                    audit.output_tokens = tokens_generated;
-                    audit.duration_ms = duration_ms;
-                    audit.user_id = user_id.clone();
-                    AuditLogger::new().log(&audit);
+                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
 
                     let data = format_done_event(
                         &model, &completion_id, format,
@@ -3334,6 +3392,41 @@ mod tests {
         let kept = running_model_entry(&model(None), now);
         let year = parse(&kept, "expires_at").format("%Y").to_string();
         assert!(year.parse::<i32>().unwrap() > 2200, "kept for good: {kept}");
+    }
+
+    /// The one builder writes what each of the ten copies it replaced wrote:
+    /// the model, the endpoint as the request type, the tokens read and
+    /// written, the time, and who asked — and nothing else.
+    #[test]
+    fn a_generations_audit_entry_has_the_fields_it_always_had() {
+        for (format, request_type) in [
+            (StreamFormat::OllamaGenerate, "generate"),
+            (StreamFormat::OllamaChat, "chat"),
+            (StreamFormat::OpenAI, "chat.completions"),
+        ] {
+            for user_id in [None, Some("ci".to_string())] {
+                let ctx = AuditCtx {
+                    user_id: user_id.clone(),
+                };
+                let entry = ctx.entry("qwen3-8b", format, 12, 40, 900);
+                // As the copies built it.
+                let mut old = AuditEntry::new("qwen3-8b".to_string(), request_type.to_string());
+                old.input_tokens = 12;
+                old.output_tokens = 40;
+                old.duration_ms = 900;
+                old.user_id = user_id;
+                let (mut new, mut old) = (
+                    serde_json::to_value(&entry).unwrap(),
+                    serde_json::to_value(&old).unwrap(),
+                );
+                for line in [&mut new, &mut old] {
+                    let fields = line.as_object_mut().unwrap();
+                    fields.remove("id");
+                    fields.remove("timestamp");
+                }
+                assert_eq!(new, old, "{request_type}");
+            }
+        }
     }
 
     // A reasoning model doing free-text tool-calling can burn through
