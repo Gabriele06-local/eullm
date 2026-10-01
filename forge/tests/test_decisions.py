@@ -702,8 +702,13 @@ SYSTEMONE_RS = REPO / "engine" / "src" / "api" / "systemone.rs"
 
 
 def test_the_temperature_a_gguf_carries_is_one_the_engine_takes():
-    """systemone.rs accepts a temperature that is finite, above 0 and at
-    most MAX_TEMPERATURE; the GGUF holds a float32, checked as stored."""
+    """A temperature has to be finite, above 0 and at most MAX_TEMPERATURE;
+    the GGUF holds a float32, checked as stored.
+
+    The rule and the constant live in decision.rs, next to the decision
+    temperature they are also for; systemone.rs is where a request's
+    temperature is checked against them.
+    """
     from eullm_forge.decisions.metrics import MAX_TEMPERATURE, check_temperature
 
     assert check_temperature(1.37) == pytest.approx(1.37, rel=1e-7)
@@ -711,10 +716,12 @@ def test_the_temperature_a_gguf_carries_is_one_the_engine_takes():
     for refused in (0, -1, 100.5, float("nan"), float("inf"), 1e-50, 1e300, "warm", None):
         with pytest.raises(ValueError):
             check_temperature(refused)
-    if SYSTEMONE_RS.exists():
-        source = SYSTEMONE_RS.read_text(encoding="utf-8")
-        assert f"const MAX_TEMPERATURE: f64 = {MAX_TEMPERATURE};" in source
+    if DECISION_RS.exists():
+        source = DECISION_RS.read_text(encoding="utf-8")
+        assert f"pub const MAX_TEMPERATURE: f64 = {MAX_TEMPERATURE};" in source
         assert "t.is_finite() && t > 0.0 && t <= MAX_TEMPERATURE" in source
+    if SYSTEMONE_RS.exists():
+        assert "MAX_TEMPERATURE" in SYSTEMONE_RS.read_text(encoding="utf-8")
 
 
 # --- the CLI ------------------------------------------------------------------------------
