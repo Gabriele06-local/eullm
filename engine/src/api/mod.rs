@@ -696,16 +696,34 @@ impl AppState {
         let _swap_guard = self.swap_lock.lock().await;
 
         let normalized = normalize_model_name(name);
+        let wanted = model_identity_key(&normalized);
         {
+            // By the name it was loaded under, or by its file's own: the
+            // name an `--embedding-model` given as a store name was loaded
+            // under until it kept the one it was given.
             let slot = self.embedding.read().await;
             if let Some(ref loaded) = *slot
-                && model_identity_key(&loaded.model_name) == model_identity_key(&normalized)
+                && (model_identity_key(&loaded.model_name) == wanted
+                    || model_identity_key(&loaded.model.path().to_string_lossy()) == wanted)
             {
                 return Ok(loaded.model.clone());
             }
         }
 
         let gguf_path = self.resolve_model(&normalized)?;
+        // The loaded model asked for under another of its names — a store
+        // name for one launched by its path, or another name `eullm pull`
+        // linked to the same file: loading it again would hold it twice
+        // while both are in use, and put a model no longer reserved in
+        // place of a reserved companion.
+        {
+            let slot = self.embedding.read().await;
+            if let Some(ref loaded) = *slot
+                && same_file(loaded.model.path(), &gguf_path)
+            {
+                return Ok(loaded.model.clone());
+            }
+        }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
 
         let main_loaded = self.slot.read().await.model_name.is_some();
@@ -1150,6 +1168,49 @@ fn find_gguf_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Whether two paths name the same file: through the symlinks a model store
+/// is often reached by (`~/.eullm/models` linked to a data disk), and, where
+/// the filesystem says so, through the hard links `eullm pull` gives a model
+/// pulled under a second name.
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) {
+            return a.dev() == b.dev() && a.ino() == b.ino();
+        }
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+#[cfg(all(test, unix))]
+mod same_file_tests {
+    use super::same_file;
+
+    #[test]
+    fn a_file_is_the_same_through_symlinks_and_hard_links() {
+        let root = std::env::temp_dir().join(format!("eullm-same-file-{}", uuid::Uuid::new_v4()));
+        let disk = root.join("disk");
+        std::fs::create_dir_all(disk.join("emb")).unwrap();
+        std::fs::write(disk.join("emb/Model-Q8_0.gguf"), b"GGUF").unwrap();
+        std::fs::write(disk.join("emb/Other-Q8_0.gguf"), b"GGUF").unwrap();
+        std::os::unix::fs::symlink(&disk, root.join("models")).unwrap();
+
+        let direct = disk.join("emb/Model-Q8_0.gguf");
+        std::fs::create_dir_all(disk.join("alias")).unwrap();
+        std::fs::hard_link(&direct, disk.join("alias/Model-Q8_0.gguf")).unwrap();
+        assert!(same_file(&direct, &root.join("models/emb/Model-Q8_0.gguf")));
+        assert!(same_file(&direct, &disk.join("emb/../emb/Model-Q8_0.gguf")));
+        assert!(same_file(&direct, &root.join("models/alias/Model-Q8_0.gguf")));
+        assert!(!same_file(&direct, &disk.join("emb/Other-Q8_0.gguf")));
+        assert!(!same_file(&direct, &root.join("missing.gguf")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 /// Whether `additional_bytes` fits in currently free VRAM, applying the same
