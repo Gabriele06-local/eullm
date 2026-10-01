@@ -40,8 +40,10 @@ uvx --from ./adapters/reflex-mcp eullm-reflex-mcp --version
 uvx --from "git+https://github.com/eullm/eullm#subdirectory=adapters/reflex-mcp" eullm-reflex-mcp --version
 ```
 
-Its dependencies are the MCP Python SDK (`mcp`, MIT) and `httpx2`
-(BSD-3-Clause).
+From GitHub, the first run fetches the whole repository with the engine's
+llama.cpp submodule, about half a gigabyte; from a checkout you already
+have, nothing but the dependencies. Those are the MCP Python SDK (`mcp`,
+MIT) and `httpx2` (BSD-3-Clause).
 
 ## EuLLM, with a decision model and an embedding model
 
@@ -365,6 +367,11 @@ on a shared 4-core machine:
 | `decide`, two questions | 0.9 s | 122 |
 
 The machine was shared with other jobs, which is most of the spread.
+
+A call the client cancels closes its request to EuLLM, which drops the
+decision and records nothing; it notices at its next question, since a
+question being decoded is not interrupted. The 20-tool call above,
+cancelled after 3 s, kept the 0.8B busy for 26 s.
 
 ## Tests
 
