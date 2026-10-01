@@ -420,3 +420,64 @@ def test_the_merge_keeps_the_dtype_the_weights_are_stored_in(tmp_path):
     with safe_open(str(merged / "model.safetensors"), "pt") as f:
         dtypes = {f.get_tensor(k).dtype for k in f.keys()}
     assert dtypes == {torch.bfloat16}
+
+
+def test_an_image_text_model_trains_and_merges_its_language_model_only(tmp_path):
+    """Ministral-3-8B ships as an image-text Mistral3 model, which
+    `AutoModelForCausalLM` refuses. It must load, take LoRA on the language
+    model and not on the vision tower (whose layers use the same names), and
+    merge back into the same architecture llama.cpp converts."""
+    pytest.importorskip("peft")
+    from pathlib import Path
+
+    import torch
+    from peft import LoraConfig, get_peft_model
+    from transformers import AutoModelForImageTextToText, Mistral3Config
+
+    from eullm_forge.identity import (
+        load_text_model,
+        lora_target_modules,
+        merge_identity_adapter,
+    )
+
+    base = tmp_path / "base"
+    tok = make_tokenizer(all_text(DOMAIN_PAIRS))
+    tok.save_pretrained(base)
+    torch.manual_seed(0)
+    AutoModelForImageTextToText.from_config(Mistral3Config(
+        text_config={"model_type": "mistral", "vocab_size": len(tok), "hidden_size": 32,
+                     "intermediate_size": 64, "num_hidden_layers": 1,
+                     "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 16},
+        vision_config={"model_type": "pixtral", "hidden_size": 32, "intermediate_size": 64,
+                       "num_hidden_layers": 1, "num_attention_heads": 2, "head_dim": 16},
+    )).to(torch.bfloat16).save_pretrained(base)
+
+    model = load_text_model(str(base), dtype=torch.bfloat16)
+    assert type(model).__name__.startswith("Mistral3For")  # not refused as a causal LM
+    peft_model = get_peft_model(model, LoraConfig(r=2, target_modules=lora_target_modules(model)))
+    adapted = {n for n, _ in peft_model.named_modules() if n.endswith(".lora_A")}
+    assert adapted and all(".language_model." in n for n in adapted), sorted(adapted)
+    assert any(".mlp.down_proj." in n for n in adapted)
+    for p in peft_model.parameters():          # a trained adapter, not the zero init
+        if p.requires_grad:
+            torch.nn.init.normal_(p, std=0.1)
+    peft_model.save_pretrained(tmp_path / "adapter")
+
+    merged = Path(merge_identity_adapter(str(base), str(tmp_path / "adapter"),
+                                         str(tmp_path / "merged")))
+    before = AutoModelForImageTextToText.from_pretrained(base).state_dict()
+    after = AutoModelForImageTextToText.from_pretrained(merged).state_dict()
+    changed = {k for k in before if not torch.equal(before[k], after[k])}
+    assert changed and all(".language_model." in k for k in changed), sorted(changed)
+
+
+def test_a_plain_causal_lm_keeps_the_target_list():
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+
+    from eullm_forge.identity import LORA_TARGETS, lora_target_modules
+
+    model = Qwen3ForCausalLM(Qwen3Config(
+        vocab_size=64, hidden_size=16, intermediate_size=32, num_hidden_layers=1,
+        num_attention_heads=2, num_key_value_heads=1, head_dim=8,
+    ))
+    assert lora_target_modules(model) == list(LORA_TARGETS)
