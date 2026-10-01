@@ -222,6 +222,45 @@ def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
 # Label value the loss ignores (PyTorch's cross-entropy default).
 IGNORE_INDEX = -100
 
+#: The projections LoRA trains: attention and MLP of every decoder layer.
+LORA_TARGETS = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+
+
+def load_text_model(path: str, **kwargs):
+    """Load a checkpoint for text training or merging, image-text ones included.
+
+    Some instruct models ship as image-text models: Ministral-3-8B is a
+    `Mistral3ForConditionalGeneration`, a vision tower in front of the
+    language model. `AutoModelForCausalLM` refuses its configuration, so it is
+    loaded whole with `AutoModelForImageTextToText`. It trains on text alone
+    unchanged (no pixels, no image tokens), and the merged checkpoint keeps
+    the vision tower, so llama.cpp still converts it as the architecture it
+    knows.
+    """
+    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+    try:
+        return AutoModelForCausalLM.from_pretrained(path, **kwargs)
+    except ValueError as exc:
+        if "Unrecognized configuration class" not in str(exc):
+            raise
+        logger.info("  Not a causal-LM configuration: loading it as an image-text model")
+        return AutoModelForImageTextToText.from_pretrained(path, **kwargs)
+
+
+def lora_target_modules(model: object) -> list[str] | str:
+    """LoRA targets for ``model``: `LORA_TARGETS`, in the language model only.
+
+    By suffix alone the targets also match an image-text model's vision tower
+    (Pixtral's attention and MLP use the same names). Text training gives
+    those adapters no gradient, so they would only add parameters and a merge
+    that does nothing; a regex restricted to the language model leaves them
+    out. A plain causal LM has no `language_model` module and keeps the list.
+    """
+    if any(".language_model." in f".{name}." for name, _ in model.named_modules()):
+        return rf".*\.language_model\..*\.({'|'.join(LORA_TARGETS)})"
+    return list(LORA_TARGETS)
+
 # Used only when a tokenizer ships without a chat template. ChatML because it
 # is what the Qwen family — every student this project trains — already
 # speaks, so the tokens it relies on exist in the vocabulary as single
@@ -489,7 +528,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
 
     import torch
     from peft import LoraConfig, TaskType, get_peft_model
-    from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer, TrainingArguments
+    from transformers import AutoTokenizer, Trainer, TrainingArguments
 
     if not config.model_path:
         raise ValueError("model_path is required for identity fine-tuning")
@@ -532,7 +571,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     fp16 = use_cuda and not bf16
     dtype = torch.bfloat16 if bf16 else torch.float16 if fp16 else torch.float32
 
-    model = AutoModelForCausalLM.from_pretrained(
+    model = load_text_model(
         config.model_path,
         torch_dtype=dtype,
         device_map="auto" if use_cuda else None,
@@ -561,10 +600,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         r=config.lora_rank,
         lora_alpha=config.lora_alpha,
         lora_dropout=0.05,
-        target_modules=[
-            "q_proj", "k_proj", "v_proj", "o_proj",
-            "gate_proj", "up_proj", "down_proj",
-        ],
+        target_modules=lora_target_modules(model),
         **extra,
     )
     if config.gradient_checkpointing:
@@ -668,7 +704,7 @@ def merge_identity_adapter(
         Path to the merged model directory, ready for `export_gguf`.
     """
     from peft import PeftModel
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
 
     out = output_path or str(Path(adapter_path).parent / "identity-merged")
 
@@ -683,7 +719,7 @@ def merge_identity_adapter(
     # in the dtype they are stored in (bf16 for every Qwen3): the default is
     # float32, which doubles the memory, and an 8B model in float32 is 32 GB —
     # more than the 30 GB a serial-partition job may have.
-    base = AutoModelForCausalLM.from_pretrained(base_model_path, dtype="auto")
+    base = load_text_model(base_model_path, dtype="auto")
     merged = PeftModel.from_pretrained(base, adapter_path).merge_and_unload()
 
     Path(out).mkdir(parents=True, exist_ok=True)
