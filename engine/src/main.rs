@@ -406,12 +406,13 @@ struct RuntimeOpts {
     /// never told to leave any extra behind.
     ///
     /// With this flag, the embedding model is treated as a **reserved
-    /// companion**: it loads first, so its weights already show up as used
-    /// VRAM by the time `--fit` reads free VRAM to size the generation
-    /// model — no separate bookkeeping needed there — and `--fit` also
-    /// keeps a small compute-buffer margin free on top of that, for the
-    /// `LlamaContext` an embedding call opens and closes per request. A
-    /// later chat-model swap (a different model named in a request)
+    /// companion**: it loads first, with the context its inputs are embedded
+    /// in (built for its longest input and kept for every request), so both
+    /// already show up as used VRAM by the time `--fit` reads free VRAM to
+    /// size the generation model — no separate bookkeeping needed there —
+    /// and `--fit` also keeps a small margin free on top of that, for what a
+    /// decode allocates beside them. A later chat-model swap (a different
+    /// model named in a request)
     /// protects the same margin again rather than evicting the companion —
     /// it keeps its place across the process's lifetime, not just at
     /// launch.
@@ -1861,6 +1862,33 @@ fn launch_companion_name(arg: &str, path: &std::path::Path) -> String {
     }
 }
 
+/// Build the `--embedding-model` companion's kept context now, at the size of
+/// its longest input, and say what was loaded. Built before the generation
+/// model is sized, it is memory already in use when `--fit` reads what is
+/// free: a long input then never needs room the generation model took. When
+/// it cannot be built — a card already full — the embedder still starts, and
+/// its first input builds the context in whatever room is left.
+fn keep_launch_embedding_context(
+    model: &inference::embedding::EmbeddingModel,
+    path: &std::path::Path,
+    weights_bytes: u64,
+) {
+    match model.reserve_context() {
+        Ok(()) => println!(
+            "Embedding model loaded: {} ({weights_bytes} bytes, and a context for {} tokens kept \
+             for every request; {} MiB kept free beside them)",
+            path.display(),
+            model.largest_context(),
+            fit::EMBEDDING_COMPUTE_RESERVE_BYTES / (1024 * 1024)
+        ),
+        Err(e) => println!(
+            "Embedding model loaded: {} ({weights_bytes} bytes). Its context could not be kept \
+             yet ({e}): the first input builds it, in the room left then.",
+            path.display()
+        ),
+    }
+}
+
 #[cfg(test)]
 mod launch_companion_name_tests {
     use super::launch_companion_name;
@@ -2134,21 +2162,15 @@ async fn cmd_run(
             Ok(model) => {
                 let weights_bytes = std::fs::metadata(&emb_path).map(|m| m.len()).unwrap_or(0);
                 let emb_name = launch_companion_name(emb_arg, &emb_path);
-                // Only the compute-buffer margin is reserved here — the
-                // model is already loaded above, so its weights already
-                // show up as used VRAM in the free-VRAM figure `--fit`
-                // reads next; reserving them again would subtract the
-                // embedder's footprint twice. See
-                // `AppState::reserved_embedding_bytes` for the full
-                // rationale (the same reservation runs again on every later
-                // generation-model swap).
+                keep_launch_embedding_context(&model, &emb_path, weights_bytes);
+                // Only a margin is reserved here — the model and its kept
+                // context are already built above, so they already show up
+                // as used VRAM in the free-VRAM figure `--fit` reads next;
+                // reserving them again would subtract the embedder's
+                // footprint twice. See `AppState::reserved_embedding_bytes`
+                // for the full rationale (the same reservation runs again on
+                // every later generation-model swap).
                 embedding_reserve_bytes = fit::EMBEDDING_COMPUTE_RESERVE_BYTES;
-                println!(
-                    "Embedding model loaded: {} ({weights_bytes} bytes on GPU, {} MiB kept free \
-                     for its per-call compute buffer)",
-                    emb_path.display(),
-                    embedding_reserve_bytes / (1024 * 1024)
-                );
                 launch_embedding = Some(api::EmbeddingSlot {
                     model_name: emb_name,
                     model: Arc::new(model),
@@ -2856,12 +2878,7 @@ async fn cmd_serve(
         });
         let weights_bytes = std::fs::metadata(&emb_path).map(|m| m.len()).unwrap_or(0);
         let emb_name = launch_companion_name(&emb_arg, &emb_path);
-        println!(
-            "Embedding model loaded: {} ({weights_bytes} bytes on GPU, {} MiB kept free for its \
-             per-call compute buffer)",
-            emb_path.display(),
-            fit::EMBEDDING_COMPUTE_RESERVE_BYTES / (1024 * 1024)
-        );
+        keep_launch_embedding_context(&model, &emb_path, weights_bytes);
         api::EmbeddingSlot {
             model_name: emb_name,
             model: Arc::new(model),

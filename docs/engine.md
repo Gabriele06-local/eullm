@@ -481,11 +481,15 @@ batch (do all ingestion, then all generation, rather than interleaving).
 The eviction dance above assumes the embedding model was loaded on demand,
 by naming it in a request. `--embedding-model <path-or-name>` skips that:
 the embedder loads at startup and becomes a **reserved companion** — it
-loads first, so its weights already count as used VRAM by the time `--fit`
-reads free VRAM to size the generation model, on both `eullm run` and
-`eullm serve`; `--fit` additionally keeps a small compute-buffer margin free
-on top, for the `LlamaContext` an embedding call opens and closes per
-request, both at launch and again on every later generation-model swap. A reserved
+loads first, with the context its inputs are embedded in, built for its
+longest input and kept for every request, so both already count as used
+VRAM by the time `--fit` reads free VRAM to size the generation model, on
+both `eullm run` and `eullm serve`; `--fit` additionally keeps a small
+margin free on top, for what a decode allocates beside them, both at launch
+and again on every later generation-model swap. That context is memory the
+embedder holds from startup — about 1.4 GB for Qwen3-Embedding-0.6B at the
+default 2,048 tokens, measured on an RTX 5070 Ti — and what guarantees that a long input never fails for lack of room next to a
+generation model sized to fill the card. A reserved
 companion is never evicted to make room for a generation load; it keeps its
 place for the life of the process. If reserving its space would leave the
 generation model no room at all, the launch proceeds anyway with a warning:
@@ -506,14 +510,16 @@ list` shows it (`--embedding-model qwen3-embedding-0.6b-gguf-q8_0`), or by
 its file name when it was given as a path. A request naming the same file
 any other way finds it too, and is answered by the model already loaded.
 
-Every embedding request builds a context of its own, sized to its longest
-input, and holds that memory only while it runs. The requests running at
-once hold together no more context than the largest single request the
-embedder takes — 2,048 tokens, unless the request that loaded it set
-`options.num_ctx`: a burst of long requests is answered one after another,
-in the order they came, instead of failing for lack of memory, while short
-ones still run side by side. A decoder-based embedder needs the most: a
-2,048-token context of Qwen3-Embedding holds about 1.2 GB.
+The embedder keeps one context from one request to the next, grown when
+an input needs more room than it has and never shrunk, and embeds the
+inputs of every request in it one at a time, in the order they came: a
+request of many inputs holds back a short one for one input, not for all
+of them, and a burst waits instead of failing for lack of memory. Building
+that context was most of what a request cost: on an RTX 5070 Ti with
+Qwen3-Embedding-0.6B, a 1,966-token input took 1,001 ms when every request
+built its own and takes about 97 ms in the kept one; a 62-token input, 40
+ms then and about 7 ms now. An embedder loaded on demand builds its context
+when its first input comes; a reserved companion builds it at startup.
 
 Pooling is read from the model's own GGUF metadata (CLS for BGE, mean for
 E5, and so on) rather than guessed; a model that declares no pooling type

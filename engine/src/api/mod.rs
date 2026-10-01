@@ -829,11 +829,12 @@ impl AppState {
     /// (eagerly, at launch — see `main.rs`), so its weights already show up
     /// as used memory in the free-VRAM figure `--fit` reads. Adding
     /// `weights_bytes` again would subtract its footprint twice and
-    /// under-offload the generation model for no reason. Only the
-    /// compute-buffer margin is genuinely not yet reflected — `embed()`
-    /// opens its `LlamaContext`, and the VRAM it needs, per call rather than
-    /// holding it open — so that is the only part worth protecting ahead of
-    /// time.
+    /// under-offload the generation model for no reason. Its context too:
+    /// built at launch for its longest input and kept for every request
+    /// (`EmbeddingModel::reserve_context`), it is used memory already. Only
+    /// the margin is genuinely not yet reflected — what a decode allocates
+    /// beside the context, in the GPU backend's scratch pool — so that is
+    /// the only part worth protecting ahead of time.
     async fn reserved_embedding_bytes(&self) -> u64 {
         self.embedding
             .read()

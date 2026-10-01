@@ -712,10 +712,13 @@ const VRAM_SAFETY_FRACTION: f64 = 0.97;
 const COMPUTE_BUFFER_RESERVE_BYTES: f64 = 320.0 * 1024.0 * 1024.0;
 
 /// The same kind of flat reserve as `COMPUTE_BUFFER_RESERVE_BYTES`, but for
-/// an embedding model's own compute buffer rather than a generation model's
-/// — smaller because an embedding context's batch and micro-batch are both
-/// a fraction of a generation model's (`EmbeddingModel::load` uses the
-/// embedder's own small `n_ctx`, not `--ctx-size`).
+/// an embedding model. A `--embedding-model` companion's context is built at
+/// launch, at the size of its longest input, and kept for every request, so
+/// when free VRAM is read it is in use already, beside the weights: this is
+/// the margin for what a decode allocates beside them. An embedder loaded on
+/// demand builds its context when its first input comes, and this is all the
+/// coexistence check counts for that context, which a long input outgrows —
+/// a context for 2,048 tokens of Qwen3-Embedding holds about 1.4 GB.
 ///
 /// `pub(crate)`: shared by two different reservations that must agree on
 /// what "the embedder's own overhead" costs — `api::fits_in_free_vram`'s
@@ -1100,11 +1103,12 @@ fn run_fit_impl(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     // Subtracted from free VRAM before this model is sized, protecting a
-    // launch-time `--embedding-model` companion's per-call compute buffer
+    // launch-time `--embedding-model` companion's margin
     // (`EMBEDDING_COMPUTE_RESERVE_BYTES`) so it is never counted as space
-    // available to this load — the companion's weights need no separate
-    // bookkeeping here, since it always loads before this runs and so
-    // already shows up as used VRAM in the free-VRAM figure this reads.
+    // available to this load — the companion's weights and its kept context
+    // need no separate bookkeeping here, since they are built before this
+    // runs and so already show up as used VRAM in the free-VRAM figure this
+    // reads.
     // Zero from every call site except the initial `eullm run`/`eullm
     // serve` launch when that flag was given — a later `swap_model`
     // reserves it too, but only while the resident embedder is the
