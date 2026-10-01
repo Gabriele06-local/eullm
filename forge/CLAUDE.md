@@ -116,15 +116,47 @@ reintroduce:**
 
 ## Compute Infrastructure
 
-**On Leonardo every GPU job is a chain of 2-hour links, never one long job.**
-A 2 h request is backfilled into the gaps between other users' jobs and
-usually starts within the hour; a 24 h request waits until a whole node can
-stay free for a day, which on a busy Booster means a day or two in
-`Priority`. Every training script here resumes from its last checkpoint and
-exits at once when its output is already complete, so a chain of short links
-(`submit_chain.sh <script> N`) loses minutes per link and gains days of
-queue. This was established for stage 3 and then forgotten for GRPO on
-2026-10-01, which left five whole-node jobs waiting all afternoon for nothing.
+### Leonardo: the shape of a job that starts. Check every submission against this.
+
+Every rule here was learnt by losing hours to its opposite. Before giving the
+user an `sbatch`, a chain or an `scontrol update`, check it against all of
+them, and look for what the scripts' headers already measured before
+proposing a new request shape.
+
+1. **Two hours, chained.** `--time=02:00:00`, as a chain of links
+   (`submit_chain.sh <script> N` or `--dependency=afterany`). A 2 h request is
+   backfilled into gaps; a 24 h one waits for a node to stay free for a day.
+   Every training script resumes from its checkpoint and exits at once when
+   its output is complete, so a link costs minutes. (Forgotten for GRPO on
+   2026-10-01: five 24 h jobs waited all afternoon.)
+2. **Three GPUs, 24 cores, 340 GB — all three numbers.** Never 4 GPUs, never
+   32 cores, never more than ~340 GB. Four GPUs or 32 cores make the job
+   exclusive, and an entirely idle node is rare: on 2026-09-23 two probes
+   differing only in `--gres` started in 87 s (3 GPUs) and not at all (4);
+   see sbatch_phase2_split.slurm. Forgotten for GRPO on 2026-10-01 (3253 of
+   3264 nodes busy, the whole-node chains never started). One-GPU jobs:
+   8 cores, 120 GB.
+3. **Changing a queued job:** `scontrol update` takes memory in MB
+   (`MinMemoryNode=348160`, not `340G`), and one invalid field fails the
+   whole update silently for the others. Read the result back with
+   `scontrol show job`; if a field cannot be changed, cancel and resubmit with
+   explicit `--gres/--cpus-per-task/--mem/-t` (dependents first, so nothing
+   behind them starts).
+4. **The serial partition is small:** `lrd_all_serial` allows 10 queued and
+   2 running jobs per user. Keep it for packaging only; evaluation and
+   anything that can, go on `boost_usr_prod` with one GPU.
+5. **Never install into the shared venv** (`$WORK/eullm_venv`), not even
+   from a script: no `pip install --upgrade`, never torch or transformers.
+   Extra libraries go to a `--target` directory on PYTHONPATH for the jobs
+   that need them (setup_grpo_libs.sh). The known-good state is
+   `$WORK/eullm_venv-known-good-2026-10-01.txt`; restoring is
+   `pip install -r` of it, not guessing versions.
+6. **Space:** `$WORK` is 1 TB for everything. A merged 8B is 17 GB, a 14B
+   28 GB, plus the same again while converting to GGUF. Check `cindata`
+   (its figure lags by hours) before adding models.
+7. **Every submission is idempotent and gated:** it checks the inputs exist
+   and that the same chain is not already queued, and stops at the first
+   failed check, so running it twice cannot duplicate jobs.
 
 - **EuroHPC Leonardo Booster (CINECA) — active allocation EHPC-AIF-2026PG01-1147**: 1,250 node hours, 02/09/2026 → 02/11/2026. Nodes have 4x A100 **64 GB** (not 96 GB — single-GPU memory budgets do not apply there), max walltime 24 h, no internet on compute nodes. Use the `leonardo/` training configs and `forge/scripts/leonardo/`; runbook in `docs/leonardo-runbook.md`.
 - **EU Cloud (preferred)**: Seeweb (IT), Hetzner (DE), OVH/Scaleway (FR) — GPU servers with A100/H100/RTX PRO 6000
