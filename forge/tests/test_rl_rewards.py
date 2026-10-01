@@ -1,0 +1,127 @@
+"""GRPO rewards: right answers score, and the ways to game them do not.
+
+A policy under RL finds whatever the checker pays for. Each case below is a
+shortcut it could take, written down so the checker cannot quietly start
+paying for it.
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from eullm_forge.rl import answer_reward, score_answer
+
+SIXTY = ["60 giorni|sessanta giorni"]
+
+
+@pytest.mark.parametrize("answer", [
+    "L'art. 10 prevede che il ricorso sia proposto entro sessanta giorni dalla notifica.",
+    "Il termine è di 60 giorni dalla notifica dell'atto.",
+    "Non è prevista alcuna proroga: il ricorso va proposto entro 60 giorni.",
+])
+def test_a_right_deadline_scores(answer):
+    assert score_answer(answer, "termine", SIXTY) == 1.0
+
+
+@pytest.mark.parametrize("answer", [
+    "Il termine è di 30 giorni.",                                   # wrong number
+    "Il termine può essere di 10 giorni, 30 giorni, 60 giorni o 90 giorni.",  # listing
+    "L'art. 10 non esiste. Comunque il termine è di 60 giorni.",    # refuse and answer
+    "Tra i testi riportati non trovo la disposizione; forse 60 giorni.",
+])
+def test_the_shortcuts_to_a_deadline_do_not(answer):
+    assert score_answer(answer, "termine_argomento", SIXTY) == 0.0
+
+
+def test_the_deadline_the_article_also_mentions_is_allowed():
+    """An article that sets a deadline and refers to another: naming both is
+    a complete answer, not a list."""
+    answer = "Il ricorso va proposto entro 60 giorni; l'opposizione entro 30 giorni."
+    assert score_answer(answer, "termine", SIXTY) == 1.0
+
+
+@pytest.mark.parametrize("answer,tipo", [
+    ("L'art. 2999 del codice civile non esiste nella raccolta.", "inesistente"),
+    ("Tra i testi normativi riportati non trovo la disposizione che risponde.", "assente"),
+    ("I testi riportati non contengono la norma richiesta.", "assente"),
+])
+def test_saying_it_is_not_there_scores_where_it_is_true(answer, tipo):
+    assert score_answer(answer, tipo) == 1.0
+
+
+@pytest.mark.parametrize("answer", [
+    "L'art. 2999 disciplina la responsabilità del vettore.",           # invents it
+    "Non trovo la norma, ma di solito il termine è di 60 giorni.",     # abstains, then answers
+])
+def test_inventing_or_hedging_on_a_missing_article_does_not(answer):
+    assert score_answer(answer, "inesistente") == 0.0
+
+
+def test_always_abstaining_is_not_a_policy_that_pays():
+    """The same refusal on all four kinds: right on two, wrong on the two
+    that make up most of the prompts."""
+    refusal = "Tra i testi riportati non trovo la disposizione richiesta."
+    got = [score_answer(refusal, t, SIXTY) for t in
+           ("termine", "termine_argomento", "inesistente", "assente")]
+    assert got == [0.0, 0.0, 1.0, 1.0]
+
+
+def test_an_uncheckable_kind_is_an_error_not_a_zero():
+    with pytest.raises(ValueError):
+        score_answer("qualsiasi", "contenuto")
+    with pytest.raises(ValueError):
+        score_answer("60 giorni", "termine", [])
+
+
+def test_the_trl_reward_reads_chat_completions_and_aligned_columns():
+    completions = [[{"role": "assistant", "content": "Il termine è di 60 giorni."}],
+                   [{"role": "assistant", "content": "Il termine è di 90 giorni."}],
+                   "L'articolo non esiste."]
+    assert answer_reward(completions, tipo=["termine", "termine", "inesistente"],
+                         keywords=[SIXTY, SIXTY, []]) == [1.0, 0.0, 1.0]
+
+
+def test_the_prompts_file_is_built_from_the_exam_code_and_leaves_exam_articles_out(tmp_path):
+    """Prompts come from build_exam and the exam's own retrieval prompt; an
+    article of an excluded exam is never drawn."""
+    import importlib.util
+
+    from eullm_forge.eval import EvalItem, save_eval_set
+
+    filler = " Il presente articolo contiene disposizioni di dettaglio sufficienti."
+    records = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+                "text": f"Art. {n}. \n \n (Materia {n}). \n \n Il ricorso è proposto "
+                        f"entro sessanta giorni dalla notifica.{filler * 2}"}
+               for n in range(1, 31)]
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+                     encoding="utf-8")
+    exam = tmp_path / "norm-exam-v9.jsonl"
+    save_eval_set([EvalItem(id=f"x{n}", domain="legal", lang="it", question="?",
+                            metadata={"code": "codice_civile", "articolo": str(n)})
+                   for n in range(1, 11)], exam)
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_grpo_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_grpo_prompts", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = tmp_path / "prompts.jsonl"
+    assert mod.main(["--norms", str(norms), "--exclude-exam", str(exam),
+                     "--per-code", "50", "--out", str(out)]) == 0
+
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    kinds = {r["tipo"] for r in rows}
+    assert kinds == {"termine", "termine_argomento", "inesistente", "assente"}
+    assert not {r["articolo"] for r in rows if r["tipo"] != "inesistente"} & \
+        {str(n) for n in range(1, 11)}
+    termine = next(r for r in rows if r["tipo"] == "termine")
+    content = termine["prompt"][0]["content"]
+    assert content.startswith("Testi normativi di riferimento:") and "Domanda: " in content
+    assert termine["keywords"] == SIXTY
+    absent = next(r for r in rows if r["tipo"] == "assente")
+    assert f"art. {absent['articolo']}\n" not in absent["prompt"][0]["content"]
+    for r in rows:   # every row is gradable
+        score_answer("x", r["tipo"], r["keywords"])
