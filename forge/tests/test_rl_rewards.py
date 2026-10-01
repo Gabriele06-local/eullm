@@ -37,6 +37,40 @@ def test_the_shortcuts_to_a_deadline_do_not(answer):
 
 
 @pytest.mark.parametrize("answer", [
+
+    "Non è prevista alcuna proroga: il ricorso va proposto entro 60 giorni.",
+    "Non esiste alcuna proroga: il ricorso va proposto entro 60 giorni.",
+    "Non esiste alcun termine perentorio: il ricorso va proposto entro 60 giorni.",
+    "Non esiste alcuna eccezione: il termine è di 60 giorni.",
+    "Non esiste alcuna decadenza; il ricorso va proposto entro 60 giorni.",
+    "Secondo l'articolo 10 il termine è di 60 giorni e non esiste proroga.",
+    "Ai sensi dell'art. 10 il ricorso si propone entro 60 giorni, e non esiste deroga.",
+])
+def test_opening_with_a_negation_about_something_else_still_scores(answer):
+    """"Non è prevista" was carved out of the refusal set because it opens right
+    deadline answers. "Non esiste" is the more common way to write the same
+    sentence, and was in the set, so the same answer was paid for with one
+    synonym and not with the other."""
+    assert score_answer(answer, "termine", SIXTY) == 1.0
+
+
+@pytest.mark.parametrize("answer", [
+    "L'articolo 10 non esiste, ma il ricorso si propone entro 60 giorni.",
+    "Non esiste alcuna norma che disciplini il ricorso; il termine è di 60 giorni.",
+    "Non esiste alcun articolo che tratti del ricorso. Il termine è di 60 giorni.",
+])
+def test_denying_the_article_itself_is_still_a_refusal(answer):
+    """What the set is for, in both orders and with the noun spelled out."""
+    assert score_answer(answer, "termine", SIXTY) == 0.0
+
+
+@pytest.mark.parametrize("answer", [
+    "Non esiste alcuna proroga. Il termine è di 30 giorni.",
+    "Non esiste alcuna proroga; i termini sono 10, 30, 60 o 90 giorni.",
+])
+def test_a_decorative_negation_does_not_buy_a_wrong_or_a_listed_deadline(answer):
+    assert score_answer(answer, "termine", SIXTY) == 0.0
+
     "entro 120 giorni.",          # ends in the 20 of "20 giorni"
     "entro 1020 giorni.",
     "entro 160 giorni.",          # ends in the 60 of "60 giorni"

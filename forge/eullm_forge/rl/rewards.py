@@ -53,10 +53,31 @@ _ABSTAIN = re.compile(
 # The subset that can only be a refusal. "Non è previsto" also opens right
 # deadline answers ("non è prevista alcuna proroga: il termine è di 60
 # giorni"), so it may not cost a deadline answer its reward.
+#
+# "Non esiste" opens the same sentence, and is the more common way to write
+# it, so it is here only where what it denies is the article or the norm --
+# the thing a deadline question presupposes. "Non esiste alcuna proroga" and
+# "non esiste alcun termine perentorio" deny something else, and an answer
+# that opens with one of them states the right deadline. Paying the two
+# sentences differently for a synonym is what this avoids: the same answer
+# scored 1.0 with "non è prevista" and 0.0 with "non esiste", so GRPO trained
+# the phrasing out of the policy. What the set is for still holds -- denying
+# the article and answering anyway earns nothing, in either order.
+_NOT_THE_ARTICLE = (
+    r"articol[oi]|art\.?|norma|disposizion[ei]|prescrizion[ei]|regola|testo"
+    r"|riferiment[oi]|passaggio|fonte"
+)
 _REFUSAL = re.compile(
-    r"non esiste|inesistent|non trovo|non contengono"
+    r"inesistent|non trovo|non contengono"
     r"|non (?:è|e') possibile (?:individuare|trovare|rispondere)"
-    r"|non (?:posso|sono in grado di) (?:rispondere|indicare)",
+    r"|non (?:posso|sono in grado di) (?:rispondere|indicare)"
+    # "non esiste" the article, or the article "non esiste" -- the two orders
+    # Italian uses. A period may be crossed, so "L'art. 10 non esiste" is
+    # matched and "l'articolo 10 è stato abrogato. Non esiste alcuna proroga"
+    # is still read as the refusal it looks like.
+    rf"|non esiste\s+(?:alcun[ao]?\s+|nessun[ao]?\s+)?(?:l['’]\s*)?(?:{_NOT_THE_ARTICLE})"
+    rf"|\b(?:{_NOT_THE_ARTICLE})\s*(?:n\.\s*)?\d*[\w-]*[^.?!;\n\d]{{0,60}}?\bnon esiste\b",
+    re.IGNORECASE,
 )
 
 
