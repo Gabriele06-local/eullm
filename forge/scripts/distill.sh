@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
-# Wrapper around forge/scripts/distill.py with the same resume-friendly
-# semantics as forge/scripts/train.sh: pass the YAML, optionally a
-# data dir, and a re-run will pick up the most recent checkpoint inside
-# the YAML's output_dir.
+# Wrapper around forge/scripts/distill.py: pass the YAML and, optionally, a
+# data dir. A re-run picks up where the last one stopped.
+#
+# The resume decision belongs to distill.py and this wrapper deliberately does
+# not make one. It used to: it looked for checkpoint-* in the YAML's
+# output_dir, took the one with the newest mtime, and passed it as
+# --resume-from, which is how every phase-2 job launches. Two things were
+# wrong with that. mtime is not the step number -- anything that touches a
+# checkpoint directory without writing one reorders the list, and the
+# copy of $WORK that runs between links is exactly that -- and a resume
+# reloads a checkpoint half the run old and redoes thousands of steps.
+# distill.py already sorts by step number (_checkpoint_step, whose comment
+# says exactly this) and logs the directory it loads, so passing nothing says
+# the same thing correctly.
 #
 # Usage:
 #   bash forge/scripts/distill.sh <config.yaml> [data-dir]
@@ -30,29 +40,11 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$REPO_ROOT/forge/scripts/distill.py"
 [ -f "$SCRIPT" ] || err "missing $SCRIPT"
 
-# Pull the output_dir out of the YAML (one shell-only sed, no Python
-# imports needed here — distill.py will load and validate the full
-# config itself).
-OUTPUT_DIR=$(grep -E '^output_dir:' "$CONFIG" \
-    | head -1 | sed -E 's/output_dir:[[:space:]]*//; s/[[:space:]]+#.*$//; s/^["'\'']//; s/["'\'']$//')
-OUTPUT_DIR="${OUTPUT_DIR/#\~/$HOME}"
-[ -n "$OUTPUT_DIR" ] || err "could not extract output_dir from $CONFIG"
-
-RESUME_ARG=()
-if [ -d "$OUTPUT_DIR" ]; then
-    LATEST_CKPT=$(find "$OUTPUT_DIR" -maxdepth 1 -type d -name 'checkpoint-*' \
-        -printf '%T@ %p\n' 2>/dev/null \
-        | sort -rn | awk 'NR==1{print $2}')
-    if [ -n "$LATEST_CKPT" ]; then
-        log "found existing checkpoint: $LATEST_CKPT — resuming"
-        RESUME_ARG=(--resume-from "$LATEST_CKPT")
-    fi
-fi
-
+# No --resume-from: distill.py reads output_dir from the YAML it already has to
+# load, and picks the highest step among the checkpoints it finds.
 CMD=(python "$SCRIPT"
      --config "$CONFIG"
-     --dataset-dir "$DATA_DIR"
-     "${RESUME_ARG[@]}")
+     --dataset-dir "$DATA_DIR")
 
 echo
 log "Launching:"
