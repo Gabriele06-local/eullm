@@ -317,6 +317,25 @@ def server_state(url, api_key, timeout):
     return {"version": get("/api/version"), "ps": get("/api/ps")}
 
 
+def release_embedder(url, model, api_key, timeout):
+    """Unload `model` from the server's embedding slot when the kNN baseline
+    loaded it there, so the routed candidates have the room it took back
+    before stage 3 times them. A reserved companion (`--embedding-model`)
+    is left alone: the server keeps room for it whatever happens. Says what
+    it did."""
+    ps = (server_state(url, api_key, timeout).get("ps") or {}).get("models") or []
+    entry = next(
+        (m for m in ps if m.get("name") == model and (m.get("eullm") or {}).get("slot") == "embedding"),
+        None,
+    )
+    if entry is None:
+        return "not loaded"
+    if (entry.get("eullm") or {}).get("reserved_companion"):
+        return "reserved, kept"
+    post(url.rstrip("/") + "/api/embed", {"model": model, "input": "-", "keep_alive": 0}, api_key, timeout)
+    return "unloaded"
+
+
 def evictions(state):
     """`generation_evictions` in a `server_state`, or None."""
     version = (state or {}).get("version") or {}

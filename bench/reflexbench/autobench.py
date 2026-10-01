@@ -593,6 +593,11 @@ def main(argv=None):
                 rows += rows_for_set(args, dataset, answers, details)
         if "e2e" in args.stages:
             print("stage 3: end to end", file=sys.stderr, flush=True)
+            if args.embed_model:
+                done = ab_methods.release_embedder(
+                    args.url, args.embed_model, args.api_key, args.timeout
+                )
+                print(f"  {args.embed_model}: {done}", file=sys.stderr, flush=True)
             for dataset in datasets:
                 e2e += e2e_rows(args, dataset, answers)
     finally:

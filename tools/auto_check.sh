@@ -41,8 +41,10 @@
 # small first; check 1, 2 and 4 use the first), CTX=8192 for pair A — pair B
 # runs at 4096 with --decision-ctx 4096, as the plan sizes it.
 # EMBED=qwen3-embedding-0.6b-gguf-q8_0, pulled from EMBED_PULL
-# (hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0), for check 4 and the kNN
-# baseline of check 3. LIMIT=100 items per set, SETS=gsm8k,arc-easy,
+# (hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0): reserved at launch for
+# check 4, and for the kNN baseline of check 3 loaded on demand and unloaded
+# before its end-to-end stage — reserved there too, its 2 GiB would keep the
+# pair from sitting side by side on a 16 GB card. LIMIT=100 items per set, SETS=gsm8k,arc-easy,
 # arc-challenge,mmlu. DURATION=3600. CPU_SMALL=qwen3-1.7b.
 # PORT=11500, OUT=/tmp/auto-check. Needs curl and python3.
 set -u
@@ -122,15 +124,28 @@ warmed() {
     return 1
 }
 
-# A server routing between `small` and `large` with `decision`, and an
-# embedding model when there is one: routed <log> <small> <large> <decision> [flags...].
+# A server routing between `small` and `large` with `decision`, as the plan
+# sizes it: routed <log> <small> <large> <decision> [flags...].
 routed() {
     local log=$1 small=$2 large=$3 decision=$4
     shift 4
     up "$log" --max-loaded-models 2 \
         --auto-model "$small=Short everyday requests, simple facts and quick rewrites" \
         --auto-model "$large=Multi-step reasoning, maths, code, analysis and long answers" \
-        --decision-model "$decision" ${EMBED:+--embedding-model "$EMBED"} "$@"
+        --decision-model "$decision" "$@"
+}
+
+# Whether the warm-up left every candidate resident: "yes", or the line that
+# says why not. A pair that cannot sit side by side swaps on every change of
+# route, and every number after that measures the swaps.
+side_by_side() {
+    local clean
+    clean=$(sed 's/\x1b\[[0-9;]*m//g' "$1")
+    if echo "$clean" | grep -q "Auto routing warm-up: \([0-9]*\) of \1 candidates"; then
+        echo yes
+    else
+        echo "$clean" | grep -o "Auto routing warm-up stops: .*" | head -1
+    fi
 }
 
 # /api/route at each concurrency, `n` requests each: one line per level,
@@ -227,8 +242,11 @@ for path in ("/api/generate", "/api/chat", "/v1/chat/completions"):
 print("; ".join(bad) if bad else "ok")
 PY
     )
-    if [ "$answers" = ok ]; then
+    both=$(side_by_side "$OUT/1-$n.log")
+    if [ "$answers" = ok ] && [ "$both" = yes ]; then
         result PASS "1 routed answers with $dname on every endpoint, streamed and not; $warm"
+    elif [ "$answers" = ok ]; then
+        result FAIL "1 routed answers with $dname, but the pair does not stay loaded side by side: $both (see $OUT/1-$n.log)"
     else
         result FAIL "1 routed answers with $dname: $answers (see $OUT/1-$n.log)"
     fi
@@ -280,7 +298,8 @@ print(f"{min(v):.3f}" if v else "none")' "$OUT/3-$tag.json" 2> /dev/null)
 done
 
 # 4. Soak: mixed traffic at concurrency 8, VRAM sampled every 5 s.
-routed "$OUT/4.log" "$SMALL" "$LARGE" "${DECISIONS[0]}" --ctx-size "$CTX" || exit 1
+routed "$OUT/4.log" "$SMALL" "$LARGE" "${DECISIONS[0]}" --ctx-size "$CTX" \
+    ${EMBED:+--embedding-model "$EMBED"} || exit 1
 warmed "$OUT/4.log"
 python3 - "$URL" "$DURATION" "$SMALL" "$LARGE" "$EMBED" > "$OUT/4.json" << 'PY'
 import json, subprocess, sys, threading, time, urllib.request

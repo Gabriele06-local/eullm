@@ -348,6 +348,20 @@ class MethodsTest(unittest.TestCase):
             decision = knn.decide(item("3", text="query"))
         self.assertEqual((decision.score, decision.small), (1.0, True))
 
+    def test_the_knn_embedder_is_unloaded_before_stage_3_unless_reserved(self):
+        def ps(reserved):
+            return {"models": [{"name": "e", "eullm": {"slot": "embedding", "reserved_companion": reserved}}]}
+
+        sent = []
+        for reserved, expected in ((False, "unloaded"), (True, "reserved, kept")):
+            state = {"version": {}, "ps": ps(reserved)}
+            with mock.patch.object(ab_methods, "server_state", lambda *a, s=state: s), \
+                    mock.patch.object(ab_methods, "post", lambda url, body, *a: sent.append((url, body))):
+                self.assertEqual(ab_methods.release_embedder("http://x/", "e", None, 10), expected)
+        self.assertEqual(sent, [("http://x/api/embed", {"model": "e", "input": "-", "keep_alive": 0})])
+        with mock.patch.object(ab_methods, "server_state", lambda *a: {"ps": {"models": []}}):
+            self.assertEqual(ab_methods.release_embedder("http://x", "e", None, 10), "not loaded")
+
     def test_a_streamed_answer_is_timed_to_its_first_piece(self):
         lines = [
             {"model": "m", "message": {"content": "Hel"}, "done": False},
