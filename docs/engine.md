@@ -1479,6 +1479,27 @@ curl -N http://localhost:11434/v1/chat/completions \
 }
 ```
 
+**Output limit:** `max_completion_tokens`, the name OpenAI's Chat Completions
+API now gives it, or `max_tokens`, the deprecated name older clients still
+send. A request carrying both is limited by `max_completion_tokens`; a `null`
+counts as not sent. Either name takes a non-negative integer, and any other
+value means no limit. The limit counts every token the model generates, its
+reasoning included, which is what OpenAI means by `max_completion_tokens`.
+Without one the model generates until it stops or its context is full, and a
+limit larger than the room left in the context is capped to it, as
+[`num_predict`](#post-apigenerate) is. An answer cut short either way ends
+with `"finish_reason": "length"`.
+
+```bash
+curl -X POST http://localhost:11434/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "eullm/legal-it-4b",
+    "messages": [{"role": "user", "content": "Hello"}],
+    "max_completion_tokens": 256
+  }'
+```
+
 #### `POST /v1/embeddings`
 
 Embed one or more texts in OpenAI format. Same underlying embedding slot as
