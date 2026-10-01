@@ -1,0 +1,261 @@
+//! Generation models on a real GGUF, over HTTP: what a request does to the
+//! model that answers it. CPU, one thread, a tiny model copied under several
+//! names into a temporary store so that every copy is a distinct model to the
+//! server — a hard link would be one file, and one model.
+//!
+//! ```text
+//! EULLM_GENERATION_TEST_MODEL=/path/to/stories260K.gguf \
+//!     cargo test -p eullm-engine -- --ignored real_model_ --test-threads=1
+//! ```
+
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use futures_util::StreamExt;
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+
+use super::{AppState, auth};
+use crate::models::ModelStore;
+
+/// The GGUF every test here runs on.
+fn test_model() -> PathBuf {
+    std::env::var("EULLM_GENERATION_TEST_MODEL")
+        .expect("set EULLM_GENERATION_TEST_MODEL to a GGUF file")
+        .into()
+}
+
+/// A store holding a copy of the test model under each of `names`, laid out
+/// the way a pull leaves one.
+fn store_of_copies(dir: &Path, names: &[&str]) -> ModelStore {
+    let source = test_model();
+    for name in names {
+        let model_dir = dir.join(name);
+        std::fs::create_dir_all(&model_dir).expect("model dir");
+        std::fs::copy(&source, model_dir.join("model.gguf")).expect("copy the test model");
+        let manifest = json!({
+            "id": name, "name": name, "description": "test copy", "languages": ["en"],
+            "base": "test", "vram_gb": 1, "size_bytes": 0, "license": "MIT",
+            "digest": "sha256:0", "pulled_at": "2026-10-01T00:00:00Z", "status": "ready",
+            "gguf_file": "model.gguf",
+        });
+        std::fs::write(model_dir.join("manifest.json"), manifest.to_string()).expect("manifest");
+    }
+    ModelStore::at(dir.to_path_buf())
+}
+
+/// A server on 127.0.0.1:0, with its idle-unload loop running, over a store
+/// of copies of the test model. The store goes when this does.
+struct TestServer {
+    base: String,
+    state: Arc<AppState>,
+    dir: PathBuf,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Small and on one thread: a CPU shared with other work, and a model of a
+/// few hundred thousand parameters, need no more.
+async fn start(names: &[&str], configure: impl FnOnce(&mut AppState)) -> TestServer {
+    let dir = std::env::temp_dir().join(format!("eullm-resident-{}", uuid::Uuid::new_v4()));
+    let store = store_of_copies(&dir, names);
+    let absent = Path::new("/nonexistent/eullm-test/.env");
+    let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+    state.ctx_size = 2048;
+    configure(&mut state);
+    let state = Arc::new(state);
+    tokio::spawn(Arc::clone(&state).run_idle_unload_loop());
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let app = super::api_router(Arc::clone(&state));
+    tokio::spawn(async move {
+        let _ = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await;
+    });
+    TestServer {
+        base: format!("http://{addr}"),
+        state,
+        dir,
+    }
+}
+
+impl TestServer {
+    /// The generation models loaded right now.
+    async fn loaded(&self) -> Vec<String> {
+        self.state
+            .slot
+            .read()
+            .await
+            .model_name
+            .clone()
+            .into_iter()
+            .collect()
+    }
+
+    /// Wait up to `limit` for exactly `expected` to be loaded.
+    async fn wait_for_loaded(&self, expected: &[&str], limit: Duration) {
+        let start = Instant::now();
+        loop {
+            let loaded = self.loaded().await;
+            if loaded == expected {
+                return;
+            }
+            assert!(
+                start.elapsed() < limit,
+                "expected {expected:?} loaded within {limit:?}, still {loaded:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
+    /// POST `body` to `/api/generate`; the status and every JSON line of the
+    /// answer — one for a plain response, one per event for a stream.
+    async fn generate(&self, body: Value) -> (reqwest::StatusCode, Vec<Value>) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/generate", self.base))
+            .json(&body)
+            .send()
+            .await
+            .expect("request");
+        let status = response.status();
+        let text = response.text().await.expect("body");
+        let lines = text
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect();
+        (status, lines)
+    }
+}
+
+/// The text of a generation's answer, from its lines.
+fn answer(lines: &[Value]) -> String {
+    lines
+        .iter()
+        .filter_map(|l| l["response"].as_str())
+        .collect()
+}
+
+/// The last line of a generation that ended as it should: done, for a reason
+/// a generation ends with, and no error anywhere.
+fn assert_finished(lines: &[Value]) {
+    assert!(
+        lines.iter().all(|l| l.get("error").is_none()),
+        "an error in the answer: {lines:?}"
+    );
+    let last = lines.last().expect("at least one line");
+    assert_eq!(last["done"], true, "{last}");
+    assert!(
+        matches!(last["done_reason"].as_str(), Some("stop" | "length")),
+        "{last}"
+    );
+}
+
+/// `keep_alive: 0` with a prompt used to unload the model before the
+/// request reached it: the scheduler's thread was gone, and the request
+/// failed with "Scheduler queue full". It is answered now, and the model
+/// unloaded once the answer is over — streamed or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_keep_alive_zero_with_a_prompt_answers_then_unloads() {
+    let server = start(&["tiny-a"], |_| {}).await;
+    for stream in [false, true] {
+        let (status, lines) = server
+            .generate(json!({
+                "model": "tiny-a", "prompt": "Once upon a time", "keep_alive": 0,
+                "stream": stream, "options": { "num_predict": 24 },
+            }))
+            .await;
+        assert_eq!(status, 200, "{lines:?}");
+        assert_finished(&lines);
+        assert!(!answer(&lines).is_empty(), "{lines:?}");
+        server.wait_for_loaded(&[], Duration::from_secs(5)).await;
+    }
+}
+
+/// keep_alive counts from the end of the answer. It used to count from its
+/// start, so an answer longer than keep_alive lost its model halfway: the
+/// idle-unload loop shut the scheduler down under it. A short request that
+/// finishes beside a long one must not do it either: its deadline passes
+/// while the long one is still answering.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_long_generation_outlives_a_short_keep_alive() {
+    let tick = Duration::from_millis(25);
+    let keep_alive = Duration::from_millis(25);
+    let server = start(&["tiny-a"], |state| {
+        state.idle_tick = tick;
+        state.ctx_size = 8192;
+        state.batch_size = 2;
+    })
+    .await;
+
+    let started = Instant::now();
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/generate", server.base))
+        .json(&json!({
+            "model": "tiny-a", "prompt": "Once upon a time",
+            "keep_alive": keep_alive.as_secs_f64(), "stream": true,
+            "options": { "num_predict": 3000 },
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+
+    // Past keep_alive and a few ticks of the loop, for as long as the answer
+    // is still coming, the model must still be there.
+    let midway = keep_alive + 4 * tick;
+    let mut short_one_done = false;
+    let mut checks_past_midway = 0;
+    let mut pending = String::new();
+    let mut lines = Vec::new();
+    let mut body = response.bytes_stream();
+    while let Some(chunk) = body.next().await {
+        pending.push_str(&String::from_utf8_lossy(&chunk.expect("chunk")));
+        while let Some(end) = pending.find('\n') {
+            let line: String = pending.drain(..=end).collect();
+            lines.push(serde_json::from_str::<Value>(line.trim()).expect("a JSON line"));
+        }
+        if !short_one_done {
+            let (status, short) = server
+                .generate(json!({
+                    "model": "tiny-a", "prompt": "Once", "stream": false,
+                    "keep_alive": keep_alive.as_secs_f64(), "options": { "num_predict": 4 },
+                }))
+                .await;
+            assert_eq!(status, 200, "{short:?}");
+            assert_finished(&short);
+            short_one_done = true;
+        }
+        let done = lines.last().is_some_and(|l| l["done"] == true);
+        if started.elapsed() > midway && !done {
+            assert_eq!(
+                server.loaded().await,
+                ["tiny-a"],
+                "unloaded {:?} into an answer that was still coming",
+                started.elapsed()
+            );
+            checks_past_midway += 1;
+        }
+    }
+    assert_finished(&lines);
+    assert!(
+        checks_past_midway > 10,
+        "the answer took {:?}, not long enough to outlast keep_alive; raise num_predict",
+        started.elapsed()
+    );
+
+    // And once it is over, keep_alive runs out and the model goes.
+    server.wait_for_loaded(&[], keep_alive + 10 * tick).await;
+}

@@ -65,6 +65,19 @@ pub fn init_shared_backend()
     Ok(std::sync::Arc::new(backend))
 }
 
+/// The one backend every test in this binary shares, for the reason
+/// [`init_shared_backend`] gives: a second `init()` fails while the first
+/// backend is alive, and a backend a test dropped can still be held by a
+/// model thread that has not exited yet. One per module was not enough once
+/// tests of several modules ran in one process (`--ignored real_model_`).
+#[cfg(test)]
+pub(crate) fn test_backend() -> std::sync::Arc<LlamaBackend> {
+    static BACKEND: std::sync::OnceLock<std::sync::Arc<LlamaBackend>> = std::sync::OnceLock::new();
+    BACKEND
+        .get_or_init(|| init_shared_backend().expect("llama backend init"))
+        .clone()
+}
+
 /// Report the binary's GPU capability and return the layer count that may
 /// actually be handed to llama.cpp.
 ///

@@ -27,10 +27,9 @@ use tokio::sync::mpsc;
 use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded, EmbeddingModel};
 
 use super::AppState;
+use super::resident::{Lease, SlotSnapshot};
 use crate::audit::{AuditEntry, AuditLogger};
-use crate::inference::{
-    GenerateRequest, InferenceEngine, JSON_GBNF, SchedulerHandle, StopReason, StreamEvent,
-};
+use crate::inference::{GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent};
 use crate::models::EU_CATALOG;
 use crate::tools;
 
@@ -284,77 +283,64 @@ pub fn openai_routes() -> Router<S> {
 
 // ── Model slot and dynamic swap ──────────────────────────────────────────────
 
-/// A snapshot of the model slot — cloned handles that don't hold the RwLock.
-/// The `Arc` / `SchedulerHandle` clones are cheap (refcount bump + channel clone)
-/// and keep the old model alive until in-flight requests finish.
-struct SlotSnapshot {
-    model_name: String,
-    engine: Option<Arc<InferenceEngine>>,
-    scheduler: Option<SchedulerHandle>,
-}
-
-/// Ensure the requested model is loaded and return a snapshot of the slot.
+/// Ensure the requested model is loaded and return a snapshot of the slot,
+/// with a lease on the model for this request (see `resident::Lease`).
 ///
 /// If `requested` differs from the currently loaded model, triggers a
-/// dynamic model swap (unloads old, loads new).  In-flight requests on
-/// cloned handles of the old model complete normally.
+/// dynamic model swap (unloads old, loads new).
 ///
 /// If no model is specified in the request, uses whatever is loaded.
+///
+/// `keep_alive` is the request's own: it applies to the model that answers
+/// it, from the moment the response is over.
 async fn ensure_model(
     state: &AppState,
     requested: Option<&str>,
     override_batch_size: Option<usize>,
     override_ctx_size: Option<u32>,
+    keep_alive: super::KeepAlive,
 ) -> Result<SlotSnapshot, (StatusCode, Json<Value>)> {
-    // Check if a swap is needed.
-    if let Some(name) = requested {
-        let normalized = name.replace(':', "-");
-        let needs_swap = {
-            let slot = state.slot.read().await;
-            match slot.model_name.as_deref() {
-                Some(loaded) => !model_names_match(loaded, &normalized),
-                None => true,
-            }
+    {
+        // The lease is taken under this guard: see `resident::Usage::lease`.
+        let slot = state.slot.read().await;
+        let loaded = slot.engine.is_some() || slot.scheduler.is_some();
+        let wanted = match (requested, slot.model_name.as_deref()) {
+            (None, _) => true,
+            (Some(name), Some(current)) => model_names_match(current, &name.replace(':', "-")),
+            (Some(_), None) => false,
         };
-        if needs_swap {
-            state
-                .swap_model(name, override_batch_size, override_ctx_size)
-                .await
-                .map_err(|e| match e {
-                    // A model that does not exist is a client mistake, and a
-                    // 5xx here is actively harmful: clients with automatic
-                    // retry treat it as transient and hammer a request that
-                    // can never succeed. Ollama answers 404 for this.
-                    crate::api::ModelError::NotFound(msg) => {
-                        (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
-                    }
-                    // The model exists but would not load: out of VRAM, a
-                    // corrupt GGUF, a context that will not allocate. That is
-                    // ours, and 500 is correct.
-                    crate::api::ModelError::LoadFailed(msg) => (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({ "error": format!("Failed to load model '{name}': {msg}") })),
-                    ),
-                })?;
+        if loaded && wanted {
+            return Ok(state.lease_slot(&slot, keep_alive));
         }
     }
 
-    // Take a read-lock snapshot (cheap clones: Arc bump + channel clone).
-    let slot = state.slot.read().await;
-    if slot.engine.is_none() && slot.scheduler.is_none() {
+    let Some(name) = requested else {
         return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(
                 json!({ "error": "No model loaded. Send a request with a \"model\" field, or use `eullm run <model>`." }),
             ),
         ));
-    }
-
-    Ok(SlotSnapshot {
-        model_name: slot.model_name.clone().unwrap_or_else(|| "unknown".into()),
-        engine: slot.engine.clone(),
-        scheduler: slot.scheduler.clone(),
-    })
+    };
+    state
+        .swap_model(name, override_batch_size, override_ctx_size, keep_alive)
+        .await
+        .map_err(|e| match e {
+            // A model that does not exist is a client mistake, and a
+            // 5xx here is actively harmful: clients with automatic
+            // retry treat it as transient and hammer a request that
+            // can never succeed. Ollama answers 404 for this.
+            crate::api::ModelError::NotFound(msg) => {
+                (StatusCode::NOT_FOUND, Json(json!({ "error": msg })))
+            }
+            // The model exists but would not load: out of VRAM, a
+            // corrupt GGUF, a context that will not allocate. That is
+            // ours, and 500 is correct.
+            crate::api::ModelError::LoadFailed(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": format!("Failed to load model '{name}': {msg}") })),
+            ),
+        })
 }
 
 /// Parsed sampling parameters from the API request.
@@ -1516,10 +1502,16 @@ async fn generate(
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
 
     let prompt = body
         .get("prompt")
@@ -1532,6 +1524,7 @@ async fn generate(
     // `ensure_model` above already did the loading/swap, so there is nothing
     // left to do. Returning here, before `GenerateRequest` is built, is what
     // makes this genuinely free: it never reaches the scheduler or engine.
+    // The lease ends with it, which is what applies the `keep_alive`.
     if prompt.is_empty() {
         return Ok(Json(json!({
             "model": model,
@@ -1580,6 +1573,7 @@ async fn generate(
                 model,
                 StreamFormat::OllamaGenerate,
                 user_id,
+                snap.lease,
             ))
         } else {
             let Collected {
@@ -1628,6 +1622,7 @@ async fn generate(
                 model,
                 StreamFormat::OllamaGenerate,
                 user_id,
+                snap.lease,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -1683,10 +1678,16 @@ async fn chat(
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
 
     let messages = body
         .get("messages")
@@ -1791,6 +1792,7 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
             ));
         }
         let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
@@ -1862,6 +1864,7 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
             ))
         } else {
             let Collected {
@@ -1912,6 +1915,7 @@ async fn chat(
                 model,
                 StreamFormat::OllamaChat,
                 user_id,
+                snap.lease,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -2243,13 +2247,19 @@ async fn chat_completions(
     let user_id = identity.key_id().map(str::to_string);
     let requested = body.get("model").and_then(|v| v.as_str());
     let (override_batch_size, override_ctx_size) = parse_slot_overrides(&body)?;
-    let snap = ensure_model(&state, requested, override_batch_size, override_ctx_size).await?;
-    let model = snap.model_name.clone();
     // `keep_alive` is an EULLM/Ollama extension to the OpenAI shape, not part
     // of it — accepted here too so the idle-unload timer works the same way
     // regardless of which endpoint a client happens to use.
     let keep_alive = super::parse_keep_alive(body.get("keep_alive"));
-    state.touch_main_slot(keep_alive).await;
+    let snap = ensure_model(
+        &state,
+        requested,
+        override_batch_size,
+        override_ctx_size,
+        keep_alive,
+    )
+    .await?;
+    let model = snap.model_name.clone();
 
     let messages = body
         .get("messages")
@@ -2421,7 +2431,8 @@ async fn chat_completions(
         });
 
         if is_streaming(&body) {
-            let stream = buffered_message_sse(model, message, finish_reason.to_string(), usage);
+            let stream =
+                buffered_message_sse(model, message, finish_reason.to_string(), usage, snap.lease);
             return Ok(Sse::new(stream).into_response());
         }
         return Ok(Json(json!({
@@ -2443,7 +2454,8 @@ async fn chat_completions(
         let rx = sched.submit(request);
 
         if is_streaming(&body) {
-            let stream = stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id);
+            let stream =
+                stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id, snap.lease);
             Ok(Sse::new(stream).into_response())
         } else {
             let Collected {
@@ -2492,7 +2504,8 @@ async fn chat_completions(
 
         if is_streaming(&body) {
             let rx = sequential_to_channel(engine, request);
-            let stream = stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id);
+            let stream =
+                stream_from_channel_sse(rx, model, StreamFormat::OpenAI, user_id, snap.lease);
             Ok(Sse::new(stream).into_response())
         } else {
             let result = tokio::task::spawn_blocking({
@@ -2551,13 +2564,18 @@ async fn chat_completions(
 /// valid OpenAI streaming — structured tool calls cannot be streamed
 /// incrementally without the format-aware incremental parser, which is
 /// separate future work.
+///
+/// The stream holds `lease` until it ends, so the model counts as in use for
+/// the whole response — as it does in the other stream helpers.
 fn buffered_message_sse(
     model: String,
     message: Value,
     finish_reason: String,
     usage: Value,
+    lease: Lease,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
         let created = chrono::Utc::now().timestamp();
         yield Ok(Event::default().data(
@@ -2595,13 +2613,19 @@ enum StreamFormat {
 /// Convert an mpsc channel of StreamEvents into an SSE event stream.
 ///
 /// Used for OpenAI-compatible `/v1/chat/completions` streaming only.
+///
+/// The stream holds `lease` until it ends — the last event sent, or the
+/// client gone — so keep_alive counts from the end of the response, not
+/// from when the handler returned it.
 fn stream_from_channel_sse(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
     user_id: Option<String>,
+    lease: Lease,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
     async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         while let Some(event) = rx.recv().await {
@@ -2651,13 +2675,17 @@ fn stream_from_channel_sse(
 /// followed by a newline. No `data:` prefix, no double newlines.
 ///
 /// This is what Ollama clients (RAG Enterprise, Open WebUI, etc.) expect.
+///
+/// The stream holds `lease` until it ends, as `stream_from_channel_sse` does.
 fn ndjson_stream_response(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
     format: StreamFormat,
     user_id: Option<String>,
+    lease: Lease,
 ) -> axum::response::Response {
     let stream = async_stream::stream! {
+        let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
 
         while let Some(event) = rx.recv().await {

@@ -525,12 +525,9 @@ mod tests {
     /// the one backend every test here shares: llama.cpp's can be
     /// initialized only once at a time in a process.
     fn load_test_model() -> EmbeddingModel {
-        static BACKEND: std::sync::OnceLock<Arc<LlamaBackend>> = std::sync::OnceLock::new();
         let path = std::env::var("EULLM_EMBEDDING_TEST_MODEL")
             .expect("set EULLM_EMBEDDING_TEST_MODEL to an embedding GGUF");
-        let backend = BACKEND
-            .get_or_init(|| crate::inference::init_shared_backend().expect("backend"))
-            .clone();
+        let backend = crate::inference::test_backend();
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
         EmbeddingModel::load(Path::new(&path), threads, DEFAULT_EMBEDDING_CTX, backend)
             .expect("load the model")

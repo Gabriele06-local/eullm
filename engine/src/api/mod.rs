@@ -14,6 +14,9 @@
 mod auth;
 mod ip_allowlist;
 mod origin;
+#[cfg(test)]
+mod real_model_tests;
+mod resident;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
 // reuses `routes::sequential_to_channel` so that a model without a scheduler
 // (multimodal forces `batch_size = 0`) streams through exactly the same code
@@ -49,6 +52,10 @@ pub struct ModelSlot {
     pub engine: Option<Arc<InferenceEngine>>,
     /// Continuous batching scheduler (preferred when available).
     pub scheduler: Option<SchedulerHandle>,
+    /// How the loaded model is in use: the requests holding it, and when its
+    /// keep_alive runs out (see `resident::Usage`). A fresh one with every
+    /// load.
+    pub(crate) usage: Arc<resident::Usage>,
 }
 
 /// The embedding slot — independent of `ModelSlot` on purpose. See
@@ -231,14 +238,20 @@ pub struct AppState {
     /// visible over time rather than only as an unexplained slowdown.
     pub cross_slot_evictions: std::sync::atomic::AtomicU64,
 
-    /// Idle-unload deadline for the main slot — `None` means no timer is
-    /// running (slot empty, or the model that loaded it asked to be kept
+    /// Woken when the last request on the generation model finishes, so the
+    /// idle-unload loop acts on `keep_alive: 0` as soon as the request is
+    /// over instead of at its next tick. The generation model's own
+    /// deadline lives in `ModelSlot::usage`, set when its requests end.
+    idle: Arc<tokio::sync::Notify>,
+    /// How often the idle-unload loop looks for an expired keep_alive: 30 s,
+    /// shorter in tests.
+    idle_tick: std::time::Duration,
+    /// Idle-unload deadline for the embedding slot — `None` means no timer
+    /// is running (slot empty, or the model that loaded it asked to be kept
     /// forever). Reset on every request that touches the slot; checked by
     /// the background task spawned in `serve()`. See `KeepAlive`.
-    main_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    /// Same as `main_deadline`, for the embedding slot.
     embedding_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
-    /// Same as `main_deadline`, for the decision slot.
+    /// Same as `embedding_deadline`, for the decision slot.
     decision_deadline: tokio::sync::Mutex<Option<tokio::time::Instant>>,
     /// Applied when a request does not set its own `keep_alive` field —
     /// see `RuntimeOpts`/`ServeConfig::keep_alive`. `None` disables the
@@ -288,13 +301,19 @@ impl AppState {
     /// smaller model that uses less VRAM).  Pass `None` to keep the
     /// batch size from the CLI launch.
     ///
+    /// Returns the model with a lease on it for the request that asked,
+    /// taken under the same guard that found or installed it, so the request
+    /// is answered by the model it named even when another swap follows
+    /// straight after. `keep_alive` is that request's.
+    ///
     /// This is the **write** path — only one swap can run at a time.
-    pub async fn swap_model(
+    pub(crate) async fn swap_model(
         &self,
         name: &str,
         override_batch_size: Option<usize>,
         override_ctx_size: Option<u32>,
-    ) -> Result<(), ModelError> {
+        keep_alive: KeepAlive,
+    ) -> Result<resident::SlotSnapshot, ModelError> {
         // Serialize swaps — if another request is already swapping,
         // wait for it to finish instead of starting a parallel swap.
         let _swap_guard = self.swap_lock.lock().await;
@@ -314,7 +333,7 @@ impl AppState {
                         "Model {} already loaded (swapped by another request)",
                         crate::audit::sanitize_for_log(&normalized)
                     );
-                    return Ok(());
+                    return Ok(self.lease_slot(&slot, keep_alive));
                 }
             }
         }
@@ -566,12 +585,14 @@ impl AppState {
             .map_err(|e| format!("Task join error: {e}"))??;
 
         // ── 3. Install the new model in the slot ─────────────────────
-        {
+        let snapshot = {
             let mut slot = self.slot.write().await;
             slot.model_name = Some(model_name.clone());
             slot.engine = new_engine;
             slot.scheduler = new_scheduler;
-        }
+            slot.usage = resident::Usage::new();
+            self.lease_slot(&slot, keep_alive)
+        };
 
         tracing::info!(
             "Model swap complete → {} (batch_size={batch_size})",
@@ -611,7 +632,20 @@ impl AppState {
         }
         .print();
 
-        Ok(())
+        Ok(snapshot)
+    }
+
+    /// The loaded model's handles, with a lease on it for one request. Only
+    /// with a guard on the slot held — see `resident::Usage::lease`.
+    fn lease_slot(&self, slot: &ModelSlot, keep_alive: KeepAlive) -> resident::SlotSnapshot {
+        resident::SlotSnapshot {
+            model_name: slot.model_name.clone().unwrap_or_else(|| "unknown".into()),
+            engine: slot.engine.clone(),
+            scheduler: slot.scheduler.clone(),
+            lease: slot
+                .usage
+                .lease(keep_alive, self.default_keep_alive, &self.idle),
+        }
     }
 
     /// Unload the currently loaded model, freeing its VRAM, and leave the
@@ -657,12 +691,46 @@ impl AppState {
             slot.model_name = None;
             sched
         };
-        if let Some(handle) = old_scheduler {
-            tokio::task::spawn_blocking(move || handle.shutdown())
-                .await
-                .map_err(|e| format!("Failed to join scheduler thread: {e}"))?;
+        shut_down_scheduler(old_scheduler).await
+    }
+
+    /// Unload the generation model if it is due (`resident::due`): no request
+    /// is using it, and the last one to finish asked for `keep_alive: 0` or
+    /// left a deadline that has passed. Checked again under the slot's write
+    /// guard, where no lease can be taken, so a request that arrived in the
+    /// meantime keeps its model.
+    async fn unload_generation_if_due(&self) {
+        let due_now = {
+            let slot = self.slot.read().await;
+            slot.model_name.is_some()
+                && resident::due(&slot.usage.view(), std::time::Instant::now())
+        };
+        if !due_now {
+            return;
         }
-        Ok(())
+        let _swap_guard = self.swap_lock.lock().await;
+        let (name, immediate, old_scheduler) = {
+            let mut slot = self.slot.write().await;
+            let usage = slot.usage.view();
+            if slot.model_name.is_none() || !resident::due(&usage, std::time::Instant::now()) {
+                return;
+            }
+            slot.engine = None;
+            (
+                slot.model_name.take().unwrap_or_default(),
+                usage.unload_when_idle,
+                slot.scheduler.take(),
+            )
+        };
+        let name = crate::audit::sanitize_for_log(&name);
+        if immediate {
+            tracing::info!("keep_alive 0 — unloading {name} now that its request is over");
+        } else {
+            tracing::info!("keep_alive expired — unloading idle generation model {name}");
+        }
+        if let Err(e) = shut_down_scheduler(old_scheduler).await {
+            tracing::warn!("{e}");
+        }
     }
 
     /// Ensure the named embedding model is loaded, loading or swapping it in
@@ -978,19 +1046,11 @@ impl AppState {
             .unwrap_or(0)
     }
 
-    /// Reset the main slot's idle-unload deadline. Called on every request
-    /// that uses the main slot (after `ensure_model` in `routes.rs`), so an
-    /// active conversation is never unloaded out from under it. `Immediate`
-    /// unloads right away instead of scheduling a deadline — see
+    /// Reset the embedding slot's idle-unload deadline. Called on every
+    /// request that uses the slot, so an active ingestion run is never
+    /// unloaded out from under it. `Immediate` empties the slot right away:
+    /// the request holds its own `Arc` to the model and finishes on it. See
     /// `KeepAlive`.
-    pub async fn touch_main_slot(&self, keep_alive: KeepAlive) {
-        touch_deadline(&self.main_deadline, keep_alive, self.default_keep_alive);
-        if keep_alive == KeepAlive::Immediate {
-            let _ = self.unload().await;
-        }
-    }
-
-    /// Same as `touch_main_slot`, for the embedding slot.
     pub async fn touch_embedding_slot(&self, keep_alive: KeepAlive) {
         touch_deadline(
             &self.embedding_deadline,
@@ -1002,7 +1062,7 @@ impl AppState {
         }
     }
 
-    /// Same as `touch_main_slot`, for the decision slot.
+    /// Same as `touch_embedding_slot`, for the decision slot.
     pub async fn touch_decision_slot(&self, keep_alive: KeepAlive) {
         touch_deadline(&self.decision_deadline, keep_alive, self.default_keep_alive);
         if keep_alive == KeepAlive::Immediate {
@@ -1010,31 +1070,25 @@ impl AppState {
         }
     }
 
-    /// Background loop spawned once from `serve()`: every 30 seconds, unload
-    /// any slot whose idle deadline has passed. 30s is coarse on purpose
-    /// — this is a power-saving idle timer, not a latency-sensitive path,
-    /// and checking every request would mean taking the slot locks on
-    /// every single generation/embedding/decision call for a comparison
-    /// that is false almost all the time.
+    /// Background loop spawned once from `serve()`: unload whatever is due.
+    /// It looks every `idle_tick` (30 s), which is coarse on purpose — this
+    /// is a power-saving idle timer, not a latency-sensitive path, and
+    /// checking on every request would mean taking the slot locks on every
+    /// single call for a comparison that is false almost all the time — and
+    /// also whenever the generation model's last request finishes, so that
+    /// `keep_alive: 0` takes effect when the request is over rather than up
+    /// to 30 s later.
     async fn run_idle_unload_loop(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
         loop {
-            interval.tick().await;
+            // Registered before anything is checked: a request that ends
+            // while this pass runs wakes the next pass instead of being
+            // missed until the tick after.
+            let mut went_idle = std::pin::pin!(self.idle.notified());
+            went_idle.as_mut().enable();
+
+            self.unload_generation_if_due().await;
+
             let now = tokio::time::Instant::now();
-
-            let main_expired = {
-                let mut deadline = self.main_deadline.lock().await;
-                let expired = deadline.is_some_and(|d| now >= d);
-                if expired {
-                    *deadline = None;
-                }
-                expired
-            };
-            if main_expired {
-                tracing::info!("keep_alive expired — unloading idle generation model");
-                let _ = self.unload().await;
-            }
-
             let embedding_expired = {
                 let mut deadline = self.embedding_deadline.lock().await;
                 let expired = deadline.is_some_and(|d| now >= d);
@@ -1059,6 +1113,11 @@ impl AppState {
             if decision_expired {
                 tracing::info!("keep_alive expired — unloading idle decision model");
                 *self.decision.write().await = None;
+            }
+
+            tokio::select! {
+                () = went_idle.as_mut() => {}
+                () = tokio::time::sleep(self.idle_tick) => {}
             }
         }
     }
@@ -1157,6 +1216,18 @@ impl AppState {
              - Registered name: eullm import-ollama {name}"
         )))
     }
+}
+
+/// Stop a scheduler taken out of the slot and wait for its thread to exit,
+/// so its model's memory is free when this returns. On a blocking thread:
+/// the join waits for the decode loop to notice.
+async fn shut_down_scheduler(scheduler: Option<SchedulerHandle>) -> Result<(), String> {
+    if let Some(handle) = scheduler {
+        tokio::task::spawn_blocking(move || handle.shutdown())
+            .await
+            .map_err(|e| format!("Failed to join scheduler thread: {e}"))?;
+    }
+    Ok(())
 }
 
 /// Find the first `.gguf` file in a directory.
@@ -1264,6 +1335,18 @@ pub enum KeepAlive {
     For(std::time::Duration),
 }
 
+impl KeepAlive {
+    /// `Default` replaced by what it stands for: the server's `--keep-alive`
+    /// (`default`), or `Forever` when none was given. Every other value is
+    /// the request's own and is returned as it is.
+    pub(crate) fn resolve(self, default: Option<std::time::Duration>) -> KeepAlive {
+        match self {
+            KeepAlive::Default => default.map_or(KeepAlive::Forever, KeepAlive::For),
+            other => other,
+        }
+    }
+}
+
 /// Parse a request body's `keep_alive` field. Accepts what Ollama accepts:
 /// a bare number of seconds (`300`), a duration string with a unit
 /// (`"5m"`, `"30s"`, `"2h"`), or a plain numeric string (`"300"`). An
@@ -1351,7 +1434,7 @@ fn parse_duration_string(s: &str) -> Option<f64> {
     }
 }
 
-/// Shared implementation behind `touch_main_slot`/`touch_embedding_slot`:
+/// Shared implementation behind `touch_embedding_slot`/`touch_decision_slot`:
 /// resolve `keep_alive` (falling back to `default` when it is `Default`)
 /// into a new deadline, or clear it for `Forever`/`Immediate` (the caller
 /// handles the actual unload for `Immediate`).
@@ -1360,12 +1443,11 @@ fn touch_deadline(
     keep_alive: KeepAlive,
     default: Option<std::time::Duration>,
 ) {
-    let resolved = match keep_alive {
-        KeepAlive::Default => default.map(KeepAlive::For).unwrap_or(KeepAlive::Forever),
-        other => other,
-    };
-    let new_deadline = match resolved {
-        KeepAlive::For(d) => Some(tokio::time::Instant::now() + d),
+    let new_deadline = match keep_alive.resolve(default) {
+        // `checked_add`: a duration a request may carry (up to ~584 billion
+        // years) overflows an `Instant`, and `+` panics on that. A deadline
+        // that far away is no deadline.
+        KeepAlive::For(d) => tokio::time::Instant::now().checked_add(d),
         KeepAlive::Forever | KeepAlive::Immediate | KeepAlive::Default => None,
     };
     // `try_lock`: this runs on the hot request path (once per request, to
@@ -1512,6 +1594,17 @@ mod keep_alive_tests {
         // A server default of 5 minutes turns Default into an actual deadline.
         touch_deadline(&deadline, KeepAlive::Default, Some(Duration::from_secs(300)));
         assert!(deadline.try_lock().unwrap().is_some());
+    }
+
+    /// 1e19 seconds is a `Duration`, so it parses, and is not an `Instant`
+    /// away from now: adding it panicked the embedding and decision handlers.
+    #[test]
+    fn a_keep_alive_past_the_end_of_time_is_no_deadline_not_a_panic() {
+        let huge = parse_keep_alive(Some(&v("1e19")));
+        assert!(matches!(huge, KeepAlive::For(_)), "{huge:?}");
+        let deadline = tokio::sync::Mutex::new(None);
+        touch_deadline(&deadline, huge, None);
+        assert!(deadline.try_lock().unwrap().is_none());
     }
 
     #[test]
@@ -1841,6 +1934,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             model_name: cfg.model_name,
             engine: cfg.engine,
             scheduler: cfg.scheduler,
+            usage: resident::Usage::new(),
         }),
         swap_lock: tokio::sync::Mutex::new(()),
         gpu_layers: cfg.gpu_layers,
@@ -1872,7 +1966,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
-        main_deadline: tokio::sync::Mutex::new(None),
+        idle: Arc::new(tokio::sync::Notify::new()),
+        idle_tick: IDLE_TICK,
         embedding_deadline: tokio::sync::Mutex::new(None),
         decision_deadline: tokio::sync::Mutex::new(None),
         default_keep_alive: cfg.keep_alive,
@@ -1950,6 +2045,67 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Server shut down gracefully.");
     Ok(())
+}
+
+/// How often the idle-unload loop looks for an expired keep_alive — see
+/// `AppState::run_idle_unload_loop`.
+const IDLE_TICK: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[cfg(test)]
+impl AppState {
+    /// A server with nothing loaded, and every other field at a test's
+    /// starting value — named once, here, so that adding a field does not
+    /// break every test that builds a state. Perimeter settings take their
+    /// defaults: `.env` is read from a path that does not exist.
+    pub(crate) fn for_tests(store: ModelStore, api_keys: auth::ApiKeys) -> Self {
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        Self {
+            backend: crate::inference::test_backend(),
+            fallback_mmproj: None,
+            mmproj_offload: None,
+            slot: tokio::sync::RwLock::new(ModelSlot {
+                model_name: None,
+                engine: None,
+                scheduler: None,
+                usage: resident::Usage::new(),
+            }),
+            swap_lock: tokio::sync::Mutex::new(()),
+            gpu_layers: 0,
+            fit: false,
+            fit_strict: false,
+            ctx_size: 4096,
+            threads: 1,
+            flash_attn: false,
+            n_batch: 512,
+            cache_type_k: crate::inference::KvCacheType::F16,
+            cache_type_v: crate::inference::KvCacheType::F16,
+            batch_size: 1,
+            cpu_moe: false,
+            n_cpu_moe: 0,
+            rs_seq: 0,
+            ctx_checkpoints: 0,
+            checkpoint_min_step: 8192,
+            rust_debug: false,
+            web_enabled: false,
+            api_port: 0,
+            store,
+            ip_allowlist: ip_allowlist::IpAllowlist::load(absent),
+            api_keys: Arc::new(api_keys),
+            allowed_origins: origin::AllowedOrigins::load(absent),
+            web_policy: crate::tools::guard::WebPolicy::from_env(),
+            allow_model_paths: false,
+            launch_model: None,
+            embedding: tokio::sync::RwLock::new(None),
+            decision: tokio::sync::RwLock::new(None),
+            decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
+            cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
+            idle: Arc::new(tokio::sync::Notify::new()),
+            idle_tick: IDLE_TICK,
+            embedding_deadline: tokio::sync::Mutex::new(None),
+            decision_deadline: tokio::sync::Mutex::new(None),
+            default_keep_alive: None,
+        }
+    }
 }
 
 /// Wait for a shutdown signal (SIGTERM, SIGINT, or Ctrl+C).
@@ -2324,21 +2480,6 @@ mod http_tests {
         ModelStore::at(dir.to_path_buf())
     }
 
-    /// The one `LlamaBackend` shared by every `spawn()` call in this test
-    /// binary. `LlamaBackend::init()` marks a process-wide `AtomicBool` and
-    /// fails on a second call while the first instance is still alive, and
-    /// these tests run in parallel by default — a fresh `init()` per test
-    /// would make the second test to reach it fail with
-    /// `BackendAlreadyInitialized`, not a real bug in either test.
-    fn test_backend() -> Arc<LlamaBackend> {
-        static BACKEND: std::sync::OnceLock<Arc<LlamaBackend>> = std::sync::OnceLock::new();
-        BACKEND
-            .get_or_init(|| {
-                crate::inference::init_shared_backend().expect("llama backend init")
-            })
-            .clone()
-    }
-
     /// Start the API on 127.0.0.1:0 and return its base URL.
     ///
     /// Port 0 rather than a fixed one: these run in parallel with every other
@@ -2357,51 +2498,7 @@ mod http_tests {
 
     /// `spawn`, with API keys configured.
     async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
-        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
-        let state = Arc::new(AppState {
-            backend: test_backend(),
-            fallback_mmproj: None,
-            mmproj_offload: None,
-            slot: tokio::sync::RwLock::new(ModelSlot {
-                model_name: None,
-                engine: None,
-                scheduler: None,
-            }),
-            swap_lock: tokio::sync::Mutex::new(()),
-            gpu_layers: 0,
-            fit: false,
-            fit_strict: false,
-            ctx_size: 4096,
-            threads: 1,
-            flash_attn: false,
-            n_batch: 512,
-            cache_type_k: crate::inference::KvCacheType::F16,
-            cache_type_v: crate::inference::KvCacheType::F16,
-            batch_size: 1,
-            cpu_moe: false,
-            n_cpu_moe: 0,
-            rs_seq: 0,
-            ctx_checkpoints: 0,
-            checkpoint_min_step: 8192,
-            rust_debug: false,
-            web_enabled: false,
-            api_port: 0,
-            store,
-            ip_allowlist: ip_allowlist::IpAllowlist::load(absent),
-            api_keys: Arc::new(api_keys),
-            allowed_origins: origin::AllowedOrigins::load(absent),
-            web_policy: crate::tools::guard::WebPolicy::from_env(),
-            allow_model_paths: false,
-            launch_model: None,
-            embedding: tokio::sync::RwLock::new(None),
-            decision: tokio::sync::RwLock::new(None),
-            decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
-            cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
-            main_deadline: tokio::sync::Mutex::new(None),
-            embedding_deadline: tokio::sync::Mutex::new(None),
-            decision_deadline: tokio::sync::Mutex::new(None),
-            default_keep_alive: None,
-        });
+        let state = Arc::new(AppState::for_tests(store, api_keys));
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");

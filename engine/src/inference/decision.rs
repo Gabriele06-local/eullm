@@ -2452,7 +2452,7 @@ mod tests {
     fn load_test_model() -> DecisionModel {
         let path = std::env::var("EULLM_DECISION_TEST_MODEL")
             .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file");
-        let backend = crate::inference::init_shared_backend().expect("backend");
+        let backend = crate::inference::test_backend();
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
         DecisionModel::load(
             Path::new(&path),
