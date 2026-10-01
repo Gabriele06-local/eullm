@@ -31,6 +31,8 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 QUESTIONS = [
     "Come ti chiami?",
     "Se ho un contenzioso con lo Stato, come posso fare ricorso?",
@@ -48,10 +50,12 @@ def main() -> int:
     args = ap.parse_args()
 
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoTokenizer
+
+    from eullm_forge.identity import load_text_model
 
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.bfloat16)
+    model = load_text_model(args.model, dtype=torch.bfloat16)
     model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
