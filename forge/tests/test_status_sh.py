@@ -129,6 +129,25 @@ def test_a_stage3_link_after_training_finished_is_not_an_alarm(tmp_path, runs):
     assert "60 eullm-s3-it4b-v05: ended in 00:00:40 with nothing left to do" in out
 
 
+def test_a_grpo_link_after_training_finished_is_not_an_alarm(tmp_path, runs):
+    """A GRPO link that resumed at the last step saved and ended, which is
+    what grpo_train.py does with no steps left. Same case as the stage-3 link
+    above, and it was raising the alarm: eullm-grpo* had been added to the list
+    of names checked, but the escape only matched the stage-3 prefix."""
+    (runs / "logs" / "eullm-grpo-77.out").write_text(
+        "[grpo] resuming from /w/eullm_runs/grpo/v03/checkpoint-9000\n"
+        "[grpo] adapter /w/eullm_runs/grpo/v03/adapter\n")
+    (runs / "logs" / "eullm-grpo-78.out").write_text(
+        "[grpo] adapter already at /w/eullm_runs/grpo/v03/adapter: nothing "
+        "left to do (move it away to train again)\n")
+    out = run_status(tmp_path, queue=[],
+                     ended=[("77", "eullm-grpo", "COMPLETED", "00:04:31"),
+                            ("78", "eullm-grpo", "COMPLETED", "00:00:12")])
+    assert "[!!]" not in out, out
+    assert "77 eullm-grpo: ended in 00:04:31, training finished (fine)" in out
+    assert "78 eullm-grpo: ended in 00:00:12 with nothing left to do" in out
+
+
 def test_a_named_stage3_link_that_did_nothing_is_flagged(tmp_path, runs):
     """A chain renamed with -J is still a training chain: a three-minute link
     that never reached the end of training needs a human."""
