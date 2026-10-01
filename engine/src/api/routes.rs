@@ -644,6 +644,9 @@ struct SamplingParams {
     repeat_last_n: i32,
     seed: Option<u32>,
     num_ctx: Option<u32>,
+    /// `cache_prompt` (see `GenerateRequest::cache_prompt`), true unless a
+    /// request sets it to false.
+    cache_prompt: bool,
 }
 
 /// Sampling parameters of a request to `/api/generate` or `/api/chat`.
@@ -701,9 +704,13 @@ fn parse_sampling_params(body: &Value, with_max_completion_tokens: bool) -> Samp
     let repeat_last_n = get("repeat_last_n").and_then(|v| v.as_i64()).unwrap_or(64) as i32;
     let seed = get("seed").and_then(|v| v.as_u64()).map(|v| v as u32);
     let num_ctx = get("num_ctx").and_then(|v| v.as_u64()).map(|v| v as u32);
+    // llama.cpp's server reads it at the top level; an Ollama client passes
+    // what it does not know in `options`. Anything but `false` keeps reuse.
+    let cache_prompt = get("cache_prompt").and_then(|v| v.as_bool()) != Some(false);
 
     tracing::info!(
-        "Request params: max_tokens={max_tokens}, temp={temperature:.2}, top_k={top_k}, top_p={top_p:.2}, repeat_penalty={repeat_penalty:.2}, num_ctx={num_ctx:?}"
+        "Request params: max_tokens={max_tokens}, temp={temperature:.2}, top_k={top_k}, top_p={top_p:.2}, repeat_penalty={repeat_penalty:.2}, num_ctx={num_ctx:?}{}",
+        if cache_prompt { "" } else { ", cache_prompt=false" }
     );
     SamplingParams {
         max_tokens,
@@ -715,6 +722,7 @@ fn parse_sampling_params(body: &Value, with_max_completion_tokens: bool) -> Samp
         repeat_last_n,
         seed,
         num_ctx,
+        cache_prompt,
     }
 }
 
@@ -2221,6 +2229,7 @@ async fn generate_with(
         num_ctx: sp.num_ctx,
         grammar,
         raw,
+        cache_prompt: sp.cache_prompt,
         ..Default::default()
     };
 
@@ -2465,6 +2474,7 @@ async fn chat_with(
             // think can also emit a think tag that has to be stripped.
             filter_sequences: crate::inference::default_filters(mm_think),
             grammar: None,
+            cache_prompt: sp.cache_prompt,
         };
         if is_streaming(&body) {
             let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
@@ -2536,6 +2546,7 @@ async fn chat_with(
         filter_sequences: crate::inference::default_filters(think),
         grammar,
         raw: false,
+        cache_prompt: sp.cache_prompt,
     };
 
     if let Some(ref sched) = snap.scheduler {
@@ -3079,6 +3090,7 @@ async fn chat_completions_with(
         },
         grammar,
         raw: false,
+        cache_prompt: sp.cache_prompt,
     };
 
     // ── Tool calling (issue #334): buffered, format-aware path ──────────
@@ -3831,6 +3843,25 @@ mod tests {
 
         let sp = parse_generate_params(&json!({ "options": { "num_predict": 256 } }));
         assert_eq!(sp.max_tokens, 256);
+    }
+
+    /// `cache_prompt` is llama.cpp's top-level field; an Ollama client puts
+    /// what Ollama lacks in `options`. Only an explicit `false` turns reuse
+    /// off: a prompt cache is what keeps a long conversation's next turn
+    /// cheap, and a typo must not cost every request its whole prompt.
+    #[test]
+    fn only_an_explicit_false_turns_the_prompt_cache_off() {
+        assert!(parse_generate_params(&json!({})).cache_prompt);
+        assert!(!parse_generate_params(&json!({ "cache_prompt": false })).cache_prompt);
+        assert!(
+            !parse_generate_params(&json!({ "options": { "cache_prompt": false } })).cache_prompt
+        );
+        assert!(
+            !parse_chat_completions_params(&json!({ "cache_prompt": false })).cache_prompt
+        );
+        assert!(parse_generate_params(&json!({ "cache_prompt": true })).cache_prompt);
+        assert!(parse_generate_params(&json!({ "cache_prompt": "false" })).cache_prompt);
+        assert!(parse_generate_params(&json!({ "cache_prompt": null })).cache_prompt);
     }
 
     // ── `max_completion_tokens` on /v1/chat/completions ─────────────────

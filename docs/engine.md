@@ -1514,7 +1514,10 @@ curl -X POST http://localhost:11434/api/generate \
 | `num_ctx` | server per-slot ctx | Per-request context window budget (clamped to per-slot max) |
 | `format` | — | Set to `"json"` for constrained JSON decoding (GBNF grammar) |
 | `keep_alive` | `--keep-alive` | How long the model stays loaded once this request is over: a duration (`"5m"`), a number of seconds, `0` to unload it as soon as the answer has been sent, `-1` to keep it. Counted from when the model goes idle, with the keep_alive of the last request that arrived — as in Ollama, so a `keep_alive: 0` sent while an answer is still coming unloads the model once it is over |
+| `cache_prompt` | true | EuLLM extension, llama.cpp's name: `false` decodes the whole prompt instead of starting from what the slot holds from the request before. Slower for a long conversation, but on a GPU the only way the same request gets the same answer twice at temperature 0 (see below). Also on `/api/chat` and `/v1/chat/completions`, at the top level or in `options` |
 | `options` | — | Ollama-style nested object for `num_predict`, `temperature`, `num_ctx` |
+
+**Same request, same answer.** Temperature 0 (or `top_k: 1`) with a `seed` picks the same token from the same numbers, but on a GPU the numbers themselves depend on how many of a prompt's tokens are decoded together, and by default a request starts from the part of the prompt its slot already holds from the request before. The same request can then get a different answer depending on what came before it, or on whether the model was reloaded in between — in AutoBench on an RTX 5070 Ti, half of qwen3-8b's GSM8K answers came out different the second time they were asked. A CPU decodes the same way whatever the batch, so this is a GPU matter. Send `"cache_prompt": false` when answers must reproduce (evaluations, comparisons, tests): AutoBench does for every answer it compares.
 
 **Ollama `options` support:** Parameters can be passed at the top level (OpenAI style) or nested inside an `options` object (Ollama style). Top-level values take precedence.
 

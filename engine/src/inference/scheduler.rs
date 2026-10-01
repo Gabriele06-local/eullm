@@ -1022,7 +1022,14 @@ fn run_scheduler_loop(
                     // retokenizing the whole growing prompt every turn and
                     // hoping it lands on the same token ids as last time
                     // (see `text_prefix_match`'s doc comment).
-                    let fast_path = text_prefix_match(&idle_slots, &prompt_text).and_then(|idx| {
+                    //
+                    // A request with `cache_prompt: false` reuses nothing:
+                    // it skips this and starts its slot from position 0.
+                    let cache_prompt = scheduled.request.cache_prompt;
+                    let matched = cache_prompt
+                        .then(|| text_prefix_match(&idle_slots, &prompt_text))
+                        .flatten();
+                    let fast_path = matched.and_then(|idx| {
                         let matched_len = idle_slots[idx].text.len();
                         match model.str_to_token(&prompt_text[matched_len..], AddBos::Never) {
                             Ok(suffix_tokens) => {
@@ -1085,6 +1092,7 @@ fn run_scheduler_loop(
                                 break; // No free slots — should not happen due to active.len() check
                             }
                             let (seq_id, reuse_len) = pick_slot(&mut idle_slots, &tokens);
+                            let reuse_len = if cache_prompt { reuse_len } else { 0 };
                             (tokens, seq_id, reuse_len)
                         }
                     };
