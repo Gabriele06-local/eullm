@@ -144,6 +144,12 @@ eullm-forge export ./my-model -o ./my-model.gguf --quant q4_k_m
 | `--output, -o` | — | Output GGUF file path |
 | `--quant` | `q4_k_m` | Quantization type |
 
+### `eullm-forge decisions build | train | export`
+
+A decision model of your own, trained on the decisions a server traced and
+the feedback on them, for `eullm serve --decision-model`. See
+[Decision models trained on your decisions](#decision-models-trained-on-your-decisions).
+
 ## Pipeline Stages
 
 All five stages are implemented with real PyTorch/Transformers code. Each stage requires appropriate GPU hardware to execute.
@@ -385,6 +391,145 @@ llama.cpp/build/bin/llama-quantize ./eullm-legal-it-4b-merged/model.gguf \
 eullm run ./eullm-legal-it-4b-Q4_K_M.gguf
 ```
 
+## Decision models trained on your decisions
+
+MVP 4 of the [Reflex roadmap](reflex-roadmap.md). `/v1/systemone` answers
+typed questions about a state with a small decision model — today a
+third party's Jev-Style models. `eullm-forge decisions` trains one of your
+own, from your own decisions, in three steps:
+
+```bash
+eullm-forge decisions build  ~/traces -o ~/decisions/data --rules my_rules.py:label
+eullm-forge decisions train  ~/decisions/data -o ~/decisions/run1
+eullm-forge decisions export ~/decisions/run1 -o ~/models/decide-q8_0.gguf
+eullm serve --decision-model ~/models/decide-q8_0.gguf
+```
+
+and whether it may replace the model in service is for the qualification
+test to say: [`bench/reflexbench/qualify.py`](../bench/reflexbench/README.md#the-qualification-test-qualifypy).
+
+### The traces
+
+A server started with `EULLM_DECISION_TRACES=<dir>` writes, locally and
+with personal data redacted, every decision it computes to
+`<dir>/decisions.jsonl` — the state, the questions as evaluated, the
+answers — and `<dir>/feedback.jsonl` holds what the right answers turned
+out to be: `{"kind": "feedback", "id": <the decision's audit id>,
+"answers": {question: option name | true/false | level number}, "source":
+"user" | "rule" | "teacher"}`, written by whoever learns it. Both are read
+tolerantly: unknown fields are ignored, a line that is not a JSON object is
+skipped and counted, rotated files beside the two are read too, and a later
+feedback line on a question corrects an earlier one.
+
+### `build`: the label of every question
+
+In this order, the first that has one:
+
+1. **feedback** on that decision;
+2. **`--rules FILE.py:FUNCTION`** (or `MODULE:FUNCTION`): your function,
+   called as `label(state, question_id, question, record)` with the question
+   in the API's shape and the decision as a dict; it returns the right
+   answer, or None where it has nothing to say. An answer the question
+   cannot have is an error in the rule, and stops the build;
+3. **`--teacher-url URL --teacher-model NAME`**: a large model behind any
+   OpenAI-compatible chat endpoint — EuLLM serving a large chat model, say —
+   asked exactly the prompt the decision model will be asked, at
+   temperature 0, its reply parsed for a code (after any reasoning). Replies
+   are cached in `teacher-cache.jsonl`, so a second build asks nothing twice.
+   The states go to that endpoint: point it at a server you would send them
+   to anyway;
+4. **`--allow-logged`** only: the logged decision itself. A model trained on
+   its own answers learns to repeat them, mistakes included.
+
+Feedback naming an option the question did not offer is not overruled by a
+teacher: the question is left out. The same question about the same state
+is one example. Dev and test (`--dev-share`, `--test-share`, 10% each) hold
+out whole states, chosen by a hash of the state, so a state held out today
+stays held out when the set is built again next month. Questions a
+code-readout model cannot be asked — more than 26 options — are left out.
+Everything left out is counted with its reason in `stats.json`, next to the
+spread of every question's answers and the accuracy of always giving the
+commonest one, the floor a model has to clear. The output:
+
+| File | |
+|---|---|
+| `train.jsonl`, `dev.jsonl`, `test.jsonl` | one question per line: the state, the question, the right answer and its code, where the label came from |
+| `dev.labelled.jsonl`, `test.labelled.jsonl` | the same as requests, every question about a state in one: what `qualify.py --data` reads |
+| `stats.json` | what was kept, from where, and why the rest was not |
+
+A redacted state is trained on as it was redacted, and served unredacted:
+the model learns from `[EMAIL]` where it will read an address.
+
+### `train`: LoRA on the answer code
+
+The engine reads a decision model of our own through its *codes readout*
+(`engine/src/inference/decision.rs`): one chat prompt per question — a
+fixed system text, the state, the question with its codes `Yes`/`No`,
+`A`…`Z` or `0`…`9` — rendered with the model's chat template, reasoning
+off, and the answer read as the next-token probability of each code. Each
+example is that prompt, and the loss is the cross-entropy of the right
+code's token at its end, nothing else: there is no end-of-turn to learn,
+since the engine reads that one position and nothing after it. Only that
+position's logits are computed (`logits_to_keep=1`, prompts padded on the
+left): at 2,048 tokens and Qwen3's vocabulary, every position's would be
+1.2 GB per example, all of it thrown away.
+
+`eullm_forge.decisions.prompt` renders it, mirroring decision.rs line for
+line: what is trimmed and what is not, the template's empty reasoning
+block, a state's `<|im_end|>` kept as text, which spellings of a code count.
+A model trained on a prompt off by one space is trained for a prompt it
+will never be shown, and nothing fails, so this is tested two ways:
+`tests/test_decisions.py` reads the constants out of decision.rs itself,
+and `tests/test_decisions_engine.py` trains a tiny Qwen3 with Qwen3's
+tokenizer, exports it through Forge, serves it with the engine binary and
+compares every answer's log-probabilities. Measured on a CPU: the engine
+and training agree to 0.006 nats (F16), where one extra space in the prompt
+moves them by 0.23.
+
+| Option | Default | |
+|---|---|---|
+| `--base` | `Qwen/Qwen3-1.7B` | an Apache-2.0 chat model whose template can switch reasoning off; `Qwen/Qwen3-0.6B` for a decision on a CPU |
+| `--epochs` | 2 | more starts fitting noise: dev ECE grows while accuracy does not |
+| `--lr` | 2e-4 | AdamW, linear decay, as identity and stage 3 |
+| `--rank` | 16 | LoRA rank, alpha twice it, on attention and MLP |
+| `--batch-size`, `--grad-accum` | 8, 2 | effective batch 16 |
+| `--max-length` | 2048 | longest prompt kept; a longer one is dropped, never cut — the engine refuses to truncate a state too |
+| `--save-steps` | 0 (each epoch) | a run finding a checkpoint resumes from it |
+| `--no-baseline` | off | skip scoring the base model on dev first |
+
+It writes the adapter and `decision-model.json`: what was trained on what,
+and the dev split's accuracy, ECE, NLL and coverage per question type,
+before and after. A fine-tuned model is usually too sure of itself, so the
+report also fits a temperature on dev; the engine applies one per request
+(`"eullm": {"temperature": T}`), and `qualify.py --candidate-temperature`
+qualifies the model as it will be served. bf16 on a GPU, fp32 on a CPU.
+Not measured on a GPU yet; by estimate, Qwen3-1.7B at the defaults peaks
+around 7 GB with gradient checkpointing (3.4 GB of weights, the layer
+inputs of 8 × 2,048 tokens, one position's logits), which leaves a 16 GB
+card room for longer states or larger batches.
+
+### `export`: merge, then GGUF
+
+`identity.merge_identity_adapter` merges the adapter into its base (the base
+the run recorded, never a guess) and `export.export_gguf` converts and
+quantizes, so llama.cpp must be where Forge finds it (`LLAMA_CPP_PATH`, or
+`~/llama.cpp`, with `llama-quantize` built). The default is **Q8_0, not
+Q4_K_M**: a decision is a probability, and quantization noise moves it —
+Qwen3-0.6B answers the same question differently in two evaluation modes by
+up to 0.017 at F16, 0.13 at Q8_0 and 0.34 at Q4_K_M on a CPU
+([engine.md](engine.md)). `--quant f16` needs only the converter.
+
+### How many labelled decisions
+
+Each question id is a task of its own. A few hundred labelled answers per
+question are a first model; what decides is the qualification test, and it
+needs at least 50 answers per question type on held-out states to say
+anything (`--min-answers`), and a few hundred to tell apart two models a
+few points of accuracy apart. With 10% of the states held out for test,
+that is some 500 labelled decisions per question type before a verdict
+means much — feedback, rules or a teacher; the logged decisions themselves
+only teach the model to repeat them.
+
 ## Running Tests
 
 ```bash
@@ -401,6 +546,8 @@ pytest tests/ -v
 | `test_pipeline.py` | Profile loading, config defaults, parameter estimation |
 | `test_distill.py` | Distillation cost estimation |
 | `test_identity.py` | Identity dataset generation (EN, IT, DE, FR) |
+| `test_decisions.py` | Decision models: the prompt against decision.rs, traces, labels, splits, CLI, a tiny CPU training run |
+| `test_decisions_engine.py` | A trained decision model served by the engine binary (needs `EULLM_E2E_BIN`, `EULLM_E2E_TOKENIZER`, `LLAMA_CPP_PATH`) |
 
 ## Implementation Status
 
