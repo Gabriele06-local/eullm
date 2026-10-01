@@ -168,11 +168,29 @@ if [ ! -f "$LCPP_DIR/build/bin/llama-quantize" ] || \
     ok "llama.cpp built"
 fi
 
-# Make sure the conversion script has its Python deps
-log "ensuring HF→GGUF Python deps installed"
-python3 -m pip install --quiet --upgrade \
-    "transformers>=4.45" "sentencepiece" "gguf>=0.10" "protobuf>=4" \
-    "torch>=2.1" "numpy"
+# Make sure the conversion script has its Python deps — by checking, and
+# installing only small packages that are MISSING. Never `--upgrade`, and
+# never torch or transformers: this runs inside whatever environment the
+# caller has active, which on Leonardo is the venv every training and exam
+# job shares. On 2026-09-30 an `--upgrade "torch>=2.1"` here pulled the
+# newest torch from PyPI (a CUDA 13 build) into that venv in the middle of
+# a package job; from then on `import torch` failed everywhere with
+# "undefined symbol: ncclCommResume", and every job died in seconds until
+# someone noticed the next morning. The converter needs torch and
+# transformers to exist, not to be the newest.
+log "checking the HF→GGUF Python deps"
+python3 -c "import torch, transformers" 2>/dev/null ||
+    err "torch/transformers do not import in this Python environment. Install or repair them deliberately — this script will not touch them."
+missing=()
+python3 -c "import sentencepiece" 2>/dev/null || missing+=("sentencepiece")
+python3 -c "import google.protobuf" 2>/dev/null || missing+=("protobuf>=4")
+python3 -c "import numpy" 2>/dev/null || missing+=("numpy")
+if [ "${#missing[@]}" -gt 0 ]; then
+    log "installing what is missing: ${missing[*]}"
+    python3 -m pip install --quiet "${missing[@]}"
+fi
+# gguf is not installed: convert_hf_to_gguf.py puts the gguf-py of its own
+# checkout first on sys.path, which is the version it was written against.
 
 # ---------------------------------------------------------------------------
 # 3. Convert HF → GGUF F16 (full precision)
