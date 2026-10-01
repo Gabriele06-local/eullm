@@ -163,6 +163,7 @@ jobs:
       engine: ${{ steps.filter.outputs.engine }}
       hub: ${{ steps.filter.outputs.hub }}
       forge: ${{ steps.filter.outputs.forge }}
+      bench: ${{ steps.filter.outputs.bench }}
       windows_packaging: ${{ steps.filter.outputs.windows_packaging }}
     steps:
       - uses: actions/checkout@v5
@@ -192,6 +193,9 @@ jobs:
               - '.github/workflows/ci.yml'
             forge:
               - 'forge/**'
+              - '.github/workflows/ci.yml'
+            bench:
+              - 'bench/**'
               - '.github/workflows/ci.yml'
             windows_packaging:
               - 'installer/**'
@@ -477,6 +481,29 @@ jobs:
         run: |
           pip install pip-audit==2.10.1
           pip-audit --desc --skip-editable --ignore-vuln CVE-2026-69112
+
+  # ── Benchmarks ───────────────────────────────────────────────────────
+  # ReflexBench, the RAG gate, the qualification test and AutoBench are
+  # standard-library Python whose tests run offline, against a stand-in
+  # server and made-up files. They were run by hand only, so a change that
+  # broke a benchmark's metrics surfaced when someone next ran it on a GPU.
+  # No pip cache: two packages, pinned, install in seconds.
+  bench:
+    name: Bench (lint + test)
+    needs: changes
+    if: needs.changes.outputs.bench == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install ruff==0.16.9 pytest==9.1.1
+      - name: Lint
+        run: ruff check bench/reflexbench
+      - name: Test
+        run: pytest -q bench/reflexbench
 
   # ── Windows packaging (runs where it can fail: on Windows) ──────────
   # Three things that only run on Windows and would otherwise be exercised

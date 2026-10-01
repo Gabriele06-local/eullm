@@ -4,7 +4,9 @@ Two benchmarks share this directory: `reflexbench.py`, tool selection (MVP
 0), and `ragbench.py`, whether retrieved passages suffice to answer
 ([below](#the-rag-gate-ragbenchpy), MVP 1). Beside them, `qualify.py` says
 whether one decision model may replace another
-([below](#the-qualification-test-qualifypy), MVP 4).
+([below](#the-qualification-test-qualifypy), MVP 4), and `autobench.py`
+whether `"model": "auto"` sends a request to a small model only when that
+costs nothing ([below](#routing-autobenchpy), MVP 3).
 
 MVP 0 of the [Reflex roadmap](../../docs/reflex-roadmap.md). Before Reflex
 selects tools for anyone, this benchmark measures it on public labelled sets
@@ -351,6 +353,87 @@ Each request is asked once per mode and per server. On a CPU, where a
 Jev-Style 0.8B takes about three seconds a request of three questions,
 100 requests against two servers take about half an hour.
 
+## Routing: `autobench.py`
+
+MVP 3. With `--auto-model`, a request naming the model `auto` is answered by
+one of several models, chosen by the decision model (see `docs/engine.md`).
+Whether that is worth it is a measurement: how many calls to the large model
+it avoids, at what cost in accuracy, against what a deployment could do
+without a decision model at all.
+
+```bash
+EULLM_AUDIT_DIR=/tmp/autobench-audit eullm serve --max-loaded-models 2 \
+  --auto-model 'qwen3-4b=Short everyday requests, simple facts and definitions' \
+  --auto-model 'qwen3-8b=Multi-step reasoning, maths, code and long answers' \
+  --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m \
+  --embedding-model qwen3-embedding-0.6b-gguf-q8_0
+python3 bench/reflexbench/autobench.py --small qwen3-4b --large qwen3-8b \
+  --embed-model qwen3-embedding-0.6b-gguf-q8_0 \
+  --sets gsm8k,arc-easy,arc-challenge,mmlu --limit 200 \
+  --answers answers.jsonl --out auto.json --details auto.jsonl
+```
+
+**Stage 1, `generate`.** Both models answer every item, each named
+explicitly and deterministically: temperature 0, top_k 1, seed 1, thinking
+off (`--think` turns it on; the report records which). An item is
+`small_ok` when the small model got it right, or both got it wrong: routing
+it small cost nothing. `--answers` keeps the answers; a second run, with
+another question wording or another decision model, reuses them.
+
+**Stage 2, `route`.** Decisions only, nothing generated. Since decoding is
+deterministic, what a router would score is the chosen model's grade on
+each item. The items are split in two halves: thresholds and neighbours
+come from the dev half, every router is scored on the test half.
+
+| Router | |
+|---|---|
+| `reflex` | `POST /api/route`, the server's own routing, with the request as a client sends it; its score is the probability it gives the small model. At its own decision (the most likely model), and at a threshold fitted on the dev half |
+| `reflex:<name>` | `--questions FILE`: the question worded otherwise, or its options reversed (position bias), asked of `/v1/systemone` about the state the server built for `/api/route` — `[{"name": "reversed", "reverse": true}, {"name": "terse", "instructions": "Which model should answer?"}]` |
+| `length` | shorter requests go small, at a threshold fitted on the dev half |
+| `knn` | the 10 nearest dev items by `/v1/embeddings` (`--embed-model`); the share the small model handled is the score |
+| `random` | at the share Reflex routes small |
+| `always-small`, `always-large`, `oracle` | the bounds |
+
+A fitted threshold routes the most items small while accuracy stays within
+one point of always-large on the dev half.
+
+| Column | |
+|---|---|
+| routed small, large calls avoided | the requests the large model did not have to answer |
+| large GPU-s avoided | what they took the large model in stage 1 |
+| accuracy, Δ vs large, 95% CI | against always-large, the interval from a paired bootstrap over the items (seed 1) |
+| lost, gained | items the large model got right and the chosen one did not, and the other way round |
+| AUROC | how well the score separates `small_ok` items from the others |
+| p50 ms, p95 ms | deciding, as the client sees it; the JSON report adds the server's `decision_ms` and how often each reason (`decided`, `timeout`, …) came up |
+
+**The kill criterion.** When the length threshold or the embeddings avoid as
+many calls as Reflex at an accuracy just as indistinguishable from
+always-large, Reflex is not the answer for routing: the report says so per
+set. Several resident models stay useful either way.
+
+**The sets.** Downloaded on first use to `~/.cache/reflexbench`, pinned: a
+commit, an object version, or the file's SHA-256, checked before it is read.
+
+| Set | Source | Licence | Graded by |
+|---|---|---|---|
+| `gsm8k` | [GSM8K](https://github.com/openai/grade-school-math) test, 1,319 problems | MIT | the number after "Answer:" |
+| `arc-easy`, `arc-challenge` | [ARC](https://allenai.org/data/arc) test, read out of the release zip with range requests (its corpus, under other terms, is never downloaded) | CC BY-SA 4.0 | the letter |
+| `mmlu` | [MMLU](https://github.com/hendrycks/test) test, 14,042 questions; the 166 MB archive is deleted once its questions are kept | MIT | the letter |
+
+`--data` takes a set of your own, one JSON object per line:
+
+```json
+{"id": "q1", "messages": [{"role": "user", "content": "Riassumi l'art. 2043 c.c."}], "grader": "judge"}
+{"id": "q2", "prompt": "2 + 2 =", "answer": "4", "grader": "number"}
+```
+
+Graders: `number`, `letter`, `exact` and `f1` against `answer`; `judge`
+compares the two models' answers with `--judge-model`, asked in both orders,
+a tie unless both agree — use a judge from another family than the large
+model. `--judge-labels FILE` (`{"id": ..., "verdict": "small" | "large" |
+"tie"}` per line) reports Cohen's kappa between the judge and you: check it
+on 50 items before trusting the judge.
+
 ## Tests
 
 ```bash
@@ -358,5 +441,6 @@ python3 -m unittest discover -s bench/reflexbench
 ```
 
 Offline: the metrics, BM25, the loaders on made-up files, the
-qualification test's sets, metrics and thresholds, and every client
-against a stand-in server.
+qualification test's sets, metrics and thresholds, AutoBench's graders,
+bootstrap and threshold, and every client against a stand-in server. CI
+runs them, with `ruff`, on every change under `bench/`.
