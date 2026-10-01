@@ -61,8 +61,13 @@ def prompt_row(item, index: NormIndex, k: int, absent: bool = False) -> dict | N
     """
     code, art = item.metadata["code"], str(item.metadata["articolo"])
     if absent:
+        # index.articles_of, not record_articles: a chunk that continues the
+        # article carries no header of its own, so record_articles reports
+        # none, and the article's own text stayed in the prompt -- shown to
+        # the model, and paid for denying it, since an assente row scores 1.0
+        # only for abstaining.
         found = [r for r in index.search(item.question, k + 6)
-                 if not (r.get("code") == code and art in record_articles(r))][:k]
+                 if not (r.get("code") == code and art in index.articles_of(r))][:k]
         if not found:
             return None
         content, tipo = open_book_prompt(item.question, found), "assente"
