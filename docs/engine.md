@@ -802,7 +802,8 @@ works unchanged. With no decision model loaded the request is refused with a
 Every decision is written to the audit trail with `request_type:
 "systemone"` and a `decision` record: each answer with its log-probabilities
 and its probabilities before and after calibration. The state itself is not
-stored, only its SHA-256.
+stored, only its SHA-256; its text, redacted, goes only to the
+[decision traces](#decision-traces-eullm_decision_traces), when they are on.
 
 **A client that disconnects.** The record is written by the thread that
 computed the decision, not by the connection that asked for it, so every
@@ -856,6 +857,106 @@ settings:
   version — stops the server at startup instead of letting every option
   through. The startup log prints the patterns and where they came from;
   restart the server to change them.
+
+### Decision traces (`EULLM_DECISION_TRACES`)
+
+Training a decision model on the decisions it is actually asked to make
+needs the text of those decisions, and the audit trail does not keep it, on
+purpose: it records every decision's state as a SHA-256 only. Traces are
+the explicit place for that text. They are off unless
+`EULLM_DECISION_TRACES` names a directory (from the environment first and
+the `.env` file second), they stay on the machine, and personal data is
+redacted before anything is written.
+
+```bash
+EULLM_DECISION_TRACES=/data/traces eullm serve --decision-model jev-style-0.8b-decision-v3-gguf-q4_k_m
+```
+
+`decisions.jsonl` in that directory gets one line for every decision the
+audit trail records — the same decisions, those whose client had gone
+included — and nothing for a request that was refused or abandoned:
+
+| Key | Value |
+|---|---|
+| `schema` | `1`, the version of this shape. A change that would break a reader of it gets a new number |
+| `id` | The audit record's `id`: the same decision in the audit trail |
+| `timestamp` | The audit record's, RFC 3339 in UTC |
+| `model` | The decision model, named as in the audit record |
+| `readout` | `codes` or `verdict` |
+| `mode` | `shared_prefix`, `batched` or `separate` |
+| `state` | The state as the model read it: text as it is; a structured state as the readout writes it (indented JSON for `codes`, one line for `verdict`), its values redacted, so it is still JSON |
+| `questions` | Each question as the model read it, after the decision policy, in the shape of a request: `type`, `instructions` (structured instructions as the compact JSON the model read) and `criteria` — `{"true": …, "false": …}` for `noul`, `""` where the question said nothing; option → description for `choice`, `""` for none; for `score`, each level as the model read it |
+| `answers` | Each answer as the response returned it, without its `eullm` object: `noul`; `choice`, `probabilities`, `confidence`; `score`, `legend`, `probabilities`, `confidence` |
+| `policy_removed` | Per question, the options the decision policy removed; `{}` when none |
+| `client_disconnected` | `true` when the answers were computed after the client had gone, and never sent |
+
+Every key is on every line. A line from the Jev-Style 0.8B on a CPU, wrapped
+here, for a ticket that named a card number, an IBAN and a mobile number, on
+a server whose policy denies `delete_*` and `transfer_funds`:
+
+```json
+{"schema": 1, "id": "b1149e83-332b-48c0-bab7-53725922c4de", "timestamp": "2026-10-01T13:35:34.529683343Z",
+ "model": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "readout": "verdict", "mode": "shared_prefix",
+ "state": "Sono Mario Rossi, il pagamento del 28/09 è stato addebitato due volte sulla carta [CARD]. Rimborsate su [IBAN] o chiamatemi al [PHONE].",
+ "questions": {
+   "is_urgent": {"type": "noul", "instructions": "Does the customer need an answer today?", "criteria": {"true": "", "false": ""}},
+   "action": {"type": "choice", "instructions": "What should the support agent do?",
+              "criteria": {"refund": "Refund the duplicate charge", "ask_human": "Hand the ticket to a person"}},
+   "severity": {"type": "score", "instructions": "How severe is the problem?",
+                "criteria": ["Cosmetic", "Degraded, with a workaround", "Blocking"]}},
+ "answers": {
+   "is_urgent": {"type": "noul", "noul": 0.525160129126831},
+   "action": {"type": "choice", "choice": "refund",
+              "probabilities": {"refund": 0.8943443753775355, "ask_human": 0.1056556246224647}, "confidence": 0.788688750755071},
+   "severity": {"type": "score", "score": 1.400225522364445,
+                "legend": {"0": "Cosmetic", "1": "Degraded, with a workaround", "2": "Blocking"},
+                "probabilities": {"0": 0.03265542390587039, "1": 0.5344636298238142, "2": 0.4328809462703154},
+                "confidence": 0.3016954447357214}},
+ "policy_removed": {"action": ["transfer_funds", "delete_account"]},
+ "client_disconnected": false}
+```
+
+**What is redacted.** Every text on the line — the state, instructions,
+descriptions, levels and legend — has six kinds of personal data replaced
+by a placeholder:
+
+| Placeholder | What | Recognised |
+|---|---|---|
+| `[EMAIL]` | E-mail addresses | `name@domain.tld`, international letters included |
+| `[PHONE]` | Phone numbers | With `+` or `00` and a country code, any country: `+39 333 1234567`, `+44 20 7946 0958`, `+1 (202) 555-0123`. Italian ones without it: a mobile, ten digits from a 3 (`333 1234567`, `333-123-4567`); a landline, 8 to 11 digits from a 0 (`06 1234 5678`, `(02) 12345678`) |
+| `[IBAN]` | IBANs | Any country, whole, in groups of four, or by its parts as Italian documents print it (`IT 60 X 05428 11101 000000123456`), when the check digits match |
+| `[CF]` | Italian codici fiscali | By their structure, omocodia included, so a mistyped check letter is caught too |
+| `[CARD]` | Payment card numbers | 13 to 19 digits starting with 2 to 6, whole or in the groups cards are printed in, when the Luhn check passes |
+| `[IP]` | IPv4 addresses | Four numbers from 0 to 255 joined by dots |
+
+Dates, times, amounts, years, article numbers (`art. 2043 c.c.`,
+`d.lgs. 196/2003`) and other numbers are left as they are.
+
+It is pattern matching, and it misses things:
+
+- Names, street addresses, dates of birth and every identifier not in the
+  table — an identity card or passport number, a licence plate, an IPv6
+  address, a partita IVA — stay as written.
+- So does anything in the table written in a form it does not expect:
+  `mario at example dot com`, a foreign number without its `+`
+  (`(202) 555-0123`), a codice fiscale split by spaces, an IBAN or a card
+  number with a wrong check digit.
+- Question ids and option names are written as they are, as in the audit
+  trail: they are what the answers refer to, and redacting them could turn
+  two options into one. Keep personal data out of them.
+
+And it errs the other way: a four-part version number (`1.2.3.4`) becomes
+`[IP]`; a code of 13 to 19 digits that happens to pass the Luhn check — one
+in ten do — becomes `[CARD]`; ten digits from a 3, or 8 to 10 from a 0,
+become `[PHONE]`. Treat the files as what they are: the text of the
+decisions, less what the patterns catch.
+
+**A trace that cannot be written** — a full disk, a directory removed —
+never fails the decision: it is still made, audited and answered, and the
+server log says the trace is missing. A directory that cannot be written at
+startup stops the server instead, since whoever set the variable asked for
+the traces. The file grows with every decision; move it away to start a new
+one, and the next decision creates it again.
 
 ### Jev-Style decision models
 

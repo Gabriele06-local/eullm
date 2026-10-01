@@ -16,6 +16,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+pub mod redact;
+
 /// A single audit log entry for an inference request.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {

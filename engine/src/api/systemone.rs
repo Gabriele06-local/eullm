@@ -43,7 +43,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::decision_policy::DecisionPolicy;
+use super::decision_traces::{DecisionTraces, TRACE_SCHEMA};
 use super::{AppState, KeepAlive};
+use crate::audit::redact::redact;
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
     self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, DecisionModelInfo,
@@ -389,6 +391,33 @@ impl OrderedJson {
         self.json_line(",", ":")
     }
 
+    /// This value with personal data redacted from every string in it, keys
+    /// included, and from every number: one that held some — a phone number
+    /// written as a number — becomes its placeholder, as a string. Redacting
+    /// the values rather than the JSON text keeps it JSON.
+    fn redacted(&self) -> Self {
+        match self {
+            Self::Null | Self::Bool(_) => self.clone(),
+            Self::Number(n) => {
+                let text = n.to_string();
+                let redacted = redact(&text);
+                if redacted == text {
+                    self.clone()
+                } else {
+                    Self::String(redacted)
+                }
+            }
+            Self::String(s) => Self::String(redact(s)),
+            Self::Array(items) => Self::Array(items.iter().map(Self::redacted).collect()),
+            Self::Object(map) => Self::Object(OrderedMap(
+                map.0
+                    .iter()
+                    .map(|(key, value)| (redact(key), value.redacted()))
+                    .collect(),
+            )),
+        }
+    }
+
     /// One line of JSON with `item` between items and `key` after a key.
     fn json_line(&self, item: &str, key: &str) -> String {
         let mut out = String::new();
@@ -630,6 +659,9 @@ struct ParsedRequest {
     /// The state as a verdict model reads it: structured state as the one
     /// line of JSON it was trained on.
     state_line: String,
+    /// A structured state as it was sent, for its decision trace: its
+    /// values are redacted, then it is written as the model read it.
+    structured_state: Option<OrderedJson>,
     ids: Vec<String>,
     questions: Vec<Question>,
     /// Per question, what each score level is called in the response's
@@ -652,12 +684,13 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty() && !m.to_ascii_lowercase().starts_with("jev"));
 
-    let (state, state_line) = match request.state {
+    let (state, state_line, structured_state) = match request.state {
         None => return Err(ApiError::invalid_request("\"state\" is required")),
-        Some(OrderedJson::String(s)) => (s.clone(), s),
+        Some(OrderedJson::String(s)) => (s.clone(), s, None),
         Some(other) => (
             serde_json::to_string_pretty(&other).map_err(|e| ApiError::internal(e.to_string()))?,
             other.python_json(),
+            Some(other),
         ),
     };
 
@@ -723,6 +756,7 @@ fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
         model,
         state,
         state_line,
+        structured_state,
         ids,
         questions,
         legends,
@@ -1174,6 +1208,189 @@ fn build_answers(
     (OrderedMap(answers), records)
 }
 
+/// One line of `decisions.jsonl` (see `decision_traces`): a decision as a
+/// decision model could be trained on it, with personal data redacted from
+/// every text in it. Read by Forge and documented in docs/engine.md: a
+/// change here is a change to that contract, and one that would break a
+/// reader of this shape needs a new [`TRACE_SCHEMA`].
+#[derive(Debug, Serialize)]
+struct TraceLine<'a> {
+    schema: u32,
+    /// The audit record's `id`: the line is that record's text.
+    id: uuid::Uuid,
+    /// The audit record's.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    model: &'a str,
+    readout: &'static str,
+    mode: &'static str,
+    /// The state as the model read it.
+    state: String,
+    /// The questions as the model read them, after the decision policy, in
+    /// the shape a `/v1/systemone` request gives them.
+    questions: OrderedMap<TraceQuestion>,
+    /// The answers as the response returned them, without `eullm`.
+    answers: OrderedMap<TraceAnswer<'a>>,
+    /// Per question, the options the decision policy removed; `{}` for
+    /// none.
+    policy_removed: &'a BTreeMap<String, Vec<String>>,
+    client_disconnected: bool,
+}
+
+/// A question in a trace: `type`, `instructions` and `criteria`, as a
+/// request writes them.
+#[derive(Debug, Serialize)]
+struct TraceQuestion {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    instructions: String,
+    criteria: TraceCriteria,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum TraceCriteria {
+    /// `noul`: what `true` and `false` mean, `""` where the question did
+    /// not say; `choice`: each option's description, `""` for none.
+    Named(OrderedMap<String>),
+    /// `score`: each level as the model read it, lowest first.
+    Levels(Vec<String>),
+}
+
+/// An answer in a trace: the System One fields of [`Answer`].
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+enum TraceAnswer<'a> {
+    Noul {
+        noul: f64,
+    },
+    Choice {
+        choice: &'a str,
+        probabilities: &'a OrderedMap<f64>,
+        confidence: f64,
+    },
+    Score {
+        score: f64,
+        legend: OrderedMap<String>,
+        probabilities: &'a OrderedMap<f64>,
+        confidence: f64,
+    },
+}
+
+impl<'a> From<&'a Answer> for TraceAnswer<'a> {
+    fn from(answer: &'a Answer) -> Self {
+        match answer {
+            Answer::Noul { noul, .. } => Self::Noul { noul: *noul },
+            Answer::Choice {
+                choice,
+                probabilities,
+                confidence,
+                ..
+            } => Self::Choice {
+                choice,
+                probabilities,
+                confidence: *confidence,
+            },
+            Answer::Score {
+                score,
+                legend,
+                probabilities,
+                confidence,
+                ..
+            } => Self::Score {
+                score: *score,
+                legend: OrderedMap(
+                    legend
+                        .0
+                        .iter()
+                        .map(|(level, name)| (level.clone(), redact(name)))
+                        .collect(),
+                ),
+                probabilities,
+                confidence: *confidence,
+            },
+        }
+    }
+}
+
+/// A decision's trace line. Question ids and option names are written as
+/// they are, like in the audit trail: they are what the answers refer to,
+/// and redacting them could make two options one.
+fn trace_line<'a>(
+    audit: &'a AuditEntry,
+    parsed: &'a ParsedRequest,
+    readout: ReadoutKind,
+    mode: EvalMode,
+    answers: &'a OrderedMap<Answer>,
+    client_disconnected: bool,
+) -> TraceLine<'a> {
+    TraceLine {
+        schema: TRACE_SCHEMA,
+        id: audit.id,
+        timestamp: audit.timestamp,
+        model: &audit.model,
+        readout: readout.as_str(),
+        mode: mode.as_str(),
+        state: trace_state(parsed, readout),
+        questions: OrderedMap(
+            parsed
+                .ids
+                .iter()
+                .zip(&parsed.questions)
+                .map(|(id, question)| (id.clone(), trace_question(question)))
+                .collect(),
+        ),
+        answers: OrderedMap(
+            answers
+                .0
+                .iter()
+                .map(|(id, answer)| (id.clone(), TraceAnswer::from(answer)))
+                .collect(),
+        ),
+        policy_removed: &parsed.policy_removed,
+        client_disconnected,
+    }
+}
+
+/// The state as the model read it, redacted: text as it is, a structured
+/// state with its values redacted and written as the readout reads it.
+fn trace_state(parsed: &ParsedRequest, readout: ReadoutKind) -> String {
+    let Some(state) = &parsed.structured_state else {
+        return redact(&parsed.state);
+    };
+    let state = state.redacted();
+    match readout {
+        ReadoutKind::Codes => serde_json::to_string_pretty(&state).unwrap_or_default(),
+        ReadoutKind::Verdict => state.python_json(),
+    }
+}
+
+fn trace_question(question: &Question) -> TraceQuestion {
+    let criteria = match question {
+        Question::Noul {
+            true_means,
+            false_means,
+            ..
+        } => TraceCriteria::Named(OrderedMap(vec![
+            ("true".to_string(), redact(true_means)),
+            ("false".to_string(), redact(false_means)),
+        ])),
+        Question::Choice { options, .. } => TraceCriteria::Named(OrderedMap(
+            options
+                .iter()
+                .map(|(name, description)| (name.clone(), redact(description)))
+                .collect(),
+        )),
+        Question::Score { levels, .. } => {
+            TraceCriteria::Levels(levels.iter().map(|level| redact(level)).collect())
+        }
+    };
+    TraceQuestion {
+        kind: question.kind().as_str(),
+        instructions: redact(question.instructions()),
+        criteria,
+    }
+}
+
 /// Why the engine could not decide, as the API reports it; `ids` names the
 /// question when the error was one question's. Input over a budget is
 /// `input_budget_exceeded`, as jev-style reports it: the request was not
@@ -1275,6 +1492,7 @@ pub(super) async fn systemone(
         temperature,
         started,
         cancel,
+        traces: state.decision_traces.clone(),
     };
     let Decided {
         parsed,
@@ -1347,6 +1565,8 @@ struct DecisionJob {
     temperature: f64,
     started: Instant,
     cancel: Cancel,
+    /// Where the decision's trace goes, when traces are on.
+    traces: Option<Arc<DecisionTraces>>,
 }
 
 /// What a decided request's response is built from.
@@ -1375,6 +1595,11 @@ impl DecisionJob {
     /// and the audit trail records what was decided, as it leaves out a
     /// request refused as invalid or failed in llama.cpp. The server's log
     /// says it was abandoned.
+    ///
+    /// With traces on, every decision the audit trail records also gets its
+    /// trace line, here, for the same reason. A trace that cannot be written
+    /// is logged and the decision goes on: it was made, it is audited, and
+    /// the client is owed its answers.
     fn run(self) -> Result<Decided, ApiError> {
         let Self {
             parsed,
@@ -1385,6 +1610,7 @@ impl DecisionJob {
             temperature,
             started,
             cancel,
+            traces,
         } = self;
         let readout = model.readout();
         let state = match readout {
@@ -1413,6 +1639,7 @@ impl DecisionJob {
         let input_tokens = decision.stats.evaluated_tokens + prior_tokens;
         let request_ms = started.elapsed().as_secs_f64() * 1000.0;
 
+        let client_disconnected = cancel.is_cancelled();
         let mut audit = AuditEntry::new(model_name, "systemone".to_string());
         audit.input_tokens = u32::try_from(input_tokens).unwrap_or(u32::MAX);
         audit.duration_ms = request_ms as u64;
@@ -1424,11 +1651,28 @@ impl DecisionJob {
             calibration: parsed.calibration.as_str().to_string(),
             temperature,
             confidence_method: decision::CONFIDENCE_METHOD.to_string(),
-            client_disconnected: cancel.is_cancelled(),
+            client_disconnected,
             policy_removed: parsed.policy_removed.clone(),
             answers: records,
         });
         AuditLogger::new().log(&audit);
+
+        if let Some(traces) = &traces {
+            let line = trace_line(
+                &audit,
+                &parsed,
+                readout,
+                decision.stats.mode,
+                &answers,
+                client_disconnected,
+            );
+            if let Err(e) = traces.append_decision(&line) {
+                tracing::warn!(
+                    "Decision trace of audit record {} not written, the decision stands: {e}",
+                    audit.id
+                );
+            }
+        }
 
         Ok(Decided {
             parsed,
@@ -2035,6 +2279,171 @@ mod tests {
         apply_policy(&mut parsed, &deny(r#""nothing_like_these""#)).unwrap();
         assert_eq!(parsed.questions, before);
         assert!(parsed.policy_removed.is_empty());
+    }
+
+    fn close(value: &Value, expected: f64) -> bool {
+        value.as_f64().is_some_and(|v| (v - expected).abs() < 1e-9)
+    }
+
+    /// A decision's trace line, key by key: the contract Forge reads.
+    #[test]
+    fn a_trace_line_holds_the_decision_with_personal_data_redacted() {
+        let text = r#"{ "state": "Sono Mario, scrivete a mario@example.com o al 333 1234567.",
+            "questions": {
+                "urgent": { "type": "noul", "instructions": "Urgent? If unsure call 06 1234 5678." },
+                "team": { "type": "choice", "instructions": "Which team?",
+                          "criteria": { "billing": "Refunds to IT60X0542811101000000123456",
+                                        "delete_all": "Wipe everything", "tech": null } },
+                "severity": { "type": "score", "instructions": "How bad?",
+                              "criteria": [ {"label": "low", "description": "art. 2043 c.c."},
+                                            "mario@example.com is angry" ] } } }"#;
+        let mut parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        apply_policy(&mut parsed, &deny(r#""delete_*""#)).unwrap();
+        let decision = fake_decision(vec![
+            outcome(&[0.8, 0.2], None),
+            outcome(&[0.7, 0.3], None),
+            outcome(&[0.4, 0.6], None),
+        ]);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Verdict, 1.0);
+        let audit = AuditEntry::new("jev-style-0.8b".into(), "systemone".into());
+        let line = trace_line(
+            &audit,
+            &parsed,
+            ReadoutKind::Verdict,
+            EvalMode::SharedPrefix,
+            &answers,
+            false,
+        );
+        let text = serde_json::to_string(&line).unwrap();
+        assert!(!text.contains('\n'), "one line: {text}");
+
+        // Every key, in the documented order.
+        let keys: OrderedMap<Value> = serde_json::from_str(&text).unwrap();
+        let keys: Vec<&str> = keys.0.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "schema",
+                "id",
+                "timestamp",
+                "model",
+                "readout",
+                "mode",
+                "state",
+                "questions",
+                "answers",
+                "policy_removed",
+                "client_disconnected"
+            ]
+        );
+        let json: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["schema"], 1);
+        assert_eq!(json["id"], audit.id.to_string());
+        assert_eq!(
+            json["timestamp"],
+            serde_json::to_value(audit.timestamp).unwrap()
+        );
+        assert_eq!(json["model"], "jev-style-0.8b");
+        assert_eq!(json["readout"], "verdict");
+        assert_eq!(json["mode"], "shared_prefix");
+        assert_eq!(
+            json["state"],
+            "Sono Mario, scrivete a [EMAIL] o al [PHONE]."
+        );
+
+        // The questions as the model read them, after the policy, in the
+        // shape of a request; text redacted, names as they are.
+        assert_eq!(
+            json["questions"]["urgent"],
+            json!({ "type": "noul", "instructions": "Urgent? If unsure call [PHONE].",
+                    "criteria": { "true": "", "false": "" } })
+        );
+        assert_eq!(json["questions"]["team"]["type"], "choice");
+        assert_eq!(
+            json["questions"]["team"]["criteria"],
+            json!({ "billing": "Refunds to [IBAN]", "tech": "" })
+        );
+        assert_eq!(
+            json["questions"]["severity"]["criteria"],
+            json!(["low: art. 2043 c.c.", "[EMAIL] is angry"])
+        );
+
+        // The answers as returned, without `eullm`.
+        let urgent = &json["answers"]["urgent"];
+        assert_eq!(urgent["type"], "noul");
+        assert!(close(&urgent["noul"], 0.8), "{urgent}");
+        assert_eq!(urgent.as_object().unwrap().len(), 2, "{urgent}");
+        let team = &json["answers"]["team"];
+        assert_eq!(team["choice"], "billing");
+        assert!(close(&team["probabilities"]["tech"], 0.3), "{team}");
+        assert!(close(&team["confidence"], 0.4), "{team}");
+        assert!(team.get("eullm").is_none());
+        let severity = &json["answers"]["severity"];
+        assert!(close(&severity["score"], 0.6), "{severity}");
+        assert_eq!(
+            severity["legend"],
+            json!({ "0": "low", "1": "[EMAIL] is angry" })
+        );
+        assert!(close(&severity["probabilities"]["1"], 0.6), "{severity}");
+
+        assert_eq!(json["policy_removed"], json!({ "team": ["delete_all"] }));
+        assert_eq!(json["client_disconnected"], false);
+        assert!(!text.contains("mario@"), "{text}");
+    }
+
+    /// Nothing removed, a decision computed after its client left: the keys
+    /// are there all the same.
+    #[test]
+    fn a_trace_line_has_every_key_when_there_is_nothing_to_say() {
+        let parsed = parse_text("{}");
+        let decision = fake_decision(vec![
+            outcome(&[0.95, 0.05], None),
+            outcome(&[0.1, 0.8, 0.1], None),
+            outcome(&[0.2, 0.5, 0.3], None),
+        ]);
+        let (answers, _) = build_answers(&parsed, &decision, ReadoutKind::Codes, 1.0);
+        let audit = AuditEntry::new("qwen3-1.7b".into(), "systemone".into());
+        let json = serde_json::to_value(trace_line(
+            &audit,
+            &parsed,
+            ReadoutKind::Codes,
+            EvalMode::Separate,
+            &answers,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(json["readout"], "codes");
+        assert_eq!(json["mode"], "separate");
+        assert_eq!(json["state"], parsed.state, "nothing to redact");
+        assert_eq!(json["policy_removed"], json!({}));
+        assert_eq!(json["client_disconnected"], true);
+        assert_eq!(
+            json["questions"]["team"]["criteria"],
+            json!({ "tech": "Bugs", "billing": "Payments and payouts", "other": "" })
+        );
+        assert_eq!(json["answers"]["team"]["choice"], "billing");
+    }
+
+    /// A structured state's values are redacted, not its JSON text, so it
+    /// is still JSON, written the way each readout reads it.
+    #[test]
+    fn a_structured_state_is_traced_as_the_model_read_it_with_its_values_redacted() {
+        let text = r#"{ "state": { "from": "mario@example.com", "tel": 3331234567,
+                                   "amount": 12.5, "note": "art. 2043 c.c.",
+                                   "accounts": [ { "iban": "IT60X0542811101000000123456" } ],
+                                   "mario.rossi@example.com": true },
+                        "questions": { "q": { "type": "noul", "instructions": "Refund?" } } }"#;
+        let parsed = parse_request(serde_json::from_str(text).unwrap()).unwrap();
+        assert_eq!(
+            trace_state(&parsed, ReadoutKind::Verdict),
+            r#"{"from": "[EMAIL]", "tel": "[PHONE]", "amount": 12.5, "note": "art. 2043 c.c.", "accounts": [{"iban": "[IBAN]"}], "[EMAIL]": true}"#
+        );
+        let codes = trace_state(&parsed, ReadoutKind::Codes);
+        assert!(codes.contains("\n  \"from\": \"[EMAIL]\""), "{codes}");
+        let value: Value = serde_json::from_str(&codes).expect("still JSON");
+        assert_eq!(value["tel"], "[PHONE]");
+        assert_eq!(value["amount"], 12.5);
+        assert!(!codes.contains("3331234567"), "{codes}");
     }
 
     #[test]

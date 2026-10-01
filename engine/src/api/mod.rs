@@ -13,6 +13,7 @@
 
 mod auth;
 mod decision_policy;
+mod decision_traces;
 mod ip_allowlist;
 mod origin;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
@@ -224,6 +225,9 @@ pub struct AppState {
     /// (`EULLM_DECISION_POLICY`) — see `decision_policy`. Read once at
     /// startup.
     pub decision_policy: decision_policy::DecisionPolicy,
+    /// Where every decision's redacted trace goes (`EULLM_DECISION_TRACES`)
+    /// — see `decision_traces`. `None`, the default: traces are off.
+    pub decision_traces: Option<Arc<decision_traces::DecisionTraces>>,
 
     /// How many times a model was evicted to make VRAM room for another
     /// slot (generation displacing the embedder or the decision model, or
@@ -1760,6 +1764,18 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             decision_policy::POLICY_VERSION
         )
     })?;
+    // Fatal too when set but unusable, as for an explicitly set
+    // EULLM_AUDIT_DIR: whoever set it asked for the traces, and a server that
+    // ran without them would leave a hole found only when the training data
+    // is.
+    let decision_traces = decision_traces::DecisionTraces::load(env_file)
+        .map_err(|e| {
+            format!(
+                "EULLM_DECISION_TRACES is set but the decision traces cannot be written: {e}\n  \
+                 Point it at a writable directory, or unset it to keep no traces."
+            )
+        })?
+        .map(Arc::new);
     let web_policy = crate::tools::guard::WebPolicy::from_env();
     let allow_model_paths = matches!(
         std::env::var("EULLM_ALLOW_MODEL_PATHS")
@@ -1853,6 +1869,18 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             audit.log_path().display(),
         ),
     }
+    match &decision_traces {
+        Some(traces) => tracing::info!(
+            "Decision traces: on — every decision's state, questions and answers, personal \
+             data redacted, go to {}  [source: {}]",
+            traces.decisions_path().display(),
+            traces.source(),
+        ),
+        None => tracing::info!(
+            "Decision traces: off (EULLM_DECISION_TRACES not set) — decisions are audited \
+             with their state as a SHA-256 only"
+        ),
+    }
 
     let state = Arc::new(AppState {
         backend: cfg.backend,
@@ -1893,6 +1921,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
         decision_policy,
+        decision_traces,
         cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
         main_deadline: tokio::sync::Mutex::new(None),
         embedding_deadline: tokio::sync::Mutex::new(None),
@@ -2379,7 +2408,13 @@ mod http_tests {
 
     /// `spawn`, with API keys configured.
     async fn spawn_with_keys(store: ModelStore, api_keys: auth::ApiKeys) -> String {
-        spawn_with(store, api_keys, decision_policy::DecisionPolicy::none()).await
+        spawn_with(
+            store,
+            api_keys,
+            decision_policy::DecisionPolicy::none(),
+            None,
+        )
+        .await
     }
 
     /// `spawn`, with a decision policy.
@@ -2389,7 +2424,7 @@ mod http_tests {
     ) -> String {
         let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
         let api_keys = auth::ApiKeys::load(absent).expect("no keys configured");
-        spawn_with(store, api_keys, decision_policy).await
+        spawn_with(store, api_keys, decision_policy, None).await
     }
 
     /// Start the API with these perimeter settings.
@@ -2397,6 +2432,7 @@ mod http_tests {
         store: ModelStore,
         api_keys: auth::ApiKeys,
         decision_policy: decision_policy::DecisionPolicy,
+        decision_traces: Option<decision_traces::DecisionTraces>,
     ) -> String {
         let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
         let state = Arc::new(AppState {
@@ -2438,6 +2474,7 @@ mod http_tests {
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
             decision_policy,
+            decision_traces: decision_traces.map(Arc::new),
             cross_slot_evictions: std::sync::atomic::AtomicU64::new(0),
             main_deadline: tokio::sync::Mutex::new(None),
             embedding_deadline: tokio::sync::Mutex::new(None),

@@ -1,6 +1,6 @@
 # EuLLM Engine — Privacy Policy / Informativa sulla privacy
 
-*Last updated / Ultimo aggiornamento: 26 September 2026*
+*Last updated / Ultimo aggiornamento: 1 October 2026*
 
 [English](#english) · [Italiano](#italiano)
 
@@ -31,12 +31,22 @@ processed on your machine and are not sent to us or to anyone else.
   keys, which key was used. It does **not** contain the text of prompts or
   answers. It exists so that organisations can document their use of AI
   (EU AI Act) and it never leaves your computer.
+- **Decision traces**, only if you turn them on by setting
+  `EULLM_DECISION_TRACES`, in the folder it names. They hold the text of the
+  decisions made through `/v1/systemone` — the state, the questions and the
+  answers — after e-mail addresses, phone numbers, IBANs, codici fiscali,
+  payment card numbers and IP addresses have been replaced by placeholders;
+  other personal data, such as names, is not removed. They exist so that you
+  can train a decision model on your own decisions, and they never leave
+  your computer.
 - **Prompts and answers** are held in memory while EuLLM runs. EuLLM does
-  not write them to disk. The browser chat keeps an API key, if you use one,
-  only for the open tab (`sessionStorage`).
+  not write them to disk, except as decision traces when you turn them on.
+  The browser chat keeps an API key, if you use one, only for the open tab
+  (`sessionStorage`).
 
 You control all of this: delete the `.eullm` folder to remove models and the
-audit log. Uninstalling EuLLM does not delete that folder.
+audit log, and the traces folder to remove decision traces. Uninstalling
+EuLLM does not delete either.
 
 ### When EuLLM connects to the internet
 
@@ -102,12 +112,22 @@ vengono inviati né a noi né ad altri.
   hai configurato chiavi API, quale chiave è stata usata. **Non** contiene il
   testo dei prompt né delle risposte. Serve alle organizzazioni per
   documentare l'uso dell'IA (AI Act) e non lascia mai il tuo computer.
+- **Le tracce delle decisioni**, solo se le attivi impostando
+  `EULLM_DECISION_TRACES`, nella cartella che indica. Contengono il testo
+  delle decisioni prese tramite `/v1/systemone` — lo stato, le domande e le
+  risposte — dopo che indirizzi e-mail, numeri di telefono, IBAN, codici
+  fiscali, numeri di carte di pagamento e indirizzi IP sono stati sostituiti
+  da segnaposto; altri dati personali, come i nomi, non vengono rimossi.
+  Servono ad addestrare un modello decisionale sulle tue decisioni e non
+  lasciano mai il tuo computer.
 - **Prompt e risposte** restano in memoria mentre EuLLM è in esecuzione.
-  EuLLM non li scrive su disco. La chat nel browser conserva l'eventuale
-  chiave API solo per la scheda aperta (`sessionStorage`).
+  EuLLM non li scrive su disco, se non come tracce delle decisioni quando le
+  attivi. La chat nel browser conserva l'eventuale chiave API solo per la
+  scheda aperta (`sessionStorage`).
 
 Hai il pieno controllo: cancellando la cartella `.eullm` rimuovi modelli e
-log di audit. La disinstallazione di EuLLM non cancella quella cartella.
+log di audit, e cancellando la cartella delle tracce rimuovi le tracce delle
+decisioni. La disinstallazione di EuLLM non cancella nessuna delle due.
 
 ### Quando EuLLM si collega a internet
 
