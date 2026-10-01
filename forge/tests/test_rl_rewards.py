@@ -36,6 +36,25 @@ def test_the_shortcuts_to_a_deadline_do_not(answer):
     assert score_answer(answer, "termine_argomento", SIXTY) == 0.0
 
 
+@pytest.mark.parametrize("answer", [
+    "entro 120 giorni.",          # ends in the 20 of "20 giorni"
+    "entro 1020 giorni.",
+    "entro 160 giorni.",          # ends in the 60 of "60 giorni"
+    "entro 360 giorni.",
+    "entro centoventi giorni.",   # same, in words
+    "entro centosessanta giorni.",
+    "entro duecentoventi giorni.",
+])
+def test_a_wrong_deadline_containing_the_right_one_scores_nothing(answer):
+    """The keyword is a substring test, so the right digits are enough.
+
+    The value is parsed a few lines up to count the deadlines an answer
+    names; it is also what says whether the one it named is the right one.
+    """
+    keyword = SIXTY if "60" in answer or "sessanta" in answer else ["20 giorni|venti giorni"]
+    assert score_answer(answer, "termine", keyword) == 0.0
+
+
 def test_the_deadline_the_article_also_mentions_is_allowed():
     """An article that sets a deadline and refers to another: naming both is
     a complete answer, not a list."""
