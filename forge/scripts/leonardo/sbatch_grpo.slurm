@@ -1,7 +1,7 @@
 #!/bin/bash
-# GRPO with verifiable rewards on a merged open-book model — a whole node.
+# GRPO with verifiable rewards on a merged open-book model — three GPUs.
 #
-# Four GPUs, one process each (data parallel): every step each GPU writes
+# Three GPUs, one process each (data parallel): every step each GPU writes
 # --per-device-batch answers to the same prompts its group shares, they are
 # scored (eullm_forge.rl.rewards) and the LoRA moves towards the better ones.
 # Generation is most of the time, which is why this is the job that uses
@@ -40,13 +40,22 @@
 #
 # Four links cover 250 steps of a 4 B model; give an 8 B five.
 #
+# THREE GPUs, 24 cores, 340 GB — the geometry sbatch_phase2_8b.slurm and
+# sbatch_gen_instruct.slurm measured to be placed quickly. Four GPUs is a
+# whole node, which has to be entirely idle before it is given away; three
+# make every node with one card in use by someone else a candidate. On
+# 2026-10-01 boost_usr_prod had 3253 of 3264 nodes allocated and the
+# whole-node GRPO chains sat in the queue all evening. The script counts the
+# GPUs it gets: three processes x --per-device-batch 8 = 24 answers a step,
+# three prompts of eight.
+#
 #SBATCH --job-name=eullm-grpo
 #SBATCH --partition=boost_usr_prod
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gres=gpu:4
-#SBATCH --mem=480G
+#SBATCH --cpus-per-task=24
+#SBATCH --gres=gpu:3
+#SBATCH --mem=340G
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
 
