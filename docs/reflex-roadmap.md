@@ -1,7 +1,8 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0 done; MVP 1, the RAG gate: Reflex stops half again as many
-insufficient contexts as embeddings, once calibrated · 30 September 2026
+**Status:** MVP 0 done; MVP 1 measured on MuSiQue, its Italian set next; MVP 2
+to 4 under way, MCP already working through jev-style's server · 1 October
+2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -186,7 +187,7 @@ for an embedding: 55 to 170 times the GPU's latency for Reflex, 8 times for
 the embeddings. The 2B is not a reflex on a CPU; for few options the 0.8B
 is the candidate there, not yet measured.
 
-## MVP 1 — tool selection, then a RAG sufficiency gate  [🆕 next]
+## MVP 1 — tool selection, then a RAG sufficiency gate  [🔧 now]
 
 - [✅ measured] Tool selection with the best layout ReflexBench finds.
 - **Kill criterion:** if embeddings reach the same recall at the working k
@@ -254,21 +255,34 @@ when it may stop at most about one sufficient case in ten:
   company's documents take one. The Italian set is what says how the gate
   does on those.
 
-## MVP 2 — adapters, not a runtime  [🆕 next]
+## MVP 2 — adapters, not a runtime  [🔧 now]
 
-- An MCP server exposing `decide` and `select_tools` over `/v1/systemone`,
-  so that any MCP client — an IDE agent, a desktop assistant — can use
-  Reflex without code of ours in its loop. The `jev-style` package
-  (Apache-2.0) already ships an MCP server and a client that take any
-  `/v1/systemone` base URL: to be tried against EuLLM before writing ours.
-- Examples for LangGraph and n8n.
-- A server-side policy: options filtered before the model sees them, and a
-  deny list. Configured through `EULLM_*` environment variables, like every
-  perimeter setting of the engine (see `engine/CLAUDE.md`), with remote
-  models off unless enabled.
+- [✅ done] **MCP through jev-style's server.** jev-style (Apache-2.0)
+  ships an MCP server that talks to any `/v1/systemone`. Tried against
+  EuLLM, it needed EuLLM to answer as the System One API does: its error
+  shape, score levels and instructions given as objects, `timing.total_ms`,
+  its confidence formula, the decision model listed in `GET /v1/models`
+  ([#610](https://github.com/eullm/eullm/pull/610)). Claude Code, Claude Desktop and Cursor can now call `decide`,
+  `noul`, `choice` and `score` on a local EuLLM; the set-up is in
+  [`engine.md`](engine.md#jev-style-with-eullm-mcp-server-cli-python-client).
+- [🔧 now] **EuLLM's own MCP server, for what jev-style's lacks**
+  (`adapters/reflex-mcp`): `select_tools`, the two-stage selection MVP 0
+  measured — the embeddings keep a shortlist, Reflex judges it, "none"
+  included — and `rag_gate`, MVP 1's gate with a threshold calibrated on the
+  user's own cases. It talks to a local EuLLM unless told otherwise.
+- [🔧 now] Examples for LangGraph and n8n (`examples/decision-langgraph`,
+  `examples/decision-n8n`): the orchestrator orchestrates, Reflex decides,
+  a chat model on EuLLM writes.
+- [🔧 now] A server-side policy, `EULLM_DECISION_POLICY`, an `EULLM_*`
+  setting like every perimeter setting of the engine (see
+  `engine/CLAUDE.md`): options the operator denies are removed before the
+  model sees them, whatever a client asks, and the audit trail says so.
 
 ## MVP 3 — several chat models resident, then `model: "auto"`  [🆕 next]
 
+- [🔧 now] The implementation plan: how the engine's one generation slot
+  becomes several, how they are sized, evicted and locked, and where Reflex
+  picks the model — read from the code before any of it changes.
 - **The engine keeps one chat model loaded today**, next to the embedding
   and decision slots; asking for another model swaps it, which takes
   seconds. Choosing per request between two local chat models needs both
@@ -289,15 +303,40 @@ when it may stop at most about one sufficient case in ten:
   in large-model calls avoided, latency, and quality against always using
   the large one.
 
-## MVP 4 — decision models trained on your decisions  [🆕 next]
+## MVP 4 — decision models trained on your decisions  [🔧 now]
 
-- Opt-in, local capture of traces: state, options, decision, outcome,
-  correction.
-- Forge trains a small decision model from them, with rules, a large model
-  or people as the teacher.
-- A qualification test before any decision model is swapped in:
-  calibration, noise between evaluation modes, accuracy on the domain's set.
+- [🔧 now] Opt-in, local capture of traces: `EULLM_DECISION_TRACES` keeps
+  each decision with its state, personal data redacted, and
+  `POST /v1/systemone/feedback` records the right answer, the outcome or the
+  correction against the decision it belongs to.
+- [🔧 now] Forge trains a small decision model from them, in EuLLM's own
+  codes readout, with corrections, rules or a large model as the teacher
+  (`forge/eullm_forge/decisions`).
+- [🔧 now] A qualification test before any decision model is swapped in
+  (`bench/reflexbench/qualify.py`): calibration, noise between evaluation
+  modes, accuracy on the domain's set, latency, and a pass or a fail.
   "Interchangeable" is earned by passing it, not by a configuration line.
+
+## Beyond MVP 4  [🆕 next]
+
+- **The loop closed.** New corrections retrain the model on a schedule; the
+  qualification test runs by itself; the new model runs in the shadow of the
+  current one — the same requests, its decisions compared, none of them
+  returned — and takes over only when it passes. Calibration is watched for
+  drift.
+- **Corrections where decisions are seen.** The chat UI and the command line
+  show a decision with its probabilities and take a correction in one step,
+  straight into the feedback the loop trains on.
+- **A guard for tool calls inside EuLLM.** The engine's own tool calling
+  asks Reflex before running a tool, under the operator's policy, every
+  judgement audited: what jev-style's guard does for one coding agent, for
+  every client of EuLLM.
+- **Our own models in the verdict format too.** Forge trains decision models
+  that read as the Jev-Style ones do, so the dependency under Risks has an
+  answer that keeps the clients already speaking it.
+- **Decision models on the Hub.** A legal-it decision model beside
+  legal-it-4b, trained and qualified on Italian legal decisions: the first
+  decision model that is ours from data to GGUF.
 
 ---
 
@@ -316,6 +355,7 @@ when it may stop at most about one sufficient case in ten:
 - **CPU cost.** Reading a large tool catalog on every request may take tens
   of seconds on a CPU. Layout B and the two-stage variant exist to bring that
   down, and the benchmark measures it instead of guessing.
-- **The engine.** Nothing before MVP 3 changes it: MVP 0 to 2 are additive
-  and use the endpoint as it is. Without a decision model loaded, chat,
-  completions and embeddings behave exactly as they do now.
+- **The engine.** MVP 2's policy and MVP 4's traces add to the endpoint,
+  both off unless configured; MVP 3 is the first change to the engine's
+  memory management. Without a decision model loaded, chat, completions and
+  embeddings behave exactly as they do now.
