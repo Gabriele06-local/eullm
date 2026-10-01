@@ -303,6 +303,7 @@ class MethodsTest(unittest.TestCase):
         self.assertEqual(payload["model"], "auto")
         self.assertEqual(payload["messages"], [{"role": "user", "content": "Hi"}])
         self.assertEqual(payload["options"]["temperature"], 0)
+        self.assertIs(payload["cache_prompt"], False)
         self.assertEqual((decision.score, decision.small), (0.7, True))
         self.assertEqual(decision.server["decision_ms"], 12.5)
 
@@ -472,6 +473,22 @@ class ReportTest(unittest.TestCase):
             self.assertIn(column, text.splitlines()[0])
         for line in text.splitlines()[2:]:
             self.assertEqual(line.count("|"), len(autobench.E2E_COLUMNS) + 1, line)
+
+    def test_kept_answers_are_reused_only_when_asked_the_same_way(self):
+        args = autobench.parse_args(["--url", "http://x", "--small", "s", "--large", "l"])
+        how = autobench.answers_how(args)
+        self.assertIs(how["cache_prompt"], False)
+        answer = ab_methods.Answer("4", "s", 1.0, 2.0).to_json()
+        rows = [
+            {"key": "a", "how": how, "answer": answer},
+            # Kept before `cache_prompt`, or with another limit: asked again.
+            {"key": "b", "answer": answer},
+            {"key": "c", "how": dict(how, max_tokens=16), "answer": answer},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "answers.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            self.assertEqual(list(autobench.load_answers(str(path), how)), ["a"])
 
     def test_concurrency_levels_are_numbers(self):
         args = autobench.parse_args(["--small", "s", "--large", "l"])

@@ -69,14 +69,23 @@ def answer_key(item, model):
     return f"{item.set}\t{item.id}\t{model}"
 
 
-def load_answers(path):
-    """The answers a previous run kept, by set, item and model."""
+def answers_how(args):
+    """What an answer depends on besides its item and model. A kept answer
+    asked another way — thinking, a longer limit, or from the prompt cache,
+    as runs before `cache_prompt` were — is asked again, not reused."""
+    return dict(ab_methods.REPRODUCIBLE, think=args.think, max_tokens=args.max_tokens)
+
+
+def load_answers(path, how):
+    """The answers a previous run kept the way `how` says, by set, item and
+    model."""
     answers = {}
     if path and pathlib.Path(path).exists():
         for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines():
             if line.strip():
                 row = json.loads(line)
-                answers[row["key"]] = ab_methods.Answer.from_json(row["answer"])
+                if row.get("how") == how:
+                    answers[row["key"]] = ab_methods.Answer.from_json(row["answer"])
     return answers
 
 
@@ -112,7 +121,11 @@ def generate_all(args, datasets, answers):
                         answer.correct = ab_grade.correct(item, answer.text)
                     answers[answer_key(item, model)] = answer
                     if out:
-                        row = {"key": answer_key(item, model), "answer": answer.to_json()}
+                        row = {
+                            "key": answer_key(item, model),
+                            "how": answers_how(args),
+                            "answer": answer.to_json(),
+                        }
                         out.write(json.dumps(row) + "\n")
                         out.flush()
                     shown = progress(n, len(todo), started, shown)
@@ -554,7 +567,7 @@ def main(argv=None):
         raise SystemExit("the set has judge items: name a judge with --judge-model")
 
     before = ab_methods.server_state(args.url, args.api_key, args.timeout)
-    answers = load_answers(args.answers)
+    answers = load_answers(args.answers, answers_how(args))
     if "generate" in args.stages:
         print("stage 1: generate", file=sys.stderr, flush=True)
         generate_all(args, datasets, answers)

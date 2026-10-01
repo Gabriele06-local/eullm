@@ -32,6 +32,12 @@ from rb_methods import ServerError, post, unit
 # What makes stage 1 deterministic.
 GREEDY = {"temperature": 0, "top_k": 1, "seed": 1}
 
+# Greedy decoding is not enough on a GPU: the numbers a prompt produces
+# depend on how much of it the server reuses from the request before, so the
+# same request could get another answer in stage 3 than in stage 1. Every
+# generation decodes its whole prompt instead (llama.cpp's `cache_prompt`).
+REPRODUCIBLE = {"cache_prompt": False}
+
 
 class Answer:
     """One model's answer to one item, and what it cost."""
@@ -75,7 +81,7 @@ def chat_body(item, model, think, max_tokens, stream=True):
     """The request for `item` as a client sends it: `/api/chat` with its
     messages, or `/api/generate` with its prompt."""
     options = dict(GREEDY, num_predict=max_tokens)
-    body = {"model": model, "stream": stream, "think": think, "options": options}
+    body = dict(REPRODUCIBLE, model=model, stream=stream, think=think, options=options)
     if item.prompt is not None:
         return "/api/generate", dict(body, prompt=item.prompt)
     return "/api/chat", dict(body, messages=item.messages)
