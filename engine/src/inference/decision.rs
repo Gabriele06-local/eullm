@@ -1310,6 +1310,12 @@ impl DecisionModel {
         })
     }
 
+    /// The bytes of its weights as llama.cpp holds them: what `/api/ps`
+    /// reports as its size.
+    pub fn weights_bytes(&self) -> u64 {
+        self.model.size()
+    }
+
     /// Its budgets and what it is, for `GET /v1/models`.
     pub fn info(&self) -> DecisionModelInfo {
         let max_ctx = self.max_ctx as usize;

@@ -2810,6 +2810,8 @@ async fn cmd_run(
             launch_decision,
             decision_ctx,
             residency,
+            // What the launch model itself got, for `/api/ps` only.
+            launch_gpu_layers: Some(gpu_layers),
             backend,
         })
         .await
@@ -2987,6 +2989,7 @@ async fn cmd_serve(
         launch_decision,
         decision_ctx,
         residency,
+        launch_gpu_layers: None,
         backend,
     })
     .await

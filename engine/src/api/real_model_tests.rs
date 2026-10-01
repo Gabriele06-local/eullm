@@ -800,3 +800,93 @@ async fn real_model_unload_names_one_model_or_takes_them_all() {
     assert!(answer["unloaded"].is_string());
     assert!(server.loaded().await.is_empty());
 }
+
+/// `/api/ps` lists every resident with its own expiry, and `/api/tags` and
+/// `/v1/models` list every resident as loaded; a request that loaded its
+/// model says how long that took.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_every_resident_is_listed_with_its_own_expiry() {
+    let server = start(&["tiny-a", "tiny-b"], |state| state.max_loaded_models = 2).await;
+    let ask = |model: &str, keep_alive: Value| {
+        json!({
+            "model": model, "prompt": "Once", "stream": false, "keep_alive": keep_alive,
+            "options": { "num_predict": 4 },
+        })
+    };
+    let (status, loaded_a) = server.generate(ask("tiny-a", json!("10m"))).await;
+    assert_eq!(status, 200);
+    let (status, _) = server.generate(ask("tiny-b", json!(-1))).await;
+    assert_eq!(status, 200);
+    assert!(
+        loaded_a[0]["load_duration"]
+            .as_u64()
+            .is_some_and(|ns| ns > 0),
+        "{loaded_a:?}"
+    );
+    let (_, again) = server.generate(ask("tiny-a", json!("10m"))).await;
+    assert_eq!(again[0]["load_duration"], 0, "already loaded: {again:?}");
+
+    let ps: Value = reqwest::get(format!("{}/api/ps", server.base))
+        .await
+        .expect("request")
+        .json()
+        .await
+        .expect("json");
+    let models = ps["models"].as_array().expect("models");
+    let names: Vec<&str> = models.iter().filter_map(|m| m["name"].as_str()).collect();
+    assert_eq!(names, ["tiny-a", "tiny-b"], "most recently used first");
+    let expires = |i: usize| {
+        chrono::DateTime::parse_from_rfc3339(models[i]["expires_at"].as_str().expect("a date"))
+            .expect("RFC 3339")
+            .to_utc()
+    };
+    let in_ten_minutes = (expires(0) - chrono::Utc::now()).num_seconds();
+    assert!((590..=600).contains(&in_ten_minutes), "{in_ten_minutes}");
+    assert!(
+        expires(1)
+            .format("%Y")
+            .to_string()
+            .parse::<i32>()
+            .expect("a year")
+            > 2200,
+        "kept for good"
+    );
+    for m in models {
+        assert!(m["size"].as_u64().is_some_and(|b| b > 0), "{m}");
+        assert!(m["context_length"].as_u64().is_some_and(|c| c > 0), "{m}");
+        assert_eq!(m["eullm"]["slot"], "generation");
+    }
+
+    let tags: Value = reqwest::get(format!("{}/api/tags", server.base))
+        .await
+        .expect("request")
+        .json()
+        .await
+        .expect("json");
+    let mut loaded: Vec<&str> = tags["models"]
+        .as_array()
+        .expect("models")
+        .iter()
+        .filter(|m| m["loaded"] == true)
+        .filter_map(|m| m["name"].as_str())
+        .collect();
+    loaded.sort();
+    assert_eq!(loaded, ["tiny-a", "tiny-b"]);
+    let openai: Value = reqwest::get(format!("{}/v1/models", server.base))
+        .await
+        .expect("request")
+        .json()
+        .await
+        .expect("json");
+    let ids: Vec<&str> = openai["data"]
+        .as_array()
+        .expect("data")
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"tiny-a") && ids.contains(&"tiny-b"),
+        "{ids:?}"
+    );
+}

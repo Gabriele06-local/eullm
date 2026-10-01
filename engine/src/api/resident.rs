@@ -57,6 +57,24 @@ impl UsageView {
     fn kept_forever(&self) -> bool {
         self.deadline.is_none() && !self.unload_when_idle
     }
+
+    /// How long from `now` until the model is unloaded for being idle, as
+    /// `/api/ps` reports it; `None` when nothing will unload it. A model
+    /// still answering has not started counting: it is reported as if its
+    /// requests ended now.
+    pub(crate) fn expires_in(&self, now: Instant) -> Option<Duration> {
+        if self.in_flight > 0 {
+            return match self.keep_alive {
+                KeepAlive::For(duration) => Some(duration),
+                KeepAlive::Immediate => Some(Duration::ZERO),
+                KeepAlive::Forever | KeepAlive::Default => None,
+            };
+        }
+        if self.unload_when_idle {
+            return Some(Duration::ZERO);
+        }
+        self.deadline.map(|d| d.saturating_duration_since(now))
+    }
 }
 
 impl Usage {
@@ -162,6 +180,9 @@ pub(crate) struct SlotSnapshot {
     pub(crate) engine: Option<Arc<InferenceEngine>>,
     pub(crate) scheduler: Option<SchedulerHandle>,
     pub(crate) lease: Lease,
+    /// How long the request waited for the model to load; zero when it was
+    /// loaded already. Ollama's `load_duration`.
+    pub(crate) load_duration: Duration,
 }
 
 /// A generation model resident in this server.
@@ -185,7 +206,45 @@ pub(crate) struct LoadedModel {
     /// `fit::context_reserve_bytes`). 0 for a scheduler, whose context is
     /// allocated with the model.
     pub(crate) unallocated_reserve: u64,
+    /// How it was loaded, for `/api/ps`.
+    pub(crate) facts: LoadFacts,
     pub(crate) usage: Arc<Usage>,
+}
+
+/// How a resident was loaded, settled when it was: what `/api/ps` reports.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LoadFacts {
+    /// Its context, in tokens: shared by every slot of a scheduler.
+    pub(crate) ctx_size: u32,
+    /// Scheduler slots; 0 for a sequential engine.
+    pub(crate) batch_size: usize,
+    /// Layers on the GPU, `-1` for all.
+    pub(crate) gpu_layers: i32,
+    /// Layers it has, when its header says.
+    pub(crate) n_layers: Option<u32>,
+    /// Its weights, its projector's and its KV cache's, in bytes.
+    pub(crate) size_bytes: u64,
+    /// How much free VRAM went when it loaded, when that could be measured.
+    pub(crate) size_vram: Option<u64>,
+    /// Its architecture, from its header.
+    pub(crate) family: Option<String>,
+}
+
+impl LoadFacts {
+    /// The VRAM it holds: what its load measured or, without a measurement,
+    /// an estimate from how many of its layers went to the GPU.
+    pub(crate) fn vram_bytes(&self) -> u64 {
+        if let Some(measured) = self.size_vram {
+            return measured;
+        }
+        match (self.gpu_layers, self.n_layers) {
+            (0, _) => 0,
+            (layers, Some(n)) if layers > 0 && (layers as u32) < n => {
+                (self.size_bytes as f64 * f64::from(layers as u32) / f64::from(n)) as u64
+            }
+            _ => self.size_bytes,
+        }
+    }
 }
 
 impl LoadedModel {
@@ -205,6 +264,7 @@ impl LoadedModel {
             scheduler,
             launch: false,
             unallocated_reserve: 0,
+            facts: LoadFacts::default(),
             usage: Usage::new(),
         }
     }
@@ -536,6 +596,48 @@ mod tests {
             },
             launch: false,
         }
+    }
+
+    #[test]
+    fn a_model_expires_when_its_keep_alive_says_and_never_without_one() {
+        let usage = Usage::new();
+        let idle = notify();
+        let now = Instant::now();
+        assert_eq!(usage.view().expires_in(now), None, "never used: kept");
+
+        let lease = usage.lease(KeepAlive::For(Duration::from_secs(300)), None, &idle);
+        assert_eq!(
+            usage.view().expires_in(now),
+            Some(Duration::from_secs(300)),
+            "answering: as if it ended now"
+        );
+        drop(lease);
+        let left = usage.view().expires_in(Instant::now()).expect("a deadline");
+        assert!(left <= Duration::from_secs(300) && left > Duration::from_secs(299));
+
+        drop(usage.lease(KeepAlive::Forever, None, &idle));
+        assert_eq!(usage.view().expires_in(Instant::now()), None);
+        drop(usage.lease(KeepAlive::Immediate, None, &idle));
+        assert_eq!(
+            usage.view().expires_in(Instant::now()),
+            Some(Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn the_vram_a_model_holds_is_measured_or_estimated_from_its_layers() {
+        let facts = |gpu_layers, size_vram| LoadFacts {
+            gpu_layers,
+            n_layers: Some(40),
+            size_bytes: 4000,
+            size_vram,
+            ..LoadFacts::default()
+        };
+        assert_eq!(facts(10, Some(1234)).vram_bytes(), 1234);
+        assert_eq!(facts(-1, None).vram_bytes(), 4000);
+        assert_eq!(facts(40, None).vram_bytes(), 4000);
+        assert_eq!(facts(10, None).vram_bytes(), 1000);
+        assert_eq!(facts(0, None).vram_bytes(), 0);
     }
 
     /// `due` is what the idle-unload loop asks of each resident on its own.

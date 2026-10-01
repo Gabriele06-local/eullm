@@ -536,6 +536,9 @@ impl AppState {
                 gate.arrived.notify_one();
                 gate.proceed.notified().await;
             }
+            // Loads are serialized, so what free VRAM loses across this one
+            // is what this model holds: `/api/ps`'s `size_vram`.
+            let free_before = crate::fit::vram_bytes().map(|(free, _)| free);
 
             let (new_engine, new_scheduler, ready_info, effective_ctx_size) =
                 tokio::task::spawn_blocking(move || {
@@ -602,6 +605,28 @@ impl AppState {
                 continue;
             }
 
+            let size_vram = free_before
+                .zip(crate::fit::vram_bytes().map(|(free, _)| free))
+                .map(|(before, after)| before.saturating_sub(after));
+            let kv_bytes = ready_info.as_ref().map_or(0, |info| {
+                ((info.kv_k_mib + info.kv_v_mib) * 1024.0 * 1024.0) as u64
+            });
+            let projector_bytes = mmproj_path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map_or(0, |m| m.len());
+            let facts = resident::LoadFacts {
+                ctx_size: effective_ctx_size,
+                batch_size,
+                gpu_layers,
+                n_layers: sizing.info.map(|info| info.n_layers),
+                size_bytes: file_size
+                    .saturating_add(projector_bytes)
+                    .saturating_add(kv_bytes),
+                size_vram,
+                family: sizing.info.and_then(|info| info.architecture.clone()),
+            };
+
             // ── 3. Install the new model among the residents ─────────
             // A sequential engine creates its context per request, so the
             // memory that context takes is free while it is idle; it is held
@@ -624,6 +649,7 @@ impl AppState {
                     new_scheduler,
                 );
                 model.unallocated_reserve = unallocated_reserve;
+                model.facts = facts;
                 let model = models.insert(model);
                 self.lease(model, keep_alive)
             };
@@ -686,6 +712,7 @@ impl AppState {
             lease: model
                 .usage
                 .lease(keep_alive, self.default_keep_alive, &self.idle),
+            load_duration: std::time::Duration::ZERO,
         }
     }
 
@@ -2316,6 +2343,10 @@ pub struct ServeConfig {
     pub decision_ctx: u32,
     /// `--max-loaded-models`, as the user gave it.
     pub residency: ResidencyConfig,
+    /// How many layers the launch model actually put on the GPU, after its
+    /// own sizing: reported by `/api/ps`, and nothing else. Never a setting
+    /// for the next load — that is `gpu_layers`, the user's flag.
+    pub launch_gpu_layers: Option<i32>,
 }
 
 /// Start the API server on the given port with graceful shutdown support.
@@ -2471,9 +2502,28 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             ),
             _ => 0,
         };
+        let info = crate::fit::read_gguf_info(&path);
+        let file_size = std::fs::metadata(&path).map_or(0, |m| m.len());
+        let facts = resident::LoadFacts {
+            ctx_size: cfg
+                .engine
+                .as_ref()
+                .map_or(cfg.ctx_size, |engine| engine.context_size()),
+            batch_size: if cfg.scheduler.is_some() {
+                cfg.batch_size
+            } else {
+                0
+            },
+            gpu_layers: cfg.launch_gpu_layers.unwrap_or(cfg.gpu_layers),
+            n_layers: info.as_ref().map(|info| info.n_layers),
+            size_bytes: file_size,
+            size_vram: None,
+            family: info.and_then(|info| info.architecture),
+        };
         let mut launch = resident::LoadedModel::new(name, path, cfg.engine, cfg.scheduler);
         launch.launch = true;
         launch.unallocated_reserve = unallocated_reserve;
+        launch.facts = facts;
         models.insert(launch);
     }
 
@@ -3480,6 +3530,17 @@ mod http_tests {
         let (status, body) = get_json(&format!("{base}/api/tags")).await;
         assert_eq!(status, 401);
         assert!(body["error"].is_string(), "{body}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Ollama clients call `/api/ps` to see what is loaded; it answered 404.
+    #[tokio::test]
+    async fn api_ps_answers_with_no_model() {
+        let tmp = std::env::temp_dir().join(format!("eullm-ps-{}", uuid::Uuid::new_v4()));
+        let base = spawn(ModelStore::at(tmp.clone())).await;
+        let (status, body) = get_json(&format!("{base}/api/ps")).await;
+        assert_eq!(status, 200);
+        assert_eq!(body, serde_json::json!({ "models": [] }));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 

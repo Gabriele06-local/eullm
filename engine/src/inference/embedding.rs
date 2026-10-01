@@ -180,6 +180,12 @@ impl EmbeddingModel {
         &self.path
     }
 
+    /// The bytes of its weights as llama.cpp holds them: what `/api/ps`
+    /// reports as its size.
+    pub fn weights_bytes(&self) -> u64 {
+        self.model.size()
+    }
+
     /// Tokens of context the model keeps once its longest input has come:
     /// [`n_ctx`](Self::embed) rounded up to whole steps of 256 cells.
     pub fn largest_context(&self) -> u32 {

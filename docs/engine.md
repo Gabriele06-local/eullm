@@ -335,7 +335,8 @@ How a model finds its place:
 - A request with no `model` field is answered by the most recently used model.
 
 Requests to a model that is loaded never wait for another model's load.
-`/api/version` reports `max_loaded_models`, `loaded_models`, and
+`GET /api/ps` lists what is loaded, with what each model holds and when it
+expires. `/api/version` reports `max_loaded_models`, `loaded_models`, and
 `generation_evictions` (how many models were unloaded to make room; a steady
 rate of one per request means the models asked for do not fit together).
 
@@ -1073,7 +1074,7 @@ another.
 
 #### `GET /api/tags`
 
-List available models. Returns the currently loaded model first (what admin dashboards check for health), followed by catalog entries.
+List available models. Returns the loaded models first, the most recently used first, each with `"loaded": true` (what admin dashboards check for health), followed by catalog entries and the other models in the store. `GET /api/ps` lists only what is loaded, with what each model holds.
 
 ```bash
 curl http://localhost:11434/api/tags
@@ -1194,6 +1195,61 @@ curl -N http://localhost:11434/api/chat \
     "stream": true
   }'
 ```
+
+#### `GET /api/ps`
+
+The models in memory, in Ollama's shape: every generation model, the most
+recently used first, then the embedding and decision models.
+
+```bash
+curl http://localhost:11434/api/ps
+```
+
+```json
+{
+  "models": [
+    {
+      "name": "qwen3-8b",
+      "model": "qwen3-8b",
+      "size": 5603000000,
+      "digest": "sha256:…",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen3",
+        "families": ["qwen3"],
+        "parameter_size": "8.2B",
+        "quantization_level": "Q4_K_M"
+      },
+      "expires_at": "2026-10-01T15:42:07.512+00:00",
+      "size_vram": 5410000000,
+      "context_length": 4096,
+      "eullm": {
+        "slot": "generation",
+        "in_flight": 0,
+        "last_used": "2026-10-01T15:37:07.512+00:00",
+        "batch_size": 1,
+        "gpu_layers": -1,
+        "reserved_companion": false,
+        "launch": false,
+        "size_vram_measured": true
+      }
+    }
+  ]
+}
+```
+
+- `size` is the model's weights, its projector and its KV cache; `size_vram`
+  what free VRAM lost when it loaded (`eullm.size_vram_measured`), or an
+  estimate from its layers on the GPU when that could not be measured.
+- `expires_at` is when its keep_alive runs out once it is idle; a model kept
+  for good gets a date centuries ahead, as in Ollama, never `null`.
+- `context_length` is what one request gets: a scheduler's context is shared
+  by its `batch_size` slots.
+- `eullm` is EuLLM's own: which slot holds the model, how many requests it is
+  answering, when it was last used, and whether it is a reserved companion
+  (`--embedding-model`, `--decision-model`) or the model `eullm run` started
+  with.
 
 #### `POST /api/unload`
 
