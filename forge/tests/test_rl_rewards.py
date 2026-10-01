@@ -37,7 +37,6 @@ def test_the_shortcuts_to_a_deadline_do_not(answer):
 
 
 @pytest.mark.parametrize("answer", [
-
     "Non è prevista alcuna proroga: il ricorso va proposto entro 60 giorni.",
     "Non esiste alcuna proroga: il ricorso va proposto entro 60 giorni.",
     "Non esiste alcun termine perentorio: il ricorso va proposto entro 60 giorni.",
@@ -71,6 +70,8 @@ def test_denying_the_article_itself_is_still_a_refusal(answer):
 def test_a_decorative_negation_does_not_buy_a_wrong_or_a_listed_deadline(answer):
     assert score_answer(answer, "termine", SIXTY) == 0.0
 
+
+@pytest.mark.parametrize("answer", [
     "entro 120 giorni.",          # ends in the 20 of "20 giorni"
     "entro 1020 giorni.",
     "entro 160 giorni.",          # ends in the 60 of "60 giorni"
