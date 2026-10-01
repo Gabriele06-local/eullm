@@ -1,0 +1,121 @@
+"""Rewards a program can check, for open-book legal questions.
+
+Three kinds of question have an answer that needs no judge:
+
+* ``termine`` / ``termine_argomento``: the article states one deadline, and
+  the answer must state it. Checked with the same keyword the exam uses
+  (`norm_exam._deadline_keyword`), digits or words.
+* ``inesistente``: the article asked about does not exist, and the prompt
+  says so; the answer must say it does not exist instead of describing one.
+* ``assente``: a question by topic whose article was taken out of the
+  retrieved texts; the answer must say the texts do not contain it.
+
+Each check is written against the ways a policy learns to game it, because
+under RL it will:
+
+* **Listing every number.** An answer naming five deadlines contains the
+  right one. A deadline answer earns nothing if it names more than
+  `MAX_DEADLINES` different deadlines.
+* **Always abstaining.** "Non trovo la disposizione" is right for two of the
+  four kinds and wrong for the other two, so it is only worth what it is
+  worth on the abstention kinds. A deadline answer that refuses earns
+  nothing even if a number slipped in.
+* **Abstaining and then answering anyway.** An abstention that goes on to
+  state a deadline is not an abstention: it earns nothing.
+"""
+
+from __future__ import annotations
+
+import re
+
+from ..eval.metrics import keyword_coverage
+from ..eval.norm_exam import _UNITS, _number_of
+
+DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
+ABSTAIN_TYPES = frozenset({"inesistente", "assente"})
+
+#: How many different deadlines a right answer may name: the one asked, and
+#: one more for the article that also mentions, say, a notice period.
+MAX_DEADLINES = 2
+
+# Ways of saying "it is not there", for a missing article or for texts that
+# do not hold the answer. Matched on the lowercased answer; accents kept,
+# since the models write them.
+_ABSTAIN = re.compile(
+    r"non esiste|inesistent|non (?:è|e') (?:previst|presente|contenut|riportat)"
+    r"|non (?:sono|risulta(?:no)?) (?:presenti|riportat|contenut)"
+    r"|non trovo|non (?:è|e') possibile (?:individuare|trovare|rispondere)"
+    r"|non contengono|non (?:si )?trova(?:no)? (?:nei|tra i) testi"
+    r"|non (?:posso|sono in grado di) (?:rispondere|indicare)",
+)
+
+
+# The subset that can only be a refusal. "Non è previsto" also opens right
+# deadline answers ("non è prevista alcuna proroga: il termine è di 60
+# giorni"), so it may not cost a deadline answer its reward.
+_REFUSAL = re.compile(
+    r"non esiste|inesistent|non trovo|non contengono"
+    r"|non (?:è|e') possibile (?:individuare|trovare|rispondere)"
+    r"|non (?:posso|sono in grado di) (?:rispondere|indicare)",
+)
+
+
+# Any "<number> <unit>" in an answer. The exam's own pattern wants the
+# statute's phrasing ("entro", "decorsi"); answers say "il termine è di 60
+# giorni", and a count that misses those would let a list of numbers through.
+_ANY_DEADLINE = re.compile(r"\b(\d+|[a-zà-ù]+)\s+(giorni|giorno|mesi|mese|anni|anno|ore)\b",
+                           re.IGNORECASE)
+
+
+def mentioned_deadlines(answer: str) -> set[tuple[int, str]]:
+    """The distinct deadlines an answer names, digits or words."""
+    found = set()
+    for num, unit in _ANY_DEADLINE.findall(answer):
+        n = _number_of(num)
+        if n:
+            found.add((n, _UNITS[unit.lower()]))
+    return found
+
+
+def abstains(answer: str) -> bool:
+    """Whether the answer says the article or the answer is not there."""
+    return bool(_ABSTAIN.search(answer.lower()))
+
+
+def refuses(answer: str) -> bool:
+    """Whether the answer declines to answer, in words that mean nothing else."""
+    return bool(_REFUSAL.search(answer.lower()))
+
+
+def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> float:
+    """1.0 for a verifiably right answer, 0.0 otherwise.
+
+    Raises ValueError for a kind it cannot check: a question that silently
+    scored 0 whatever the model said would only teach it noise.
+    """
+    if tipo in DEADLINE_TYPES:
+        if not keywords:
+            raise ValueError(f"a {tipo} question needs its deadline keyword")
+        if refuses(answer) or len(mentioned_deadlines(answer)) > MAX_DEADLINES:
+            return 0.0
+        return 1.0 if keyword_coverage(answer, keywords) == 1.0 else 0.0
+    if tipo in ABSTAIN_TYPES:
+        return 1.0 if abstains(answer) and not mentioned_deadlines(answer) else 0.0
+    raise ValueError(f"no verifiable reward for questions of type {tipo!r}")
+
+
+def _text(completion) -> str:
+    """A completion as TRL hands it: a string, or a list of chat messages."""
+    if isinstance(completion, str):
+        return completion
+    return "".join(m.get("content", "") for m in completion if isinstance(m, dict))
+
+
+def answer_reward(completions, tipo, keywords, **_) -> list[float]:
+    """TRL reward function: one score per completion.
+
+    TRL passes the dataset's other columns as keyword lists aligned with the
+    completions, so ``tipo`` and ``keywords`` come from the prompts file
+    written by make_grpo_prompts.py.
+    """
+    return [score_answer(_text(c), t, k) for c, t, k in zip(completions, tipo, keywords)]
