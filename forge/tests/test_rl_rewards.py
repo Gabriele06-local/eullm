@@ -125,3 +125,18 @@ def test_the_prompts_file_is_built_from_the_exam_code_and_leaves_exam_articles_o
     assert f"art. {absent['articolo']}\n" not in absent["prompt"][0]["content"]
     for r in rows:   # every row is gradable
         score_answer("x", r["tipo"], r["keywords"])
+    assert sum(r["tipo"] == "inesistente" for r in rows) <= 0.2 * len(rows) + 1
+
+
+def test_nonexistent_articles_are_capped_and_nothing_else_is_dropped():
+    import importlib.util
+    import random
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_grpo_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_grpo_prompts", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    rows = [{"tipo": "inesistente"}] * 679 + [{"tipo": "termine"}] * 433
+    kept = mod.cap_share(rows, "inesistente", 0.2, random.Random(0))
+    assert sum(r["tipo"] == "termine" for r in kept) == 433
+    assert sum(r["tipo"] == "inesistente" for r in kept) == 108   # 20% of 541
