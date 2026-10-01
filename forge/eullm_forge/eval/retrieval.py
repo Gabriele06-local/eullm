@@ -197,6 +197,9 @@ class NormIndex:
                 heading = last_heading.get(code, "")
             self._arts.append(arts)
             self._headings.append(heading)
+        # By identity, the way search() tells its own hits apart, so a caller
+        # holding a record can ask which articles it belongs to.
+        self._arts_of = {id(r): arts for r, arts in zip(self.records, self._arts)}
         self._docs = []
         for r, heading in zip(self.records, self._headings):
             doc = Counter(tokens(r.get("text", "")))
@@ -272,6 +275,19 @@ class NormIndex:
         what = ", ".join(f"art. {n}" for n in nums)
         return (f"Nota: nella raccolta normativa non è presente {what} "
                 f"({code.replace('_', ' ')}).")
+
+    def articles_of(self, record: dict) -> list[str]:
+        """The articles a record belongs to, continuations resolved.
+
+        ``record_articles`` reads what the chunk itself says, so a chunk that
+        continues an article -- ``article_num`` is "" for the codes parsed out
+        of the Normattiva ZIP, and only the first chunk carries a header --
+        reports no article at all. This is the answer the index works out in
+        ``_arts``, which any caller asking "is this chunk the article I am
+        removing?" has to use: the text of a long article is mostly in its
+        continuation chunks, so those are what BM25 hands back.
+        """
+        return self._arts_of.get(id(record), record_articles(record))
 
     def search(self, question: str, k: int = 3) -> list[dict]:
         """Named article first, then BM25 to fill up to k, without repeats."""
