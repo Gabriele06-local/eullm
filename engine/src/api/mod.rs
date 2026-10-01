@@ -412,92 +412,84 @@ impl AppState {
         // swapped in has its own size, layer count, and (possibly) expert
         // layout. Runs after the unload above so the measured free VRAM is
         // real. Never prompts — same decision order as the `run` startup
-        // flow: MoE auto-sizing first (always resolves), then the dense
-        // split, headless.
+        // flow: projector placement, MoE auto-sizing (always resolves), then
+        // the dense split, headless — all in one `fit::plan_offload`.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
-        let mut gpu_layers = self.gpu_layers;
-        let mut cpu_moe = self.cpu_moe;
-        let mut n_cpu_moe = self.n_cpu_moe;
+        let info = crate::fit::read_gguf_info(&gguf_path);
+        let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
+        let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
+        let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
         // The projector is loaded with the model, always, so sizing has to
         // count it — see `fit::place_mmproj` for where it goes and why.
         let mmproj_bytes = crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref());
-        let mut mmproj_placement = crate::fit::MmprojPlacement::from_flag(self.mmproj_offload);
-        if self.fit {
+        let flags = crate::fit::OffloadFlags {
+            gpu_layers: self.gpu_layers,
+            cpu_moe: self.cpu_moe,
+            n_cpu_moe: self.n_cpu_moe,
+            mmproj_offload: self.mmproj_offload,
+        };
+        let plan = if self.fit {
             // Counted below as reserved; the context the decision model
             // keeps between requests must not show up as used as well.
             self.release_decision_context().await;
-            let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
-            let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
-            let mut reserve_bytes = self
+            // Memory the free-VRAM figure does not show yet: the reserved
+            // companions' requests, and the context every sequential
+            // resident creates per request.
+            let reserve_bytes = self
                 .reserved_embedding_bytes()
                 .await
-                .saturating_add(self.reserved_decision_bytes().await);
-            if self.mmproj_offload.is_none() {
-                mmproj_placement = crate::fit::decide_mmproj_placement(
-                    &gguf_path,
-                    mmproj_bytes,
-                    effective_ctx,
-                    kv_bpe_k,
-                    kv_bpe_v,
-                    reserve_bytes,
-                );
-            }
-            reserve_bytes = reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
-            let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
-                crate::fit::run_moe_fit(&gguf_path, effective_ctx, kv_bpe_k, kv_bpe_v, reserve_bytes)
-            } else {
-                crate::fit::MoeFitDecision::NotMoe
+                .saturating_add(self.reserved_decision_bytes().await)
+                .saturating_add(self.models.read().await.unallocated_reserve());
+            let layout = match (&info, file_size) {
+                (Some(i), size) if size > 0 => {
+                    crate::fit::read_gguf_moe_layout(&gguf_path, size, i.n_layers)
+                }
+                _ => None,
             };
-            match moe_decision {
-                crate::fit::MoeFitDecision::Proceed { n_cpu_moe: computed } if computed > 0 => {
-                    tracing::info!(
-                        "--fit: MoE model — keeping expert tensors on CPU RAM for the \
-                         first {computed} layers so the rest fits in VRAM"
-                    );
-                    n_cpu_moe = computed;
-                    gpu_layers = -1;
-                }
-                crate::fit::MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
-                    tracing::info!(
-                        "--fit: MoE model — even with every expert tensor on CPU RAM the \
-                         rest doesn't fit fully; offloading a reduced layer split ({gl})"
-                    );
-                    cpu_moe = true;
-                    gpu_layers = gl;
-                }
-                _ => match crate::fit::run_fit_headless(
-                    &gguf_path,
-                    self.gpu_layers,
-                    effective_ctx,
-                    self.fit_strict,
-                    kv_bpe_k,
-                    kv_bpe_v,
-                    reserve_bytes,
-                ) {
-                    crate::fit::FitOutcome::Proceed(n) => gpu_layers = n,
-                    crate::fit::FitOutcome::Abort => {
-                        return Err(ModelError::LoadFailed(format!(
-                            "--fit-strict: model '{normalized}' does not fully fit in the \
-                             currently free VRAM; not loading. Retry without --fit-strict \
-                             to allow a partial CPU/GPU split."
-                        )));
-                    }
-                },
+            let plan = crate::fit::plan_offload(
+                crate::fit::vram_bytes(),
+                info.as_ref(),
+                layout.as_ref(),
+                file_size,
+                effective_ctx,
+                kv_bpe_k,
+                kv_bpe_v,
+                reserve_bytes,
+                mmproj_bytes,
+                flags,
+            );
+            plan.print_decision(file_size, self.fit_strict);
+            if self.fit_strict && plan.refused_by_strict() {
+                return Err(ModelError::LoadFailed(format!(
+                    "--fit-strict: model '{normalized}' does not fully fit in the \
+                     currently free VRAM; not loading. Retry without --fit-strict \
+                     to allow a partial CPU/GPU split."
+                )));
             }
-
             // A `--gpu-layers` given at startup is an upper bound for every
             // model this server loads, not a count to apply blindly to a
             // model it was never chosen for.
-            let capped = crate::fit::apply_gpu_layers_ceiling(gpu_layers, self.gpu_layers);
-            if capped != gpu_layers {
+            if plan.capped_from.is_some() {
                 tracing::info!(
-                    "--gpu-layers {}: offloading {capped} layers for {}",
+                    "--gpu-layers {}: offloading {} layers for {}",
                     self.gpu_layers,
+                    plan.gpu_layers,
                     crate::audit::sanitize_for_log(&normalized)
                 );
-                gpu_layers = capped;
             }
-        }
+            Some(plan)
+        } else {
+            None
+        };
+        let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
+            Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+            None => (
+                self.gpu_layers,
+                self.cpu_moe,
+                self.n_cpu_moe,
+                crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
+            ),
+        };
 
         let config = InferenceConfig {
             model_path: gguf_path.clone(),
@@ -584,14 +576,28 @@ impl AppState {
             .map_err(|e| format!("Task join error: {e}"))??;
 
         // ── 3. Install the new model in the slot ─────────────────────
+        // A sequential engine creates its context per request, so the
+        // memory that context takes is free while it is idle; it is held
+        // back from everything sized next to it instead (F5).
+        let unallocated_reserve = match &new_engine {
+            Some(engine) if gpu_layers != 0 => crate::fit::context_reserve_bytes(
+                info.as_ref(),
+                engine.context_size(),
+                kv_bpe_k,
+                kv_bpe_v,
+            ),
+            _ => 0,
+        };
         let snapshot = {
             let mut models = self.models.write().await;
-            let model = models.insert(resident::LoadedModel::new(
+            let mut model = resident::LoadedModel::new(
                 model_name.clone(),
                 gguf_path,
                 new_engine,
                 new_scheduler,
-            ));
+            );
+            model.unallocated_reserve = unallocated_reserve;
+            let model = models.insert(model);
             self.lease(model, keep_alive)
         };
 
@@ -840,10 +846,16 @@ impl AppState {
         }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
 
-        let main_loaded = !self.models.read().await.is_empty();
-        let fits_alongside =
-            fits_in_free_vram(weights_bytes, crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES)
-                .unwrap_or(true);
+        let (main_loaded, unallocated) = {
+            let models = self.models.read().await;
+            (!models.is_empty(), models.unallocated_reserve())
+        };
+        let fits_alongside = fits_in_free_vram(
+            weights_bytes,
+            crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES,
+            unallocated,
+        )
+        .unwrap_or(true);
         if main_loaded && !fits_alongside {
             tracing::info!(
                 "Embedding model {} does not fit alongside the loaded generation model — \
@@ -990,9 +1002,13 @@ impl AppState {
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
 
-        let main_loaded = !self.models.read().await.is_empty();
+        let (main_loaded, unallocated) = {
+            let models = self.models.read().await;
+            (!models.is_empty(), models.unallocated_reserve())
+        };
         let fits_alongside =
-            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0).unwrap_or(true);
+            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0, unallocated)
+                .unwrap_or(true);
         if main_loaded && !fits_alongside {
             tracing::info!(
                 "Decision model {} does not fit alongside the loaded generation model — \
@@ -1273,17 +1289,49 @@ enum Removal {
     IfDue,
 }
 
-/// Free a generation model taken out of the residents. A scheduler is
-/// stopped, and its thread joined on a blocking thread — the join waits for
-/// the decode loop to notice — so its model's memory is free when this
-/// returns.
+/// Free a generation model taken out of the residents, so that its memory
+/// is free when this returns — the next load is sized against what is free.
+///
+/// A scheduler is stopped, and its thread joined on a blocking thread: the
+/// join waits for the decode loop to notice. A sequential engine has no
+/// thread to join; it is freed when the last `Arc` to it goes, and every
+/// request running on it holds one. Those are waited for (F4): taking it out
+/// of the residents used to be all, so the next load measured free VRAM with
+/// the old weights still in it.
 async fn retire(model: resident::LoadedModel) {
     if let Some(handle) = model.scheduler
         && let Err(e) = tokio::task::spawn_blocking(move || handle.shutdown()).await
     {
         tracing::warn!("Failed to join scheduler thread: {e}");
     }
+    if let Some(engine) = model.engine {
+        let released = resident::wait_for_release(
+            &engine,
+            &model.usage,
+            ENGINE_RELEASE_LIMIT,
+            ENGINE_RELEASE_GRACE,
+        )
+        .await;
+        if !released {
+            tracing::warn!(
+                "{} is still held elsewhere — the terminal chat, or a request \
+                 whose client left before it finished; its memory is freed when \
+                 that ends",
+                crate::audit::sanitize_for_log(&model.name)
+            );
+        }
+    }
 }
+
+/// The longest a sequential engine's in-flight requests are waited for
+/// before its memory is given up on (see `retire`): a load waits behind it.
+const ENGINE_RELEASE_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long a sequential engine still held after its last request ended is
+/// waited for: the moment the blocking thread that ran the request takes to
+/// let go. A holder that outlasts it is not a request — `eullm run`'s
+/// terminal chat holds the launch model for as long as it runs.
+const ENGINE_RELEASE_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Find the first `.gguf` file in a directory.
 fn find_gguf_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
@@ -1312,6 +1360,33 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
+    }
+}
+
+#[cfg(test)]
+mod fits_tests {
+    use super::fits_in;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+
+    /// A sequential generation model creates its context per request, so
+    /// while it is idle that memory looks free. An embedder sized into it
+    /// left the next image request without room for its context (F5).
+    #[test]
+    fn a_sequential_resident_reserves_its_context_for_a_companion() {
+        // 16 GiB card, 8 GiB free; the floor keeps 12% of it back.
+        let card = (8 * GIB, 16 * GIB);
+        let embedder = 2 * GIB;
+        assert_eq!(fits_in(card, embedder, 256 * MIB, 0), Some(true));
+        let vision_model_context = 4 * GIB;
+        assert_eq!(
+            fits_in(card, embedder, 256 * MIB, vision_model_context),
+            Some(false)
+        );
+        // Saturating, not wrapping, when the reservations exceed what is free.
+        assert_eq!(fits_in(card, 0, 256 * MIB, 64 * GIB), Some(true));
+        assert_eq!(fits_in(card, 1, 256 * MIB, 64 * GIB), Some(false));
     }
 }
 
@@ -1357,12 +1432,34 @@ mod same_file_tests {
 /// decides what "unknown" means for it; `ensure_embedding_model` treats it as
 /// "assume yes" so a build that cannot measure VRAM behaves as it always has,
 /// letting a real allocation failure surface as a normal load error.
-fn fits_in_free_vram(additional_bytes: u64, compute_reserve_bytes: u64) -> Option<bool> {
-    let (free, total) = crate::fit::vram_bytes()?;
+///
+/// `unallocated_bytes` is memory the free figure shows but is already
+/// spoken for: the contexts sequential residents create per request (F5).
+fn fits_in_free_vram(
+    additional_bytes: u64,
+    compute_reserve_bytes: u64,
+    unallocated_bytes: u64,
+) -> Option<bool> {
+    fits_in(
+        crate::fit::vram_bytes()?,
+        additional_bytes,
+        compute_reserve_bytes,
+        unallocated_bytes,
+    )
+}
+
+/// [`fits_in_free_vram`] against a given `(free, total)`.
+fn fits_in(
+    (free, total): (u64, u64),
+    additional_bytes: u64,
+    compute_reserve_bytes: u64,
+    unallocated_bytes: u64,
+) -> Option<bool> {
     let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
     let usable = free
         .saturating_sub(floor)
-        .saturating_sub(compute_reserve_bytes);
+        .saturating_sub(compute_reserve_bytes)
+        .saturating_sub(unallocated_bytes);
     Some(additional_bytes <= usable)
 }
 
@@ -2008,8 +2105,20 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
             .launch_model
             .as_ref()
             .map_or_else(|| PathBuf::from(&name), |(_, path)| path.clone());
+        // A sequential launch model reserves its per-request context like
+        // any other (see `LoadedModel::unallocated_reserve`).
+        let unallocated_reserve = match &cfg.engine {
+            Some(engine) if cfg.gpu_layers != 0 => crate::fit::context_reserve_bytes(
+                crate::fit::read_gguf_info(&path).as_ref(),
+                engine.context_size(),
+                crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_k),
+                crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_v),
+            ),
+            _ => 0,
+        };
         let mut launch = resident::LoadedModel::new(name, path, cfg.engine, cfg.scheduler);
         launch.launch = true;
+        launch.unallocated_reserve = unallocated_reserve;
         models.insert(launch);
     }
 

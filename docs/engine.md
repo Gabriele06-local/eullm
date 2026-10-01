@@ -262,6 +262,7 @@ curl http://localhost:11434/api/generate \
 **Behavior:**
 
 - In-flight requests on the old model complete normally (they hold cloned handles)
+- A model served sequentially — every multimodal model, and any with `--batch-size 0` — is freed only when the requests running on it end, so a swap waits for them, up to 30 seconds, before the next model is sized against free VRAM
 - The new model loads on a blocking thread, then atomically replaces the slot
 - The model name must be an imported model (`eullm import-ollama`) or a local GGUF path
 

@@ -174,6 +174,11 @@ pub(crate) struct LoadedModel {
     /// The model `eullm run` started with, whose terminal chat holds it:
     /// evicted after every other.
     pub(crate) launch: bool,
+    /// VRAM this model will take that the free-VRAM figure does not show:
+    /// a sequential engine's context, created per request (see
+    /// `fit::context_reserve_bytes`). 0 for a scheduler, whose context is
+    /// allocated with the model.
+    pub(crate) unallocated_reserve: u64,
     pub(crate) usage: Arc<Usage>,
 }
 
@@ -193,6 +198,7 @@ impl LoadedModel {
             engine,
             scheduler,
             launch: false,
+            unallocated_reserve: 0,
             usage: Usage::new(),
         }
     }
@@ -264,9 +270,52 @@ impl ResidentModels {
         self.models.is_empty()
     }
 
+    /// VRAM the residents will take that the free-VRAM figure does not show
+    /// (see [`LoadedModel::unallocated_reserve`]): what any load beside them
+    /// must leave free.
+    pub(crate) fn unallocated_reserve(&self) -> u64 {
+        self.models
+            .iter()
+            .map(|m| m.unallocated_reserve)
+            .fold(0, u64::saturating_add)
+    }
+
     /// The residents as [`next_step`] and [`eviction_order`] read them.
     pub(crate) fn views(&self) -> Vec<ResidentView> {
         self.models.iter().map(LoadedModel::view).collect()
+    }
+}
+
+/// Wait until `held` is the last reference to what it points to — every
+/// request running on it has let go — and say whether it is. Gives up at
+/// `limit`, or `grace` after the model's last lease was released: a holder
+/// still there by then is not a request.
+pub(crate) async fn wait_for_release<T>(
+    held: &Arc<T>,
+    usage: &Usage,
+    limit: Duration,
+    grace: Duration,
+) -> bool {
+    const POLL: Duration = Duration::from_millis(20);
+    let started = Instant::now();
+    let mut idle_since = None;
+    loop {
+        if Arc::strong_count(held) == 1 {
+            return true;
+        }
+        let now = Instant::now();
+        if usage.view().in_flight == 0 {
+            let since = *idle_since.get_or_insert(now);
+            if now.duration_since(since) >= grace {
+                return false;
+            }
+        } else {
+            idle_since = None;
+        }
+        if now.duration_since(started) >= limit {
+            return false;
+        }
+        tokio::time::sleep(POLL).await;
     }
 }
 
@@ -568,6 +617,89 @@ mod tests {
         let removed = residents.remove(2).expect("there");
         assert_eq!(removed.name, "second");
         assert!(residents.get(2).is_none());
+    }
+
+    /// A sequential engine is freed when the last request running on it lets
+    /// go of it; taking it out of the residents is not enough (F4).
+    #[tokio::test]
+    async fn an_engine_is_waited_for_until_its_last_request_lets_go() {
+        let usage = Usage::new();
+        let idle = notify();
+        let engine = Arc::new(());
+        let request = Arc::clone(&engine);
+        let lease = usage.lease(KeepAlive::Default, None, &idle);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            drop(lease);
+            // The blocking thread that ran it lets go a moment later.
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            drop(request);
+        });
+        let started = Instant::now();
+        let released = wait_for_release(
+            &engine,
+            &usage,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+        )
+        .await;
+        assert!(released);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+        assert_eq!(Arc::strong_count(&engine), 1);
+    }
+
+    /// `eullm run`'s terminal chat holds the launch model for as long as it
+    /// runs: with no request in flight, a holder is waited for only briefly.
+    #[tokio::test]
+    async fn a_holder_that_is_not_a_request_is_waited_for_only_briefly() {
+        let usage = Usage::new();
+        let engine = Arc::new(());
+        let _terminal_chat = Arc::clone(&engine);
+        let started = Instant::now();
+        let released = wait_for_release(
+            &engine,
+            &usage,
+            Duration::from_secs(5),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(!released);
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(100) && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_request_that_does_not_end_is_waited_for_up_to_the_limit() {
+        let usage = Usage::new();
+        let idle = notify();
+        let engine = Arc::new(());
+        let _running = Arc::clone(&engine);
+        let _lease = usage.lease(KeepAlive::Default, None, &idle);
+        let started = Instant::now();
+        let released = wait_for_release(
+            &engine,
+            &usage,
+            Duration::from_millis(150),
+            Duration::from_millis(20),
+        )
+        .await;
+        assert!(!released);
+        assert!(started.elapsed() >= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn the_residents_reserve_what_their_contexts_will_take() {
+        let mut residents = ResidentModels::default();
+        assert_eq!(residents.unallocated_reserve(), 0);
+        for (name, reserve) in [("scheduler", 0), ("vision", 3 << 30), ("text", 1 << 30)] {
+            let mut model = LoadedModel::new(name.into(), name.into(), None, None);
+            model.unallocated_reserve = reserve;
+            residents.insert(model);
+        }
+        assert_eq!(residents.unallocated_reserve(), 4 << 30);
     }
 
     /// `keep_alive` comes from a request body, and a Duration that fits is

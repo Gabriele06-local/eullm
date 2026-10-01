@@ -1456,6 +1456,232 @@ pub fn decide_mmproj_placement(
     )
 }
 
+/// The flags a load is sized under: the user's own, never a split worked
+/// out for some other model (see `engine/CLAUDE.md`).
+#[derive(Debug, Clone, Copy)]
+pub struct OffloadFlags {
+    /// `--gpu-layers`: a ceiling on whatever sizing decides; `-1` for none.
+    pub gpu_layers: i32,
+    /// `--cpu-moe`.
+    pub cpu_moe: bool,
+    /// `--n-cpu-moe`.
+    pub n_cpu_moe: u32,
+    /// `--mmproj-offload` / `--no-mmproj-offload`, or `None` to let sizing
+    /// place the projector.
+    pub mmproj_offload: Option<bool>,
+}
+
+/// What sizing decided, before the `--gpu-layers` ceiling: what the load
+/// log reports, and what `--fit-strict` judges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffloadBasis {
+    /// A MoE model whose first `n_cpu_moe` layers keep their experts in RAM,
+    /// every whole layer on the GPU.
+    MoeExperts { n_cpu_moe: u32 },
+    /// A MoE model with every expert in RAM, and still only this split of
+    /// the rest on the GPU.
+    MoeAllExpertsAndPartial { gpu_layers: i32 },
+    /// The dense sizer's decision, which also stands for a MoE model that
+    /// fits whole and for one whose expert offload the user set.
+    Dense(FitDecision),
+}
+
+/// How one model is to be loaded: one plan, decided before the load, which
+/// the load then uses as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OffloadPlan {
+    /// Layers on the GPU, after the `--gpu-layers` ceiling; `-1` for all.
+    pub gpu_layers: i32,
+    pub cpu_moe: bool,
+    pub n_cpu_moe: u32,
+    pub mmproj: MmprojPlacement,
+    pub basis: OffloadBasis,
+    /// The free VRAM the model was sized against, every reservation taken
+    /// out — the figure the load log reports.
+    pub free_vram: Option<u64>,
+    /// What sizing put on the GPU when the `--gpu-layers` ceiling lowered
+    /// it, for the log line that says so.
+    pub capped_from: Option<i32>,
+}
+
+/// Size one load: where the projector goes, then MoE expert offload, then
+/// the dense split, then the `--gpu-layers` ceiling — the order every load
+/// of the API server has always followed, now as one pure function over the
+/// probed VRAM and the model's header, so that a later step can ask whether
+/// the plan fits without loading anything. Prints nothing; see
+/// [`OffloadPlan::print_decision`].
+///
+/// `reserve_bytes` is taken out of free VRAM first: the memory reserved
+/// companions and resident models will need that the free-VRAM figure does
+/// not show yet. The projector's own footprint is added to it when the
+/// projector goes on the GPU, before the text model is sized.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_offload(
+    vram: Option<(u64, u64)>,
+    info: Option<&GgufInfo>,
+    layout: Option<&MoeLayout>,
+    file_size: u64,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    reserve_bytes: u64,
+    mmproj_bytes: u64,
+    flags: OffloadFlags,
+) -> OffloadPlan {
+    let without = |reserved: u64| vram.map(|(free, total)| (free.saturating_sub(reserved), total));
+    let mmproj = match flags.mmproj_offload {
+        None if mmproj_bytes > 0 => place_mmproj(
+            without(reserve_bytes),
+            info,
+            layout,
+            file_size,
+            ctx_size,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+            mmproj_bytes,
+        ),
+        forced => MmprojPlacement::from_flag(forced),
+    };
+    let vram = without(reserve_bytes.saturating_add(mmproj.reserve(mmproj_bytes)));
+
+    let moe = if flags.cpu_moe || flags.n_cpu_moe > 0 {
+        MoeFitDecision::NotMoe
+    } else {
+        compute_moe_fit(
+            vram,
+            info,
+            layout,
+            ctx_size,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+        )
+    };
+    let (gpu_layers, cpu_moe, n_cpu_moe, basis) = match moe {
+        MoeFitDecision::Proceed { n_cpu_moe } if n_cpu_moe > 0 => (
+            -1,
+            flags.cpu_moe,
+            n_cpu_moe,
+            OffloadBasis::MoeExperts { n_cpu_moe },
+        ),
+        MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers } => (
+            gpu_layers,
+            true,
+            flags.n_cpu_moe,
+            OffloadBasis::MoeAllExpertsAndPartial { gpu_layers },
+        ),
+        _ => {
+            let decision = compute_fit(
+                vram,
+                info,
+                file_size,
+                ctx_size,
+                kv_bytes_per_elem_k,
+                kv_bytes_per_elem_v,
+            );
+            let gpu_layers = match decision {
+                FitDecision::FitsFully => -1,
+                FitDecision::Partial { layers, .. } => layers,
+                FitDecision::Unknown { .. } => flags.gpu_layers,
+            };
+            (
+                gpu_layers,
+                flags.cpu_moe,
+                flags.n_cpu_moe,
+                OffloadBasis::Dense(decision),
+            )
+        }
+    };
+    let capped = apply_gpu_layers_ceiling(gpu_layers, flags.gpu_layers);
+    OffloadPlan {
+        gpu_layers: capped,
+        cpu_moe,
+        n_cpu_moe,
+        mmproj,
+        basis,
+        free_vram: vram.map(|(free, _)| free),
+        capped_from: (capped != gpu_layers).then_some(gpu_layers),
+    }
+}
+
+impl OffloadPlan {
+    /// `--fit-strict` loads only a model the dense sizer put wholly on the
+    /// GPU: it refuses a split, and a model it could not size. A MoE plan
+    /// always resolves to a loadable configuration and is never refused.
+    pub fn refused_by_strict(&self) -> bool {
+        matches!(
+            self.basis,
+            OffloadBasis::Dense(FitDecision::Partial { .. } | FitDecision::Unknown { .. })
+        )
+    }
+
+    /// The lines sizing has always printed for its decision, on the streams
+    /// it has always used, so a load logs what it did as before: nothing for
+    /// a model it could not size unless `--fit-strict` refuses it then.
+    /// `file_size` is the model's, for the sizes it states.
+    pub fn print_decision(&self, file_size: u64, strict: bool) {
+        let free = self.free_vram.unwrap_or(0);
+        match &self.basis {
+            OffloadBasis::MoeExperts { n_cpu_moe } => tracing::info!(
+                "--fit: MoE model — keeping expert tensors on CPU RAM for the \
+                 first {n_cpu_moe} layers so the rest fits in VRAM"
+            ),
+            OffloadBasis::MoeAllExpertsAndPartial { gpu_layers } => tracing::info!(
+                "--fit: MoE model — even with every expert tensor on CPU RAM the \
+                 rest doesn't fit fully; offloading a reduced layer split ({gpu_layers})"
+            ),
+            OffloadBasis::Dense(FitDecision::FitsFully) => {
+                if let Some(v) = self.free_vram {
+                    println!(
+                        "[EULLM] --fit: model ({}) fits fully in {} free VRAM → offloading all layers.",
+                        gib(file_size),
+                        gib(v),
+                    );
+                }
+            }
+            OffloadBasis::Dense(FitDecision::Partial { layers, n_layers }) if strict => {
+                eprintln!(
+                    "[EULLM] --fit-strict: model needs ~{} but only {} VRAM is free; not loading.",
+                    gib(file_size),
+                    gib(free),
+                );
+                eprintln!(
+                    "[EULLM] Retry without --fit-strict to offload {layers}/{n_layers} layers (rest in RAM)."
+                );
+            }
+            OffloadBasis::Dense(FitDecision::Partial { layers, n_layers }) => eprintln!(
+                "[EULLM] Model larger than free VRAM ({} free, model {}): \
+                 offloading {layers}/{n_layers} layers, the rest runs in RAM (slower). \
+                 Set --gpu-layers to choose yourself, or --no-fit to disable sizing.",
+                gib(free),
+                gib(file_size),
+            ),
+            OffloadBasis::Dense(FitDecision::Unknown { reason }) if strict => {
+                eprintln!("[EULLM] --fit could not size the model: {reason}.");
+                eprintln!(
+                    "[EULLM] --fit-strict set: refusing to load without a reliable estimate."
+                );
+            }
+            OffloadBasis::Dense(FitDecision::Unknown { .. }) => {}
+        }
+    }
+}
+
+/// What a sequential engine's context takes when a request creates it: its
+/// KV cache at `ctx_size` plus the flat compute reserve. The engine builds a
+/// context per request, so while it is idle this memory is free in the
+/// figure every other load is sized against — and an embedder or a second
+/// model sized into it leaves the next request without room for its context.
+/// It is kept reserved instead.
+pub(crate) fn context_reserve_bytes(
+    info: Option<&GgufInfo>,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+) -> u64 {
+    kv_cache_bytes(info, ctx_size, kv_bytes_per_elem_k, kv_bytes_per_elem_v)
+        .saturating_add(COMPUTE_BUFFER_RESERVE_BYTES as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1936,6 +2162,301 @@ mod tests {
             );
             prop_assert!(matches!(d, FitDecision::Unknown { .. }), "{n} layers gave {d:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_offload_tests {
+    use super::*;
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+    const MIB: u64 = 1024 * 1024;
+    const F16: (f64, f64) = (2.0, 2.0);
+
+    fn attention(n_layers: u32, n_head_kv: u32) -> GgufInfo {
+        GgufInfo {
+            n_layers,
+            n_embd: None,
+            n_head: None,
+            n_head_kv: Some(n_head_kv),
+            key_length: Some(128),
+            value_length: Some(128),
+            full_attention_interval: None,
+            architecture: Some("qwen3".into()),
+        }
+    }
+
+    /// A dense 14B: 40 layers, 160 KiB of F16 KV per token.
+    fn dense() -> (GgufInfo, u64) {
+        (attention(40, 8), 8 * GIB + 400 * MIB)
+    }
+
+    /// A 30B-A3B-shaped MoE: 48 layers, 2 GiB outside the experts and
+    /// 400 MiB of experts per layer.
+    fn moe() -> (GgufInfo, MoeLayout, u64) {
+        let layout = MoeLayout {
+            non_expert_bytes: 2 * GIB,
+            expert_bytes_per_layer: vec![400 * MIB; 48],
+        };
+        (attention(48, 4), layout, 2 * GIB + 48 * 400 * MIB)
+    }
+
+    fn flags() -> OffloadFlags {
+        OffloadFlags {
+            gpu_layers: -1,
+            cpu_moe: false,
+            n_cpu_moe: 0,
+            mmproj_offload: None,
+        }
+    }
+
+    /// The sizing every API load ran before `plan_offload`, step for step:
+    /// `decide_mmproj_placement`, `run_moe_fit`, `run_fit_headless` and the
+    /// ceiling, each against free VRAM less the reservations so far.
+    #[allow(clippy::too_many_arguments)]
+    fn sized_as_before(
+        vram: Option<(u64, u64)>,
+        info: Option<&GgufInfo>,
+        layout: Option<&MoeLayout>,
+        file_size: u64,
+        ctx: u32,
+        reserve: u64,
+        mmproj_bytes: u64,
+        flags: OffloadFlags,
+    ) -> (i32, bool, u32, MmprojPlacement) {
+        let less = |r: u64| vram.map(|(free, total)| (free.saturating_sub(r), total));
+        let mut cpu_moe = flags.cpu_moe;
+        let mut n_cpu_moe = flags.n_cpu_moe;
+        let mut placement = MmprojPlacement::from_flag(flags.mmproj_offload);
+        let mut reserve = reserve;
+        if flags.mmproj_offload.is_none() {
+            placement = if mmproj_bytes == 0 {
+                MmprojPlacement::FollowText
+            } else {
+                place_mmproj(
+                    less(reserve),
+                    info,
+                    layout,
+                    file_size,
+                    ctx,
+                    F16.0,
+                    F16.1,
+                    mmproj_bytes,
+                )
+            };
+        }
+        reserve += placement.reserve(mmproj_bytes);
+        let moe = if !cpu_moe && n_cpu_moe == 0 {
+            compute_moe_fit(less(reserve), info, layout, ctx, F16.0, F16.1)
+        } else {
+            MoeFitDecision::NotMoe
+        };
+        let gpu_layers = match moe {
+            MoeFitDecision::Proceed {
+                n_cpu_moe: computed,
+            } if computed > 0 => {
+                n_cpu_moe = computed;
+                -1
+            }
+            MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
+                cpu_moe = true;
+                gl
+            }
+            _ => match compute_fit(less(reserve), info, file_size, ctx, F16.0, F16.1) {
+                FitDecision::FitsFully => -1,
+                FitDecision::Partial { layers, .. } => layers,
+                FitDecision::Unknown { .. } => flags.gpu_layers,
+            },
+        };
+        (
+            apply_gpu_layers_ceiling(gpu_layers, flags.gpu_layers),
+            cpu_moe,
+            n_cpu_moe,
+            placement,
+        )
+    }
+
+    #[test]
+    fn plan_offload_decides_what_every_load_decided_before() {
+        let (dense_info, dense_size) = dense();
+        let (moe_info, moe_layout, moe_size) = moe();
+        let models: [(Option<&GgufInfo>, Option<&MoeLayout>, u64); 3] = [
+            (Some(&dense_info), None, dense_size),
+            (Some(&moe_info), Some(&moe_layout), moe_size),
+            (None, None, dense_size),
+        ];
+        let flag_sets = [
+            flags(),
+            OffloadFlags {
+                gpu_layers: 20,
+                ..flags()
+            },
+            OffloadFlags {
+                cpu_moe: true,
+                ..flags()
+            },
+            OffloadFlags {
+                n_cpu_moe: 10,
+                ..flags()
+            },
+            OffloadFlags {
+                mmproj_offload: Some(true),
+                ..flags()
+            },
+            OffloadFlags {
+                mmproj_offload: Some(false),
+                ..flags()
+            },
+        ];
+        let mut cases = 0;
+        for (info, layout, file_size) in models {
+            for flags in flag_sets {
+                for mmproj_bytes in [0, 1200 * MIB] {
+                    for reserve in [0, GIB] {
+                        let mut cards = vec![None];
+                        cards.extend((1..=96).map(|q| Some((q * 256 * MIB, 24 * GIB))));
+                        for vram in cards {
+                            for ctx in [4096, 32768] {
+                                let plan = plan_offload(
+                                    vram,
+                                    info,
+                                    layout,
+                                    file_size,
+                                    ctx,
+                                    F16.0,
+                                    F16.1,
+                                    reserve,
+                                    mmproj_bytes,
+                                    flags,
+                                );
+                                let before = sized_as_before(
+                                    vram,
+                                    info,
+                                    layout,
+                                    file_size,
+                                    ctx,
+                                    reserve,
+                                    mmproj_bytes,
+                                    flags,
+                                );
+                                assert_eq!(
+                                    (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+                                    before,
+                                    "{vram:?} {flags:?} mmproj {mmproj_bytes} reserve {reserve} \
+                                     ctx {ctx} moe {}",
+                                    layout.is_some()
+                                );
+                                cases += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(cases > 10_000, "{cases}");
+    }
+
+    #[test]
+    fn the_plan_says_what_it_decided_and_what_strict_refuses() {
+        let (info, file_size) = dense();
+        let plan = |vram, flags| {
+            plan_offload(
+                vram,
+                Some(&info),
+                None,
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+                0,
+                0,
+                flags,
+            )
+        };
+
+        let whole = plan(Some((15 * GIB, 16 * GIB)), flags());
+        assert_eq!(whole.basis, OffloadBasis::Dense(FitDecision::FitsFully));
+        assert_eq!((whole.gpu_layers, whole.capped_from), (-1, None));
+        assert_eq!(whole.free_vram, Some(15 * GIB));
+        assert!(!whole.refused_by_strict());
+
+        let split = plan(Some((6 * GIB, 16 * GIB)), flags());
+        assert!(matches!(
+            split.basis,
+            OffloadBasis::Dense(FitDecision::Partial { .. })
+        ));
+        assert!(split.gpu_layers > 0 && split.gpu_layers < 40);
+        assert!(split.refused_by_strict());
+
+        let unknown = plan(
+            None,
+            OffloadFlags {
+                gpu_layers: 12,
+                ..flags()
+            },
+        );
+        assert!(matches!(
+            unknown.basis,
+            OffloadBasis::Dense(FitDecision::Unknown { .. })
+        ));
+        assert_eq!(unknown.gpu_layers, 12, "the user's --gpu-layers, as given");
+        assert!(unknown.refused_by_strict());
+
+        let capped = plan(
+            Some((15 * GIB, 16 * GIB)),
+            OffloadFlags {
+                gpu_layers: 20,
+                ..flags()
+            },
+        );
+        assert_eq!((capped.gpu_layers, capped.capped_from), (20, Some(-1)));
+    }
+
+    #[test]
+    fn a_moe_plan_moves_experts_before_layers_and_is_never_refused() {
+        let (info, layout, file_size) = moe();
+        let plan = |free| {
+            plan_offload(
+                Some((free, 16 * GIB)),
+                Some(&info),
+                Some(&layout),
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+                0,
+                0,
+                flags(),
+            )
+        };
+        let experts = plan(14 * GIB);
+        match experts.basis {
+            OffloadBasis::MoeExperts { n_cpu_moe } => {
+                assert!(n_cpu_moe > 0 && n_cpu_moe < 48);
+                assert_eq!((experts.gpu_layers, experts.n_cpu_moe), (-1, n_cpu_moe));
+            }
+            other => panic!("expected expert offload, got {other:?}"),
+        }
+        assert!(!experts.refused_by_strict());
+
+        let starved = plan(3 * GIB);
+        assert!(matches!(
+            starved.basis,
+            OffloadBasis::MoeAllExpertsAndPartial { .. }
+        ));
+        assert!(starved.cpu_moe);
+        assert!(!starved.refused_by_strict());
+    }
+
+    #[test]
+    fn a_sequential_engine_reserves_its_kv_cache_and_compute_buffer() {
+        // Qwen3-0.6B: 28 layers, 8 KV heads of 128 — 112 KiB per token.
+        let info = attention(28, 8);
+        assert_eq!(
+            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1),
+            896 * MIB + 320 * MIB
+        );
+        assert_eq!(context_reserve_bytes(None, 8192, F16.0, F16.1), 320 * MIB);
     }
 }
 

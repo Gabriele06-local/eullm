@@ -315,3 +315,72 @@ async fn real_model_one_model_swaps_exactly_as_before() {
         );
     }
 }
+
+/// A sequential engine — every multimodal model, and `--batch-size 0` — is
+/// freed when the last request running on it lets go. A swap used to take it
+/// out of the slot and load the next model at once, sized against VRAM that
+/// still held it. It waits now: the answer streaming from the old model is
+/// finished in full, and only then is the new model loaded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_swap_waits_for_a_sequential_engine_to_be_released() {
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.batch_size = 0;
+        state.ctx_size = 4096;
+    })
+    .await;
+
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/generate", server.base))
+        .json(&json!({
+            "model": "tiny-a", "prompt": "Once upon a time", "stream": true,
+            "options": { "num_predict": 2000 },
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let mut body = response.bytes_stream();
+    let first = body.next().await.expect("a first chunk").expect("chunk");
+    assert!(!first.is_empty());
+
+    let swap = {
+        let base = server.base.clone();
+        tokio::spawn(async move {
+            let response = reqwest::Client::new()
+                .post(format!("{base}/api/generate"))
+                .json(&json!({
+                    "model": "tiny-b", "prompt": "Once", "stream": false,
+                    "options": { "num_predict": 4 },
+                }))
+                .send()
+                .await
+                .expect("request");
+            let status = response.status();
+            let line: Value = response.json().await.expect("json");
+            (status, line, Instant::now())
+        })
+    };
+
+    let mut text = String::from_utf8_lossy(&first).into_owned();
+    while let Some(chunk) = body.next().await {
+        text.push_str(&String::from_utf8_lossy(&chunk.expect("chunk")));
+    }
+    let a_ended = Instant::now();
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| serde_json::from_str(l).expect("a JSON line"))
+        .collect();
+    assert_finished(&lines);
+
+    let (status, line, b_answered) = swap.await.expect("the swap");
+    assert_eq!(status, 200, "{line}");
+    assert_finished(&[line]);
+    assert!(
+        b_answered >= a_ended,
+        "tiny-b answered {:?} before tiny-a's answer was over",
+        a_ended - b_answered
+    );
+    assert_eq!(server.loaded().await, ["tiny-b"]);
+}
