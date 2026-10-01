@@ -101,7 +101,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--keep-alive` | (unset) | Idle-unload a model this many seconds/minutes/hours after its last use (e.g. `5m`). Unset = never automatic; a request's own `keep_alive` field overrides it for that load. Applies to the generation, embedding and decision models independently. For a generation model the time counts from the end of its last request, and a model is never unloaded while a request is using it |
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
 | `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
-| `--max-loaded-models` | `1` | How many generation models stay loaded at once (1–16); embedding and decision models are not counted. Past it, the least recently used idle model is unloaded; a model answering requests is never unloaded to make room. See [Several models at once](#several-models-at-once) |
+| `--max-loaded-models` | `1` | How many generation models stay loaded at once (1–16); embedding and decision models are not counted. Past it, the least recently used idle model is unloaded; above 1, a model answering requests is never unloaded to make room. At 1, a request for another model replaces the loaded one, as before. See [Several models at once](#several-models-at-once) |
 | `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
@@ -322,7 +322,9 @@ How a model finds its place:
   the model `eullm run` started with goes last.
 - **A model answering requests is never unloaded to make room.** When every
   model that could make room is busy, the load waits up to 120 seconds for one
-  to finish, then answers 503 with `Retry-After: 5`.
+  to finish, then answers 503 with `Retry-After: 5`. This holds from a limit
+  of 2: at 1, the default, a request for another model replaces the loaded
+  one even mid-answer, as it always did.
 - **A model loads beside others only if it fits whole** on the GPU in what
   they leave free: every layer, and its projector. Otherwise models are
   unloaded until it fits, or until it is alone, when it is sized like any
@@ -434,9 +436,13 @@ Start with `--batch-size 4` for the best per-request latency. Increase when your
 The Engine supports hot-swapping models at runtime. When a request specifies a different `model`, the server automatically:
 
 1. **Shuts down** the old scheduler thread (waits for it to fully exit)
-2. **Frees VRAM** — the old model, KV cache, and LlamaBackend are destroyed
+2. **Frees VRAM** — the old model and its KV cache are destroyed
 3. **Loads** the new model with the requested configuration
 4. **Resumes** serving requests on the new model
+
+That is with one model at a time, the default. With `--max-loaded-models`
+above 1, a model is unloaded only when the new one needs its place or its
+memory — see [Several models at once](#several-models-at-once).
 
 ### Basic swap (via model field)
 
