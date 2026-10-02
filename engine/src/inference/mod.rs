@@ -983,6 +983,15 @@ pub struct GenerateRequest {
     /// When true, the prompt is used as-is without adding BOS token.
     /// Required for raw ChatML prompts that already contain special tokens.
     pub raw: bool,
+    /// Whether the prompt may start from what a slot's KV cache holds from
+    /// an earlier request (llama.cpp server's `cache_prompt`). On a GPU the
+    /// numbers a prompt produces depend on how many of its tokens are
+    /// decoded together, so the same request can get different last digits,
+    /// and at temperature 0 eventually different words, depending on what
+    /// the slot held before. `false` decodes the whole prompt every time:
+    /// slower, but an answer that reproduces. Engines that build a context
+    /// per request (multimodal, `--batch-size 0`) reuse nothing anyway.
+    pub cache_prompt: bool,
 }
 
 impl Default for GenerateRequest {
@@ -1005,6 +1014,7 @@ impl Default for GenerateRequest {
             num_ctx: None,
             grammar: None,
             raw: false,
+            cache_prompt: true,
         }
     }
 }

@@ -890,3 +890,273 @@ async fn real_model_every_resident_is_listed_with_its_own_expiry() {
         "{ids:?}"
     );
 }
+
+/// With `--default-model`, a request that names no model is answered by that
+/// model, loaded for it beside the others, and not by the one used last.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_request_naming_no_model_goes_to_the_default_one() {
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        let path = state
+            .store
+            .gguf_path("tiny-b")
+            .expect("tiny-b in the store");
+        state.default_model = Some(super::NamedModel {
+            name: "tiny-b".into(),
+            path,
+        });
+    })
+    .await;
+    let (status, _) = server.generate(short("tiny-a")).await;
+    assert_eq!(status, 200);
+    let unnamed = json!({
+        "prompt": "Once upon a time", "stream": false, "options": { "num_predict": 8 },
+    });
+    let (status, lines) = server.generate(unnamed.clone()).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_finished(&lines);
+    assert_eq!(lines[0]["model"], "tiny-b", "not tiny-a, the one used last");
+    assert_eq!(server.loaded().await, ["tiny-a", "tiny-b"]);
+    let kept = server.load_id("tiny-b").await;
+
+    // Loaded now: the same load answers.
+    let (status, lines) = server.generate(unnamed).await;
+    assert_eq!(status, 200, "{lines:?}");
+    assert_eq!(lines[0]["model"], "tiny-b");
+    assert_eq!(server.load_id("tiny-b").await, kept);
+}
+
+// ── Routing: `"model": "auto"` ───────────────────────────────────────────
+//
+// These also need a decision model: Qwen3-0.6B reads a choice as any
+// instruction-tuned model does.
+//
+//     EULLM_DECISION_TEST_MODEL=/path/to/Qwen3-0.6B-Q8_0.gguf
+
+/// The decision model in `EULLM_DECISION_TEST_MODEL`, loaded on one thread.
+async fn decision_slot() -> super::DecisionSlot {
+    let path = std::env::var("EULLM_DECISION_TEST_MODEL")
+        .expect("set EULLM_DECISION_TEST_MODEL to a GGUF file");
+    let model = tokio::task::spawn_blocking(move || {
+        crate::inference::decision::DecisionModel::load(
+            Path::new(&path),
+            1,
+            crate::inference::decision::DEFAULT_DECISION_CTX,
+            true,
+            crate::inference::test_backend(),
+        )
+    })
+    .await
+    .expect("the load task")
+    .expect("load the decision model");
+    super::DecisionSlot {
+        model_name: "test-decision".into(),
+        model: Arc::new(model),
+        is_reserved_companion: true,
+        reserve_bytes: 0,
+    }
+}
+
+/// `"model": "auto"` between `tiny-a` and `tiny-b`, the latter the fallback.
+fn route_table(state: &AppState, timeout: Duration) -> super::route::RouteTable {
+    let candidate = |name: &str, description: &str| super::route::RouteCandidate {
+        name: name.to_string(),
+        path: state.store.gguf_path(name).expect("in the store"),
+        description: description.to_string(),
+        source: super::route::DescriptionSource::Flag,
+        has_projector: false,
+    };
+    super::route::RouteTable {
+        candidates: vec![
+            candidate("tiny-a", "Short everyday requests and simple facts"),
+            candidate(
+                "tiny-b",
+                "Multi-step reasoning, maths, code and long answers",
+            ),
+        ],
+        fallback: 1,
+        timeout,
+    }
+}
+
+impl TestServer {
+    /// POST `body` to `/api/route`.
+    async fn route(&self, body: Value) -> (reqwest::StatusCode, Value) {
+        let response = reqwest::Client::new()
+            .post(format!("{}/api/route", self.base))
+            .json(&body)
+            .send()
+            .await
+            .expect("request");
+        let status = response.status();
+        (status, response.json().await.expect("json"))
+    }
+}
+
+/// The decision model chooses between the two, with probabilities that sum
+/// to one, and nothing is loaded for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs GGUF models in EULLM_GENERATION_TEST_MODEL and EULLM_DECISION_TEST_MODEL"]
+async fn real_model_a_route_is_decided_with_probabilities_that_sum_to_one() {
+    let decision = decision_slot().await;
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.router = Some(route_table(state, Duration::from_secs(300)));
+        state.decision = tokio::sync::RwLock::new(Some(decision));
+    })
+    .await;
+    let (status, route) = server
+        .route(json!({ "model": "auto", "messages": [
+            { "role": "user", "content": "What is the capital of France?" }
+        ] }))
+        .await;
+    assert_eq!(status, 200, "{route}");
+    assert_eq!(route["reason"], "decided", "{route}");
+    assert_eq!(route["decision_model"], "test-decision");
+    let candidates = route["candidates"].as_array().expect("candidates");
+    let total: f64 = candidates
+        .iter()
+        .map(|c| c["probability"].as_f64().expect("a probability"))
+        .sum();
+    assert!((total - 1.0).abs() < 1e-6, "{route}");
+    let chosen = route["model"].as_str().expect("a model");
+    assert!(["tiny-a", "tiny-b"].contains(&chosen), "{route}");
+    let confidence = route["confidence"].as_f64().expect("a confidence");
+    assert!((0.0..=1.0).contains(&confidence));
+    assert!(route["decision_ms"].as_f64().is_some_and(|ms| ms > 0.0));
+    assert!(server.loaded().await.is_empty(), "a dry run loads nothing");
+    if let Ok(dir) = std::env::var("EULLM_AUDIT_DIR") {
+        let audit = std::fs::read_to_string(Path::new(&dir).join("audit.jsonl")).expect("audit");
+        let id = route["route_id"].as_str().expect("an id");
+        let line: Value = audit
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|l| l["id"] == id)
+            .expect("the route is audited under its id");
+        assert_eq!(line["request_type"], "route");
+        assert_eq!(line["routing"]["model"], chosen);
+        assert_eq!(line["routing"]["dry_run"], true);
+        assert_eq!(line["decision"]["answers"][0]["answer"], chosen);
+    }
+}
+
+/// A decision that takes longer than the timeout is abandoned, and the
+/// fallback answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs GGUF models in EULLM_GENERATION_TEST_MODEL and EULLM_DECISION_TEST_MODEL"]
+async fn real_model_a_route_past_its_timeout_falls_back() {
+    let decision = decision_slot().await;
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.router = Some(route_table(state, Duration::from_millis(10)));
+        state.decision = tokio::sync::RwLock::new(Some(decision));
+    })
+    .await;
+    let long = "Explain, step by step, how a lighthouse lens focuses light. ".repeat(20);
+    let (status, route) = server
+        .route(json!({ "model": "auto", "messages": [{ "role": "user", "content": long }] }))
+        .await;
+    assert_eq!(status, 200, "{route}");
+    assert_eq!(route["reason"], "timeout", "{route}");
+    assert_eq!(route["model"], "tiny-b");
+    assert!(route["confidence"].is_null());
+    assert!(
+        route["decision_ms"].as_f64().is_some_and(|ms| ms < 5000.0),
+        "waited for the decision: {route}"
+    );
+}
+
+/// `"model": "auto"` on every endpoint, streamed and not: the decision model
+/// chooses, the chosen model answers — every line and chunk says which —
+/// the headers say it before the body, and the last line or chunk, or the
+/// response, carries the route. With `EULLM_AUDIT_DIR` set, the
+/// generation's audit line names the route's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs GGUF models in EULLM_GENERATION_TEST_MODEL and EULLM_DECISION_TEST_MODEL"]
+async fn real_model_auto_answers_on_every_endpoint_and_says_how() {
+    let decision = decision_slot().await;
+    let server = start(&["tiny-a", "tiny-b"], |state| {
+        state.max_loaded_models = 2;
+        state.router = Some(route_table(state, Duration::from_secs(300)));
+        state.decision = tokio::sync::RwLock::new(Some(decision));
+    })
+    .await;
+    let messages = json!([{ "role": "user", "content": "What is the capital of France?" }]);
+    for path in ["/api/generate", "/api/chat", "/v1/chat/completions"] {
+        for stream in [false, true] {
+            let mut body = json!({
+                "model": "auto", "stream": stream, "think": false,
+                "options": { "num_predict": 8 }, "max_tokens": 8,
+            });
+            if path == "/api/generate" {
+                body["prompt"] = json!("The capital of France is");
+            } else {
+                body["messages"] = messages.clone();
+            }
+            let response = reqwest::Client::new()
+                .post(format!("{}{path}", server.base))
+                .json(&body)
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(response.status(), 200, "{path} {body}");
+            let header = |name: &str| {
+                response
+                    .headers()
+                    .get(name)
+                    .map(|v| v.to_str().expect("text").to_string())
+                    .unwrap_or_else(|| panic!("{path}: no {name}"))
+            };
+            let (model, reason, id) = (
+                header("x-eullm-model"),
+                header("x-eullm-route"),
+                header("x-eullm-route-id"),
+            );
+            assert!(["tiny-a", "tiny-b"].contains(&model.as_str()), "{model}");
+            assert_eq!(reason, "decided", "{path}");
+            let text = response.text().await.expect("body");
+            let objects: Vec<Value> = text
+                .lines()
+                .map(|l| l.strip_prefix("data:").unwrap_or(l).trim())
+                .filter(|l| !l.is_empty() && *l != "[DONE]")
+                .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+                .collect();
+            let (last, before) = objects.split_last().expect("an answer");
+            for object in &objects {
+                assert_eq!(object["model"], model.as_str(), "{path}: {object}");
+            }
+            assert!(
+                before.iter().all(|o| o.get("eullm").is_none()),
+                "{path}: only the last carries the route"
+            );
+            let route = &last["eullm"]["route"];
+            assert_eq!(route["requested"], "auto", "{path}: {last}");
+            assert_eq!(route["model"], model.as_str());
+            assert_eq!(route["reason"], "decided");
+            assert_eq!(route["id"], id.as_str());
+            assert_eq!(route["decision_model"], "test-decision");
+            let p = route["probabilities"].as_object().expect("probabilities");
+            assert_eq!(p.len(), 2, "{route}");
+            assert!((p.values().filter_map(Value::as_f64).sum::<f64>() - 1.0).abs() < 1e-6);
+
+            if let Ok(dir) = std::env::var("EULLM_AUDIT_DIR") {
+                let audit =
+                    std::fs::read_to_string(Path::new(&dir).join("audit.jsonl")).expect("audit");
+                let lines: Vec<Value> = audit
+                    .lines()
+                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .collect();
+                let routed = lines
+                    .iter()
+                    .find(|l| l["id"] == id.as_str())
+                    .expect("the route's line");
+                assert_eq!(routed["routing"]["model"], model.as_str());
+                let generation = lines
+                    .iter()
+                    .find(|l| l["route"]["id"] == id.as_str())
+                    .expect("the generation's line names its route");
+                assert_eq!(generation["model"], model.as_str());
+                assert!(generation["route"].get("fallback").is_none());
+            }
+        }
+    }
+}

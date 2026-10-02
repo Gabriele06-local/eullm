@@ -490,6 +490,54 @@ struct RuntimeOpts {
         value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..=16)
     )]
     max_loaded_models: usize,
+
+    /// The generation model a request that names none is answered by: a
+    /// store name or a GGUF path, like --decision-model.
+    ///
+    /// A request with no `model` field, or an empty one, goes to this model,
+    /// which is loaded for it when it is not loaded, as if the request had
+    /// named it. Without the flag such a request is answered by the most
+    /// recently used generation model — with one model at a time, the one
+    /// there is — and refused when none is loaded.
+    ///
+    /// `auto`, with --auto-model, routes such a request as one naming
+    /// `"model": "auto"` is.
+    ///
+    /// Checked at startup: a name that is no model stops the server there,
+    /// rather than letting every request that names none fail.
+    #[arg(long, value_name = "NAME_OR_PATH")]
+    default_model: Option<String>,
+
+    /// A model `"model": "auto"` may choose, as NAME or NAME=DESCRIPTION.
+    /// Give it two to eight times, smallest model first.
+    ///
+    /// A request naming the model `auto` is answered by one of these: those
+    /// that cannot take it — it carries an image and the model has no
+    /// projector, or it is longer than the model's context — are left out,
+    /// and the decision model (--decision-model) chooses among the rest from
+    /// a digest of the request. The description is what it reads about each
+    /// option: say which requests the model should get ("Short everyday
+    /// requests", "Multi-step reasoning, maths and code"), in at most 400
+    /// characters. Without one, the store's or the catalog's description is
+    /// used, and the startup log warns.
+    ///
+    /// Whenever the decision model does not decide — none is loaded, it did
+    /// not answer within --auto-timeout-ms, it failed — the fallback
+    /// answers: --default-model when it is one of these, the last otherwise.
+    /// `POST /api/route` shows the choice for a request without generating.
+    #[arg(long, value_name = "NAME[=DESCRIPTION]", action = clap::ArgAction::Append)]
+    auto_model: Vec<String>,
+
+    /// The most routing (`"model": "auto"`) may add to a request, in
+    /// milliseconds, 10 to 60000: a decision not made by then is abandoned,
+    /// and the fallback answers.
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = api::DEFAULT_AUTO_TIMEOUT_MS,
+        value_parser = clap::value_parser!(u64).range(10..=60_000)
+    )]
+    auto_timeout_ms: u64,
 }
 
 #[derive(Subcommand)]
@@ -808,8 +856,20 @@ async fn main() {
                 decision_model,
                 decision_ctx,
                 max_loaded_models,
+                default_model,
+                auto_model,
+                auto_timeout_ms,
             } = opts;
-            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
+            let residency = residency_config(
+                &store,
+                mmproj.as_deref(),
+                api::ResidencyFlags {
+                    max_loaded_models,
+                    default_model,
+                    auto_models: auto_model,
+                    auto_timeout_ms,
+                },
+            );
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -972,8 +1032,20 @@ async fn main() {
                 decision_model,
                 decision_ctx,
                 max_loaded_models,
+                default_model,
+                auto_model,
+                auto_timeout_ms,
             } = opts;
-            let residency = api::ResidencyConfig::from_flags(max_loaded_models);
+            let residency = residency_config(
+                &store,
+                mmproj.as_deref(),
+                api::ResidencyFlags {
+                    max_loaded_models,
+                    default_model,
+                    auto_models: auto_model,
+                    auto_timeout_ms,
+                },
+            );
             // `None` lets sizing decide; either flag decides instead.
             let mmproj_offload = match (mmproj_offload, no_mmproj_offload) {
                 (true, _) => Some(true),
@@ -1882,9 +1954,75 @@ fn resolve_model_path(model: &str, store: &ModelStore) -> Option<PathBuf> {
     store.gguf_path(model)
 }
 
+/// `--max-loaded-models`, `--default-model` and `--auto-model`, resolved
+/// against the store; exits when one of the models named is no model, as for
+/// `--decision-model`, or when `--auto-model` is refused. `mmproj` is
+/// `--mmproj`, which gives every model a projector.
+fn residency_config(
+    store: &ModelStore,
+    mmproj: Option<&std::path::Path>,
+    flags: api::ResidencyFlags,
+) -> api::ResidencyConfig {
+    api::ResidencyConfig::resolve(&flags, |arg| candidate_facts(arg, store, mmproj)).unwrap_or_else(
+        |e| {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        },
+    )
+}
+
+/// A generation model named on the command line, with what the store and
+/// the catalog say it is, and whether it can read images: what
+/// `--default-model` and `--auto-model` are resolved with. The store's
+/// description is taken only when someone wrote one: not an external pull's
+/// provenance, and not the catalog's text a catalog pull copied there.
+fn candidate_facts(
+    arg: &str,
+    store: &ModelStore,
+    mmproj: Option<&std::path::Path>,
+) -> Option<api::CandidateFacts> {
+    let model = named_model(arg, store)?;
+    let entry = catalog::find_model(&model.name);
+    let store_description = store
+        .get(&model.name)
+        .ok()
+        .flatten()
+        .and_then(|manifest| manifest.written_description().map(str::to_string))
+        .filter(|text| entry.is_none_or(|entry| entry.description.trim() != text.as_str()));
+    let has_projector = mmproj.is_some()
+        || store.mmproj_path(&model.name).is_some()
+        || models::store::mmproj_beside(&model.path).is_some();
+    Some(api::CandidateFacts {
+        catalog: entry.map(|entry| api::CatalogFacts {
+            description: entry.description.clone(),
+            params_b: entry.params_b,
+            domain: entry.domain.clone(),
+        }),
+        model,
+        store_description,
+        has_projector,
+    })
+}
+
+/// A generation model named on the command line, under the name requests
+/// will use for it (see `launch_companion_name`), and its GGUF. An Ollama
+/// tag (`qwen3:8b`) is taken as the store name it stands for.
+fn named_model(arg: &str, store: &ModelStore) -> Option<api::NamedModel> {
+    let normalized = arg.replace(':', "-");
+    let (arg, path) = resolve_model_path(arg, store)
+        .map(|path| (arg, path))
+        .or_else(|| {
+            resolve_model_path(&normalized, store).map(|path| (normalized.as_str(), path))
+        })?;
+    Some(api::NamedModel {
+        name: launch_companion_name(arg, &path),
+        path,
+    })
+}
+
 /// The name a request would use to ask for a model loaded at launch by
-/// `--embedding-model` or `--decision-model`: what was typed for a store
-/// name, the file name for a path.
+/// `--embedding-model` or `--decision-model`, or named by `--default-model`:
+/// what was typed for a store name, the file name for a path.
 ///
 /// The embedder used to take its file name in both cases. A stored model is
 /// asked for by its store name, as `eullm list` shows it, and its file is
@@ -1956,6 +2094,72 @@ mod launch_companion_name_tests {
             launch_companion_name("Qwen3-Embedding-0.6B-Q8_0.gguf", path),
             "Qwen3-Embedding-0.6B-Q8_0"
         );
+    }
+
+    /// A model named on the command line goes by its store name, an Ollama
+    /// tag of it included, or by its file's stem; one not there is none.
+    #[test]
+    fn a_named_model_is_found_under_the_name_requests_use() {
+        let dir = std::env::temp_dir().join(format!("eullm-named-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("qwen3-8b")).unwrap();
+        let weights = dir.join("qwen3-8b").join("Qwen3-8B-Q4_K_M.gguf");
+        std::fs::write(&weights, b"GGUF").unwrap();
+        let store = super::ModelStore::at(dir.clone());
+        for arg in ["qwen3-8b", "qwen3:8b"] {
+            let named = super::named_model(arg, &store).expect(arg);
+            assert_eq!(named.name, "qwen3-8b", "{arg}");
+            assert_eq!(named.path, weights);
+        }
+        let by_path = super::named_model(weights.to_str().unwrap(), &store).expect("a path");
+        assert_eq!(by_path.name, "Qwen3-8B-Q4_K_M");
+        assert!(super::named_model("qwen3-14b", &store).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What `--auto-model` reads about a model: the description someone
+    /// wrote in its manifest, not the catalog's text a pull copied there;
+    /// the catalog's facts; and a projector beside its weights.
+    #[test]
+    fn a_candidates_facts_come_from_its_manifest_the_catalog_and_its_directory() {
+        let dir = std::env::temp_dir().join(format!("eullm-facts-{}", uuid::Uuid::new_v4()));
+        let catalog = super::catalog::find_model("qwen3-8b").expect("in the catalog");
+        let stored = |id: &str, description: &str, projector: bool| {
+            std::fs::create_dir_all(dir.join(id)).unwrap();
+            std::fs::write(dir.join(id).join("model.gguf"), b"GGUF").unwrap();
+            if projector {
+                std::fs::write(dir.join(id).join("mmproj-F16.gguf"), b"GGUF").unwrap();
+            }
+            let manifest = serde_json::json!({
+                "id": id, "name": id, "description": description, "languages": [],
+                "base": "x", "vram_gb": 0, "size_bytes": 0, "license": "MIT", "digest": "",
+                "pulled_at": "2026-10-01T00:00:00Z", "status": "ready", "gguf_file": "model.gguf",
+            });
+            std::fs::write(dir.join(id).join("manifest.json"), manifest.to_string()).unwrap();
+        };
+        stored("qwen3-8b", &catalog.description, false);
+        stored("mine", "Italian contracts and case law", true);
+        stored("pulled", "External model pulled from hf.co/x/y", false);
+        let store = super::ModelStore::at(dir.clone());
+        let facts = |id| super::candidate_facts(id, &store, None).expect(id);
+
+        let qwen = facts("qwen3-8b");
+        assert_eq!(qwen.store_description, None, "the catalog's own text");
+        assert_eq!(qwen.catalog.map(|c| c.params_b), Some(catalog.params_b));
+        let mine = facts("mine");
+        assert_eq!(
+            mine.store_description.as_deref(),
+            Some("Italian contracts and case law")
+        );
+        assert!(mine.has_projector && !qwen.has_projector);
+        assert_eq!(facts("pulled").store_description, None, "only provenance");
+        let projector = std::path::Path::new("/models/mmproj.gguf");
+        assert!(
+            super::candidate_facts("qwen3-8b", &store, Some(projector))
+                .unwrap()
+                .has_projector,
+            "--mmproj gives every model one"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
 
@@ -4616,6 +4820,53 @@ mod cli_default_parity_tests {
                     "--max-loaded-models {refused} must be refused"
                 );
             }
+        }
+    }
+
+    /// `--auto-model` repeats, keeping its order and the text after `=`
+    /// whole; `--auto-timeout-ms` is 1000 unless given, from 10 to 60000.
+    #[test]
+    fn auto_model_repeats_and_its_timeout_is_bounded() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            let plain = runtime_opts(sub);
+            assert!(plain.auto_model.is_empty());
+            assert_eq!(plain.auto_timeout_ms, 1000);
+            let routed = runtime_opts(
+                &[
+                    sub,
+                    &[
+                        "--auto-model",
+                        "qwen3-4b=Short requests, simple facts",
+                        "--auto-model",
+                        "qwen3-8b",
+                        "--auto-timeout-ms",
+                        "250",
+                    ],
+                ]
+                .concat(),
+            );
+            assert_eq!(
+                routed.auto_model,
+                ["qwen3-4b=Short requests, simple facts", "qwen3-8b"]
+            );
+            assert_eq!(routed.auto_timeout_ms, 250);
+            for refused in ["9", "60001", "-1", "soon"] {
+                let parsed = Cli::try_parse_from([sub, &["--auto-timeout-ms", refused]].concat());
+                assert!(
+                    parsed.is_err(),
+                    "--auto-timeout-ms {refused} must be refused"
+                );
+            }
+        }
+    }
+
+    /// `--default-model` is on both commands, and unset unless given.
+    #[test]
+    fn default_model_is_a_shared_flag_unset_by_default() {
+        for sub in [&["eullm", "run", "m.gguf"][..], &["eullm", "serve"][..]] {
+            assert_eq!(runtime_opts(sub).default_model, None);
+            let named = runtime_opts(&[sub, &["--default-model", "qwen3-8b"]].concat());
+            assert_eq!(named.default_model.as_deref(), Some("qwen3-8b"));
         }
     }
 

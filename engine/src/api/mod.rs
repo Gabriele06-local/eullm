@@ -20,6 +20,7 @@ mod origin;
 #[cfg(test)]
 mod real_model_tests;
 mod resident;
+mod route;
 // `routes` is not part of the public API, but the terminal REPL in `main.rs`
 // reuses `routes::sequential_to_channel` so that a model without a scheduler
 // (multimodal forces `batch_size = 0`) streams through exactly the same code
@@ -28,6 +29,7 @@ pub(crate) mod routes;
 mod systemone;
 
 pub use auth::Identity;
+pub use route::{CandidateFacts, CatalogFacts, DEFAULT_AUTO_TIMEOUT_MS};
 
 use axum::Router;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, State};
@@ -224,6 +226,21 @@ pub struct AppState {
     /// back to it.
     pub launch_model: Option<(String, PathBuf)>,
 
+    /// `--default-model`: the model a request that names none — no `model`
+    /// field, or an empty one — is answered by, loaded for it when it is not
+    /// loaded. `None`: the most recently used generation model answers, and
+    /// with none loaded the request is refused. Resolvable by its name or
+    /// path whatever `allow_model_paths` says, as the launch model is.
+    pub default_model: Option<NamedModel>,
+
+    /// The models `"model": "auto"` chooses between, and how long it may
+    /// take to (`--auto-model`, `--auto-timeout-ms`); `None` without them,
+    /// and `auto` is then a model name like any other. See `route`.
+    pub(crate) router: Option<route::RouteTable>,
+    /// `--default-model auto`: a request that names no model is routed, as
+    /// one naming `auto` is.
+    pub(crate) default_auto: bool,
+
     /// Second, independent model slot for text embeddings — see
     /// `ensure_embedding_model`. `None` until the first `/v1/embeddings` or
     /// `/api/embed` request names a model.
@@ -294,14 +311,29 @@ pub enum ModelError {
     /// requests can give, and none finished in time. The caller should get a
     /// 503 with `Retry-After`: the same request can succeed in a moment.
     Busy(String),
+    /// Loading the model would unload another, and the load was asked not
+    /// to (`EvictPolicy::Never`): a warm-up, which has nobody waiting for
+    /// the model and must not take one away from someone who is.
+    NoRoom(String),
 }
 
 impl std::fmt::Display for ModelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) => f.write_str(m),
+            Self::NotFound(m) | Self::LoadFailed(m) | Self::Busy(m) | Self::NoRoom(m) => {
+                f.write_str(m)
+            }
         }
     }
+}
+
+/// Whether a load may unload resident generation models to make room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EvictPolicy {
+    /// As a request needs: the count, and what fits beside what, decide.
+    Allowed,
+    /// Never: the load is refused with `ModelError::NoRoom` instead.
+    Never,
 }
 
 impl From<String> for ModelError {
@@ -328,12 +360,14 @@ impl AppState {
     ///
     /// This is the **write** path — only one load runs at a time, and a load
     /// that waits for a busy model to finish lets go of the lock meanwhile.
+    /// `evict` says whether it may unload other models at all.
     pub(crate) async fn load_generation_model(
         &self,
         name: &str,
         override_batch_size: Option<usize>,
         override_ctx_size: Option<u32>,
         keep_alive: KeepAlive,
+        evict: EvictPolicy,
     ) -> Result<resident::SlotSnapshot, ModelError> {
         // Serialize loads — if another request is already loading, wait for
         // it to finish instead of starting a parallel load.
@@ -458,6 +492,7 @@ impl AppState {
                     &sizing,
                     fits_now,
                     keep_alive,
+                    evict,
                 )
                 .await?
             {
@@ -760,7 +795,10 @@ impl AppState {
     /// companions are evicted under `--fit` before sizing, as before.
     ///
     /// `fits_now` starts the planning: `Some(false)` makes one more resident
-    /// go before anything is sized.
+    /// go before anything is sized. Under `EvictPolicy::Never`, the first
+    /// step that would unload a model, or wait for one to go idle so that it
+    /// can, refuses the load instead.
+    #[allow(clippy::too_many_arguments)]
     async fn make_room<'a>(
         &'a self,
         swap_guard: &mut Option<tokio::sync::MutexGuard<'a, ()>>,
@@ -769,6 +807,7 @@ impl AppState {
         sizing: &Sizing<'_>,
         mut fits_now: Option<bool>,
         keep_alive: KeepAlive,
+        evict: EvictPolicy,
     ) -> Result<Room, ModelError> {
         let busy = if self.max_loaded_models <= 1 {
             resident::BusyPolicy::Abort
@@ -784,7 +823,18 @@ impl AppState {
             went_idle.as_mut().enable();
             let views = self.models.read().await.views();
             let now = std::time::Instant::now();
-            match resident::next_step(&views, self.max_loaded_models, busy, fits_now, now) {
+            let step = resident::next_step(&views, self.max_loaded_models, busy, fits_now, now);
+            if evict == EvictPolicy::Never && step != resident::Step::Load {
+                let why = if fits_now == Some(false) {
+                    "it would not fit whole beside the resident ones"
+                } else {
+                    "there is no room for it in --max-loaded-models"
+                };
+                return Err(ModelError::NoRoom(format!(
+                    "Loading '{incoming}' would unload another model: {why}"
+                )));
+            }
+            match step {
                 resident::Step::Evict(i) => {
                     let view = views[i];
                     let removal = match busy {
@@ -1009,6 +1059,79 @@ impl AppState {
         Ok(Some(name))
     }
 
+    /// Per routing candidate, in the table's order, the context one request
+    /// to it gets and whether it is loaded: a resident's, from how it was
+    /// loaded; another's, from how it would load — with the request's own
+    /// `batch_size` and `ctx_size` when it gives them, and on the sequential
+    /// engine, with the whole context, when it has a projector.
+    pub(crate) async fn route_candidates(
+        &self,
+        table: &route::RouteTable,
+        (override_batch_size, override_ctx_size): (Option<usize>, Option<u32>),
+    ) -> (Vec<u32>, Vec<bool>) {
+        let models = self.models.read().await;
+        table
+            .candidates
+            .iter()
+            .map(|candidate| {
+                let resident = models
+                    .find(&candidate.name)
+                    .or_else(|| models.find_file(&candidate.path));
+                match resident {
+                    Some(model) => (
+                        model.facts.ctx_size / model.facts.batch_size.max(1) as u32,
+                        true,
+                    ),
+                    None => {
+                        let ctx = override_ctx_size.unwrap_or(self.ctx_size);
+                        let slots = if candidate.has_projector {
+                            1
+                        } else {
+                            override_batch_size.unwrap_or(self.batch_size).max(1)
+                        };
+                        (ctx / slots as u32, false)
+                    }
+                }
+            })
+            .unzip()
+    }
+
+    /// Load the routing candidates that fit without unloading anything, so
+    /// that the first routed requests do not pay for a load: the fallback
+    /// first — it answers whenever the decision model does not decide — then
+    /// the others in the table's order, until one would need another model
+    /// to go (`EvictPolicy::Never`). A candidate that fails to load is
+    /// logged and passed over. `keep_alive` applies to each from when it is
+    /// loaded. Returns the candidates resident at the end, in that order.
+    pub(crate) async fn warm_route_candidates(
+        &self,
+        table: &route::RouteTable,
+        keep_alive: KeepAlive,
+    ) -> Vec<String> {
+        let order = std::iter::once(table.fallback)
+            .chain((0..table.candidates.len()).filter(|&i| i != table.fallback));
+        let mut warm = Vec::new();
+        for i in order {
+            let name = &table.candidates[i].name;
+            let loaded = self
+                .load_generation_model(name, None, None, keep_alive, EvictPolicy::Never)
+                .await;
+            match loaded {
+                // The lease ends here, which starts its keep_alive.
+                Ok(_) => warm.push(name.clone()),
+                Err(ModelError::NoRoom(why)) => {
+                    tracing::info!("Auto routing warm-up stops: {why}");
+                    break;
+                }
+                Err(e) => tracing::warn!(
+                    "Auto routing warm-up: {} did not load: {e}",
+                    crate::audit::sanitize_for_log(name)
+                ),
+            }
+        }
+        warm
+    }
+
     /// The resident `requested` names, by name or else as its file, or `None`
     /// when it is not loaded. A name that is no model at all is
     /// `ModelError::NotFound`; one the residents answer to is never looked up
@@ -1021,11 +1144,10 @@ impl AppState {
         Ok(self.models.read().await.find_file(&path).map(|m| m.id))
     }
 
-    /// Shared by `unload_all` and the companions that need the whole card:
-    /// take every generation model out and wait for each one's scheduler
-    /// thread to fully exit, so their VRAM is guaranteed freed by the time
-    /// this resolves — the caller needs the VRAM actually free before handing
-    /// it to another model or process. Call with `swap_lock` held.
+    /// `unload_all`'s work: take every generation model out and wait for each
+    /// one's scheduler thread to fully exit, so their VRAM is guaranteed
+    /// freed by the time this resolves — the caller needs the VRAM actually
+    /// free before handing it to another process. Call with `swap_lock` held.
     async fn unload_generation_models(&self) -> Vec<String> {
         let ids: Vec<u64> = self
             .models
@@ -1040,6 +1162,66 @@ impl AppState {
             unloaded.extend(self.remove_generation(id, Removal::Always).await);
         }
         unloaded
+    }
+
+    /// Unload generation models until a companion `companion` — the
+    /// `kind` (embedding or decision) model about to load, needing `need`
+    /// bytes of VRAM and `compute_reserve` beside them — fits in what is free,
+    /// or none is left: the least recently used and idle ones first, and no
+    /// more than it takes (`resident::companion_evictions`). Each one unloaded
+    /// counts in `cross_slot_evictions`. Without a free-VRAM figure nothing is
+    /// unloaded, and the companion loads beside them as it always did. Call
+    /// with `swap_lock` held.
+    ///
+    /// What each resident gives back is what its load measured, or an
+    /// estimate; the free figure is read again after each round, and another
+    /// round follows while the companion still does not fit.
+    async fn make_room_for_companion(
+        &self,
+        companion: &str,
+        kind: &str,
+        need: u64,
+        compute_reserve: u64,
+    ) {
+        loop {
+            let (views, unallocated) = {
+                let models = self.models.read().await;
+                (models.views(), models.unallocated_reserve())
+            };
+            let usable = crate::fit::vram_bytes()
+                .map(|card| usable_vram(card, compute_reserve, unallocated));
+            let now = std::time::Instant::now();
+            let plan = resident::companion_evictions(&views, usable, need, now);
+            let mut unloaded = 0;
+            for id in plan {
+                let Some(view) = views.iter().find(|v| v.id == id) else {
+                    continue;
+                };
+                let Some(name) = self.remove_generation(id, Removal::Always).await else {
+                    continue;
+                };
+                unloaded += 1;
+                self.cross_slot_evictions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let state = if view.usage.in_flight > 0 {
+                    format!("answering {} request(s)", view.usage.in_flight)
+                } else {
+                    format!(
+                        "idle for {} s",
+                        now.duration_since(view.usage.last_used).as_secs()
+                    )
+                };
+                tracing::info!(
+                    "Unloaded {} ({state}) to make room for the {kind} model {}, which does \
+                     not fit beside it; it reloads on its next request",
+                    crate::audit::sanitize_for_log(&name),
+                    crate::audit::sanitize_for_log(companion)
+                );
+            }
+            if unloaded == 0 {
+                return;
+            }
+        }
     }
 
     /// Unload every generation model that is due (`resident::due`): no
@@ -1082,13 +1264,13 @@ impl AppState {
     /// process can tell which situation it is in right now.
     ///
     /// 1. Already loaded under this name → return it, no eviction, no load.
-    /// 2. Not loaded, and it fits in free VRAM alongside whatever is in the
-    ///    main slot → load it into the embedding slot; the main slot is
-    ///    untouched.
-    /// 3. Not loaded, and it does not fit → evict the main slot first (a
-    ///    generation request will reload it later; `resolve_model` and the
-    ///    embedded chat UI both work unchanged against an empty main slot),
-    ///    then load the embedder, which now has the whole card.
+    /// 2. Not loaded, and it fits in free VRAM beside the generation models
+    ///    → load it into the embedding slot; they are untouched.
+    /// 3. Not loaded, and it does not fit → unload generation models first,
+    ///    the least recently used and idle ones before the others, until it
+    ///    fits or none is left (`make_room_for_companion`; a generation
+    ///    request reloads one later, and `resolve_model` and the embedded
+    ///    chat UI work unchanged without it), then load the embedder.
     ///
     /// On a non-CUDA build `fit::vram_bytes()` cannot answer "does it fit",
     /// so this always takes the coexist path (case 2) and lets a real
@@ -1131,27 +1313,13 @@ impl AppState {
             }
         }
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
-
-        let (main_loaded, unallocated) = {
-            let models = self.models.read().await;
-            (!models.is_empty(), models.unallocated_reserve())
-        };
-        let fits_alongside = fits_in_free_vram(
+        self.make_room_for_companion(
+            &normalized,
+            "embedding",
             weights_bytes,
             crate::fit::EMBEDDING_COMPUTE_RESERVE_BYTES,
-            unallocated,
         )
-        .unwrap_or(true);
-        if main_loaded && !fits_alongside {
-            tracing::info!(
-                "Embedding model {} does not fit alongside the loaded generation model — \
-                 evicting it to make room (will reload on the next generation request)",
-                crate::audit::sanitize_for_log(&normalized)
-            );
-            let evicted = self.unload_generation_models().await;
-            self.cross_slot_evictions
-                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        .await;
 
         tracing::info!(
             "Loading embedding model {} ({})",
@@ -1259,10 +1427,10 @@ impl AppState {
 
     /// Ensure the named decision model is loaded into the decision slot and
     /// return it. The same residency rules as `ensure_embedding_model` —
-    /// already loaded: reuse it; fits next to the generation model: load it
-    /// alongside; does not: evict the generation model first — with the VRAM
-    /// a request's context needs (`fit::decision_reserve_bytes`) counted in,
-    /// not only the weights.
+    /// already loaded: reuse it; fits next to the generation models: load it
+    /// alongside; does not: unload them, least recently used first, until it
+    /// does — with the VRAM a request's context needs
+    /// (`fit::decision_reserve_bytes`) counted in, not only the weights.
     ///
     /// A different decision model already in the slot is dropped before the
     /// new one loads, so the free-VRAM check sees the room it leaves. A
@@ -1287,24 +1455,13 @@ impl AppState {
         *self.decision.write().await = None;
         let weights_bytes = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let reserve_bytes = crate::fit::decision_reserve_bytes(&gguf_path, self.decision_ctx);
-
-        let (main_loaded, unallocated) = {
-            let models = self.models.read().await;
-            (!models.is_empty(), models.unallocated_reserve())
-        };
-        let fits_alongside =
-            fits_in_free_vram(weights_bytes.saturating_add(reserve_bytes), 0, unallocated)
-                .unwrap_or(true);
-        if main_loaded && !fits_alongside {
-            tracing::info!(
-                "Decision model {} does not fit alongside the loaded generation model — \
-                 evicting it to make room (will reload on the next generation request)",
-                crate::audit::sanitize_for_log(&normalized)
-            );
-            let evicted = self.unload_generation_models().await;
-            self.cross_slot_evictions
-                .fetch_add(evicted.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        }
+        self.make_room_for_companion(
+            &normalized,
+            "decision",
+            weights_bytes.saturating_add(reserve_bytes),
+            0,
+        )
+        .await;
 
         tracing::info!(
             "Loading decision model {} ({})",
@@ -1496,19 +1653,37 @@ impl AppState {
     ///
     /// The launch path is always accepted regardless: `/api/tags` reports it as
     /// the loaded model's name, clients echo back what they were told, and
-    /// refusing our own answer would break `eullm run ./model.gguf`.
+    /// refusing our own answer would break `eullm run ./model.gguf`. So is
+    /// `--default-model`'s and every `--auto-model`'s: they were named on
+    /// the command line, not in a request.
     fn resolve_model(&self, name: &str) -> Result<PathBuf, ModelError> {
         let path = PathBuf::from(name);
 
-        // 0. The model this process was launched with, by the name the API
-        //    advertises for it or by its literal path. Exact match on either —
-        //    never a stem or prefix comparison, which would turn this
-        //    allowance into a way to reach any similarly named file.
-        if let Some((launch_name, launch_path)) = &self.launch_model
-            && (name == launch_name.as_str() || &path == launch_path)
-            && launch_path.is_file()
-        {
-            return Ok(launch_path.clone());
+        // 0. The model this process was launched with, or one that
+        //    `--default-model` or `--auto-model` names, by the name the API
+        //    uses for it or by
+        //    its literal path. Exact match on either — never a stem or prefix
+        //    comparison, which would turn this allowance into a way to reach
+        //    any similarly named file.
+        let named = self
+            .launch_model
+            .iter()
+            .map(|(name, path)| (name.as_str(), path))
+            .chain(
+                self.default_model
+                    .iter()
+                    .map(|m| (m.name.as_str(), &m.path)),
+            )
+            .chain(
+                self.router
+                    .iter()
+                    .flat_map(|table| &table.candidates)
+                    .map(|c| (c.name.as_str(), &c.path)),
+            );
+        for (named, named_path) in named {
+            if (name == named || &path == named_path) && named_path.is_file() {
+                return Ok(named_path.clone());
+            }
         }
 
         if self.allow_model_paths {
@@ -1688,16 +1863,90 @@ mod residency_config_tests {
         assert!(ignored.contains("ignored"), "{ignored}");
     }
 
+    fn flags(max_loaded_models: usize, default_model: Option<&str>) -> ResidencyFlags {
+        ResidencyFlags {
+            max_loaded_models,
+            default_model: default_model.map(str::to_string),
+            auto_models: Vec::new(),
+            auto_timeout_ms: route::DEFAULT_AUTO_TIMEOUT_MS,
+        }
+    }
+
+    /// A store of `qwen3-4b` and `qwen3-8b`, and nothing else.
+    fn lookup(name: &str) -> Option<CandidateFacts> {
+        matches!(name, "qwen3-4b" | "qwen3-8b").then(|| CandidateFacts {
+            model: NamedModel {
+                name: name.to_string(),
+                path: PathBuf::from(format!("/store/{name}/model.gguf")),
+            },
+            store_description: None,
+            catalog: None,
+            has_projector: false,
+        })
+    }
+
     #[test]
     fn the_residency_config_holds_at_least_one_model() {
-        assert_eq!(ResidencyConfig::from_flags(0).max_loaded_models, 1);
-        assert_eq!(ResidencyConfig::from_flags(4).max_loaded_models, 4);
+        let resolve = |n| ResidencyConfig::resolve(&flags(n, None), |_| None).expect("no default");
+        assert_eq!(resolve(0).max_loaded_models, 1);
+        assert_eq!(resolve(4).max_loaded_models, 4);
+        assert_eq!(resolve(4).default_model, None);
+        assert_eq!(resolve(4).router, None);
+    }
+
+    /// `--default-model` is resolved at startup: a model the server cannot
+    /// find stops it there, rather than failing every request naming none.
+    #[test]
+    fn the_default_model_is_resolved_at_startup() {
+        let config =
+            ResidencyConfig::resolve(&flags(2, Some(" qwen3-8b ")), lookup).expect("found");
+        assert_eq!(
+            config.default_model.map(|m| m.name).as_deref(),
+            Some("qwen3-8b")
+        );
+        let refused = ResidencyConfig::resolve(&flags(2, Some("qwen3-80b")), lookup).unwrap_err();
+        assert!(
+            refused.contains("--default-model 'qwen3-80b'") && refused.contains("eullm pull"),
+            "{refused}"
+        );
+    }
+
+    /// `--auto-model` is resolved with the rest, its fallback the default
+    /// model when that is one of its candidates.
+    #[test]
+    fn the_route_table_is_resolved_with_the_default_model() {
+        let mut flags = flags(2, Some("qwen3-4b"));
+        flags.auto_models = vec!["qwen3-4b=Small".into(), "qwen3-8b=Large".into()];
+        flags.auto_timeout_ms = 250;
+        let router = ResidencyConfig::resolve(&flags, lookup)
+            .expect("resolved")
+            .router
+            .expect("a table");
+        assert_eq!(router.fallback().name, "qwen3-4b");
+        assert_eq!(router.timeout, std::time::Duration::from_millis(250));
+        flags.auto_models.push("qwen3-80b".into());
+        let refused = ResidencyConfig::resolve(&flags, lookup).unwrap_err();
+        assert!(refused.contains("'qwen3-80b' is not a model"), "{refused}");
+    }
+
+    /// `--default-model auto` routes the requests that name no model, which
+    /// takes models to route between; the fallback is then the last one.
+    #[test]
+    fn default_model_auto_routes_and_needs_auto_models() {
+        let mut flags = flags(2, Some("Auto"));
+        let refused = ResidencyConfig::resolve(&flags, lookup).unwrap_err();
+        assert!(refused.contains("--auto-model"), "{refused}");
+        flags.auto_models = vec!["qwen3-4b=Small".into(), "qwen3-8b=Large".into()];
+        let config = ResidencyConfig::resolve(&flags, lookup).expect("resolved");
+        assert!(config.default_auto);
+        assert_eq!(config.default_model, None);
+        assert_eq!(config.router.expect("a table").fallback().name, "qwen3-8b");
     }
 }
 
 #[cfg(test)]
 mod fits_tests {
-    use super::fits_in;
+    use super::usable_vram;
 
     const GIB: u64 = 1024 * 1024 * 1024;
     const MIB: u64 = 1024 * 1024;
@@ -1710,15 +1959,11 @@ mod fits_tests {
         // 16 GiB card, 8 GiB free; the floor keeps 12% of it back.
         let card = (8 * GIB, 16 * GIB);
         let embedder = 2 * GIB;
-        assert_eq!(fits_in(card, embedder, 256 * MIB, 0), Some(true));
+        assert!(embedder <= usable_vram(card, 256 * MIB, 0));
         let vision_model_context = 4 * GIB;
-        assert_eq!(
-            fits_in(card, embedder, 256 * MIB, vision_model_context),
-            Some(false)
-        );
+        assert!(embedder > usable_vram(card, 256 * MIB, vision_model_context));
         // Saturating, not wrapping, when the reservations exceed what is free.
-        assert_eq!(fits_in(card, 0, 256 * MIB, 64 * GIB), Some(true));
-        assert_eq!(fits_in(card, 1, 256 * MIB, 64 * GIB), Some(false));
+        assert_eq!(usable_vram(card, 256 * MIB, 64 * GIB), 0);
     }
 }
 
@@ -1747,52 +1992,30 @@ mod same_file_tests {
     }
 }
 
-/// Whether `additional_bytes` fits in currently free VRAM, applying the same
-/// floor `fit.rs` reserves for a normal model load
-/// (`fit::MIN_FREE_TOTAL_RATIO`) plus `compute_reserve_bytes` for the
-/// model's own compute buffer — `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an
-/// embedder, 256 MiB rather than `fit.rs`'s 640 MiB, since an embedding
-/// model's context and micro-batch are both a fraction of an LLM's. A
-/// decision model passes 0 and counts its whole per-request context in
-/// `additional_bytes` instead (`fit::decision_reserve_bytes`).
+/// What a card with `(free, total)` VRAM leaves for a companion model — an
+/// embedder or a decision model — beside what is loaded: free VRAM, less the
+/// floor `fit.rs` keeps for every load (`fit::MIN_FREE_TOTAL_RATIO`), less
+/// `compute_reserve_bytes` for the companion's own compute buffer —
+/// `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an embedder, 256 MiB rather
+/// than `fit.rs`'s 640 MiB, since an embedding model's context and
+/// micro-batch are both a fraction of an LLM's; a decision model passes 0 and
+/// counts its whole per-request context in what it needs instead
+/// (`fit::decision_reserve_bytes`) — and less `unallocated_bytes`, memory the
+/// free figure shows but is already spoken for: the contexts sequential
+/// residents create per request (F5).
 ///
 /// Deliberately not the layer-by-layer machinery in `fit.rs`: an embedding
 /// model loads fully onto the GPU or not at all (see `EmbeddingModel::load`),
-/// so this only ever needs a yes/no answer, never a partial split.
-///
-/// `None` when VRAM cannot be probed at all (non-CUDA build) — the caller
-/// decides what "unknown" means for it; `ensure_embedding_model` treats it as
-/// "assume yes" so a build that cannot measure VRAM behaves as it always has,
-/// letting a real allocation failure surface as a normal load error.
-///
-/// `unallocated_bytes` is memory the free figure shows but is already
-/// spoken for: the contexts sequential residents create per request (F5).
-fn fits_in_free_vram(
-    additional_bytes: u64,
-    compute_reserve_bytes: u64,
-    unallocated_bytes: u64,
-) -> Option<bool> {
-    fits_in(
-        crate::fit::vram_bytes()?,
-        additional_bytes,
-        compute_reserve_bytes,
-        unallocated_bytes,
-    )
-}
-
-/// [`fits_in_free_vram`] against a given `(free, total)`.
-fn fits_in(
+/// so a companion only ever needs a yes/no answer, never a partial split.
+fn usable_vram(
     (free, total): (u64, u64),
-    additional_bytes: u64,
     compute_reserve_bytes: u64,
     unallocated_bytes: u64,
-) -> Option<bool> {
+) -> u64 {
     let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
-    let usable = free
-        .saturating_sub(floor)
+    free.saturating_sub(floor)
         .saturating_sub(compute_reserve_bytes)
-        .saturating_sub(unallocated_bytes);
-    Some(additional_bytes <= usable)
+        .saturating_sub(unallocated_bytes)
 }
 
 /// How long a loaded model should be kept resident after a request, decoded
@@ -2246,20 +2469,150 @@ pub(crate) fn model_names_match(loaded: &str, normalized_request: &str) -> bool 
     model_identity_key(loaded) == model_identity_key(normalized_request)
 }
 
-/// How generation models are kept resident: the user's flags, built once in
-/// `main.rs` and handed to `serve` whole.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// How generation models are kept resident, which one answers a request
+/// that names none, and which ones `"model": "auto"` chooses between: the
+/// user's flags, resolved once in `main.rs` and handed to `serve` whole.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidencyConfig {
     /// `--max-loaded-models` (see `RuntimeOpts::max_loaded_models`).
     pub max_loaded_models: usize,
+    /// `--default-model`, resolved: the model a request that names none is
+    /// answered by (see `RuntimeOpts::default_model`).
+    pub default_model: Option<NamedModel>,
+    /// `--auto-model` and `--auto-timeout-ms`, resolved; `None` without
+    /// `--auto-model` (see `route`).
+    pub router: Option<route::RouteTable>,
+    /// `--default-model auto`: a request that names no model is routed.
+    /// Only ever set with a `router`.
+    pub default_auto: bool,
+}
+
+/// The flags `ResidencyConfig` is resolved from, as the command line gave
+/// them.
+#[derive(Debug, Clone, Default)]
+pub struct ResidencyFlags {
+    /// `--max-loaded-models`.
+    pub max_loaded_models: usize,
+    /// `--default-model`.
+    pub default_model: Option<String>,
+    /// Every `--auto-model`, in order.
+    pub auto_models: Vec<String>,
+    /// `--auto-timeout-ms`.
+    pub auto_timeout_ms: u64,
+}
+
+/// A model named on the command line, resolved when the server started:
+/// the name requests use for it, and its GGUF. The server loads it by that
+/// name, or that path, even when a request's `model` may not name a path
+/// (`EULLM_ALLOW_MODEL_PATHS`): whoever started the server named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedModel {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 impl ResidencyConfig {
-    /// From the flags as the command line gave them.
-    pub fn from_flags(max_loaded_models: usize) -> Self {
-        Self {
-            max_loaded_models: max_loaded_models.max(1),
+    /// From the flags as the command line gave them. `lookup` resolves a
+    /// model named on the command line the way `--decision-model` is
+    /// resolved — a store name or a GGUF path — to the name requests will
+    /// use and its file, with what the store and the catalog say about it.
+    /// A `--default-model` or an `--auto-model` it cannot resolve is an
+    /// error: the server would otherwise start, and fail every request that
+    /// needs it (see `route::RouteTable::resolve` for what else
+    /// `--auto-model` refuses). `--default-model auto` routes a request that
+    /// names no model, and needs `--auto-model` to route with.
+    pub fn resolve(
+        flags: &ResidencyFlags,
+        lookup: impl Fn(&str) -> Option<CandidateFacts>,
+    ) -> Result<Self, String> {
+        let default_flag = flags.default_model.as_deref().map(str::trim);
+        let default_auto = default_flag.is_some_and(|name| name.eq_ignore_ascii_case(route::AUTO));
+        if default_auto && flags.auto_models.is_empty() {
+            return Err(
+                "--default-model auto routes requests that name no model, and needs the models \
+                 to route between: give two or more --auto-model"
+                    .to_string(),
+            );
         }
+        let default_model = match default_flag.filter(|_| !default_auto) {
+            None => None,
+            Some(name) => Some(lookup(name).map(|facts| facts.model).ok_or_else(|| {
+                format!(
+                    "--default-model '{name}' is not a model: give a GGUF path or a name \
+                     `eullm list` shows (a catalog model has to be pulled first: eullm pull \
+                     {name})"
+                )
+            })?),
+        };
+        let router = route::RouteTable::resolve(
+            &flags.auto_models,
+            default_model.as_ref(),
+            std::time::Duration::from_millis(flags.auto_timeout_ms),
+            &lookup,
+        )?;
+        Ok(Self {
+            max_loaded_models: flags.max_loaded_models.max(1),
+            default_model,
+            router,
+            default_auto,
+        })
+    }
+}
+
+/// What `"model": "auto"` chooses between, as the startup log says it: each
+/// candidate with the description the decision model reads and where it came
+/// from — a warning when it is the catalog's product text or the bare name —
+/// and what will keep routing from working as configured.
+fn log_route_table(
+    table: &route::RouteTable,
+    max_loaded_models: usize,
+    decision_model: bool,
+    keep_alive: bool,
+) {
+    tracing::info!(
+        "\"model\": \"{}\" chooses between {} models, the fallback {}, deciding within {} ms \
+         (--auto-model, --auto-timeout-ms)",
+        route::AUTO,
+        table.candidates.len(),
+        table.fallback().name,
+        table.timeout.as_millis()
+    );
+    for candidate in &table.candidates {
+        let source = candidate.source.describe();
+        if candidate.source.warns() {
+            tracing::warn!(
+                "  {}: \"{}\" — from {source}",
+                candidate.name,
+                candidate.description
+            );
+        } else {
+            tracing::info!(
+                "  {}: \"{}\" — from {source}",
+                candidate.name,
+                candidate.description
+            );
+        }
+    }
+    if !decision_model {
+        tracing::warn!(
+            "--auto-model without --decision-model: until a request loads a decision model, \
+             every routed request is answered by the fallback, {}",
+            table.fallback().name
+        );
+    }
+    if max_loaded_models < table.candidates.len() {
+        tracing::warn!(
+            "--max-loaded-models {max_loaded_models} keeps fewer models loaded than the {} \
+             --auto-model candidates: a request routed to one that is not loaded unloads \
+             another, and alternating between them reloads a model each time",
+            table.candidates.len()
+        );
+    }
+    if keep_alive {
+        tracing::warn!(
+            "--keep-alive with --auto-model: an idle decision model is unloaded like any \
+             other, and routing then falls back until a request loads one again"
+        );
     }
 }
 
@@ -2350,7 +2703,7 @@ pub struct ServeConfig {
     pub launch_decision: Option<DecisionSlot>,
     /// `--decision-ctx`: see `AppState::decision_ctx`.
     pub decision_ctx: u32,
-    /// `--max-loaded-models`, as the user gave it.
+    /// `--max-loaded-models` and `--default-model`, as the user gave them.
     pub residency: ResidencyConfig,
     /// How many layers the launch model actually put on the GPU, after its
     /// own sizing: reported by `/api/ps`, and nothing else. Never a setting
@@ -2512,6 +2865,29 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         "Generation models kept resident: up to {max_loaded_models} (--max-loaded-models)"
     );
+    match &cfg.residency.default_model {
+        Some(model) => tracing::info!(
+            "A request that names no model is answered by {} ({}; --default-model)",
+            model.name,
+            model.path.display()
+        ),
+        None if cfg.residency.default_auto => tracing::info!(
+            "A request that names no model is routed, as \"model\": \"auto\" is \
+             (--default-model auto)"
+        ),
+        None => tracing::info!(
+            "A request that names no model is answered by the most recently used generation \
+             model (no --default-model)"
+        ),
+    }
+    if let Some(table) = &cfg.residency.router {
+        log_route_table(
+            table,
+            max_loaded_models,
+            cfg.launch_decision.is_some(),
+            cfg.keep_alive.is_some(),
+        );
+    }
     if max_loaded_models > 1 && (!cfg.fit || crate::fit::vram_bytes().is_none()) {
         tracing::warn!(
             "--max-loaded-models {max_loaded_models}: generation models are kept up to the \
@@ -2612,6 +2988,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         web_policy,
         allow_model_paths,
         launch_model: cfg.launch_model,
+        default_model: cfg.residency.default_model,
+        router: cfg.residency.router,
+        default_auto: cfg.residency.default_auto,
         embedding: tokio::sync::RwLock::new(cfg.launch_embedding),
         decision: tokio::sync::RwLock::new(cfg.launch_decision),
         decision_ctx: cfg.decision_ctx,
@@ -2635,6 +3014,25 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
     let api_addr = format!("0.0.0.0:{api_port}");
     let api_listener = TcpListener::bind(&api_addr).await?;
     tracing::info!("eullm API listening on {api_addr}");
+
+    // Started once the port is bound, so that requests are taken while the
+    // candidates load; a request that wants one first loads it itself.
+    if let Some(table) = state.router.clone() {
+        let warming = state.clone();
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let warm = warming
+                .warm_route_candidates(&table, KeepAlive::Default)
+                .await;
+            tracing::info!(
+                "Auto routing warm-up: {} of {} candidates resident after {:.1} s ({})",
+                warm.len(),
+                table.candidates.len(),
+                started.elapsed().as_secs_f64(),
+                crate::audit::sanitize_for_log(&warm.join(", "))
+            );
+        });
+    }
 
     // Spawn the optional chat-UI listener on a separate port. It exposes the
     // same API surface (so the embedded JS can call same-origin) plus the
@@ -2760,6 +3158,9 @@ impl AppState {
             web_policy: crate::tools::guard::WebPolicy::from_env(),
             allow_model_paths: false,
             launch_model: None,
+            default_model: None,
+            router: None,
+            default_auto: false,
             embedding: tokio::sync::RwLock::new(None),
             decision: tokio::sync::RwLock::new(None),
             decision_ctx: crate::inference::decision::DEFAULT_DECISION_CTX,
@@ -3029,6 +3430,13 @@ fn cors_layer(state: &Arc<AppState>) -> CorsLayer {
         }))
         .allow_methods(Any)
         .allow_headers(Any)
+        // Which model a routed request went to, and why: a browser client
+        // can read only the response headers named here.
+        .expose_headers([
+            axum::http::HeaderName::from_static(route::MODEL_HEADER),
+            axum::http::HeaderName::from_static(route::ROUTE_HEADER),
+            axum::http::HeaderName::from_static(route::ROUTE_ID_HEADER),
+        ])
 }
 
 /// Build the EULLM API router (Ollama + OpenAI compat) with CORS enabled
@@ -4060,6 +4468,287 @@ mod http_tests {
         .await;
         assert_eq!(status, 503);
         assert!(body.contains("No model loaded"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A route table over two fixtures of `store`, the second the fallback.
+    fn two_candidates(store: &ModelStore) -> route::RouteTable {
+        let candidate = |name: &str, description: &str| route::RouteCandidate {
+            name: name.to_string(),
+            path: store.gguf_path(name).expect("a fixture"),
+            description: description.to_string(),
+            source: route::DescriptionSource::Flag,
+            has_projector: false,
+        };
+        route::RouteTable {
+            candidates: vec![
+                candidate("small-m", "Short everyday requests"),
+                candidate("large-m", "Reasoning, maths and code"),
+            ],
+            fallback: 1,
+            timeout: std::time::Duration::from_secs(1),
+        }
+    }
+
+    /// Without `--auto-model` there is nothing to route with, and
+    /// `/api/route` says so.
+    #[tokio::test]
+    async fn api_route_without_auto_model_is_a_404() {
+        let tmp = std::env::temp_dir().join(format!("eullm-route-off-{}", uuid::Uuid::new_v4()));
+        let base = spawn(store_with_one_model(&tmp, "a-pulled-model")).await;
+        let (status, text) = post_json(
+            &format!("{base}/api/route"),
+            serde_json::json!({ "model": "auto", "prompt": "hi" }),
+        )
+        .await;
+        assert_eq!(status, 404, "{text}");
+        assert!(text.contains("auto routing is not configured"), "{text}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Routing configured but no decision model: the fallback answers, the
+    /// reason says why, and what the decision model would have read — the
+    /// state and the question, its options in order — is in the answer.
+    /// Nothing is loaded.
+    #[tokio::test]
+    async fn api_route_without_a_decision_model_answers_with_the_fallback() {
+        let tmp = std::env::temp_dir().join(format!("eullm-route-{}", uuid::Uuid::new_v4()));
+        store_with_one_model(&tmp, "small-m");
+        let store = store_with_one_model(&tmp, "large-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state.router = Some(two_candidates(&state.store));
+        let base = spawn_state(state).await;
+        let url = format!("{base}/api/route");
+
+        let (status, text) = post_json(
+            &url,
+            serde_json::json!({ "model": "auto", "messages": [
+                { "role": "user", "content": "What is 2 + 2?" }
+            ] }),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let route: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(route["model"], "large-m");
+        assert_eq!(route["fallback"], "large-m");
+        assert_eq!(route["reason"], "no_decision_model");
+        assert!(route["decision_model"].is_null() && route["confidence"].is_null());
+        let candidates = route["candidates"].as_array().expect("candidates");
+        assert_eq!(candidates.len(), 2);
+        for candidate in candidates {
+            assert!(candidate["probability"].is_null(), "{candidate}");
+            assert_eq!(candidate["resident"], false);
+        }
+        let state_text = route["state"].as_str().expect("the state");
+        assert!(
+            state_text.starts_with("Request to answer, with its context.")
+                && state_text.ends_with("Latest message:\nWhat is 2 + 2?"),
+            "{state_text}"
+        );
+        assert_eq!(route["question"]["type"], "choice");
+        assert_eq!(route["question"]["instructions"], route::ROUTE_QUESTION);
+        assert!(
+            text.contains(
+                r#""criteria":{"small-m":"Short everyday requests","large-m":"Reasoning, maths and code"}"#
+            ),
+            "the options in their order: {text}"
+        );
+        assert!(uuid::Uuid::parse_str(route["route_id"].as_str().unwrap()).is_ok());
+
+        // A prompt routes too; a body with neither is refused.
+        let (status, text) = post_json(&url, serde_json::json!({ "prompt": "Why?" })).await;
+        assert_eq!(status, 200, "{text}");
+        assert!(text.contains(r#"Prompt:\nWhy?"#), "{text}");
+        let (status, _) = post_json(&url, serde_json::json!({ "model": "auto" })).await;
+        assert_eq!(status, 400);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// With `--default-model`, a request that names no model — or names it
+    /// empty — goes to that model, on every endpoint: here a fixture whose
+    /// weights are not a GGUF, so the load fails with a 500 that names it,
+    /// where without the flag the answer is the 503 above. Unloading with
+    /// an empty request and `keep_alive: 0` names it too.
+    #[tokio::test]
+    async fn a_request_that_names_no_model_goes_to_the_default_model() {
+        let tmp = std::env::temp_dir().join(format!("eullm-default-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let path = store.gguf_path("a-pulled-model").expect("the fixture");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state.default_model = Some(NamedModel {
+            name: "a-pulled-model".into(),
+            path,
+        });
+        let base = spawn_state(state).await;
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        for (endpoint, body) in [
+            ("/api/generate", serde_json::json!({ "prompt": "hi" })),
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "", "prompt": "hi" }),
+            ),
+            ("/api/chat", serde_json::json!({ "messages": hi })),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": " ", "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body.clone()).await;
+            assert_eq!(status, 500, "{endpoint} {body}: {text}");
+            assert!(text.contains("a-pulled-model"), "{endpoint}: {text}");
+        }
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "prompt": "", "keep_alive": 0 }),
+        )
+        .await;
+        assert_eq!(status, 200, "{text}");
+        let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+        assert_eq!(answer["done_reason"], "unload");
+        assert_eq!(answer["model"], "a-pulled-model");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Without `--auto-model`, `auto` is a name like any other, and no model
+    /// has it: a 404 that names it, as before routing existed. Nor is it
+    /// listed.
+    #[tokio::test]
+    async fn auto_without_auto_model_is_a_model_that_does_not_exist() {
+        let tmp = std::env::temp_dir().join(format!("eullm-auto-off-{}", uuid::Uuid::new_v4()));
+        let base = spawn(store_with_one_model(&tmp, "a-pulled-model")).await;
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        for (endpoint, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "hi" }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body).await;
+            assert_eq!(status, 404, "{endpoint}: {text}");
+            assert!(text.contains("auto"), "{endpoint}: {text}");
+        }
+        let (_, tags) = get_json(&format!("{base}/api/tags")).await;
+        assert!(!tags.to_string().contains("eullm-router"), "{tags}");
+        let (_, models) = get_json(&format!("{base}/v1/models")).await;
+        assert!(!models.to_string().contains(r#""id":"auto""#), "{models}");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Routing configured, and neither candidate loads (their weights are
+    /// not GGUFs): with no decision model the fallback is chosen, and the
+    /// request fails as one naming it would, on every endpoint — also when
+    /// the model chosen was the other one, which the fallback then stands
+    /// in for, and when the request names no model under `--default-model
+    /// auto`. A raw prompt is refused before anything is chosen; the
+    /// requests with nothing to generate answer as `auto`; and `auto` is
+    /// listed.
+    #[tokio::test]
+    async fn a_routed_request_is_answered_by_the_model_chosen_or_the_fallback() {
+        let tmp = std::env::temp_dir().join(format!("eullm-auto-{}", uuid::Uuid::new_v4()));
+        store_with_one_model(&tmp, "small-m");
+        let store = store_with_one_model(&tmp, "large-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        let mut table = two_candidates(&state.store);
+        // The only one that can read an image: a request with one has
+        // nothing to decide, and goes to it.
+        table.candidates[0].has_projector = true;
+        state.router = Some(table);
+        state.default_auto = true;
+        let base = spawn_state(state).await;
+
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        let photo = serde_json::json!([{ "role": "user", "content": "what is this?",
+            "images": ["aGVsbG8="] }]);
+        for (endpoint, body) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "hi" }),
+            ),
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "AUTO", "prompt": "hi", "stream": true }),
+            ),
+            ("/api/generate", serde_json::json!({ "prompt": "hi" })),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": hi }),
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": photo }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "model": "auto", "messages": hi, "stream": true }),
+            ),
+            (
+                "/v1/chat/completions",
+                serde_json::json!({ "messages": hi }),
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body.clone()).await;
+            assert_eq!(status, 500, "{endpoint} {body}: {text}");
+            assert!(
+                text.contains("Failed to load model 'large-m'"),
+                "{endpoint} {body}: {text}"
+            );
+        }
+
+        let (status, text) = post_json(
+            &format!("{base}/api/generate"),
+            serde_json::json!({ "model": "auto", "prompt": "<|im_start|>", "raw": true }),
+        )
+        .await;
+        assert_eq!(status, 400, "{text}");
+        assert!(text.contains("raw prompt"), "{text}");
+
+        for (endpoint, body, done_reason) in [
+            (
+                "/api/generate",
+                serde_json::json!({ "model": "auto", "prompt": "" }),
+                "load",
+            ),
+            (
+                "/api/chat",
+                serde_json::json!({ "model": "auto", "messages": [], "keep_alive": 0 }),
+                "unload",
+            ),
+        ] {
+            let (status, text) = post_json(&format!("{base}{endpoint}"), body).await;
+            assert_eq!(status, 200, "{endpoint}: {text}");
+            let answer: serde_json::Value = serde_json::from_str(&text).expect("json");
+            assert_eq!(answer["model"], "auto", "{answer}");
+            assert_eq!(answer["done_reason"], done_reason, "{answer}");
+        }
+
+        let (_, tags) = get_json(&format!("{base}/api/tags")).await;
+        let auto = tags["models"]
+            .as_array()
+            .and_then(|models| models.iter().find(|m| m["name"] == "auto"))
+            .expect("auto in /api/tags");
+        assert_eq!(auto["details"]["family"], "eullm-router");
+        assert_eq!(
+            auto["details"]["candidates"],
+            serde_json::json!(["small-m", "large-m"])
+        );
+        let (_, models) = get_json(&format!("{base}/v1/models")).await;
+        assert!(
+            models["data"]
+                .as_array()
+                .is_some_and(|data| data.iter().any(|m| m["id"] == "auto")),
+            "{models}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

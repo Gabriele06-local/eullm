@@ -102,6 +102,9 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--embedding-model` | (unset) | Load a text-embedding model (GGUF path or store name) at startup as a **reserved companion**: its VRAM is subtracted from free VRAM before `--fit` sizes the generation model, so both stay resident together instead of depending on load order. See [Text Embeddings and the Embedding Slot](#text-embeddings-and-the-embedding-slot) |
 | `--decision-model` | (unset) | Load a decision model for `POST /v1/systemone` at startup, as a reserved companion like `--embedding-model`. See [Decisions: `/v1/systemone`](#decisions-v1systemone-and-the-decision-slot) |
 | `--max-loaded-models` | `1` | How many generation models stay loaded at once (1–16); embedding and decision models are not counted. Past it, the least recently used idle model is unloaded; above 1, a model answering requests is never unloaded to make room. At 1, a request for another model replaces the loaded one, as before. See [Several models at once](#several-models-at-once) |
+| `--default-model` | (unset) | The model a request with no `model` field (or an empty one) goes to, loaded for it when needed; `auto` routes it. Unset: the most recently used model answers. See [The default model](#the-default-model) |
+| `--auto-model` | (unset) | `NAME[=DESCRIPTION]`, repeatable, 2–8 times, smallest model first: the models `"model": "auto"` chooses between. See [`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model) |
+| `--auto-timeout-ms` | `1000` | The most routing may add to a request (10–60000) before the fallback answers |
 | `--decision-ctx` | `8192` | Most tokens of context one `/v1/systemone` request may use: the state plus its longest question (plus every other question in `batched` mode). The context is sized per request; this ceiling is what the decision slot keeps free in VRAM |
 
 #### Automatic GPU sizing
@@ -257,7 +260,13 @@ eullm forge Qwen/Qwen3-14B --profile legal-it --identity "LegalAI"
 
 ## Dynamic Model Swap
 
-EULLM Engine can swap models at runtime, like Ollama. When an API request specifies a `"model"` that differs from the currently loaded one, the server automatically unloads the current model and loads the new one.
+EULLM Engine loads models at runtime, like Ollama: a request names a model in
+its `"model"` field, and a model that is not loaded is loaded for it. How many
+stay loaded is `--max-loaded-models`. At 1, the default, a request for another
+model replaces the loaded one — a swap; above 1, models stay loaded side by
+side ([Several models at once](#several-models-at-once)). A request may also
+name no model ([The default model](#the-default-model)), or `auto`, and let
+the decision model choose ([`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model)).
 
 ```bash
 # Start with one model
@@ -334,7 +343,13 @@ How a model finds its place:
   splitting it silently would divide the card. Without automatic sizing
   (`--no-fit`, or a build that cannot read free VRAM) only the count is kept,
   and the server says so at startup.
-- A request with no `model` field is answered by the most recently used model.
+- **An embedding or decision model loaded by a request** (not a reserved
+  `--embedding-model` or `--decision-model`) that does not fit in the VRAM
+  left free unloads generation models the same way — the least recently used
+  idle one first, one at a time, and only as many as it needs. Each counts in
+  `model_swaps`.
+- A request with no `model` field is answered by `--default-model`, or
+  without it by the most recently used model.
 
 Requests to a model that is loaded never wait for another model's load.
 `GET /api/ps` lists what is loaded, with what each model holds and when it
@@ -346,6 +361,125 @@ Unlike Ollama's `OLLAMA_MAX_LOADED_MODELS`, this is a command-line flag, not an
 environment variable, and it counts generation models only, defaulting to 1
 rather than three per GPU. The server says so at startup when the variable is
 set.
+
+**On a machine without a GPU**, run the server with
+`OMP_WAIT_POLICY=PASSIVE`. Each model computes on its own pool of OpenMP
+threads, one per core, and by default a pool's threads spin for a while after
+each step waiting for the next one, taking the cores another model is
+computing on. Measured with two tiny models on a CPU, a request's time to
+first token went from 34.5 ms alone to 235.8 ms while the other model was
+loading. `PASSIVE` makes waiting threads sleep instead. On a GPU the threads
+mostly wait on the device, and the setting matters little.
+
+```bash
+OMP_WAIT_POLICY=PASSIVE eullm serve --max-loaded-models 2
+```
+
+### The default model
+
+`--default-model NAME` (a store name or a GGUF path) is the model a request
+with no `model` field, or an empty one, goes to — on `/api/generate`,
+`/api/chat` and `/v1/chat/completions` — loaded for it as if the request had
+named it. An empty request with `keep_alive: 0` unloads it. A name that is no
+model stops the server at startup. `--default-model auto`, with
+`--auto-model`, routes such requests as `"model": "auto"` is routed. Without
+the flag a request that names no model is answered by the most recently used
+model, and refused with 503 when none is loaded.
+
+## `"model": "auto"`: the decision model chooses the model
+
+With two to eight `--auto-model` and a `--decision-model`, a request naming
+the model `auto` (in any case) is answered by one of the candidates, chosen
+for it by the decision model: the small one when it will answer correctly and
+completely, a larger one when the request needs more reasoning, knowledge,
+code or length. The large model answers only what needs it.
+
+```bash
+eullm serve --max-loaded-models 2 \
+  --auto-model 'qwen3-4b=Short everyday requests, simple facts and quick rewrites' \
+  --auto-model 'qwen3-8b=Multi-step reasoning, maths, code, analysis and long answers' \
+  --decision-model /models/Jev-Style-0.8B-Decision-v3-Q4_K_M.gguf
+curl http://localhost:11434/api/chat -d '{"model": "auto", "stream": false,
+  "messages": [{"role": "user", "content": "What is the capital of France?"}]}'
+```
+
+**Candidates.** `--auto-model NAME=DESCRIPTION`, smallest model first: the
+order is the order the decision model reads them in. The description is what
+it reads about each, up to 400 characters; without one it reads the store
+manifest's description, else the catalog's, else the name — the server warns
+about the last two, which describe a product rather than what the model is
+good at. `auto` itself, a model given twice, or a name that is no model stops
+the server at startup. `--max-loaded-models` should hold every candidate;
+the server warns when it does not, since every switch would then reload a
+model.
+
+**What the decision model reads.** One `choice` question, with a candidate as
+each option, about a digest of the request built by code: the start of the
+system instructions, the last turns before the latest message shortened, the
+latest message whole (its head and tail when very long), the attachments and
+the tool names. The text is never stored in the audit trail, only its SHA-256.
+
+**Code filters first.** A candidate that cannot read the request's images or
+audio (no projector), or whose context is shorter than the request, is not
+offered. With one candidate left there is nothing to decide; with none, the
+fallback answers, and fails as a request naming it would.
+
+**The fallback** is `--default-model` when it is a candidate, the last
+candidate otherwise. It answers whenever the decision model does not decide,
+and the reason says why:
+
+| Reason | When |
+|---|---|
+| `decided` | The decision model chose: the most likely candidate, no threshold |
+| `no_decision_model` | No `--decision-model`, or it was unloaded (by `--keep-alive`, say) |
+| `timeout` | The decision took longer than `--auto-timeout-ms` (1000); it is cancelled |
+| `decision_error` | The decision model could not decide (the request over its budget, a failure) |
+| `only_candidate` / `no_eligible_candidate` | The filters left one candidate, or none |
+| `load_failed` | The chosen model would not load: the fallback answered in its place, once |
+
+**Latency.** A decision is one forward pass of the decision model over the
+digest: tens of milliseconds on a GPU. One decision runs at a time per
+decision model, so routed requests and `/v1/systemone` traffic queue behind
+each other; `--auto-timeout-ms` bounds the wait. On a CPU a decision takes a
+second or more — measured with Qwen3-0.6B as the decision model, every route
+timed out at the default 1000 ms — so `auto` there answers with the fallback
+unless the timeout is raised, and then every request waits for its decision.
+
+**Which model answered, and why.** The `model` field of the response, and of
+every streamed line or chunk, is the model that answered. The headers, sent
+before the body, say the same — `X-EuLLM-Model`, `X-EuLLM-Route` (the reason)
+and `X-EuLLM-Route-Id` — and the response, or the last line or chunk of a
+stream, carries:
+
+```json
+"eullm": {"route": {"requested": "auto", "model": "qwen3-4b", "reason": "decided",
+  "confidence": 0.71, "probabilities": {"qwen3-4b": 0.85, "qwen3-8b": 0.15},
+  "decision_model": "Jev-Style-0.8B-Decision-v3-Q4_K_M", "decision_ms": 38.2, "id": "<uuid>"}}
+```
+
+Ollama and OpenAI clients ignore it. The audit trail has one `route` line per
+routed request, under the route's id: the candidates offered and excluded,
+the decision record as `/v1/systemone` writes it, the reason and the time.
+The answer's own line names it in `route.id`, and says in `route.fallback`
+when the chosen model did not load.
+
+**Loading.** Once the server listens, it loads the candidates, the fallback
+first, as far as they fit without unloading anything, and logs how many it
+loaded. An empty request naming `auto` (an empty prompt, or empty messages)
+does the same, and with `keep_alive: 0` unloads every candidate; both answer
+with `"model": "auto"`. `auto` is listed in `/api/tags`, with
+`details.family: "eullm-router"` and its candidates, and in `/v1/models`.
+
+**Limits.** A `raw` prompt on `/api/generate` is written for one model's
+template and gets a 400. There is no filter on tool support: a request with
+tools may go to a candidate that cannot call them. `/api/show` does not know
+`auto`. Without `--auto-model`, `auto` is a model name like any other, and a
+404.
+
+**Checking the choice without generating.** [`POST /api/route`](#post-apiroute)
+takes the same body and answers with the route, the digest and the question
+— the way to tune the descriptions, and what `bench/reflexbench/autobench.py`
+measures routing with.
 
 ## KV Cache Quantization
 
@@ -431,18 +565,18 @@ More slots increase parallelism but reduce per-request throughput (shared GPU ti
 
 Start with `--batch-size 4` for the best per-request latency. Increase when your workload requires more concurrent slots and can tolerate slower individual responses.
 
-## Dynamic Model Swap
+## Loading a Model: Slots, Context and Names
 
-The Engine supports hot-swapping models at runtime. When a request specifies a different `model`, the server automatically:
+When a request names a model that is not loaded, the server:
 
-1. **Shuts down** the old scheduler thread (waits for it to fully exit)
-2. **Frees VRAM** — the old model and its KV cache are destroyed
-3. **Loads** the new model with the requested configuration
-4. **Resumes** serving requests on the new model
-
-That is with one model at a time, the default. With `--max-loaded-models`
-above 1, a model is unloaded only when the new one needs its place or its
-memory — see [Several models at once](#several-models-at-once).
+1. **Makes room** for it: with one model at a time, the default, it shuts down
+   the loaded model's scheduler thread (waiting for it to fully exit) and frees
+   its VRAM; with `--max-loaded-models` above 1, it unloads a model only when
+   the new one needs its place or its memory — see [Several models at
+   once](#several-models-at-once)
+2. **Sizes** the new model against the VRAM now free, and **loads** it with the
+   requested configuration
+3. **Serves** the request on it, and every later request that names it
 
 ### Basic swap (via model field)
 
@@ -500,7 +634,7 @@ was loaded with, instead of loading the same weights again.
 ### Concurrent swap safety
 
 Multiple requests arriving simultaneously for a different model are handled safely:
-- Only one load runs at a time (serialized via Mutex); requests to a model that is already loaded do not wait for it
+- Only one load runs at a time (serialized via Mutex); requests to a model that is already loaded do not wait for it. A load waiting for a busy model to finish lets go of the lock meanwhile, so embedding and decision loads are not held up by it
 - Other requests for the model being loaded wait for the load to complete, then use it
 - With one model at a time (the default), requests the old model is still answering are cut off with an error, except on a sequential engine, which finishes them before it is freed. With `--max-loaded-models` above 1, a model answering requests is never unloaded to make room — see [Several models at once](#several-models-at-once)
 
@@ -1316,7 +1450,7 @@ another.
 
 #### `GET /api/tags`
 
-List available models. Returns the loaded models first, the most recently used first, each with `"loaded": true` (what admin dashboards check for health), followed by catalog entries and the other models in the store. `GET /api/ps` lists only what is loaded, with what each model holds.
+List available models. Returns the loaded models first, the most recently used first, each with `"loaded": true` (what admin dashboards check for health), followed by catalog entries and the other models in the store. `GET /api/ps` lists only what is loaded, with what each model holds. With `--auto-model`, `auto` comes last, with `details.family: "eullm-router"` and `details.candidates`.
 
 ```bash
 curl http://localhost:11434/api/tags
@@ -1380,7 +1514,10 @@ curl -X POST http://localhost:11434/api/generate \
 | `num_ctx` | server per-slot ctx | Per-request context window budget (clamped to per-slot max) |
 | `format` | — | Set to `"json"` for constrained JSON decoding (GBNF grammar) |
 | `keep_alive` | `--keep-alive` | How long the model stays loaded once this request is over: a duration (`"5m"`), a number of seconds, `0` to unload it as soon as the answer has been sent, `-1` to keep it. Counted from when the model goes idle, with the keep_alive of the last request that arrived — as in Ollama, so a `keep_alive: 0` sent while an answer is still coming unloads the model once it is over |
+| `cache_prompt` | true | EuLLM extension, llama.cpp's name: `false` decodes the whole prompt instead of starting from what the slot holds from the request before. Slower for a long conversation, but on a GPU the only way the same request gets the same answer twice at temperature 0 (see below). Also on `/api/chat` and `/v1/chat/completions`, at the top level or in `options` |
 | `options` | — | Ollama-style nested object for `num_predict`, `temperature`, `num_ctx` |
+
+**Same request, same answer.** Temperature 0 (or `top_k: 1`) with a `seed` picks the same token from the same numbers, but on a GPU the numbers themselves depend on how many of a prompt's tokens are decoded together, and by default a request starts from the part of the prompt its slot already holds from the request before. The same request can then get a different answer depending on what came before it, or on whether the model was reloaded in between — in AutoBench on an RTX 5070 Ti, half of qwen3-8b's GSM8K answers came out different the second time they were asked. A CPU decodes the same way whatever the batch, so this is a GPU matter. Send `"cache_prompt": false` when answers must reproduce (evaluations, comparisons, tests): AutoBench does for every answer it compares.
 
 **Ollama `options` support:** Parameters can be passed at the top level (OpenAI style) or nested inside an `options` object (Ollama style). Top-level values take precedence.
 
@@ -1507,6 +1644,47 @@ first, send an empty request with `"keep_alive": 0` instead (see above).
 `unloaded` names the first model unloaded, or is `null` when none was loaded —
 which is not an error — and `unloaded_all` lists every one.
 
+#### `POST /api/route`
+
+Which model [`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model)
+would choose for a request, without generating anything or loading a
+generation model. An EuLLM extension. The body is the request as it would go
+to `/api/chat`, `/v1/chat/completions` (`messages`, and `tools`) or
+`/api/generate` (`prompt`); `batch_size` and `ctx_size` are read as there.
+Without `--auto-model` it answers 404; a body with neither `messages` nor
+`prompt` gets a 400.
+
+```bash
+curl http://localhost:11434/api/route -d '{"model": "auto",
+  "messages": [{"role": "user", "content": "Prove that the square root of 2 is irrational."}]}'
+```
+
+```json
+{
+  "model": "qwen3-8b",
+  "reason": "decided",
+  "fallback": "qwen3-8b",
+  "candidates": [
+    {"model": "qwen3-4b", "description": "Short everyday requests, ...", "probability": 0.22, "resident": true},
+    {"model": "qwen3-8b", "description": "Multi-step reasoning, ...", "probability": 0.78, "resident": true}
+  ],
+  "excluded": [],
+  "confidence": 0.56,
+  "decision_model": "Jev-Style-0.8B-Decision-v3-Q4_K_M",
+  "decision_ms": 31.4,
+  "state": "Request to answer, with its context. ...",
+  "question": {"type": "choice", "instructions": "Which model should answer the latest message? ...",
+               "criteria": {"qwen3-4b": "Short everyday requests, ...", "qwen3-8b": "Multi-step reasoning, ..."}},
+  "route_id": "<uuid>"
+}
+```
+
+`candidates` are the ones offered, in order; `excluded` the others, with
+why. `state` and `question` are exactly what the decision model read, in
+`/v1/systemone`'s request shape, so the same question worded otherwise can be
+asked of `/v1/systemone` about the same state. Each call is audited as a
+`route` line with `"dry_run": true`.
+
 #### `POST /api/show`
 
 Get model metadata.
@@ -1573,7 +1751,8 @@ Its entry in `data` carries `context_tokens`, the most tokens one
 itself reads fewer), for a Jev-Style model `head_max_tokens`, what one
 question with its options may take on its own, and `"eullm": {"slot":
 "decision"}`; and the top-level `models`, the list the System One SDKs read,
-names it. With no decision model loaded, `models` is empty.
+names it. With no decision model loaded, `models` is empty. With
+`--auto-model`, `auto` is the last entry of `data`.
 
 ```json
 {
@@ -1724,12 +1903,14 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `id` | UUID v4 | Unique inference ID |
 | `timestamp` | DateTime (UTC) | Request time |
 | `model` | String | Model name |
-| `request_type` | String | `generate`, `chat`, `chat.completions`, `systemone` |
+| `request_type` | String | `generate`, `chat`, `chat.completions`, `systemone`, `route` |
 | `input_tokens` | u32 | Input token count |
 | `output_tokens` | u32 | Output token count |
 | `duration_ms` | u64 | Inference duration |
 | `user_id` | Option\<String\> | Optional user identifier |
 | `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), `policy_removed` (only when the [decision policy](#a-server-side-decision-policy-eullm_decision_policy) removed options: per question, the options the model never read), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
+| `routing` | Object, `route` only | How [`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model) routed one request: `requested`, `model` (chosen), `reason`, `fallback`, `candidates` (offered, in order), `excluded` (with `why`), `decision_model`, `decision_ms`, `dry_run` (only for `POST /api/route`), `error`. The line's `id` is the route's id; its `model` is the decision model, and its `decision` the decision record as above |
+| `route` | Object, routed answers only | `id` (the `route` line's), `requested` (`auto`), and `fallback` (`load_failed: …`, only when the chosen model did not load) |
 
 **Example audit entry:**
 

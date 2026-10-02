@@ -49,7 +49,7 @@ use crate::audit::redact::redact;
 use crate::audit::{AuditEntry, AuditLogger, DecisionAnswerRecord, DecisionRecord};
 use crate::inference::decision::{
     self, Cancel, DecideOptions, Decision, DecisionError, DecisionModel, DecisionModelInfo,
-    EvalMode, EvalStats, MAX_TEMPERATURE, Question, QuestionKind, ReadoutKind,
+    EvalMode, EvalStats, MAX_TEMPERATURE, Question, QuestionKind, QuestionOutcome, ReadoutKind,
 };
 
 type S = Arc<AppState>;
@@ -1128,18 +1128,15 @@ fn build_answers(
         .zip(&parsed.legends)
         .zip(&decision.outcomes)
     {
-        let labels = labels(question);
-        let raw = decision::calibrated_probabilities(&outcome.logprobs, None, 1.0);
         let prior = match parsed.calibration {
             Calibration::ContentFree => outcome.prior_logprobs.as_deref(),
             Calibration::None => None,
         };
-        let probabilities =
-            decision::calibrated_probabilities(&outcome.logprobs, prior, temperature);
-        let codes = readout == ReadoutKind::Codes;
-        let coverage = codes.then(|| decision::coverage(&outcome.logprobs));
-        let values = OrderedMap::zip(&labels, &outcome.logprobs);
-        let (logprobs, scores) = if codes {
+        let record = answer_record(id, question, outcome, prior, readout, temperature);
+        let labels = &record.labels;
+        let probabilities = &record.probabilities;
+        let values = OrderedMap::zip(labels, &outcome.logprobs);
+        let (logprobs, scores) = if readout == ReadoutKind::Codes {
             (Some(values), None)
         } else {
             (None, Some(values))
@@ -1147,83 +1144,94 @@ fn build_answers(
         let extension = AnswerExtension {
             logprobs,
             scores,
-            raw_probabilities: OrderedMap::zip(&labels, &raw),
-            coverage,
-            prior_logprobs: prior.map(|p| OrderedMap::zip(&labels, p)),
+            raw_probabilities: OrderedMap::zip(labels, &record.raw_probabilities),
+            coverage: record.coverage,
+            prior_logprobs: prior.map(|p| OrderedMap::zip(labels, p)),
             // System One reports no confidence for a yes/no answer.
             confidence_entropy: (question.kind() != QuestionKind::Noul)
-                .then(|| decision::normalized_entropy_confidence(&probabilities)),
+                .then(|| decision::normalized_entropy_confidence(probabilities)),
         };
 
-        let (answer, value, confidence) = match question {
-            Question::Noul { .. } => {
-                let noul = probabilities[0];
-                (
-                    Answer::Noul {
-                        noul,
-                        eullm: extension,
-                    },
-                    json!(noul),
-                    None,
-                )
-            }
-            Question::Choice { .. } => {
-                let best = probabilities
-                    .iter()
-                    .enumerate()
-                    .max_by(|a, b| a.1.total_cmp(b.1))
-                    .map_or(0, |(i, _)| i);
-                let confidence = decision::max_probability_confidence(&probabilities);
-                let choice = labels[best].clone();
-                (
-                    Answer::Choice {
-                        choice: choice.clone(),
-                        probabilities: OrderedMap::zip(&labels, &probabilities),
-                        confidence,
-                        eullm: extension,
-                    },
-                    json!(choice),
-                    Some(confidence),
-                )
-            }
-            Question::Score { .. } => {
-                let score = decision::expected_level(&probabilities);
-                let confidence = decision::max_probability_confidence(&probabilities);
-                (
-                    Answer::Score {
-                        score,
-                        legend: OrderedMap(
-                            labels.iter().cloned().zip(legend.iter().cloned()).collect(),
-                        ),
-                        probabilities: OrderedMap::zip(&labels, &probabilities),
-                        confidence,
-                        eullm: extension,
-                    },
-                    json!(score),
-                    Some(confidence),
-                )
-            }
+        let answer = match question {
+            Question::Noul { .. } => Answer::Noul {
+                noul: probabilities[0],
+                eullm: extension,
+            },
+            Question::Choice { .. } => Answer::Choice {
+                choice: labels[most_likely(probabilities)].clone(),
+                probabilities: OrderedMap::zip(labels, probabilities),
+                confidence: decision::max_probability_confidence(probabilities),
+                eullm: extension,
+            },
+            Question::Score { .. } => Answer::Score {
+                score: decision::expected_level(probabilities),
+                legend: OrderedMap(labels.iter().cloned().zip(legend.iter().cloned()).collect()),
+                probabilities: OrderedMap::zip(labels, probabilities),
+                confidence: decision::max_probability_confidence(probabilities),
+                eullm: extension,
+            },
         };
-        let (logprobs, scores) = if codes {
-            (Some(outcome.logprobs.clone()), None)
-        } else {
-            (None, Some(outcome.logprobs.clone()))
-        };
-        records.push(DecisionAnswerRecord {
-            id: id.clone(),
-            kind: question.kind().as_str().to_string(),
-            labels: labels.clone(),
-            logprobs,
-            scores,
-            raw_probabilities: raw,
-            probabilities,
-            coverage,
-            answer: value,
-            confidence,
-        });
         answers.push((id.clone(), answer));
+        records.push(record);
     }
     (OrderedMap(answers), records)
+}
+
+/// One question's answer as the audit trail records it, from the engine's
+/// log-probabilities for it: `/v1/systemone`'s record of each question, and
+/// the router's of its one, so that both are read back the same way.
+/// `prior`, a content-free prior to divide out; `temperature`, the scaling
+/// applied after it.
+pub(crate) fn answer_record(
+    id: &str,
+    question: &Question,
+    outcome: &QuestionOutcome,
+    prior: Option<&[f64]>,
+    readout: ReadoutKind,
+    temperature: f64,
+) -> DecisionAnswerRecord {
+    let labels = labels(question);
+    let raw = decision::calibrated_probabilities(&outcome.logprobs, None, 1.0);
+    let probabilities = decision::calibrated_probabilities(&outcome.logprobs, prior, temperature);
+    let codes = readout == ReadoutKind::Codes;
+    let (value, confidence) = match question {
+        Question::Noul { .. } => (json!(probabilities[0]), None),
+        Question::Choice { .. } => (
+            json!(labels[most_likely(&probabilities)]),
+            Some(decision::max_probability_confidence(&probabilities)),
+        ),
+        Question::Score { .. } => (
+            json!(decision::expected_level(&probabilities)),
+            Some(decision::max_probability_confidence(&probabilities)),
+        ),
+    };
+    let (logprobs, scores) = if codes {
+        (Some(outcome.logprobs.clone()), None)
+    } else {
+        (None, Some(outcome.logprobs.clone()))
+    };
+    DecisionAnswerRecord {
+        id: id.to_string(),
+        kind: question.kind().as_str().to_string(),
+        coverage: codes.then(|| decision::coverage(&outcome.logprobs)),
+        labels,
+        logprobs,
+        scores,
+        raw_probabilities: raw,
+        probabilities,
+        answer: value,
+        confidence,
+    }
+}
+
+/// The class with the highest probability: a `choice`'s answer. Of two as
+/// likely, the later one (`Iterator::max_by` keeps the last maximum).
+pub(crate) fn most_likely(probabilities: &[f64]) -> usize {
+    probabilities
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map_or(0, |(i, _)| i)
 }
 
 /// One line of `decisions.jsonl` (see `decision_traces`): a decision as a
@@ -1438,7 +1446,7 @@ fn decision_error(e: DecisionError, ids: &[String]) -> ApiError {
     }
 }
 
-fn sha256_hex(text: &str) -> String {
+pub(crate) fn sha256_hex(text: &str) -> String {
     Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -1468,7 +1476,7 @@ pub(super) async fn systemone(
                         ApiError::new(StatusCode::NOT_FOUND, "not_found", msg)
                     }
                     super::ModelError::LoadFailed(msg) => ApiError::internal(msg),
-                    super::ModelError::Busy(msg) => {
+                    super::ModelError::Busy(msg) | super::ModelError::NoRoom(msg) => {
                         ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "busy", msg)
                     }
                 })?;
@@ -1587,7 +1595,7 @@ fn response(
 /// decision runs; axum drops the handler's future — and with it this —
 /// when the client disconnects, and the decision stops at its next
 /// question instead of occupying the model to the end.
-struct CancelOnDrop(Cancel);
+pub(crate) struct CancelOnDrop(pub(crate) Cancel);
 
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
@@ -1732,7 +1740,6 @@ impl DecisionJob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inference::decision::QuestionOutcome;
 
     /// A request as the handler reads it: a body that does not deserialize
     /// is the `invalid_request` axum's rejection becomes.
