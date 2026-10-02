@@ -336,7 +336,7 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(allowed["tools"][2]["probability"], p["none"], places=3)
         self.assertIsNone(allowed["none_probability"])
         self.assertIsNone(allowed["none_wins"])
-        self.assertEqual(sum(t["probability"] for t in allowed["tools"]), 1.0, places=3)
+        self.assertAlmostEqual(sum(t["probability"] for t in allowed["tools"]), 1.0, places=3)
 
     async def test_the_arguments_are_checked(self):
         with standin.StandIn() as eullm:
