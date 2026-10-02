@@ -21,6 +21,7 @@
 #   EXAM_OUT     answers directory (default $WORK/eval/norm-exam-answers)
 #   EXAM_NORMS   legislation files: set to ALSO ask each model open book,
 #                as "<label>-open" (default: closed book only)
+#   EXAM_OPEN_ONLY  1 = with EXAM_NORMS, ask open book only
 #   EXAM_REPO    checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-exam
@@ -70,15 +71,34 @@ heartbeat_start
 
 EVAL=(python "$REPO/forge/scripts/legal_eval.py" --items "$ITEMS" --quiet
       --csv "$OUT/keywords.csv")
+# An answers file with one line per item is a finished run: legal_eval.py
+# writes the file only after the last answer, so it is either whole or absent.
+# Skipping those makes the job a link of a chain (sbatch_exam_round.slurm,
+# ROUND_EXAM_LINKS): a 2 h link that runs out of time leaves what it finished,
+# and the next link does the rest instead of starting over.
+WANT="$(grep -c . "$ITEMS")"
+done_already() { [ -s "$1" ] && [ "$(grep -c . "$1")" -eq "$WANT" ]; }
+# EXAM_OPEN_ONLY=1 asks open book only: the closed-book run is a second full
+# pass that the open-book decisions do not use.
 status=0
 for pair in $EXAM_MODELS; do
     label="${pair%%=*}"; path="${pair#*=}"
     echo "[exam] === $label ==="
-    "${EVAL[@]}" "$path" --label "$label" --answers "$OUT/answers-$label.jsonl" || status=1
+    if [ "${EXAM_OPEN_ONLY:-0}" != "1" ]; then
+        if done_already "$OUT/answers-$label.jsonl"; then
+            echo "[exam] $label: answered already, skipped"
+        else
+            "${EVAL[@]}" "$path" --label "$label" --answers "$OUT/answers-$label.jsonl" || status=1
+        fi
+    fi
     if [ -n "${EXAM_NORMS:-}" ]; then
-        # shellcheck disable=SC2086
-        "${EVAL[@]}" "$path" --label "$label-open" --norms $EXAM_NORMS \
-            --answers "$OUT/answers-$label-open.jsonl" || status=1
+        if done_already "$OUT/answers-$label-open.jsonl"; then
+            echo "[exam] $label-open: answered already, skipped"
+        else
+            # shellcheck disable=SC2086
+            "${EVAL[@]}" "$path" --label "$label-open" --norms $EXAM_NORMS \
+                --answers "$OUT/answers-$label-open.jsonl" || status=1
+        fi
     fi
 done
 exit "$status"

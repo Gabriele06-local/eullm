@@ -349,8 +349,9 @@ def test_the_retrieval_check_prints_counts_per_boost_and_no_question(tmp_path, c
     spec.loader.exec_module(mod)
     assert mod.main([str(exam), "--norms", str(norms), "--boost", "0", "3"]) == 0
     out = capsys.readouterr().out
-    assert "boost=0   termine_argomento  n=1    top1=0.00" in out
-    assert "boost=3   termine_argomento  n=1    top1=1.00" in out
+    lines = {ln.split()[2]: ln for ln in out.splitlines() if "termine_argomento" in ln}
+    assert "n=1" in lines["boost=0"] and "top1=0.00" in lines["boost=0"]
+    assert "n=1" in lines["boost=3"] and "top1=1.00" in lines["boost=3"]
     assert "Contenuto della citazione" not in out
 
 

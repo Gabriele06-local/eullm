@@ -201,3 +201,29 @@ def test_other_load_errors_are_not_swallowed():
     pytest.importorskip("torch")
     with pytest.raises(ValueError, match="Unrecognized"):
         legal_eval.load_model(_TextOnly, "ministral", 1)       # no fallback given
+
+
+def _judge_module():
+    spec = importlib.util.spec_from_file_location(
+        "judge_answers", SCRIPT.parent / "judge_answers.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_a_judge_link_skips_answers_graded_already(tmp_path):
+    import os
+
+    judge = _judge_module()
+    answers = tmp_path / "answers-v0.3-open.jsonl"
+    answers.write_text('{"id": "a"}\n{"id": "b"}\n')
+    graded = tmp_path / "answers-v0.3-open.graded.jsonl"
+    assert not judge.already_graded(answers)
+    graded.write_text('{"id": "a"}\n')                       # cut short
+    assert not judge.already_graded(answers)
+    graded.write_text('{"id": "a"}\n{"id": "b"}\n')
+    assert judge.already_graded(answers)
+    # the model was asked again after grading: the grades are stale
+    later = graded.stat().st_mtime + 10
+    os.utime(answers, (later, later))
+    assert not judge.already_graded(answers)

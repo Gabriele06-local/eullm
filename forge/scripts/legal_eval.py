@@ -183,6 +183,11 @@ def main() -> int:
                     help="legislazione_*.chunks.jsonl files: ask OPEN BOOK, "
                          "with the retrieved norms in the prompt")
     ap.add_argument("--k", type=int, default=3, help="norms retrieved per question")
+    ap.add_argument("--embedder", help="with --norms: fuse BM25 with this embedding model "
+                    "(eullm_forge.eval.dense); default BM25 alone")
+    ap.add_argument("--reranker", help="with --embedder: reorder the fused list with this model")
+    ap.add_argument("--retrieval-cache", type=Path,
+                    help="where the document embeddings are cached")
     ap.add_argument("--batch-size", type=int, default=0,
                     help="questions generated together (default: 16 on GPU, 1 on CPU)")
     ap.add_argument("--quiet", action="store_true",
@@ -195,10 +200,17 @@ def main() -> int:
     from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 
     items = load_eval_set(args.items) if args.items else load_seed()
-    index = NormIndex.from_files(args.norms) if args.norms else None
+    index = None
+    if args.norms and args.embedder:
+        from eullm_forge.eval.dense import build_hybrid
+        index = build_hybrid(args.norms, args.embedder, reranker_id=args.reranker,
+                             cache_dir=args.retrieval_cache)
+    elif args.norms:
+        index = NormIndex.from_files(args.norms)
     if index:
+        from eullm_forge.eval.dense import describe
         print(f"[eval] open book: {len(index.records):,} legislation records, "
-              f"{args.k} per question", flush=True)
+              f"{args.k} per question, retrieval {describe(index)}", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
     cuda = torch.cuda.is_available()
     model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count(),
