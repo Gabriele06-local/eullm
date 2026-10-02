@@ -19,6 +19,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -74,6 +75,7 @@ class StandIn(http.server.ThreadingHTTPServer):
         self.decide = lambda payload: {}  # the answers to a /v1/systemone payload
         self.reply = "A draft."
         self.fail = None  # (status, body) to answer every request with
+        self.misbehave = None  # a broken answer, by name: Handler.MISBEHAVIOUR
         # Polled often, so that shutting it down at the end of a test is quick.
         threading.Thread(
             target=self.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True
@@ -92,12 +94,49 @@ class StandIn(http.server.ThreadingHTTPServer):
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    #: Answers a request the way something other than a well-behaved server
+    #: would, named so a test can ask for one. All three leave the client's
+    #: request past the status line, where urllib's own error handling ends.
+    STALL, HTML, TRUNCATED = "stall", "html", "truncated"
+
+    def _raw(self, data, ctype):
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_POST(self):
         server = self.server
         length = int(self.headers.get("Content-Length") or 0)
         payload = json.loads(self.rfile.read(length) or b"{}")
         headers = {k.lower(): v for k, v in self.headers.items()}
         server.requests.append((self.path, headers, payload))
+        if server.misbehave == self.STALL:
+            # The status line, then not a byte more: the socket stays open and
+            # the client's own timeout is what ends it. Writing a partial body
+            # instead would close the read with IncompleteRead, not a timeout.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "40")
+            # Without this the handler's HTTP/1.0 closes the connection when it
+            # returns and the client reads IncompleteRead rather than waiting.
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            self.wfile.flush()
+            time.sleep(6)
+            return
+        if server.misbehave == self.HTML:
+            self._raw(b"<html><body>502 Bad Gateway</body></html>", "text/html")
+            return
+        if server.misbehave == self.TRUNCATED:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", "400")
+            self.end_headers()
+            self.wfile.write(b'{"answers": {"q": {"type": "cho')
+            self.close_connection = True
+            return
         status = 200
         if server.fail:
             status, body = server.fail
@@ -450,6 +489,24 @@ class ClientTest(WithStandIn):
         self.server.close()
         with self.assertRaisesRegex(eullm_client.EuLLMError, "eullm serve"):
             eullm_client.EuLLM(url, timeout=2).embed(["x"], "m")
+
+    def test_a_server_that_stops_mid_answer_is_an_eullm_error(self):
+        """The body is read after the status line, where URLError stops.
+
+        Both graphs catch EuLLMError and nothing else, so a TimeoutError or a
+        JSONDecodeError from a stalled or proxied server reaches the user as a
+        traceback instead of the message the graphs write.
+        """
+        client = eullm_client.EuLLM(self.server.url, timeout=2)
+        self.server.misbehave = Handler.STALL
+        with self.assertRaisesRegex(eullm_client.EuLLMError, "no answer within 2s"):
+            client.decide("state", {})
+        self.server.misbehave = Handler.HTML
+        with self.assertRaisesRegex(eullm_client.EuLLMError, "not JSON"):
+            client.decide("state", {})
+        self.server.misbehave = Handler.TRUNCATED
+        with self.assertRaisesRegex(eullm_client.EuLLMError, "stopped halfway"):
+            client.decide("state", {})
 
     def test_vectors_come_back_in_input_order(self):
         texts = ["one", "two words", "three words here"]

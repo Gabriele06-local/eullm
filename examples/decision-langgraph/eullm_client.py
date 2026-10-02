@@ -11,6 +11,7 @@ LangChain has no client for `/v1/systemone`, and the embeddings are one
 request, so those two are plain HTTP with the standard library.
 """
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -48,6 +49,27 @@ class EuLLM:
             raise EuLLMError(f"{path}: HTTP {e.code}: {detail}") from None
         except urllib.error.URLError as e:
             raise EuLLMError(f"{self.url}: {e.reason} — is `eullm serve` running?") from None
+        # Once the status line is in, the body is read outside urlopen's
+        # reach, so URLError stops covering the request. What can still go
+        # wrong there is the server going quiet mid-answer, a proxy answering
+        # 200 with an HTML page, or a body that stops halfway -- and both
+        # graphs catch EuLLMError and nothing else, so a bare TimeoutError or
+        # JSONDecodeError here reaches the user as a traceback.
+        except TimeoutError:
+            raise EuLLMError(
+                f"{path}: no answer within {self.timeout:g}s. Is the decision model "
+                "loaded, and big enough for the question?"
+            ) from None
+        except json.JSONDecodeError as e:
+            raise EuLLMError(
+                f"{path}: answered 200 with something that is not JSON ({e}). "
+                "Something in front of `eullm serve` answered instead?"
+            ) from None
+        except http.client.HTTPException as e:
+            raise EuLLMError(f"{path}: the answer stopped halfway ({e})") from None
+        except OSError as e:
+            # A reset while the body is read: neither a URLError nor an HTTPException.
+            raise EuLLMError(f"{path}: the connection dropped mid-answer ({e})") from None
 
     def decide(self, state, questions, model=None):
         """One `/v1/systemone` request: every question is answered about the
