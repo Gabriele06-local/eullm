@@ -158,6 +158,12 @@ proposing a new request shape.
    and that the same chain is not already queued, and stops at the first
    failed check, so running it twice cannot duplicate jobs.
 
+Rules 1 and 2 are also enforced by the build: `tests/test_leonardo_job_shape.py`
+fails CI for any `boost_usr_prod` script over 2 h, over three GPUs, or over
+8 cores and 123 GB per GPU. Written down, the rules were still broken by the
+next new script; checked, they cannot be. The whole-node scripts of the
+finished phases are listed in that test with their reason.
+
 - **EuroHPC Leonardo Booster (CINECA) — active allocation EHPC-AIF-2026PG01-1147**: 1,250 node hours, 02/09/2026 → 02/11/2026. Nodes have 4x A100 **64 GB** (not 96 GB — single-GPU memory budgets do not apply there), max walltime 24 h, no internet on compute nodes. Use the `leonardo/` training configs and `forge/scripts/leonardo/`; runbook in `docs/leonardo-runbook.md`.
 - **EU Cloud (preferred)**: Seeweb (IT), Hetzner (DE), OVH/Scaleway (FR) — GPU servers with A100/H100/RTX PRO 6000
 - **Fallback**: HuggingFace Inference Endpoints, dedicated GPU hosting (GPU-Mart and similar)
