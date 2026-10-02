@@ -305,6 +305,35 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(alone["method"], "no decision")
         self.assertEqual(alone["tools"], [{"name": "get_weather", "probability": None}])
 
+    async def test_a_shortlist_of_one_and_no_none_is_not_a_question_of_one_option(self):
+        """Shortlisting can leave one tool, and one option is not a question.
+
+        EuLLM refuses a choice of one, and the split loop cannot retry: one
+        tool is already the smallest it goes. The check that skips the
+        question was made on the catalog, before the embeddings had picked
+        the shortlist.
+        """
+        with standin.StandIn(scores=SCORES, vectors=VECTORS) as eullm:
+            result = await call(
+                eullm.url,
+                "select_tools",
+                self.two_stage,
+                request=RAIN,
+                tools=CATALOG,
+                shortlist=1,
+                allow_none=False,
+            )
+        # The decision model is not asked. The embeddings are -- that is how
+        # the shortlist of one was chosen -- and then there is nothing that
+        # could go in a question.
+        self.assertEqual(eullm.sent("/v1/systemone"), [])
+        self.assertEqual(result["method"], "no decision")
+        self.assertEqual(result["embedding_model"], EMBED)
+        self.assertEqual(result["tools"], [{"name": "get_weather", "probability": None}])
+        self.assertEqual((result["catalog_size"], result["left_out"]), (6, 5))
+        self.assertIsNone(result["none_probability"])
+        self.assertIsNone(result["none_wins"])
+
     async def test_one_tool_and_none_is_a_decision(self):
         with standin.StandIn(scores={"get_weather": -1.0, "none": 1.0}) as eullm:
             result = await call(eullm.url, "select_tools", request="Hello!", tools=CATALOG[:1])
