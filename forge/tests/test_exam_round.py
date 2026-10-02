@@ -126,3 +126,29 @@ def test_a_round_asks_for_more_gpus_for_a_big_model(leonardo):
     assert r.returncode == 0, r.stdout + r.stderr
     exam = calls.splitlines()[0]
     assert "--gres=gpu:2" in exam and "--mem=240G" in exam and "--cpus-per-task=16" in exam
+
+
+def test_a_development_round_draws_more_per_code_and_chains_its_links(leonardo):
+    run, work = leonardo
+    dev = work / "eval" / "norm-exam-devbig.jsonl"
+    r, calls = run(ROUND_ITEMS=str(dev), ROUND_OUT=str(work / "eval" / "devbig"),
+                   ROUND_PER_CODE="30", ROUND_CODES="codice_civile",
+                   ROUND_EXAM_LINKS="3", ROUND_JUDGE_LINKS="2", ROUND_OPEN_ONLY="1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    kinds = [json.loads(x)["metadata"]["tipo"] for x in dev.read_text().splitlines()]
+    assert kinds.count("contenuto") == 30          # 40 untrained articles, 30 asked
+    lines = calls.splitlines()
+    assert len(lines) == 5
+    e1, e2, e3, j1, j2 = lines
+    assert "--dependency" not in e1
+    assert "--dependency=afterany:101" in e2 and "--dependency=afterany:102" in e3
+    assert all("sbatch_norm_exam.slurm" in x for x in (e1, e2, e3))
+    # the judge waits for the last exam link to finish cleanly, then chains
+    assert "--dependency=afterok:103" in j1 and "--dependency=afterany:104" in j2
+    assert all("sbatch_judge.slurm" in x for x in (j1, j2))
+
+
+def test_links_must_be_a_positive_number(leonardo):
+    run, _ = leonardo
+    r, calls = run(ROUND_EXAM_LINKS="0")
+    assert r.returncode == 1 and "positive number" in r.stderr

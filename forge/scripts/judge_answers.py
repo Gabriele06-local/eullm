@@ -174,6 +174,27 @@ def scored_row(label: str, grades: list[Grade]) -> list:
     return row
 
 
+def already_graded(path: Path) -> bool:
+    """Whether ``path`` has a graded file with a grade for every answer, written
+    after the answers were.
+
+    Grading is greedy, so grading the same answers again gives the same
+    grades: a judge link that finds them done moves on. That is what lets a
+    large development set be graded by a chain of 2 h links
+    (sbatch_exam_round.slurm, ROUND_JUDGE_LINKS) instead of one long job. A
+    graded file older than its answers is stale (the model was asked again)
+    and is graded again.
+    """
+    out = path.with_suffix(".graded.jsonl")
+    if not out.is_file() or out.stat().st_mtime < path.stat().st_mtime:
+        return False
+
+    def lines(p: Path) -> int:
+        with p.open(encoding="utf-8") as f:
+            return sum(1 for line in f if line.strip())
+    return lines(out) == lines(path)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,11 +204,22 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--quiet", action="store_true",
                     help="totals only — for the held-out exam (see legal_eval.py)")
+    ap.add_argument("--regrade", action="store_true",
+                    help="grade again files already graded (e.g. with another --model)")
     args = ap.parse_args()
 
     files = [p for p in args.answers if not p.name.endswith(".graded.jsonl")]
-    grader = ReferenceGrader(Greedy(args.model))
+    todo = []
     for path in files:
+        if not args.regrade and already_graded(path):
+            print(f"[judge] {label_of(path)}: graded already, skipped", flush=True)
+        else:
+            todo.append(path)
+    if not todo:
+        print("[judge] nothing left to grade", flush=True)
+        return 0
+    grader = ReferenceGrader(Greedy(args.model))
+    for path in todo:
         grades = grade_file(path, grader, batch_size=args.batch_size, quiet=args.quiet)
         note = unreadable_note(grades, path)
         if note:

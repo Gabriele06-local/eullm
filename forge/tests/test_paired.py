@@ -1,0 +1,161 @@
+"""Paired comparison of graded answers, and the blind review sheet."""
+
+from __future__ import annotations
+
+import csv
+import importlib.util
+import json
+from pathlib import Path
+
+import pytest
+
+from eullm_forge.eval.paired import (
+    Graded,
+    compare,
+    human_agreement,
+    kind_of,
+    label_of,
+    load_graded,
+    mcnemar_p,
+)
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+
+
+def _script(name):
+    spec = importlib.util.spec_from_file_location(name, SCRIPTS / f"{name}.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_mcnemar_matches_the_exact_binomial():
+    assert mcnemar_p(0, 0) == 1.0
+    assert mcnemar_p(5, 5) == 1.0
+    # 10:0 -> 2 * 0.5**10
+    assert mcnemar_p(10, 0) == pytest.approx(2 / 1024)
+    assert mcnemar_p(0, 10) == mcnemar_p(10, 0)
+    # 169 vs 160 on 207 questions, split 20:11 -- not significant on its own
+    assert mcnemar_p(20, 11) > 0.1
+
+
+def test_kind_and_label_are_read_from_the_names():
+    assert kind_of("norm-termine_argomento-codice_civile-1456") == "termine_argomento"
+    assert kind_of("norm-termine-codice_civile-1456") == "termine"
+    assert kind_of("civ-001") == "?"
+    assert label_of(Path("answers-v0.3-open.graded.jsonl")) == "v0.3-open"
+
+
+def _graded(label, grades, lengths=None):
+    g = Graded(label)
+    g.grades = dict(grades)
+    g.lengths = dict(lengths or {k: 100 for k in grades})
+    return g
+
+
+def test_compare_counts_only_the_questions_where_exactly_one_is_right():
+    ids = [f"norm-contenuto-codice_civile-{i}" for i in range(6)]
+    a = _graded("a", zip(ids, ["correct", "correct", "correct", "wrong", "partial", "correct"]))
+    b = _graded("b", zip(ids, ["correct", "wrong", "wrong", "correct", "correct", "unparsed"]))
+    c = compare(a, b)
+    assert c.n == 5                      # the unparsed one is left out
+    assert (c.a_only, c.base_only) == (2, 2)
+    assert c.diff == 0
+    # partial counts as right in the lenient split: item 4 is no longer b's alone
+    assert (c.a_only_lenient, c.base_only_lenient) == (2, 1)
+    assert c.by_kind == {"contenuto": (2, 2)}
+
+
+def test_the_length_check_says_how_often_the_right_answer_was_the_longer():
+    ids = [f"norm-termine-codice_penale-{i}" for i in range(4)]
+    a = _graded("a", zip(ids, ["correct"] * 4), {i: 1200 for i in ids})
+    b = _graded("b", zip(ids, ["wrong"] * 4), {i: 400 for i in ids})
+    assert compare(a, b).longer_wins == 1.0
+    assert compare(b, a).longer_wins == 1.0      # same items, seen from the other side
+
+
+def test_human_agreement_counts_the_errors_that_move_a_comparison():
+    m = {"a": _graded("a", {"x": "correct", "y": "wrong", "z": "correct", "w": "correct"})}
+    rows = [{"chiave": "a|x", "giudizio": "corretto"},
+            {"chiave": "a|y", "giudizio": "Corretto "},
+            {"chiave": "a|z", "giudizio": "sbagliato"},
+            {"chiave": "a|w", "giudizio": ""},              # not labelled yet
+            {"chiave": "b|x", "giudizio": "corretto"}]      # a model not given
+    h = human_agreement(rows, m)
+    assert h["n"] == 3
+    assert h["judge_too_kind"] == 1 and h["judge_too_harsh"] == 1
+    assert h["same_label"] == pytest.approx(1 / 3)
+
+
+def _write_graded(d: Path, label: str, rows: list[tuple[str, str, int]]):
+    with (d / f"answers-{label}.graded.jsonl").open("w", encoding="utf-8") as f:
+        for item, grade, n in rows:
+            f.write(json.dumps({"id": item, "question": f"Q {item}", "reference": "R",
+                                "answer": "x" * n, "grade": grade}) + "\n")
+
+
+def test_the_script_prints_counts_never_items_and_writes_the_csv(tmp_path, capsys):
+    d = tmp_path / "devbig"
+    d.mkdir()
+    ids = [f"norm-contenuto-codice_civile-{i}" for i in range(30)]
+    _write_graded(d, "base-open", [(i, "wrong", 300) for i in ids])
+    _write_graded(d, "new-open", [(i, "correct", 300) for i in ids])
+    out = tmp_path / "paired.csv"
+    assert _script("compare_graded").main([str(d), "--baseline", "base-open",
+                                           "--csv", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "norm-contenuto" not in printed and "Q norm" not in printed
+    row = next(csv.DictReader(out.open()))
+    assert row["model"] == "new-open" and row["diff"] == "30" and row["verdict"] == "better"
+
+
+def test_a_missing_baseline_is_an_error(tmp_path):
+    d = tmp_path / "devbig"
+    d.mkdir()
+    _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "correct", 10)])
+    assert _script("compare_graded").main([str(d), "--baseline", "zzz"]) == 1
+
+
+def test_the_review_sheet_is_blind_and_maps_back_to_the_judge(tmp_path):
+    d = tmp_path / "devbig"
+    d.mkdir()
+    ids = [f"norm-termine-codice_civile-{i}" for i in range(20)]
+    _write_graded(d, "a", [(i, "correct", 50) for i in ids])
+    _write_graded(d, "b", [(i, "correct" if n % 2 else "wrong", 50) for n, i in enumerate(ids)])
+    sheet = tmp_path / "review.csv"
+    exporter = _script("export_grade_review")
+    assert exporter.main([str(d), "--n", "8", "--out", str(sheet)]) == 0
+    text = sheet.read_text(encoding="utf-8-sig")
+    assert "correct" not in text and "wrong" not in text   # the judge is not shown
+    assert "a|" not in text and "b|" not in text           # nor which model wrote it
+    rows = list(csv.DictReader(sheet.open(encoding="utf-8-sig"), delimiter=";"))
+    assert len(rows) == 8
+    keys = json.loads(exporter.keys_path(sheet).read_text())
+    assert set(keys) == {r["chiave"] for r in rows}
+    # disagreements first: 3/4 of the sample is from the 10 split questions
+    split = {f"norm-termine-codice_civile-{i}" for i in range(0, 20, 2)}
+    assert sum(keys[r["chiave"]].split("|")[1] in split for r in rows) >= 6
+
+    # a person grades everything "corretto": the judge is too harsh wherever it said wrong
+    for r in rows:
+        r["giudizio"] = "corretto"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.DictWriter(f, fieldnames=list(rows[0]), delimiter=";")
+        w.writeheader()
+        w.writerows(rows)
+    models = {g.label: g for g in map(load_graded, sorted(d.glob("*.graded.jsonl")))}
+    harsh = sum(models[k.split("|")[0]].grades[k.split("|")[1]] == "wrong"
+                for k in keys.values())
+    compare_graded = _script("compare_graded")
+    assert compare_graded.main([str(d), "--baseline", "a", "--human", str(sheet)]) == 0
+    sheet_rows = list(csv.DictReader(sheet.open(encoding="utf-8-sig"), delimiter=";"))
+    for r in sheet_rows:
+        r["chiave"] = keys[r["chiave"]]
+    assert human_agreement(sheet_rows, models)["judge_too_harsh"] == harsh
+
+
+def test_answers_of_the_held_out_exam_are_not_exported(tmp_path):
+    d = tmp_path / "norm-exam-answers-v3"
+    d.mkdir()
+    _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "correct", 10)])
+    assert _script("export_grade_review").main([str(d), "--out", str(tmp_path / "r.csv")]) == 2

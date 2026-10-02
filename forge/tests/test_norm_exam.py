@@ -386,6 +386,16 @@ def test_trained_articles_are_read_from_the_open_book_keys():
                                        ("codice_penale", "1500")}
 
 
+def test_raft_and_grpo_training_rows_count_as_trained_articles():
+    # make_raft_absent.py appends -absent to the grounded key; GRPO prompts
+    # carry no key, only code and articolo. Both were trained on.
+    rows = [{"key": "ob-g-codice_civile-1456-absent"}, {"key": "ob-g-codice_civile-2-bis-absent"},
+            {"id": "norm-termine-codice_penale-640", "code": "codice_penale", "articolo": "640"},
+            {"id": "x", "code": "codice_penale"}]
+    assert trained_articles(rows) == {("codice_civile", "1456"), ("codice_civile", "2-bis"),
+                                      ("codice_penale", "640")}
+
+
 def test_a_redraw_leaves_out_what_training_asked_about():
     exclude = {("codice_civile", "2"), ("codice_civile", "3")}
     for seed in range(20):

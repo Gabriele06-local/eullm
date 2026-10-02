@@ -384,12 +384,22 @@ def trained_articles(pairs) -> set[tuple[str, str]]:
 
     Grounded pairs are keyed ``ob-g-<code>-<article>``, absent-article pairs
     ``ob-m-<code>-<number>-<i>`` (see `openbook_gen`); codes are written with
-    underscores, so the first hyphen after the prefix ends the code. Other
-    pairs carry no article and are skipped.
+    underscores, so the first hyphen after the prefix ends the code. The RAFT
+    pairs of make_raft_absent.py append ``-absent`` to a grounded key. GRPO
+    prompts (make_grpo_prompts.py) have no key but say ``code`` and
+    ``articolo`` outright. Other pairs carry no article and are skipped.
+
+    Every file a model was trained on goes through here before a development
+    set is drawn, the GRPO prompts included: an article a model was rewarded
+    on is as much training as one it was shown an answer for.
     """
     out = set()
     for p in pairs:
         key = str(p.get("key", ""))
+        if not key and p.get("code") and p.get("articolo"):
+            out.add((str(p["code"]), str(p["articolo"])))
+            continue
+        key = re.sub(r"-absent$", "", key)
         if key.startswith("ob-g-"):
             code, _, number = key[5:].partition("-")
             number = re.sub(r"-v\d+$", "", number)     # a second question, same article
@@ -418,6 +428,10 @@ def retrieval_hits(items: list[EvalItem], index, k: int = 3) -> dict[str, dict[s
     """
     from .retrieval import record_articles
 
+    # The index resolves a continuation chunk to its article (the text of a
+    # long article is mostly in those); the chunk alone names none, and
+    # reading it alone counted a right hit as a miss.
+    articles = getattr(index, "articles_of", record_articles)
     tally: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     for it in items:
         code, art = it.metadata.get("code"), it.metadata.get("articolo")
@@ -425,7 +439,7 @@ def retrieval_hits(items: list[EvalItem], index, k: int = 3) -> dict[str, dict[s
         if kind == "inesistente":
             continue
         found = index.search(it.question, k)
-        ok = [r.get("code") == code and art in record_articles(r) for r in found]
+        ok = [r.get("code") == code and art in articles(r) for r in found]
         t = tally[kind]
         t[0] += 1
         t[1] += bool(ok[:1] and ok[0])

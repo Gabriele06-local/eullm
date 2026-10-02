@@ -30,6 +30,14 @@
 #                 held-out exam when drawing a readable development set
 #   ROUND_GPUS    GPUs for the exam job (default 1). 2 or more for models that
 #                 do not fit one 64 GB A100 in bf16 (27B dense, 35B MoE)
+#   ROUND_PER_CODE  items of each kind per code (default 10, make_norm_exam.py's)
+#   ROUND_CODES   only these codes, space-separated (default: all)
+#   ROUND_OPEN_ONLY  1 = ask open book only (EXAM_OPEN_ONLY)
+#   ROUND_EXAM_LINKS / ROUND_JUDGE_LINKS  2 h links for the exam and for the
+#                 judge (default 1 each). A large development set does not fit
+#                 one link: each link skips what an earlier one finished
+#                 (sbatch_norm_exam.slurm, judge_answers.py), so a chain of
+#                 short jobs does the work of one long one and gets placed
 #   ROUND_QUIET   1 (default) grades without printing items; 0 only for a
 #                 development set, never for the held-out exam
 #   ROUND_REPO    checkout to run (default: the one this file was submitted from)
@@ -94,24 +102,48 @@ else
     [ "$PAIRS" = "none" ] || EXCLUDE=(--exclude-pairs $PAIRS)
     # shellcheck disable=SC2206
     [ -z "${ROUND_EXCLUDE_EXAM:-}" ] || EXCLUDE+=(--exclude-exam $ROUND_EXCLUDE_EXAM)
+    DRAW=(--per-code "${ROUND_PER_CODE:-10}")
+    # shellcheck disable=SC2206
+    [ -z "${ROUND_CODES:-}" ] || DRAW+=(--codes $ROUND_CODES)
     python "$REPO/forge/scripts/make_norm_exam.py" "${NORMS[@]}" --out "$ITEMS" \
-        "${EXCLUDE[@]}" --check-retrieval || { echo "[round] drawing the exam failed" >&2; exit 1; }
+        "${EXCLUDE[@]}" "${DRAW[@]}" --check-retrieval || { echo "[round] drawing the exam failed" >&2; exit 1; }
 fi
 
 mkdir -p "$OUT" logs
 export EXAM_MODELS="$ROUND_MODELS" EXAM_ITEMS="$ITEMS" EXAM_OUT="$OUT"
-export EXAM_NORMS="${NORMS[*]}" EXAM_REPO="$REPO"
+export EXAM_NORMS="${NORMS[*]}" EXAM_REPO="$REPO" EXAM_OPEN_ONLY="${ROUND_OPEN_ONLY:-0}"
 GPUS="${ROUND_GPUS:-1}"
 case "$GPUS" in ''|*[!0-9]*) echo "[round] ROUND_GPUS must be a number" >&2; exit 1 ;; esac
-exam=$(sbatch --parsable --export=ALL --gres="gpu:$GPUS" --mem="$((GPUS * 120))G" \
-       --cpus-per-task="$((GPUS * 8))" "$LEO/sbatch_norm_exam.slurm") ||
-    { echo "[round] could not submit the exam" >&2; exit 1; }
-exam="${exam%%;*}"
-echo "[round] exam submitted: $exam"
+EXAM_LINKS="${ROUND_EXAM_LINKS:-1}"
+JUDGE_LINKS="${ROUND_JUDGE_LINKS:-1}"
+for n in "$EXAM_LINKS" "$JUDGE_LINKS"; do
+    case "$n" in ''|*[!0-9]*|0) echo "[round] ROUND_*_LINKS must be a positive number" >&2; exit 1 ;; esac
+done
+
+# Links of one chain wait on each other with afterany: a link that runs out
+# of its two hours ends TIMEOUT, which is the design, and the next one picks
+# up. The judge waits on the LAST exam link with afterok: that one finds
+# every finished answers file and exits 0, unless a model really failed --
+# and then nothing should be graded as if the round were whole.
+prev=""
+for i in $(seq 1 "$EXAM_LINKS"); do
+    DEP=()
+    [ -z "$prev" ] || DEP=(--dependency="afterany:$prev")
+    exam=$(sbatch --parsable --export=ALL --gres="gpu:$GPUS" --mem="$((GPUS * 120))G" \
+           --cpus-per-task="$((GPUS * 8))" "${DEP[@]}" "$LEO/sbatch_norm_exam.slurm") ||
+        { echo "[round] could not submit exam link $i${prev:+ (link $((i - 1)) is $prev)}" >&2; exit 1; }
+    prev="${exam%%;*}"
+    echo "[round] exam link $i/$EXAM_LINKS submitted: $prev"
+done
 
 export JUDGE_DIR="$OUT" JUDGE_REPO="$REPO"
 if [ "${ROUND_QUIET:-1}" = "0" ]; then unset JUDGE_QUIET; else export JUDGE_QUIET=1; fi
-judge=$(sbatch --parsable --export=ALL --dependency="afterok:$exam" "$LEO/sbatch_judge.slurm") ||
-    { echo "[round] could not submit the judge (exam $exam is queued)" >&2; exit 1; }
-echo "[round] judge submitted: ${judge%%;*} (after $exam)"
+kind="afterok"
+for i in $(seq 1 "$JUDGE_LINKS"); do
+    judge=$(sbatch --parsable --export=ALL --dependency="$kind:$prev" "$LEO/sbatch_judge.slurm") ||
+        { echo "[round] could not submit judge link $i (after $prev)" >&2; exit 1; }
+    echo "[round] judge link $i/$JUDGE_LINKS submitted: ${judge%%;*} ($kind $prev)"
+    prev="${judge%%;*}"
+    kind="afterany"
+done
 echo "[round] results will be in $OUT/graded.csv"
