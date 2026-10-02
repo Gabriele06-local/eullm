@@ -243,7 +243,9 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
             result = await call(
                 eullm.url, "select_tools", request=RAIN, tools=tools, allow_none=False
             )
-        self.assertGreater(len(eullm.sent("/v1/systemone")[0]["questions"]), 1)
+        # The first request is one question of four and is refused as too long;
+        # the second is two questions of two, which is the one answered.
+        self.assertEqual([len(b["questions"]) for b in eullm.sent("/v1/systemone")], [1, 2])
         self.assertEqual([t["name"] for t in result["tools"]], ["none", "a", "b", "c"])
         self.assertIsNone(result["none_probability"])
         self.assertIsNone(result["none_wins"])
@@ -323,13 +325,15 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
                 eullm.url, "select_tools", request=RAIN, tools=named_none, allow_none=False
             )
         # allow_none=False is the documented way to have a tool called "none",
-        # and it is ranked as the tool it is. The "none" option was not on the
-        # table, so there is no probability of abstaining to report -- and it
-        # must not be the tool's own probability, which is what reading the
-        # name back out of the answer gave.
-        self.assertEqual(
-            [t["name"] for t in allowed["tools"]], ["none", "get_weather", "send_email"]
-        )
+        # and it is ranked as the tool it is, at the place its score puts it.
+        # The "none" option was not on the table, so there is no probability
+        # of abstaining to report -- and it must not be the tool's own, which
+        # is what reading the name back out of the answer gave.
+        # Resolved the way the stand-in resolves it, default included.
+        asked = ("get_weather", "send_email", "none")
+        p = expected({n: SCORES.get(n, 0.0) for n in asked})
+        self.assertEqual([t["name"] for t in allowed["tools"]], list(asked))
+        self.assertAlmostEqual(allowed["tools"][2]["probability"], p["none"], places=3)
         self.assertIsNone(allowed["none_probability"])
         self.assertIsNone(allowed["none_wins"])
         self.assertEqual(sum(t["probability"] for t in allowed["tools"]), 1.0, places=3)

@@ -333,10 +333,10 @@ def merged(answers, names, temperature, has_none=True):
     weights = [math.exp((v - top) / temperature) for v in values]
     total = sum(weights)
     probabilities = {k: w / total for k, w in zip(keys, weights)}
-    # The probability read back has to be the one computed above, not the
-    # name: a tool may be called "none", and then it is in `probabilities`
-    # already.
-    return {n: probabilities[n] for n in names}, none
+    # The probability, not the score it came from, and only when the option was
+    # offered at all: with a tool called "none" among the names, that key in
+    # `probabilities` is the tool's.
+    return {n: probabilities[n] for n in names}, (probabilities.get(NONE) if has_none else None)
 
 
 def split(tools, size):
