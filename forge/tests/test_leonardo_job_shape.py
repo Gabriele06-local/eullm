@@ -48,12 +48,34 @@ WHOLE_NODE = {
 }
 
 
+#: The one-letter spellings of the options these checks read. sbatch takes
+#: `-n 32` as readily as `--ntasks=32`; a checker that knows only the long
+#: form lets the short one through unread.
+SHORT_OPTIONS = {"N": "nodes", "n": "ntasks", "c": "cpus-per-task", "t": "time", "p": "partition"}
+
+DIRECTIVE = re.compile(
+    r"#SBATCH\s+(?:--(?P<long>[\w-]+)(?:(?:=|\s+)(?P<value>[^\s#]+))?"
+    r"|-(?P<short>[A-Za-z])\s*(?P<short_value>[^\s#]+))"
+)
+
+
 def _headers(path: Path) -> dict[str, str]:
+    """The #SBATCH options as sbatch reads them: `--name=value`, `--name
+    value` or `-x value`, and a flag such as `--exclusive` as an empty value.
+    sbatch stops at the first line that is not a comment or blank, so a
+    directive written after a command asks for nothing and is not read."""
     out = {}
     for line in path.read_text(encoding="utf-8").splitlines():
-        m = re.match(r"#SBATCH\s+--([\w-]+)=(\S+)", line)
-        if m:
-            out[m.group(1)] = m.group(2)
+        if line.strip() and not line.startswith("#"):
+            break
+        m = DIRECTIVE.match(line)
+        if not m:
+            continue
+        if m.group("long"):
+            out[m.group("long")] = m.group("value") or ""
+        else:
+            short = m.group("short")
+            out[SHORT_OPTIONS.get(short, short)] = m.group("short_value")
     return out
 
 
@@ -144,6 +166,44 @@ def test_a_quarter_node_per_gpu_and_never_the_whole_node(script):
     assert "mem" in h, f"{script.name}: no --mem, the default may be the whole node"
     assert _mem_gb(h["mem"]) * _nodes(h) <= MEM_GB_PER_GPU * gpus, (
         f"{script.name}: --mem={h['mem']} for {gpus} GPUs")
+
+
+@pytest.mark.parametrize("script", GPU_SCRIPTS, ids=lambda p: p.name)
+def test_never_an_exclusive_node(script):
+    if script.name in WHOLE_NODE:
+        pytest.skip(WHOLE_NODE[script.name])
+    assert "exclusive" not in _headers(script), (
+        f"{script.name} asks for --exclusive: a whole node, which waits for an idle one")
+
+
+def test_every_spelling_of_a_directive_is_read(tmp_path):
+    """sbatch reads the short and the spaced forms, and a flag with no value;
+    so does the check, or `-c 32` passes where `--cpus-per-task=32` fails."""
+    p = tmp_path / "sbatch_case.slurm"
+    p.write_text("#!/bin/bash\n#SBATCH -p boost_usr_prod\n#SBATCH -t 120\n#SBATCH -N 1\n"
+                 "#SBATCH -n 32\n#SBATCH -c32\n#SBATCH --gres gpu:3\n#SBATCH --mem=340G\n"
+                 "#SBATCH --exclusive\n#SBATCH --job-name=x  # trailing comment\n",
+                 encoding="utf-8")
+    assert _headers(p) == {
+        "partition": "boost_usr_prod", "time": "120", "nodes": "1", "ntasks": "32",
+        "cpus-per-task": "32", "gres": "gpu:3", "mem": "340G", "exclusive": "",
+        "job-name": "x",
+    }
+    with pytest.raises(AssertionError):
+        test_a_quarter_node_per_gpu_and_never_the_whole_node(p)
+    with pytest.raises(AssertionError):
+        test_never_an_exclusive_node(p)
+
+
+def test_a_directive_after_the_first_command_is_not_read(tmp_path):
+    """sbatch stops reading #SBATCH lines at the first command: a --time
+    written below one leaves the job on the partition's 24 h default."""
+    p = tmp_path / "sbatch_case.slurm"
+    p.write_text("#!/bin/bash\n#SBATCH --partition=boost_usr_prod\n\nset -e\n"
+                 "#SBATCH --time=02:00:00\n", encoding="utf-8")
+    assert "time" not in _headers(p)
+    with pytest.raises(AssertionError):
+        test_two_hours_at_most(p)
 
 
 def test_the_whole_node_list_only_shrinks():
