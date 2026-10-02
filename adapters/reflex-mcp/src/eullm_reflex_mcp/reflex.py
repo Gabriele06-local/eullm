@@ -172,15 +172,6 @@ async def select_tools(eullm, embedder, request, tools, shortlist, allow_none):
         fields.setdefault("questions", 0)
         return ToolSelection(ms=round((time.perf_counter() - started) * 1000, 1), **fields)
 
-    if len(tools) == 1 and not allow_none:
-        # One tool and no "none" to weigh it against: the answer is known
-        # before the model reads anything, and EuLLM refuses a choice of one.
-        return result(
-            tools=[RankedTool(name=names[0])],
-            method="no decision",
-            note="one tool and allow_none=false: there is nothing to decide",
-        )
-
     shortlisting = len(tools) > shortlist
     if shortlisting and embedder is None and len(tools) > MAX_TOOLS:
         raise SelectionError(
@@ -199,6 +190,20 @@ async def select_tools(eullm, embedder, request, tools, shortlist, allow_none):
         candidates = [t for i, t in enumerate(tools) if i in kept]
     two_stage = by_similarity is not None
     left_out = len(tools) - len(candidates)
+    if len(candidates) == 1 and not allow_none:
+        # One tool left and no "none" to weigh it against: the answer is known
+        # before the model reads anything, and EuLLM refuses a choice of one.
+        # Tested on what the model would actually be given -- after the
+        # shortlisting, not before it. Shortlisting to one tool and asking
+        # with allow_none=false used to build a choice of a single option,
+        # which the engine answers 422 invalid_question to, and the split
+        # loop cannot retry: one tool is already the smallest it goes.
+        return result(
+            tools=[RankedTool(name=candidates[0].name)],
+            method="no decision",
+            left_out=left_out,
+            note="one tool and allow_none=false: there is nothing to decide",
+        )
     try:
         ranking = await rank(eullm, request, candidates, allow_none)
     except EuLLMError as e:
