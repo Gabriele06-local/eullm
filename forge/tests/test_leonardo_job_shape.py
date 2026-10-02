@@ -214,6 +214,7 @@ def test_a_bare_walltime_is_minutes(tmp_path):
     assert _seconds("180") == 180 * 60 == _seconds("03:00:00")
     assert _seconds("120") == _seconds("02:00:00")
     assert _seconds("7200") == 5 * 86400
+    assert _seconds("1-12") == 36 * 3600 == _seconds("1-12:00:00")
     p = _script(tmp_path, "#SBATCH --partition=boost_usr_prod\n"
                           "#SBATCH --time=180\n#SBATCH --gres=gpu:3\n"
                           "#SBATCH --cpus-per-task=16\n#SBATCH --mem=340G\n")
