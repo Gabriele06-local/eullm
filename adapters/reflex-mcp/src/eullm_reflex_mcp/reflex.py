@@ -202,7 +202,12 @@ async def select_tools(eullm, embedder, request, tools, shortlist, allow_none):
             tools=[RankedTool(name=candidates[0].name)],
             method="no decision",
             left_out=left_out,
-            note="one tool and allow_none=false: there is nothing to decide",
+            embedding_model=embedder.model if two_stage else None,
+            note=(
+                "the shortlist kept one tool and allow_none=false: there is nothing to decide"
+                if two_stage
+                else "one tool and allow_none=false: there is nothing to decide"
+            ),
         )
     try:
         ranking = await rank(eullm, request, candidates, allow_none)
