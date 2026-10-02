@@ -22,6 +22,12 @@
 #   EXAM_NORMS   legislation files: set to ALSO ask each model open book,
 #                as "<label>-open" (default: closed book only)
 #   EXAM_OPEN_ONLY  1 = with EXAM_NORMS, ask open book only
+#   EXAM_EMBEDDER / EXAM_RERANKER  open book with BM25 fused with this
+#                embedding model and reordered by this reranker
+#                (eullm_forge.eval.dense) instead of BM25 alone
+#   EXAM_OPEN_TAG  suffix of the open-book label (default "open"); give the
+#                hybrid runs another one ("hyb") so both sit in one directory
+#                and compare_graded.py sets them side by side
 #   EXAM_REPO    checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-exam
@@ -80,6 +86,12 @@ WANT="$(grep -c . "$ITEMS")"
 done_already() { [ -s "$1" ] && [ "$(grep -c . "$1")" -eq "$WANT" ]; }
 # EXAM_OPEN_ONLY=1 asks open book only: the closed-book run is a second full
 # pass that the open-book decisions do not use.
+TAG="${EXAM_OPEN_TAG:-open}"
+RETRIEVAL=()
+if [ -n "${EXAM_EMBEDDER:-}" ]; then
+    RETRIEVAL=(--embedder "$EXAM_EMBEDDER" --retrieval-cache "${EXAM_RETRIEVAL_CACHE:-$WORK/eval/retrieval-cache}")
+    [ -z "${EXAM_RERANKER:-}" ] || RETRIEVAL+=(--reranker "$EXAM_RERANKER")
+fi
 status=0
 for pair in $EXAM_MODELS; do
     label="${pair%%=*}"; path="${pair#*=}"
@@ -92,12 +104,12 @@ for pair in $EXAM_MODELS; do
         fi
     fi
     if [ -n "${EXAM_NORMS:-}" ]; then
-        if done_already "$OUT/answers-$label-open.jsonl"; then
-            echo "[exam] $label-open: answered already, skipped"
+        if done_already "$OUT/answers-$label-$TAG.jsonl"; then
+            echo "[exam] $label-$TAG: answered already, skipped"
         else
             # shellcheck disable=SC2086
-            "${EVAL[@]}" "$path" --label "$label-open" --norms $EXAM_NORMS \
-                --answers "$OUT/answers-$label-open.jsonl" || status=1
+            "${EVAL[@]}" "$path" --label "$label-$TAG" --norms $EXAM_NORMS "${RETRIEVAL[@]}" \
+                --answers "$OUT/answers-$label-$TAG.jsonl" || status=1
         fi
     fi
 done

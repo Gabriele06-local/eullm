@@ -25,16 +25,18 @@ pytestmark = pytest.mark.skipif(sys.platform == "win32" or shutil.which("bash") 
 
 # Writes as many lines as the exam has to the --answers path and logs the label.
 STUB = r'''#!/usr/bin/env bash
-items=""; answers=""; label=""
+items=""; answers=""; label=""; how=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --items) items="$2"; shift ;;
         --answers) answers="$2"; shift ;;
         --label) label="$2"; shift ;;
+        --embedder) how="$how+emb"; shift ;;
+        --reranker) how="$how+rr"; shift ;;
     esac
     shift
 done
-echo "$label" >> "$CALLS"
+echo "$label$how" >> "$CALLS"
 [ -n "$answers" ] && sed 's/.*/{}/' "$items" > "$answers"
 exit 0
 '''
@@ -92,3 +94,13 @@ def test_open_only_skips_the_closed_book_pass(job):
     r, asked = run(EXAM_OPEN_ONLY="1")
     assert r.returncode == 0, r.stdout + r.stderr
     assert asked == ["a-open", "b-open"]
+
+
+def test_a_hybrid_round_is_labelled_apart_and_passes_the_models(job):
+    run, out = job
+    (out / "answers-a-open.jsonl").write_text("{}\n{}\n{}\n")   # the BM25 run, done
+    r, asked = run(EXAM_OPEN_ONLY="1", EXAM_EMBEDDER="Qwen/Qwen3-Embedding-0.6B",
+                   EXAM_RERANKER="Qwen/Qwen3-Reranker-4B", EXAM_OPEN_TAG="hyb")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert asked == ["a-hyb+emb+rr", "b-hyb+emb+rr"]
+    assert (out / "answers-a-open.jsonl").read_text() == "{}\n{}\n{}\n"
