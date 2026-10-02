@@ -267,14 +267,22 @@ async def rank(eullm, request, candidates, allow_none):
                 raise
             size = max(fewest, size // 2)
     try:
-        return ranking(response, [t.name for t in candidates])
+        return ranking(response, [t.name for t in candidates], allow_none)
     except (KeyError, TypeError, ValueError) as e:
         raise EuLLMError(
             f"EuLLM's answer to /v1/systemone is not the one expected: {e!r}"
         ) from None
 
 
-def ranking(response, names):
+def ranking(response, names, has_none=True):
+    """The tools of `names` in order, and the "none" option's probability.
+
+    ``has_none`` says whether the "none" option was offered at all. It is not
+    the same question as ``NONE in names``: a catalog may hold a tool called
+    "none" -- allow_none=False is the documented way to have one -- and then
+    its probability must be the tool's, not an abstention that was never on the
+    table.
+    """
     answers = response["answers"]
     info = response.get("eullm") or {}
     if len(answers) == 1:
@@ -283,9 +291,9 @@ def ranking(response, names):
         (answer,) = answers.values()
         probabilities = answer["probabilities"]
         tool = {n: probabilities[n] for n in names}
-        none = probabilities.get(NONE)
+        none = probabilities.get(NONE) if has_none else None
     else:
-        tool, none = merged(answers, names, info.get("temperature") or 1.0)
+        tool, none = merged(answers, names, info.get("temperature") or 1.0, has_none)
     order = sorted(names, key=lambda n: -tool[n])
     return Ranking(
         [(n, tool[n]) for n in order],
@@ -296,13 +304,13 @@ def ranking(response, names):
     )
 
 
-def merged(answers, names, temperature):
+def merged(answers, names, temperature, has_none=True):
     """Probabilities over the tools of several questions and one "none":
     the softmax of the verdict scores over the model's temperature — how
     EuLLM computes them within one question — with the scores compared as
     they are, although each tool was read next to its own question's
     options only, as ReflexBench ranks them. "None" is the one from the
-    question of the best tool."""
+    question of the best tool, and only if one was offered."""
     scores, question_of, nones = {}, {}, {}
     for question, answer in answers.items():
         raw = (answer.get("eullm") or {}).get("scores")
@@ -313,19 +321,22 @@ def merged(answers, names, temperature):
                 "a Jev-Style decision model, or shorten the tool descriptions"
             )
         for name, score in raw.items():
-            if name == NONE:
+            if name == NONE and has_none:
                 nones[question] = score
             else:
                 scores[name], question_of[name] = score, question
     best = max(names, key=lambda n: scores[n])
-    none = nones.get(question_of[best])
+    none = nones.get(question_of[best]) if has_none else None
     keys = names + ([NONE] if none is not None else [])
     values = [scores[n] for n in names] + ([none] if none is not None else [])
     top = max(values)
     weights = [math.exp((v - top) / temperature) for v in values]
     total = sum(weights)
     probabilities = {k: w / total for k, w in zip(keys, weights)}
-    return {n: probabilities[n] for n in names}, probabilities.get(NONE)
+    # The probability, not the score it came from, and only when the option was
+    # offered at all: with a tool called "none" among the names, that key in
+    # `probabilities` is the tool's.
+    return {n: probabilities[n] for n in names}, (probabilities.get(NONE) if has_none else None)
 
 
 def split(tools, size):
