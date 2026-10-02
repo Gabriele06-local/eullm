@@ -232,6 +232,24 @@ struct RuntimeOpts {
     #[arg(long, default_value_t = 0)]
     rs_seq: u32,
 
+    /// Speculative decoding with the model's own multi-token prediction
+    /// (MTP) head: after each token the model writes, the head drafts up to
+    /// N more, and one decode checks them all. Every draft the model agrees
+    /// with is kept, so the answer is the one it would have written anyway,
+    /// in fewer steps. 0 (default) turns it off; 2-3 is typical. Needs a
+    /// model whose GGUF carries its MTP layers (unsloth's `*-MTP-GGUF`
+    /// Qwen3.5/3.6, for instance) and one request at a time (`--batch-size
+    /// 1`, the default): otherwise the load says why and runs without it.
+    /// On a hybrid model (Qwen3.5/3.6) it raises the recurrent-state
+    /// rollback window to N, the drafts it may have to take back.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u32).range(0..=8)
+    )]
+    mtp: u32,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -834,6 +852,7 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -967,6 +986,7 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1010,6 +1030,7 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1110,6 +1131,7 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2299,6 +2321,7 @@ async fn cmd_run(
     cpu_moe: bool,
     n_cpu_moe: u32,
     rs_seq: u32,
+    mtp: u32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2781,6 +2804,7 @@ async fn cmd_run(
             cpu_moe,
             n_cpu_moe,
             rs_seq,
+            mtp,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -2880,6 +2904,7 @@ async fn cmd_run(
             cpu_moe,
             n_cpu_moe,
             rs_seq,
+            mtp,
             ctx_checkpoints,
             checkpoint_min_step,
             batch_size,
@@ -3002,6 +3027,7 @@ async fn cmd_run(
             cpu_moe: flag_cpu_moe,
             n_cpu_moe: flag_n_cpu_moe,
             rs_seq,
+            mtp,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3074,6 +3100,7 @@ async fn cmd_serve(
     cpu_moe: bool,
     n_cpu_moe: u32,
     rs_seq: u32,
+    mtp: u32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3179,6 +3206,7 @@ async fn cmd_serve(
         cpu_moe,
         n_cpu_moe,
         rs_seq,
+        mtp,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,

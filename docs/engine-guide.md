@@ -429,6 +429,55 @@ the non-expert tensors) and `--ctx-size`, has no effect on dense (non-MoE)
 models, and is available on both `eullm run` and `eullm serve` (applied to
 every model the server loads or swaps to).
 
+## Speculative decoding with the model's MTP head (`--mtp N`)
+
+Some models are trained with a multi-token prediction (MTP) head: a small
+extra layer that guesses the tokens after the next one. Qwen3.5 and Qwen3.6
+have one. With `--mtp N`, after each token the model writes the head drafts
+up to N more, one decode of the model reads them all, and the model's own
+sampler picks a token at each position in turn: every draft it agrees with
+is kept, the first it does not is replaced by its own pick, and the rest are
+taken back from the memory. One decode can settle several tokens, and every
+token is still the model's choice.
+
+```bash
+eullm serve --default-model ./Qwen3.5-9B-Q4_K_M.gguf --mtp 3
+```
+
+What it needs:
+
+- **A GGUF that still carries the MTP layers.** Most conversions drop them.
+  unsloth publishes `*-MTP-GGUF` repositories that keep them
+  (`unsloth/Qwen3.5-9B-MTP-GGUF`, `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`, ...);
+  llama.cpp's `convert_hf_to_gguf.py` keeps them unless told `--no-mtp`. A
+  model without them loads normally, and the startup log says why `--mtp`
+  is off.
+- **One request at a time**, `--batch-size 1`, the default. With more slots
+  `--mtp` is off, and the log says so.
+- An architecture llama.cpp drafts for: Qwen3.5/3.6 (`qwen35`, `qwen35moe`)
+  and the others its MTP drafter supports. Not Qwen3.8-Flash-Next
+  (`qwen4exp`) yet: its converter drops the MTP layers.
+
+How much faster depends on how often the drafts are kept and on what a
+decode costs. The head is a whole layer plus the output projection, run
+once per draft, so on a small model it costs nearly what it saves: Qwen3.5
+0.8B on 4 CPU cores kept 40-58% of 3 drafts and wrote at 14-17 tokens/s
+instead of 20. It pays on a GPU, where one decode of a few tokens costs
+little more than a decode of one, and on large models, where the head is a
+small part of the work.
+
+The answer is the one the model writes without drafts, up to rounding: a
+token read in a decode of several is computed in a different order than one
+read alone — on a hybrid model the Gated DeltaNet layers even switch from a
+step-by-step to a chunked algorithm — and where two tokens are nearly tied
+the pick can differ, as with prompt-cache reuse (see `cache_prompt`). On
+that model, answers with real drafts and with drafts that were all wrong
+(every decode taken back) came out identical, character for character, and
+both left the plain answer at the same character. A hybrid model's
+recurrent-state rollback window is raised to N for the drafts it may take
+back (`--rs-seq`); the startup banner shows the drafts asked for, and each
+answer's end logs how many drafts the model kept.
+
 ## KV-cache reuse
 
 ### KV-cache reuse on hybrid/recurrent models (Qwen3.5/3.6): a known upstream limitation, not an eullm gap

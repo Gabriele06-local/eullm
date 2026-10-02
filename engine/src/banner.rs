@@ -34,6 +34,9 @@ pub struct ModelBanner {
     pub cpu_moe: bool,
     pub n_cpu_moe: u32,
     pub rs_seq: u32,
+    /// `--mtp`: drafts per step asked for (whether the model can is the
+    /// scheduler's to say).
+    pub mtp: u32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// 0 means the sequential engine; anything higher is the batching scheduler.
@@ -114,6 +117,12 @@ impl ModelBanner {
             println!(
                 "  RS rollback:   {} (recurrent-state window for hybrid/SSM architectures)",
                 self.rs_seq
+            );
+        }
+        if self.mtp > 0 {
+            println!(
+                "  MTP drafts:    up to {} per step (speculative decoding with the model's MTP head)",
+                self.mtp
             );
         }
         if self.ctx_checkpoints > 0 {

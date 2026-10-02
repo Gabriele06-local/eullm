@@ -538,6 +538,23 @@ impl LlamaModelParams {
         self
     }
 
+    /// EuLLM addition: sets `load_mtp`, whether the model's multi-token
+    /// prediction (MTP, "nextn") layers are loaded. Off by default in
+    /// llama.cpp: a GGUF that carries them loads without them, and an MTP
+    /// draft context on such a model has nothing to draft with.
+    #[must_use]
+    pub fn with_load_mtp(mut self, load_mtp: bool) -> Self {
+        self.params.load_mtp = load_mtp;
+        self
+    }
+
+    /// EuLLM addition: whether the model's MTP layers are loaded (see
+    /// [`Self::with_load_mtp`]).
+    #[must_use]
+    pub fn load_mtp(&self) -> bool {
+        self.params.load_mtp
+    }
+
     /// sets `use_mmap`
     #[must_use]
     pub fn with_use_mmap(mut self, use_mmap: bool) -> Self {

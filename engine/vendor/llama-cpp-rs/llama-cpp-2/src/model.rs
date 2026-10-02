@@ -771,6 +771,15 @@ impl LlamaModel {
         unsafe { llama_cpp_sys_2::llama_model_is_hybrid(self.model.as_ptr()) }
     }
 
+    /// EuLLM addition: the number of multi-token prediction (MTP, "nextn")
+    /// layers the model was loaded with — 0 for a model without them, or one
+    /// loaded without `load_mtp` (see `LlamaModelParams::with_load_mtp`).
+    #[must_use]
+    pub fn n_layer_nextn(&self) -> u32 {
+        u32::try_from(unsafe { llama_cpp_sys_2::llama_model_n_layer_nextn(self.model.as_ptr()) })
+            .unwrap_or(0)
+    }
+
     /// Returns the number of layers within the model.
     pub fn n_layer(&self) -> u32 {
         // It's never possible for this to panic because while the API interface is defined as an int32_t,
