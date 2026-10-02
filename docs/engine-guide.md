@@ -437,7 +437,7 @@ llama.cpp copies the experts kept in RAM to the card and runs them there.
 A pass reads 512 tokens by default (`n_ubatch`, llama.cpp's own default), so
 a 33,000-token prompt is 65 passes, and 65 copies of every expert in RAM over
 PCIe. On Qwen3.8-Flash-Next IQ2_XS (68 GB, most of its experts in RAM) with
-an RTX 5070 Ti, that read the prompt at 250 tokens/s.
+an RTX 5070 Ti, that read the prompt at 256 tokens/s.
 
 `--n-ubatch` sets how many tokens one pass reads. At 4096 the same prompt is
 9 passes:
@@ -448,12 +448,16 @@ eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-0
 ```
 
 The price is VRAM: a pass's activations live in the compute buffer, which
-grows with the pass. `--fit` reserves for it (320 MiB more for every further
-512 tokens) and keeps fewer layers' experts on the GPU to make room, so
-answers are written somewhat slower; `--n-cpu-moe` set by hand is not
-adjusted. The batch a decode call takes, `--n-batch`, is raised to match when
-it is smaller. A dense model, or an MoE that fits whole on the GPU, copies
-nothing per pass and gains little.
+grows with the pass — on that model from 648 MiB at 512 tokens to 3,165 MiB
+at 4096. `--fit` reserves for it (0.75 MiB for every token past 512) and
+keeps fewer layers' experts on the GPU to make room. On that model the
+prompt was read at 822 tokens/s instead of 256, and the answer written at
+19.4 tokens/s instead of 21.5, with the experts of 8 layers on the card
+instead of 11. An `--n-cpu-moe` set by hand is not adjusted.
+
+The batch a decode call takes, `--n-batch`, is raised to match when it is
+smaller. A dense model, or an MoE that fits whole on the GPU, copies nothing
+per pass and gains little.
 
 ## KV-cache reuse
 
