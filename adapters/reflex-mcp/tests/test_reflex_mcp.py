@@ -224,6 +224,30 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["none_wins"])
         self.assertEqual(result["questions"], 2)
 
+    async def test_a_tool_called_none_survives_the_split_over_questions(self):
+        """Merging the questions files a score under "none" as an abstention.
+
+        The tool's own score went into `nones`, so it never reached `scores`
+        and the tool dropped out of the ranking altogether -- KeyError on the
+        best tool. The same catalog of four answers in one question and split
+        over two.
+        """
+        tools = [
+            {"name": "none", "description": "does nothing"},
+            {"name": "a", "description": "does a"},
+            {"name": "b", "description": "does b"},
+            {"name": "c", "description": "does c"},
+        ]
+        scores = {"none": 2.0, "a": 1.0, "b": 0.0, "c": -1.0}
+        with standin.StandIn(scores=scores, max_options=2) as eullm:
+            result = await call(
+                eullm.url, "select_tools", request=RAIN, tools=tools, allow_none=False
+            )
+        self.assertGreater(len(eullm.sent("/v1/systemone")[0]["questions"]), 1)
+        self.assertEqual([t["name"] for t in result["tools"]], ["none", "a", "b", "c"])
+        self.assertIsNone(result["none_probability"])
+        self.assertIsNone(result["none_wins"])
+
     async def test_a_shortlist_the_model_cannot_read_keeps_the_embeddings_order(self):
         with standin.StandIn(scores=SCORES, vectors=VECTORS, max_options=1) as eullm:
             result = await call(
@@ -295,7 +319,20 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
                 await call(eullm.url, "select_tools", request=RAIN, tools=named_none)
             self.assertIn("allow_none=false", str(reserved.exception))
             self.assertEqual(eullm.requests, [])
-            await call(eullm.url, "select_tools", request=RAIN, tools=named_none, allow_none=False)
+            allowed = await call(
+                eullm.url, "select_tools", request=RAIN, tools=named_none, allow_none=False
+            )
+        # allow_none=False is the documented way to have a tool called "none",
+        # and it is ranked as the tool it is. The "none" option was not on the
+        # table, so there is no probability of abstaining to report -- and it
+        # must not be the tool's own probability, which is what reading the
+        # name back out of the answer gave.
+        self.assertEqual(
+            [t["name"] for t in allowed["tools"]], ["none", "get_weather", "send_email"]
+        )
+        self.assertIsNone(allowed["none_probability"])
+        self.assertIsNone(allowed["none_wins"])
+        self.assertEqual(sum(t["probability"] for t in allowed["tools"]), 1.0, places=3)
 
     async def test_the_arguments_are_checked(self):
         with standin.StandIn() as eullm:
