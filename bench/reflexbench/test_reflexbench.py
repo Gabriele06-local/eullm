@@ -248,7 +248,10 @@ SCORES = {"a": 0.1, "b": -1.0, "c": 2.0, "d": 0.5, rb_methods.NONE: -3.0}
 def too_long(status=422):
     """EuLLM's refusal of a question too long for the model: its body since
     errors take the System One shape, or, with status 400, before."""
-    message = "question, options and readout need 2100 tokens; the model allows 2048 — nothing was truncated"
+    message = (
+        "question, options and readout need 2100 tokens; the model allows 2048"
+        " — nothing was truncated"
+    )
     if status == 400:
         return rb_methods.ServerError(400, json.dumps({"error": message}))
     body = {"error": {"code": "input_budget_exceeded", "message": message, "question": "tools_0"}}

@@ -350,15 +350,21 @@ class MethodsTest(unittest.TestCase):
 
     def test_the_knn_embedder_is_unloaded_before_stage_3_unless_reserved(self):
         def ps(reserved):
-            return {"models": [{"name": "e", "eullm": {"slot": "embedding", "reserved_companion": reserved}}]}
+            embedder = {"slot": "embedding", "reserved_companion": reserved}
+            return {"models": [{"name": "e", "eullm": embedder}]}
+
+        def post(url, body, *a):
+            sent.append((url, body))
 
         sent = []
         for reserved, expected in ((False, "unloaded"), (True, "reserved, kept")):
             state = {"version": {}, "ps": ps(reserved)}
-            with mock.patch.object(ab_methods, "server_state", lambda *a, s=state: s), \
-                    mock.patch.object(ab_methods, "post", lambda url, body, *a: sent.append((url, body))):
-                self.assertEqual(ab_methods.release_embedder("http://x/", "e", None, 10), expected)
-        self.assertEqual(sent, [("http://x/api/embed", {"model": "e", "input": "-", "keep_alive": 0})])
+            with mock.patch.object(ab_methods, "server_state", lambda *a, s=state: s):
+                with mock.patch.object(ab_methods, "post", post):
+                    done = ab_methods.release_embedder("http://x/", "e", None, 10)
+            self.assertEqual(done, expected)
+        unload = {"model": "e", "input": "-", "keep_alive": 0}
+        self.assertEqual(sent, [("http://x/api/embed", unload)])
         with mock.patch.object(ab_methods, "server_state", lambda *a: {"ps": {"models": []}}):
             self.assertEqual(ab_methods.release_embedder("http://x", "e", None, 10), "not loaded")
 

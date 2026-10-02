@@ -325,14 +325,19 @@ def release_embedder(url, model, api_key, timeout):
     it did."""
     ps = (server_state(url, api_key, timeout).get("ps") or {}).get("models") or []
     entry = next(
-        (m for m in ps if m.get("name") == model and (m.get("eullm") or {}).get("slot") == "embedding"),
+        (
+            m
+            for m in ps
+            if m.get("name") == model and (m.get("eullm") or {}).get("slot") == "embedding"
+        ),
         None,
     )
     if entry is None:
         return "not loaded"
     if (entry.get("eullm") or {}).get("reserved_companion"):
         return "reserved, kept"
-    post(url.rstrip("/") + "/api/embed", {"model": model, "input": "-", "keep_alive": 0}, api_key, timeout)
+    unload = {"model": model, "input": "-", "keep_alive": 0}
+    post(url.rstrip("/") + "/api/embed", unload, api_key, timeout)
     return "unloaded"
 
 
