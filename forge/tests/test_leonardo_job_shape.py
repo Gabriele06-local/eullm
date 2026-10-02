@@ -62,15 +62,20 @@ def _seconds(walltime: str) -> int:
     if "-" in walltime:
         d, walltime = walltime.split("-", 1)
         days = int(d)
-    parts = [int(p) for p in walltime.split(":")]
-    # A bare number is minutes, the way slurm reads it and the way status.sh
-    # reads it. Left-padded to [0, N, 0] it was read as N *seconds*, so
-    # --time=180 passed a check meant to keep jobs under two hours while
-    # asking the partition for three.
-    if len(parts) == 1:
-        parts = [0, parts[0], 0]
-    while len(parts) < 3:
-        parts.insert(0, 0)
+        # days-hours[:minutes[:seconds]]: after the dash slurm reads hours
+        # first, so "1-12" is a day and twelve hours.
+        parts = [int(p) for p in walltime.split(":")]
+        parts += [0] * (3 - len(parts))
+    else:
+        parts = [int(p) for p in walltime.split(":")]
+        # A bare number is minutes, the way slurm reads it and the way status.sh
+        # reads it. Left-padded to [0, N, 0] it was read as N *seconds*, so
+        # --time=180 passed a check meant to keep jobs under two hours while
+        # asking the partition for three.
+        if len(parts) == 1:
+            parts = [0, parts[0], 0]
+        while len(parts) < 3:
+            parts.insert(0, 0)
     h, m, s = parts
     return days * 86400 + h * 3600 + m * 60 + s
 
