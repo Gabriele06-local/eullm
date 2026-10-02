@@ -297,8 +297,10 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
                 shortlist=1,
                 allow_none=False,
             )
-        # Nothing was asked: one tool and nothing to weigh it against.
-        self.assertEqual(eullm.requests, [])
+        # The decision model is not asked. The embeddings are -- that is how
+        # the shortlist of one was chosen -- and then there is nothing that
+        # could go in a question.
+        self.assertEqual(eullm.sent("/v1/systemone"), [])
         self.assertEqual(result["method"], "no decision")
         self.assertEqual(result["tools"], [{"name": "get_weather", "probability": None}])
         self.assertEqual((result["catalog_size"], result["left_out"]), (6, 5))
