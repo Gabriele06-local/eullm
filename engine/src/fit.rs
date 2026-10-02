@@ -711,6 +711,24 @@ const VRAM_SAFETY_FRACTION: f64 = 0.97;
 /// session's floor, not a ceiling nothing will ever beat.
 const COMPUTE_BUFFER_RESERVE_BYTES: f64 = 320.0 * 1024.0 * 1024.0;
 
+/// What a micro-batch larger than the default adds to the compute buffer,
+/// on top of `COMPUTE_BUFFER_RESERVE_BYTES`, which every fit already
+/// charges and which was measured at the default 512 tokens. The buffer
+/// holds the activations of one micro-batch, so it grows with it: this
+/// charges the flat reserve once more for every further 512 tokens, the
+/// same 2× margin over the measurement, scaled. `0` at or below the
+/// default, so a run without `--n-ubatch` is sized exactly as before.
+///
+/// The VRAM it takes comes out of what the fit hands the model: for an
+/// MoE model, fewer layers' experts on the GPU. That is the trade
+/// `--n-ubatch` makes — prompts read in fewer, larger passes, answers
+/// written with a little more of the model in RAM.
+pub(crate) fn ubatch_reserve_bytes(n_ubatch: u32) -> u64 {
+    let default = crate::inference::DEFAULT_N_UBATCH;
+    let extra = f64::from(n_ubatch.saturating_sub(default)) / f64::from(default);
+    (COMPUTE_BUFFER_RESERVE_BYTES * extra) as u64
+}
+
 /// The same kind of flat reserve as `COMPUTE_BUFFER_RESERVE_BYTES`, but for
 /// an embedding model. A `--embedding-model` companion's context is built at
 /// launch, at the size of its longest input, and kept for every request, so
@@ -1697,15 +1715,18 @@ impl OffloadPlan {
 /// context per request, so while it is idle this memory is free in the
 /// figure every other load is sized against — and an embedder or a second
 /// model sized into it leaves the next request without room for its context.
-/// It is kept reserved instead.
+/// It is kept reserved instead. A micro-batch above the default
+/// (`--n-ubatch`) grows the compute buffer, and the reserve with it.
 pub(crate) fn context_reserve_bytes(
     info: Option<&GgufInfo>,
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    n_ubatch: u32,
 ) -> u64 {
     kv_cache_bytes(info, ctx_size, kv_bytes_per_elem_k, kv_bytes_per_elem_v)
         .saturating_add(COMPUTE_BUFFER_RESERVE_BYTES as u64)
+        .saturating_add(ubatch_reserve_bytes(n_ubatch))
 }
 
 #[cfg(test)]
@@ -2582,11 +2603,67 @@ mod plan_offload_tests {
     fn a_sequential_engine_reserves_its_kv_cache_and_compute_buffer() {
         // Qwen3-0.6B: 28 layers, 8 KV heads of 128 — 112 KiB per token.
         let info = attention(28, 8);
+        let default = crate::inference::DEFAULT_N_UBATCH;
         assert_eq!(
-            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1),
+            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1, default),
             896 * MIB + 320 * MIB
         );
-        assert_eq!(context_reserve_bytes(None, 8192, F16.0, F16.1), 320 * MIB);
+        assert_eq!(
+            context_reserve_bytes(None, 8192, F16.0, F16.1, default),
+            320 * MIB
+        );
+        // Eight times the micro-batch, eight times the compute reserve.
+        assert_eq!(
+            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1, 4096),
+            896 * MIB + 8 * 320 * MIB
+        );
+    }
+
+    #[test]
+    fn a_micro_batch_above_the_default_reserves_its_compute_buffer() {
+        assert_eq!(ubatch_reserve_bytes(crate::inference::DEFAULT_N_UBATCH), 0);
+        assert_eq!(
+            ubatch_reserve_bytes(64),
+            0,
+            "below the default reserves nothing extra"
+        );
+        assert_eq!(ubatch_reserve_bytes(1024), 320 * MIB);
+        assert_eq!(ubatch_reserve_bytes(4096), 7 * 320 * MIB);
+    }
+
+    #[test]
+    fn a_larger_micro_batch_keeps_fewer_experts_on_the_gpu() {
+        let (info, layout, size) = moe();
+        let plan = |reserve| {
+            plan_offload(
+                Some((14 * GIB, 16 * GIB)),
+                Some(&info),
+                Some(&layout),
+                size,
+                4096,
+                F16.0,
+                F16.1,
+                reserve,
+                0,
+                flags(),
+            )
+        };
+        let default = plan(ubatch_reserve_bytes(crate::inference::DEFAULT_N_UBATCH));
+        let large = plan(ubatch_reserve_bytes(4096));
+        assert_eq!(default, plan(0), "the default is sized exactly as before");
+        // 7 × 320 MiB of compute buffer is 5.6 layers of 400 MiB experts:
+        // the larger micro-batch sends 5 or 6 more layers' experts to RAM.
+        let moved = large.n_cpu_moe - default.n_cpu_moe;
+        assert!(
+            (5..=6).contains(&moved),
+            "{} → {} layers' experts in RAM",
+            default.n_cpu_moe,
+            large.n_cpu_moe
+        );
+        assert_eq!(
+            large.gpu_layers, -1,
+            "every layer's other weights stay on the GPU"
+        );
     }
 }
 

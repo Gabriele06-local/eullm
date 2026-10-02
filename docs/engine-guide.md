@@ -429,6 +429,32 @@ the non-expert tensors) and `--ctx-size`, has no effect on dense (non-MoE)
 models, and is available on both `eullm run` and `eullm serve` (applied to
 every model the server loads or swaps to).
 
+#### Reading long prompts faster: `--n-ubatch N`
+
+With some experts in CPU RAM, an MoE model writes its answer at a speed set
+by the CPU, but reads its prompt on the GPU: for each pass over the prompt,
+llama.cpp copies the experts kept in RAM to the card and runs them there.
+A pass reads 512 tokens by default (`n_ubatch`, llama.cpp's own default), so
+a 33,000-token prompt is 65 passes, and 65 copies of every expert in RAM over
+PCIe. On Qwen3.8-Flash-Next IQ2_XS (68 GB, most of its experts in RAM) with
+an RTX 5070 Ti, that read the prompt at 250 tokens/s.
+
+`--n-ubatch` sets how many tokens one pass reads. At 4096 the same prompt is
+9 passes:
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --n-ubatch 4096
+```
+
+The price is VRAM: a pass's activations live in the compute buffer, which
+grows with the pass. `--fit` reserves for it (320 MiB more for every further
+512 tokens) and keeps fewer layers' experts on the GPU to make room, so
+answers are written somewhat slower; `--n-cpu-moe` set by hand is not
+adjusted. The batch a decode call takes, `--n-batch`, is raised to match when
+it is smaller. A dense model, or an MoE that fits whole on the GPU, copies
+nothing per pass and gains little.
+
 ## KV-cache reuse
 
 ### KV-cache reuse on hybrid/recurrent models (Qwen3.5/3.6): a known upstream limitation, not an eullm gap

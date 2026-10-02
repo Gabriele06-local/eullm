@@ -284,6 +284,23 @@ struct RuntimeOpts {
     #[arg(long, default_value_t = 2048)]
     n_batch: u32,
 
+    /// Physical micro-batch: how many prompt tokens the GPU processes in
+    /// one pass (llama.cpp's `n_ubatch`; default 512, llama.cpp's own).
+    /// Raise it, to 2048-8192, for an MoE model whose experts do not all
+    /// fit in VRAM: the experts kept in RAM are copied to the GPU once per
+    /// micro-batch of a prompt, so a 32k-token prompt read 512 tokens at a
+    /// time copies them 64 times, and 4096 at a time, 8. The compute buffer
+    /// grows with it, and --fit makes room for it by keeping fewer layers'
+    /// experts on the GPU: answers are written a little slower. Raises
+    /// --n-batch to the same value when that is smaller.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = inference::DEFAULT_N_UBATCH,
+        value_parser = clap::value_parser!(u32).range(32..=16_384)
+    )]
+    n_ubatch: u32,
+
     /// KV cache type for keys. Options: f16 (default, best GPU compat), q8_0, q4_0
     #[arg(long, default_value = "f16")]
     cache_type_k: String,
@@ -840,6 +857,7 @@ async fn main() {
                 threads,
                 no_flash_attn,
                 n_batch,
+                n_ubatch,
                 cache_type_k,
                 cache_type_v,
                 web,
@@ -860,6 +878,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
+            let n_batch = launch_n_batch(n_batch, n_ubatch);
             let residency = residency_config(
                 &store,
                 mmproj.as_deref(),
@@ -974,6 +993,7 @@ async fn main() {
                 batch_size,
                 !no_flash_attn,
                 n_batch,
+                n_ubatch,
                 ctk,
                 ctv,
                 web,
@@ -1016,6 +1036,7 @@ async fn main() {
                 threads,
                 no_flash_attn,
                 n_batch,
+                n_ubatch,
                 cache_type_k,
                 cache_type_v,
                 web,
@@ -1036,6 +1057,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
+            let n_batch = launch_n_batch(n_batch, n_ubatch);
             let residency = residency_config(
                 &store,
                 mmproj.as_deref(),
@@ -1104,6 +1126,7 @@ async fn main() {
                 threads,
                 !no_flash_attn,
                 n_batch,
+                n_ubatch,
                 ctk,
                 ctv,
                 web,
@@ -2004,6 +2027,19 @@ fn candidate_facts(
     })
 }
 
+/// `--n-batch` as `--n-ubatch` leaves it (see `inference::batch_for_ubatch`),
+/// said out loud when the micro-batch raised it: a flag that changes another
+/// flag's value without a word is the confusion the raise exists to avoid.
+fn launch_n_batch(n_batch: u32, n_ubatch: u32) -> u32 {
+    let raised = inference::batch_for_ubatch(n_batch, n_ubatch);
+    if raised != n_batch {
+        println!(
+            "[EULLM] --n-batch raised from {n_batch} to {raised} to hold --n-ubatch {n_ubatch}."
+        );
+    }
+    raised
+}
+
 /// A generation model named on the command line, under the name requests
 /// will use for it (see `launch_companion_name`), and its GGUF. An Ollama
 /// tag (`qwen3:8b`) is taken as the store name it stands for.
@@ -2306,6 +2342,7 @@ async fn cmd_run(
     batch_size: usize,
     flash_attn: bool,
     n_batch: u32,
+    n_ubatch: u32,
     cache_type_k: inference::KvCacheType,
     cache_type_v: inference::KvCacheType,
     web: bool,
@@ -2660,14 +2697,15 @@ async fn cmd_run(
                     ctx_size,
                     kv_bpe_k,
                     kv_bpe_v,
-                    companion_reserve_bytes,
+                    companion_reserve_bytes.saturating_add(fit::ubatch_reserve_bytes(n_ubatch)),
                 );
             }
             // Everything already spoken for before the text model is sized:
             // reserved embedding and decision companions, and the projector
             // unless it is going to RAM.
-            let sizing_reserve =
-                companion_reserve_bytes.saturating_add(mmproj_placement.reserve(mmproj_bytes));
+            let sizing_reserve = companion_reserve_bytes
+                .saturating_add(mmproj_placement.reserve(mmproj_bytes))
+                .saturating_add(fit::ubatch_reserve_bytes(n_ubatch));
             let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
                 fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
             } else {
@@ -2774,6 +2812,7 @@ async fn cmd_run(
             threads: resolved_threads,
             flash_attn,
             n_batch,
+            n_ubatch,
             cache_type_k,
             cache_type_v,
             mmproj_path: mmproj_for_config.clone(),
@@ -2893,6 +2932,7 @@ async fn cmd_run(
             web,
             threads: resolved_threads,
             n_batch,
+            n_ubatch,
             rust_debug,
         }
         .print();
@@ -2996,6 +3036,7 @@ async fn cmd_run(
             threads: resolved_threads,
             flash_attn,
             n_batch,
+            n_ubatch,
             cache_type_k,
             cache_type_v,
             batch_size: launch_batch_size,
@@ -3068,6 +3109,7 @@ async fn cmd_serve(
     threads: Option<u32>,
     flash_attn: bool,
     n_batch: u32,
+    n_ubatch: u32,
     cache_type_k: inference::KvCacheType,
     cache_type_v: inference::KvCacheType,
     web: bool,
@@ -3173,6 +3215,7 @@ async fn cmd_serve(
         threads,
         flash_attn,
         n_batch,
+        n_ubatch,
         cache_type_k,
         cache_type_v,
         batch_size,
@@ -4739,6 +4782,31 @@ mod cli_default_parity_tests {
         assert_eq!(cap(-1, 20), 20);
         // CPU-only is a legitimate ceiling.
         assert_eq!(cap(43, 0), 0);
+    }
+
+    /// `--n-ubatch` is llama.cpp's 512 unless asked, on both subcommands; a
+    /// micro-batch above `--n-batch` raises the batch to hold it, and a value
+    /// outside 32..=16384 is refused when the command line is read.
+    #[test]
+    fn the_micro_batch_defaults_to_llama_cpps_and_raises_the_batch() {
+        assert_eq!(runtime_opts(&["eullm", "run", "m.gguf"]).n_ubatch, 512);
+        assert_eq!(runtime_opts(&["eullm", "serve"]).n_ubatch, 512);
+        let asked = runtime_opts(&["eullm", "serve", "--n-ubatch", "4096"]);
+        assert_eq!(asked.n_ubatch, 4096);
+        assert_eq!(launch_n_batch(asked.n_batch, asked.n_ubatch), 4096);
+        let larger = runtime_opts(&[
+            "eullm",
+            "run",
+            "m.gguf",
+            "--n-batch",
+            "8192",
+            "--n-ubatch",
+            "4096",
+        ]);
+        assert_eq!(launch_n_batch(larger.n_batch, larger.n_ubatch), 8192);
+        for refused in ["16", "32768"] {
+            assert!(Cli::try_parse_from(["eullm", "serve", "--n-ubatch", refused]).is_err());
+        }
     }
 
     #[test]
