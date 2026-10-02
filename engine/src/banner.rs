@@ -49,6 +49,9 @@ pub struct ModelBanner {
     pub web: bool,
     pub threads: u32,
     pub n_batch: u32,
+    /// The physical micro-batch (`--n-ubatch`): how many prompt tokens one
+    /// GPU pass reads.
+    pub n_ubatch: u32,
     pub rust_debug: bool,
 }
 
@@ -182,7 +185,10 @@ impl ModelBanner {
             println!("  Web browsing:  enabled (URLs in messages are fetched and injected)");
         }
         println!("  Threads:       {}", self.threads);
-        println!("  Batch (prefill): {}", self.n_batch);
+        println!(
+            "  Batch (prefill): {} (micro-batch {})",
+            self.n_batch, self.n_ubatch
+        );
         println!("  Mode:          {mode}");
     }
 }

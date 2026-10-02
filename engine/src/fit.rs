@@ -711,6 +711,40 @@ const VRAM_SAFETY_FRACTION: f64 = 0.97;
 /// session's floor, not a ceiling nothing will ever beat.
 const COMPUTE_BUFFER_RESERVE_BYTES: f64 = 320.0 * 1024.0 * 1024.0;
 
+/// What a micro-batch larger than the default adds to the compute buffer,
+/// on top of `COMPUTE_BUFFER_RESERVE_BYTES`, which every fit already
+/// charges and which was measured at the default 512 tokens. The buffer
+/// holds the activations of one micro-batch, so it grows with it, by
+/// `UBATCH_RESERVE_BYTES_PER_TOKEN` for every token past the default. `0`
+/// at or below the default, so a run without `--n-ubatch` is sized exactly
+/// as before.
+///
+/// The VRAM it takes comes out of what the fit hands the model: for an
+/// MoE model, fewer layers' experts on the GPU. That is the trade
+/// `--n-ubatch` makes — prompts read in fewer, larger passes, answers
+/// written with a little more of the model in RAM.
+pub(crate) fn ubatch_reserve_bytes(n_ubatch: u32) -> u64 {
+    let extra = n_ubatch.saturating_sub(crate::inference::DEFAULT_N_UBATCH);
+    (f64::from(extra) * UBATCH_RESERVE_BYTES_PER_TOKEN) as u64
+}
+
+/// How much the compute buffer grows for each token a micro-batch adds.
+/// Measured with `LlamaContext::memory_breakdown_print` on Qwen3.8-Flash-Next
+/// IQ2_XS (RTX 5070 Ti, 40,960 context, the experts of 37 and 40 of its 48
+/// layers in RAM): the CUDA0 compute buffer was 648 MiB at a 512-token
+/// micro-batch and 3,165 MiB at 4,096, 0.70 MiB per token. 0.75 covers
+/// that with 7% to spare. A dense 27B's activations cost about half as
+/// much per token, so this reserves more than such a model needs — and a
+/// dense model gains little from a larger micro-batch anyway.
+///
+/// The same measurement shows the flat reserve short for this model at
+/// 512: 648 MiB against `COMPUTE_BUFFER_RESERVE_BYTES`' 320, the rest
+/// being the copy of a layer's RAM-resident experts the GPU computes them
+/// from. The fit's other margins absorbed it (1.8 GiB was still free);
+/// re-measure more MoE models with experts in RAM before raising the flat
+/// reserve for every model.
+const UBATCH_RESERVE_BYTES_PER_TOKEN: f64 = 0.75 * 1024.0 * 1024.0;
+
 /// The same kind of flat reserve as `COMPUTE_BUFFER_RESERVE_BYTES`, but for
 /// an embedding model. A `--embedding-model` companion's context is built at
 /// launch, at the size of its longest input, and kept for every request, so
@@ -1697,15 +1731,18 @@ impl OffloadPlan {
 /// context per request, so while it is idle this memory is free in the
 /// figure every other load is sized against — and an embedder or a second
 /// model sized into it leaves the next request without room for its context.
-/// It is kept reserved instead.
+/// It is kept reserved instead. A micro-batch above the default
+/// (`--n-ubatch`) grows the compute buffer, and the reserve with it.
 pub(crate) fn context_reserve_bytes(
     info: Option<&GgufInfo>,
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    n_ubatch: u32,
 ) -> u64 {
     kv_cache_bytes(info, ctx_size, kv_bytes_per_elem_k, kv_bytes_per_elem_v)
         .saturating_add(COMPUTE_BUFFER_RESERVE_BYTES as u64)
+        .saturating_add(ubatch_reserve_bytes(n_ubatch))
 }
 
 #[cfg(test)]
@@ -2582,11 +2619,71 @@ mod plan_offload_tests {
     fn a_sequential_engine_reserves_its_kv_cache_and_compute_buffer() {
         // Qwen3-0.6B: 28 layers, 8 KV heads of 128 — 112 KiB per token.
         let info = attention(28, 8);
+        let default = crate::inference::DEFAULT_N_UBATCH;
         assert_eq!(
-            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1),
+            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1, default),
             896 * MIB + 320 * MIB
         );
-        assert_eq!(context_reserve_bytes(None, 8192, F16.0, F16.1), 320 * MIB);
+        assert_eq!(
+            context_reserve_bytes(None, 8192, F16.0, F16.1, default),
+            320 * MIB
+        );
+        // A 4096-token micro-batch: 3584 tokens past the default, at
+        // 0.75 MiB each.
+        assert_eq!(
+            context_reserve_bytes(Some(&info), 8192, F16.0, F16.1, 4096),
+            896 * MIB + 320 * MIB + 2688 * MIB
+        );
+    }
+
+    #[test]
+    fn a_micro_batch_above_the_default_reserves_its_compute_buffer() {
+        assert_eq!(ubatch_reserve_bytes(crate::inference::DEFAULT_N_UBATCH), 0);
+        assert_eq!(
+            ubatch_reserve_bytes(64),
+            0,
+            "below the default reserves nothing extra"
+        );
+        assert_eq!(ubatch_reserve_bytes(1024), 384 * MIB);
+        // Qwen3.8-Flash-Next's compute buffer grew by 2,517 MiB from 512 to
+        // 4096 tokens; the reserve covers it.
+        assert_eq!(ubatch_reserve_bytes(4096), 2688 * MIB);
+        assert!(ubatch_reserve_bytes(4096) >= (3165 - 648) * MIB);
+    }
+
+    #[test]
+    fn a_larger_micro_batch_keeps_fewer_experts_on_the_gpu() {
+        let (info, layout, size) = moe();
+        let plan = |reserve| {
+            plan_offload(
+                Some((14 * GIB, 16 * GIB)),
+                Some(&info),
+                Some(&layout),
+                size,
+                4096,
+                F16.0,
+                F16.1,
+                reserve,
+                0,
+                flags(),
+            )
+        };
+        let default = plan(ubatch_reserve_bytes(crate::inference::DEFAULT_N_UBATCH));
+        let large = plan(ubatch_reserve_bytes(4096));
+        assert_eq!(default, plan(0), "the default is sized exactly as before");
+        // 2,688 MiB of compute buffer is 6.7 layers of 400 MiB experts: the
+        // larger micro-batch sends 6 or 7 more layers' experts to RAM.
+        let moved = large.n_cpu_moe - default.n_cpu_moe;
+        assert!(
+            (6..=7).contains(&moved),
+            "{} → {} layers' experts in RAM",
+            default.n_cpu_moe,
+            large.n_cpu_moe
+        );
+        assert_eq!(
+            large.gpu_layers, -1,
+            "every layer's other weights stay on the GPU"
+        );
     }
 }
 
