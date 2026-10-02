@@ -165,6 +165,7 @@ jobs:
       forge: ${{ steps.filter.outputs.forge }}
       bench: ${{ steps.filter.outputs.bench }}
       reflex_mcp: ${{ steps.filter.outputs.reflex_mcp }}
+      examples: ${{ steps.filter.outputs.examples }}
       windows_packaging: ${{ steps.filter.outputs.windows_packaging }}
     steps:
       - uses: actions/checkout@v5
@@ -203,6 +204,9 @@ jobs:
             reflex_mcp:
               - 'adapters/reflex-mcp/**'
               - 'bench/reflexbench/**'
+              - '.github/workflows/ci.yml'
+            examples:
+              - 'examples/**'
               - '.github/workflows/ci.yml'
             windows_packaging:
               - 'installer/**'
@@ -552,6 +556,42 @@ jobs:
       - name: Audit dependencies
         # Blocking, as in the forge job, and not `--strict` for the same
         # reason: the package itself is not on PyPI, so it cannot be audited.
+        run: |
+          pip install pip-audit==2.10.1
+          pip-audit --desc
+
+  # ── Examples ─────────────────────────────────────────────────────────
+  # The LangGraph graphs and the n8n workflow are what someone trying the
+  # decision endpoint copies first. Their tests need no model and no network
+  # beyond the pinned packages: a stand-in EuLLM on 127.0.0.1, and the
+  # workflow read as JSON. They were run by hand only, so a fix to the
+  # LangGraph client (#642) reached review with its tests never run.
+  examples:
+    name: Examples (test)
+    needs: changes
+    if: needs.changes.outputs.examples == 'true' || github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/pip
+          key: pip-examples-${{ hashFiles('examples/decision-langgraph/requirements.txt') }}
+          restore-keys: pip-examples-
+      - name: Install
+        run: |
+          pip install --upgrade pip setuptools
+          pip install -r examples/decision-langgraph/requirements.txt
+      - name: Test the LangGraph graphs
+        run: python -m unittest discover -s examples/decision-langgraph -v
+      - name: Test the n8n workflow
+        run: python -m unittest discover -s examples/decision-n8n -v
+      - name: Audit dependencies
+        # Blocking, as in the forge and reflex_mcp jobs: the requirements are
+        # what a reader installs to run the example.
         run: |
           pip install pip-audit==2.10.1
           pip-audit --desc
