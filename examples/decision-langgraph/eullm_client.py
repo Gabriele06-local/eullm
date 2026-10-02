@@ -67,6 +67,9 @@ class EuLLM:
             ) from None
         except http.client.HTTPException as e:
             raise EuLLMError(f"{path}: the answer stopped halfway ({e})") from None
+        except OSError as e:
+            # A reset while the body is read: neither a URLError nor an HTTPException.
+            raise EuLLMError(f"{path}: the connection dropped mid-answer ({e})") from None
 
     def decide(self, state, questions, model=None):
         """One `/v1/systemone` request: every question is answered about the
