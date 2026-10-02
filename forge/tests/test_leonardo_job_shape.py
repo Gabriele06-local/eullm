@@ -62,9 +62,20 @@ def _seconds(walltime: str) -> int:
     if "-" in walltime:
         d, walltime = walltime.split("-", 1)
         days = int(d)
-    parts = [int(p) for p in walltime.split(":")]
-    while len(parts) < 3:
-        parts.insert(0, 0)
+        # days-hours[:minutes[:seconds]]: after the dash slurm reads hours
+        # first, so "1-12" is a day and twelve hours.
+        parts = [int(p) for p in walltime.split(":")]
+        parts += [0] * (3 - len(parts))
+    else:
+        parts = [int(p) for p in walltime.split(":")]
+        # A bare number is minutes, the way slurm reads it and the way status.sh
+        # reads it. Left-padded to [0, N, 0] it was read as N *seconds*, so
+        # --time=180 passed a check meant to keep jobs under two hours while
+        # asking the partition for three.
+        if len(parts) == 1:
+            parts = [0, parts[0], 0]
+        while len(parts) < 3:
+            parts.insert(0, 0)
     h, m, s = parts
     return days * 86400 + h * 3600 + m * 60 + s
 
@@ -76,9 +87,29 @@ def _mem_gb(mem: str) -> float:
     return int(m.group(1)) * scale[m.group(2)]
 
 
+def _nodes(headers: dict[str, str]) -> int:
+    """Nodes the request spans. --gres and --mem are per node, so everything
+    this file reasons about is a per-node number times this."""
+    return int(headers.get("nodes", "1"))
+
+
+def _cores(headers: dict[str, str]) -> int:
+    """Cores the request asks for, whichever of the two ways it asks.
+
+    --ntasks counts the whole job, --ntasks-per-node one node of it. Reading
+    only the second is what let --ntasks=32 through on three GPUs: the cores
+    computed as 1, against a limit of 24.
+    """
+    per_task = int(headers.get("cpus-per-task", "1"))
+    if "ntasks" in headers:
+        return per_task * int(headers["ntasks"])
+    return per_task * int(headers.get("ntasks-per-node", "1")) * _nodes(headers)
+
+
 def _gpus(headers: dict[str, str]) -> int:
     m = re.search(r"gpu:(\d+)", headers.get("gres", ""))
-    return int(m.group(1)) if m else 0
+    per_node = int(m.group(1)) if m else 0
+    return per_node * _nodes(headers)
 
 
 GPU_SCRIPTS = sorted(p for p in LEONARDO.glob("*.slurm")
@@ -107,11 +138,11 @@ def test_a_quarter_node_per_gpu_and_never_the_whole_node(script):
     assert 1 <= gpus <= MAX_GPUS, (
         f"{script.name} asks for {gpus} GPUs: four is a whole node, which waits "
         "for an idle node; three is placed within the hour")
-    cpus = int(h.get("cpus-per-task", "1")) * int(h.get("ntasks-per-node", "1"))
+    cpus = _cores(h)
     assert cpus <= CORES_PER_GPU * gpus, (
         f"{script.name}: {cpus} cores for {gpus} GPUs makes the node exclusive")
     assert "mem" in h, f"{script.name}: no --mem, the default may be the whole node"
-    assert _mem_gb(h["mem"]) <= MEM_GB_PER_GPU * gpus, (
+    assert _mem_gb(h["mem"]) * _nodes(h) <= MEM_GB_PER_GPU * gpus, (
         f"{script.name}: --mem={h['mem']} for {gpus} GPUs")
 
 
@@ -132,3 +163,65 @@ def test_the_checks_catch_the_2026_10_01_grpo_script(tmp_path):
         test_two_hours_at_most(bad)
     with pytest.raises(AssertionError):
         test_a_quarter_node_per_gpu_and_never_the_whole_node(bad)
+
+
+def _script(tmp_path, body: str) -> Path:
+    p = tmp_path / "sbatch_case.slurm"
+    p.write_text("#!/bin/bash\n" + body, encoding="utf-8")
+    return p
+
+
+def test_ntasks_is_a_way_to_ask_for_the_whole_node_and_is_counted(tmp_path):
+    """--ntasks counts the whole job, --ntasks-per-node one node of it.
+
+    Only the second was read, so the cores came out as 1 and 32 cores on
+    three GPUs passed the check that exists to stop exactly that.
+    """
+    p = _script(tmp_path, "#SBATCH --partition=boost_usr_prod\n"
+                          "#SBATCH --time=02:00:00\n#SBATCH --gres=gpu:3\n"
+                          "#SBATCH --ntasks=32\n#SBATCH --mem=340G\n")
+    with pytest.raises(AssertionError):
+        test_a_quarter_node_per_gpu_and_never_the_whole_node(p)
+
+
+def test_two_nodes_are_two_of_everything(tmp_path):
+    """--gres and --mem are per node, so --nodes multiplies both.
+
+    Two nodes of three GPUs is six, which is past the three-GPU ceiling the
+    same check holds a one-node request to.
+    """
+    p = _script(tmp_path, "#SBATCH --partition=boost_usr_prod\n"
+                          "#SBATCH --time=02:00:00\n#SBATCH --nodes=2\n"
+                          "#SBATCH --gres=gpu:3\n#SBATCH --cpus-per-task=24\n"
+                          "#SBATCH --mem=340G\n")
+    with pytest.raises(AssertionError):
+        test_a_quarter_node_per_gpu_and_never_the_whole_node(p)
+
+
+def test_one_node_reads_the_same_as_before(tmp_path):
+    """Every script in the tree asks for one node, so nothing moves."""
+    p = _script(tmp_path, "#SBATCH --partition=boost_usr_prod\n"
+                          "#SBATCH --time=02:00:00\n#SBATCH --nodes=1\n"
+                          "#SBATCH --gres=gpu:3\n#SBATCH --cpus-per-task=16\n"
+                          "#SBATCH --ntasks-per-node=1\n#SBATCH --mem=340G\n")
+    h = _headers(p)
+    assert _gpus(h) == 3 and _cores(h) == 16
+    test_a_quarter_node_per_gpu_and_never_the_whole_node(p)
+
+
+def test_a_bare_walltime_is_minutes(tmp_path):
+    """Slurm reads --time=180 as 180 minutes, and status.sh does too.
+
+    Left-padded to seconds it came out as three minutes, so --time=180
+    passed a check meant to keep a link under two hours while asking the
+    partition for three.
+    """
+    assert _seconds("180") == 180 * 60 == _seconds("03:00:00")
+    assert _seconds("120") == _seconds("02:00:00")
+    assert _seconds("7200") == 5 * 86400
+    assert _seconds("1-12") == 36 * 3600 == _seconds("1-12:00:00")
+    p = _script(tmp_path, "#SBATCH --partition=boost_usr_prod\n"
+                          "#SBATCH --time=180\n#SBATCH --gres=gpu:3\n"
+                          "#SBATCH --cpus-per-task=16\n#SBATCH --mem=340G\n")
+    with pytest.raises(AssertionError):
+        test_two_hours_at_most(p)
