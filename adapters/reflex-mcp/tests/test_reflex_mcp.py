@@ -302,6 +302,7 @@ class SelectToolsTest(unittest.IsolatedAsyncioTestCase):
         # could go in a question.
         self.assertEqual(eullm.sent("/v1/systemone"), [])
         self.assertEqual(result["method"], "no decision")
+        self.assertEqual(result["embedding_model"], EMBED)
         self.assertEqual(result["tools"], [{"name": "get_weather", "probability": None}])
         self.assertEqual((result["catalog_size"], result["left_out"]), (6, 5))
         self.assertIsNone(result["none_probability"])
