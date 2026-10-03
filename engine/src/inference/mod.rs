@@ -394,9 +394,13 @@ pub(crate) fn build_ctx_params_with_cache(
     // eullm loading a context at all and OOMing at every size down to 512,
     // while stock llama-cli — same file, same layers, same card, n_ubatch at
     // its real default of 512 — loaded a context 16x larger. Matching
-    // llama.cpp's literal default here, not a value we invented. Must never
-    // exceed n_batch (llama.cpp requirement), hence the min().
-    let n_ubatch = config.n_batch.min(512);
+    // llama.cpp's literal default here, not a value we invented — and still
+    // the default of `--n-ubatch`, which raises it for the one case that
+    // pays: an MoE model whose experts stay in RAM. Those experts are copied
+    // to the GPU once per micro-batch of a prompt, so a 32k-token prompt read
+    // 512 tokens at a time copies them 64 times. Never more than n_batch
+    // (llama.cpp requirement): see `text_ubatch`.
+    let n_ubatch = config.text_ubatch();
     let mut params = LlamaContextParams::default()
         .with_n_ctx(Some(ctx_size))
         .with_n_batch(config.n_batch)
@@ -460,6 +464,10 @@ pub struct InferenceConfig {
     pub flash_attn: bool,
     /// Prompt processing batch size (how many tokens per eval during prefill).
     pub n_batch: u32,
+    /// Physical micro-batch: how many of those tokens the GPU processes in
+    /// one pass (`--n-ubatch`, llama.cpp's `n_ubatch`). Never more than
+    /// `n_batch`; see [`InferenceConfig::text_ubatch`].
+    pub n_ubatch: u32,
     /// KV cache data type for keys.  Lower precision = less VRAM.
     /// Default: F16 (maximum GPU compatibility).
     pub cache_type_k: KvCacheType,
@@ -550,6 +558,7 @@ impl Default for InferenceConfig {
             threads: num_cpus(),
             flash_attn: true,
             n_batch: 2048,
+            n_ubatch: DEFAULT_N_UBATCH,
             // F16 is the safest default — works on all GPU architectures.
             // Quantized types (Q8_0, Q4_0) save VRAM but may cause GPU
             // fallback to CPU on some architectures.  Users can opt in
@@ -565,6 +574,28 @@ impl Default for InferenceConfig {
             mtp_p_min: 0.0,
         }
     }
+}
+
+impl InferenceConfig {
+    /// The physical micro-batch a text context is built with: `n_ubatch`,
+    /// never more than `n_batch` (llama.cpp requires `n_ubatch <= n_batch`).
+    /// The command line raises `--n-batch` to `--n-ubatch` already (see
+    /// [`batch_for_ubatch`]); the cap is for a config built any other way.
+    pub(crate) fn text_ubatch(&self) -> u32 {
+        self.n_ubatch.min(self.n_batch).max(1)
+    }
+}
+
+/// llama.cpp's own default physical micro-batch, and `--n-ubatch`'s.
+pub const DEFAULT_N_UBATCH: u32 = 512;
+
+/// The `--n-batch` a run uses with `--n-ubatch`: the logical batch must hold
+/// the physical one, so a micro-batch larger than the batch raises the batch
+/// to it. Asking for 4096-token micro-batches with the default 2048-token
+/// batch would otherwise be capped at 2048 without a word — llama.cpp's own
+/// `-ub` behaves that way, and it is the first thing anyone tuning it trips on.
+pub fn batch_for_ubatch(n_batch: u32, n_ubatch: u32) -> u32 {
+    n_batch.max(n_ubatch)
 }
 
 /// Parse a KV cache type string (e.g. "q8_0", "q4_0", "f16") into a `KvCacheType`.
@@ -1789,8 +1820,8 @@ impl InferenceEngine {
 
         // A model loaded with an mmproj can still receive a plain text-only
         // message — `generate`/`generate_streaming` build their context from
-        // `config.n_batch` capped at 512 (see `build_ctx_params_with_cache`,
-        // matching llama.cpp's own n_ubatch default), same as any other model
+        // the micro-batch `--n-ubatch` sets (see `build_ctx_params_with_cache`;
+        // llama.cpp's own n_ubatch default, 512, unless raised), same as any other model
         // — as well as one with an image, which `generate_multimodal` sizes to
         // `multimodal_batch_size` instead. The probe must cover whichever of
         // the two is larger, since either is a real request this same loaded
@@ -1800,14 +1831,14 @@ impl InferenceEngine {
         // hardware exposed: load-time probe passed, first *text* message with
         // no image attached failed with the same OOM the probe was built to
         // catch. Taking only the plain text figure, symmetrically, undersells
-        // what a real image needs. The `.min(512)` must track
-        // `build_ctx_params_with_cache`'s cap exactly — probing a larger
+        // what a real image needs. `text_ubatch` is the figure
+        // `build_ctx_params_with_cache` uses, exactly — probing a larger
         // micro-batch than the real request uses only shrinks the context
         // more than necessary.
         let worst_case_batch = config
             .mmproj_path
             .is_some()
-            .then(|| multimodal_batch_size().max(config.n_batch.min(512)));
+            .then(|| multimodal_batch_size().max(config.text_ubatch()));
 
         // Why a candidate was rejected — kept so the final error message (if
         // even the floor is rejected) can still name the real cause instead
@@ -2938,6 +2969,31 @@ mod tests {
     /// old message sent that user to `--ctx-size` and to KV quantization; the
     /// first was already at its floor and the second gives back 60 MiB of the
     /// 328 missing. Neither may appear as advice, and both real levers must.
+    /// `--n-ubatch` reaches the context as asked, and never past `n_batch`,
+    /// which llama.cpp requires to hold it: the command line raises the batch
+    /// instead of letting the micro-batch be cut down without a word.
+    #[test]
+    fn the_micro_batch_never_exceeds_the_batch() {
+        assert_eq!(InferenceConfig::default().text_ubatch(), DEFAULT_N_UBATCH);
+        let raised = InferenceConfig {
+            n_batch: batch_for_ubatch(2048, 4096),
+            n_ubatch: 4096,
+            ..Default::default()
+        };
+        assert_eq!(raised.text_ubatch(), 4096);
+        let built_by_hand = InferenceConfig {
+            n_batch: 2048,
+            n_ubatch: 4096,
+            ..Default::default()
+        };
+        assert_eq!(built_by_hand.text_ubatch(), 2048);
+        assert_eq!(
+            batch_for_ubatch(2048, 512),
+            2048,
+            "a smaller micro-batch leaves the batch alone"
+        );
+    }
+
     #[test]
     fn at_the_floor_only_the_levers_that_can_close_the_gap_are_named() {
         let (total, free) = (16 * GIB, 16 * GIB / 10);

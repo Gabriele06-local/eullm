@@ -140,6 +140,9 @@ pub struct AppState {
     pub threads: u32,
     pub flash_attn: bool,
     pub n_batch: u32,
+    /// `--n-ubatch`: the physical micro-batch of every model this server
+    /// loads, and the compute buffer `--fit` reserves for it.
+    pub n_ubatch: u32,
     /// KV cache quantization type for keys (e.g. Q8_0 — reduces VRAM).
     pub cache_type_k: crate::inference::KvCacheType,
     /// KV cache quantization type for values (e.g. Q4_0 — reduces VRAM).
@@ -543,6 +546,7 @@ impl AppState {
                 threads: self.threads,
                 flash_attn: self.flash_attn,
                 n_batch: self.n_batch,
+                n_ubatch: self.n_ubatch,
                 cache_type_k,
                 cache_type_v,
                 // Multimodal: when the model store declares an mmproj sibling
@@ -688,6 +692,7 @@ impl AppState {
                     engine.context_size(),
                     sizing.kv_bpe_k,
                     sizing.kv_bpe_v,
+                    self.n_ubatch,
                 ),
                 _ => 0,
             };
@@ -743,6 +748,7 @@ impl AppState {
                 web: self.web_enabled,
                 threads: self.threads,
                 n_batch: self.n_batch,
+                n_ubatch: self.n_ubatch,
                 rust_debug: self.rust_debug,
             }
             .print();
@@ -951,7 +957,10 @@ impl AppState {
             .reserved_embedding_bytes()
             .await
             .saturating_add(self.reserved_decision_bytes().await)
-            .saturating_add(self.models.read().await.unallocated_reserve());
+            .saturating_add(self.models.read().await.unallocated_reserve())
+            // A micro-batch above the default needs a larger compute buffer
+            // than the flat reserve the fit charges (`--n-ubatch`).
+            .saturating_add(crate::fit::ubatch_reserve_bytes(self.n_ubatch));
         crate::fit::plan_offload(
             crate::fit::vram_bytes(),
             sizing.info,
@@ -2669,6 +2678,8 @@ pub struct ServeConfig {
     pub threads: u32,
     pub flash_attn: bool,
     pub n_batch: u32,
+    /// `--n-ubatch`, for every model this server loads (see `AppState::n_ubatch`).
+    pub n_ubatch: u32,
     pub cache_type_k: crate::inference::KvCacheType,
     pub cache_type_v: crate::inference::KvCacheType,
     pub batch_size: usize,
@@ -2938,6 +2949,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
                 engine.context_size(),
                 crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_k),
                 crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_v),
+                cfg.n_ubatch,
             ),
             _ => 0,
         };
@@ -2984,6 +2996,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         threads: cfg.threads,
         flash_attn: cfg.flash_attn,
         n_batch: cfg.n_batch,
+        n_ubatch: cfg.n_ubatch,
         cache_type_k: cfg.cache_type_k,
         cache_type_v: cfg.cache_type_v,
         batch_size: cfg.batch_size,
@@ -3156,6 +3169,7 @@ impl AppState {
             threads: 1,
             flash_attn: false,
             n_batch: 512,
+            n_ubatch: crate::inference::DEFAULT_N_UBATCH,
             cache_type_k: crate::inference::KvCacheType::F16,
             cache_type_v: crate::inference::KvCacheType::F16,
             batch_size: 1,
