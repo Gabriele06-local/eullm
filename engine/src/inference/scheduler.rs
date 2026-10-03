@@ -19,11 +19,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use llama_cpp_2::context::LlamaContext;
+use llama_cpp_2::context::params::LlamaContextType;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::model::{AddBos, LlamaModel};
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::speculative::{MtpDrafter, MtpSpeculativeParams};
 use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
 
@@ -141,6 +143,10 @@ struct ActiveSequence {
     /// pushed for the newly-sampled token before that token's own decode
     /// call has happened, so it's briefly one ahead of `n_past`).
     raw_generated_pieces: Vec<String>,
+    /// Tokens the MTP head drafted this turn, and how many of them the
+    /// model kept (see `mtp_step`); both 0 without `--mtp`.
+    mtp_drafted: u32,
+    mtp_accepted: u32,
 }
 
 /// An idle sequence slot together with the exact token history currently
@@ -738,6 +744,407 @@ fn finish_sequence_clean(
     });
 }
 
+/// How many tokens the MTP head drafts per step for this load: `--mtp`,
+/// when the model was loaded with MTP layers and the scheduler serves one
+/// request at a time; otherwise 0, with the reason to log.
+fn mtp_drafts(asked: u32, max_batch_size: usize, n_layer_nextn: u32) -> (u32, Option<String>) {
+    if asked == 0 {
+        return (0, None);
+    }
+    if n_layer_nextn == 0 {
+        return (
+            0,
+            Some(format!(
+                "--mtp {asked}: this model has no MTP layers (its GGUF was converted \
+                 without them; unsloth's *-MTP-GGUF files keep them) — generating \
+                 without drafts"
+            )),
+        );
+    }
+    if max_batch_size != 1 {
+        return (
+            0,
+            Some(format!(
+                "--mtp {asked}: drafting serves one request at a time, and --batch-size \
+                 is {max_batch_size} — generating without drafts"
+            )),
+        );
+    }
+    (asked, None)
+}
+
+/// The MTP drafter, the draft context it runs on, and the batch a step
+/// checks its drafts with.
+struct MtpState<'m> {
+    // First, so it is dropped before the draft context it points at. The
+    // target context outlives the whole state: `run_scheduler_loop` declares
+    // it first.
+    drafter: MtpDrafter,
+    /// The MTP head's context. It keeps a memory of its own, which llama.cpp
+    /// leaves to the caller to keep in step with the target's: what the
+    /// target holds, and nothing past it (see `mtp_step` and
+    /// `prefill_sequence`), as llama-server does.
+    draft_ctx: LlamaContext<'m>,
+    /// The last token and up to `n_max` drafts, every one with logits.
+    batch: LlamaBatch<'static>,
+}
+
+/// The draft context and drafter for `--mtp n_max`, set up as llama-server
+/// sets up `--spec-type draft-mtp`: a context of type MTP on the same model,
+/// bound to the target context (`ctx_other`), sized like it, with no
+/// recurrent rollback of its own.
+fn start_mtp<'m>(
+    model: &'m LlamaModel,
+    backend: &LlamaBackend,
+    config: &InferenceConfig,
+    ctx_size: NonZeroU32,
+    target: &LlamaContext<'_>,
+    n_max: u32,
+) -> Result<MtpState<'m>, String> {
+    let params = super::build_ctx_params(config, ctx_size)
+        .with_context_type(LlamaContextType::Mtp)
+        .with_n_rs_seq(0)
+        .with_n_seq_max(1)
+        .with_n_outputs_max(n_max + 1);
+    let draft_ctx = model
+        .new_context_with_ctx_other(backend, params, target)
+        .map_err(|e| format!("could not create the MTP draft context: {e}"))?;
+    // What the head's own context takes beside the target's — not yet
+    // charged by `--fit`, so a load that barely fits shows it here.
+    tracing::info!("MTP draft context memory:");
+    draft_ctx.memory_breakdown_print();
+    let draft = MtpSpeculativeParams {
+        n_max: n_max as i32,
+        n_min: 0,
+        p_min: config.mtp_p_min,
+    };
+    // SAFETY: `MtpState` declares the drafter before the draft context, so
+    // it is dropped first, and the target context outlives the state.
+    let drafter = unsafe { MtpDrafter::new(target, &draft_ctx, draft) }
+        .map_err(|e| format!("llama.cpp could not start its MTP drafter: {e}"))?;
+    Ok(MtpState {
+        drafter,
+        draft_ctx,
+        batch: LlamaBatch::new(n_max as usize + 1, 1),
+    })
+}
+
+/// What became of a sequence once a sampled token was handed to it.
+#[derive(Debug, PartialEq, Eq)]
+enum Emitted {
+    /// Still generating: the token is its next input.
+    Continue,
+    /// Done, and already handed back to `idle_slots`.
+    Finished,
+}
+
+/// A sequence that ended cleanly: its memory is kept for reuse. `trim_kv`
+/// drops what the context holds past `seq.n_past` first — drafts an MTP
+/// step decoded beyond where the answer ended — so the memory kept holds
+/// exactly the tokens recorded for it.
+fn finish_clean(
+    ctx: &mut LlamaContext,
+    seq: &ActiveSequence,
+    idle_slots: &mut Vec<CachedSlot>,
+    checkpoints: &mut Vec<PromptCheckpoint>,
+    sched_config: &SchedulerConfig,
+    trim_kv: bool,
+) {
+    if trim_kv {
+        let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), Some(seq.n_past as u32), None);
+    }
+    finish_sequence_clean(ctx, seq, idle_slots, checkpoints, sched_config);
+}
+
+/// A sequence that ended on an error: its memory is suspect, so it is
+/// wiped rather than offered for reuse.
+fn finish_wiped(ctx: &mut LlamaContext, seq_id: i32, idle_slots: &mut Vec<CachedSlot>) {
+    let _ = ctx.clear_kv_cache_seq(Some(seq_id as u32), None, None);
+    idle_slots.push(CachedSlot {
+        seq_id,
+        tokens: Vec::new(),
+        text: String::new(),
+        last_used: std::time::Instant::now(),
+    });
+}
+
+/// Hand a sampled token, already accepted by the sequence's sampler, to its
+/// sequence: end it on an end-of-generation token, a stop sequence or
+/// `max_tokens`, or stream its text. Shared by the plain decode step and the
+/// MTP step, which hands over several tokens per decode (`trim_kv`: see
+/// `finish_clean`).
+#[allow(clippy::too_many_arguments)]
+fn emit_token(
+    model: &LlamaModel,
+    ctx: &mut LlamaContext,
+    seq: &mut ActiveSequence,
+    token: LlamaToken,
+    idle_slots: &mut Vec<CachedSlot>,
+    checkpoints: &mut Vec<PromptCheckpoint>,
+    sched_config: &SchedulerConfig,
+    trim_kv: bool,
+) -> Emitted {
+    // End of generation?
+    if model.is_eog_token(token) {
+        send_done(seq, StopReason::Stop);
+        // Clean completion — the KV cache holds exactly seq.n_past
+        // resident tokens (this EOG token was never decoded), so
+        // it's safe to keep and offer for reuse.
+        finish_clean(ctx, seq, idle_slots, checkpoints, sched_config, trim_kv);
+        return Emitted::Finished;
+    }
+
+    seq.tokens_generated += 1;
+    seq.generated_tokens.push(token);
+
+    // Decode token to text.
+    match model.token_to_piece(token, &mut seq.decoder, true, None) {
+        Ok(piece) => {
+            // Mirrors generated_tokens: every decoded piece, unfiltered
+            // by stop-sequence truncation (see field doc comment).
+            seq.raw_generated_pieces.push(piece.clone());
+            match process_piece(
+                &mut seq.pending,
+                &seq.stop_sequences,
+                &seq.filter_sequences,
+                &piece,
+            ) {
+                PieceOutcome::Stop(out) => {
+                    if !out.is_empty() {
+                        let _ = seq.tx.try_send(StreamEvent::Token(out));
+                    }
+                    send_done(seq, StopReason::Stop);
+                    // Clean completion.
+                    finish_clean(ctx, seq, idle_slots, checkpoints, sched_config, trim_kv);
+                    return Emitted::Finished;
+                }
+                PieceOutcome::Emit(out) => match try_send_piece(&seq.tx, out, seq.seq_id) {
+                    SendOutcome::Disconnected => {
+                        // Receiver dropped — client disconnected.
+                        // Cache state is not confirmed-safe: full wipe.
+                        finish_wiped(ctx, seq.seq_id, idle_slots);
+                        return Emitted::Finished;
+                    }
+                    // Slow client: keep the text at the front of the
+                    // hold-back buffer instead of dropping it, and
+                    // carry on generating.
+                    SendOutcome::Backpressure(text) => {
+                        seq.pending.insert_str(0, &text);
+                    }
+                    SendOutcome::Sent => {}
+                },
+            }
+        }
+        Err(_) => {
+            let _ = seq.tx.try_send(StreamEvent::Error(
+                "decode failed mid-generation — the answer is incomplete".to_string(),
+            ));
+            // Decode error — cache state suspect: full wipe.
+            finish_wiped(ctx, seq.seq_id, idle_slots);
+            return Emitted::Finished;
+        }
+    }
+
+    // Check max tokens.
+    if seq.tokens_generated >= seq.max_tokens {
+        // Truncation (not a stop): flush any held-back tail as real text.
+        let tail = std::mem::take(&mut seq.pending);
+        if !tail.is_empty() {
+            let _ = seq.tx.try_send(StreamEvent::Token(tail));
+        }
+        send_done(seq, StopReason::Length);
+        // Clean completion.
+        finish_clean(ctx, seq, idle_slots, checkpoints, sched_config, trim_kv);
+        return Emitted::Finished;
+    }
+    Emitted::Continue
+}
+
+/// How many drafts a step keeps, from the token the sampler picked at each
+/// position: drafts are kept from the first while the pick there matches,
+/// and the pick after the last match — a correction, or one past every
+/// draft — is the next step's input. `picks` holds one pick per position
+/// up to and including the first mismatch, the way `mtp_step` samples.
+fn drafts_kept(drafts: &[LlamaToken], picks: &[LlamaToken]) -> usize {
+    drafts
+        .iter()
+        .zip(picks)
+        .take_while(|(draft, pick)| draft == pick)
+        .count()
+}
+
+/// One step of speculative decoding for the single active sequence: the
+/// MTP head drafts up to `n_max` tokens after `seq.last_token`, one decode
+/// reads that token and every draft, and the sequence's own sampler picks a
+/// token at each position in turn, stopping at the first that differs from
+/// the draft there. Every pick is what a plain step would have picked at
+/// that position, so the answer is the one decoding without drafts writes;
+/// the drafts only decide how many positions one decode settles.
+#[allow(clippy::too_many_arguments)]
+fn mtp_step(
+    model: &LlamaModel,
+    ctx: &mut LlamaContext,
+    mtp: &mut MtpState,
+    seq: &mut ActiveSequence,
+    per_seq_ctx: u32,
+    idle_slots: &mut Vec<CachedSlot>,
+    checkpoints: &mut Vec<PromptCheckpoint>,
+    sched_config: &SchedulerConfig,
+) -> Emitted {
+    let Some(last) = seq.last_token else {
+        return Emitted::Continue;
+    };
+    let pos0 = seq.n_past;
+
+    let mut drafts = match mtp.drafter.draft(pos0, last, &resident_tokens(seq)) {
+        Ok(drafts) => drafts,
+        Err(e) => {
+            tracing::warn!(
+                "Seq {}: the MTP head could not draft ({e}) — this step decodes one token",
+                seq.seq_id
+            );
+            Vec::new()
+        }
+    };
+    // A non-empty draft must be settled with `accept` before the next one.
+    let pending = !drafts.is_empty();
+    // Drafts past the context or past `max_tokens` could never be kept.
+    let room_ctx = (per_seq_ctx as i32 - pos0 - 1).max(0) as usize;
+    let room_tokens = seq
+        .max_tokens
+        .saturating_sub(seq.tokens_generated.saturating_add(1)) as usize;
+    drafts.truncate(room_ctx.min(room_tokens));
+    // Drafting decoded `last` and the drafts into the draft context; the
+    // verify decode below hands it those positions again, read by the
+    // target. llama-server drops them first, as here.
+    let _ = mtp
+        .draft_ctx
+        .clear_kv_cache_seq(Some(seq.seq_id as u32), Some(pos0 as u32), None);
+
+    mtp.batch.clear();
+    for (j, &token) in std::iter::once(&last).chain(drafts.iter()).enumerate() {
+        if let Err(e) = mtp.batch.add(token, pos0 + j as i32, &[seq.seq_id], true) {
+            tracing::error!("Seq {}: MTP batch rejected a token ({e})", seq.seq_id);
+            let _ = seq
+                .tx
+                .try_send(StreamEvent::Error(format!("Decode failed: {e}")));
+            finish_wiped(ctx, seq.seq_id, idle_slots);
+            return Emitted::Finished;
+        }
+    }
+    if let Err(e) = ctx.decode(&mut mtp.batch) {
+        tracing::error!("Batch decode failed: {e}");
+        let _ = seq
+            .tx
+            .try_send(StreamEvent::Error(format!("Decode failed: {e}")));
+        finish_wiped(ctx, seq.seq_id, idle_slots);
+        return Emitted::Finished;
+    }
+    if let Err(e) = mtp.drafter.process(&mtp.batch) {
+        tracing::warn!(
+            "Seq {}: the MTP head could not read the step ({e})",
+            seq.seq_id
+        );
+    }
+
+    // The pick at each position, up to the first that differs from its draft.
+    let mut picks: Vec<LlamaToken> = Vec::with_capacity(drafts.len() + 1);
+    for j in 0..=drafts.len() {
+        let idx = j as i32;
+        if sched_config.debug_logit_check {
+            warn_if_logits_corrupt(ctx, idx, seq.seq_id);
+        }
+        let token = seq.sampler.sample(ctx, idx);
+        // Always-on O(1) guard — see `sampled_token_is_corrupt`.
+        if sampled_token_is_corrupt(ctx, idx, token) {
+            tracing::error!(
+                "Seq {}: sampled token {} has a NaN/Inf logit after {} tokens — \
+                 aborting generation instead of emitting garbage. \
+                 Run with --rust-debug for the full logit scan.",
+                seq.seq_id,
+                token.0,
+                seq.tokens_generated,
+            );
+            let _ = seq.tx.try_send(StreamEvent::Error(corrupt_logits_error()));
+            finish_wiped(ctx, seq.seq_id, idle_slots);
+            return Emitted::Finished;
+        }
+        seq.sampler.accept(token);
+        picks.push(token);
+        // Past an end-of-generation token nothing is read, and a grammar
+        // sampler must not be fed tokens after the end it accepted.
+        if drafts.get(j) != Some(&token) || model.is_eog_token(token) {
+            break;
+        }
+    }
+    let kept = drafts_kept(&drafts, &picks).min(picks.len() - 1);
+    seq.mtp_drafted += drafts.len() as u32;
+    seq.mtp_accepted += kept as u32;
+
+    // Take back the drafts the model did not keep: the memory then holds
+    // `last` and the kept drafts. Within `--mtp` positions of the end, which
+    // the recurrent rollback window of a hybrid model was sized for. The
+    // draft context read every position of the step, and drops them too.
+    let resident = (pos0 + 1 + kept as i32) as u32;
+    let _ = mtp
+        .draft_ctx
+        .clear_kv_cache_seq(Some(seq.seq_id as u32), Some(resident), None);
+    if kept < drafts.len()
+        && !matches!(
+            ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), Some(resident), None),
+            Ok(true)
+        )
+    {
+        tracing::error!(
+            "Seq {}: the memory refused to take back {} rejected drafts",
+            seq.seq_id,
+            drafts.len() - kept
+        );
+        let _ = seq.tx.try_send(StreamEvent::Error(
+            "the model's memory could not drop a rejected draft — the answer is incomplete"
+                .to_string(),
+        ));
+        finish_wiped(ctx, seq.seq_id, idle_slots);
+        return Emitted::Finished;
+    }
+    if pending && let Err(e) = mtp.drafter.accept(kept as u16) {
+        tracing::warn!(
+            "Seq {}: the MTP head could not settle its draft ({e})",
+            seq.seq_id
+        );
+    }
+
+    // Hand the picks over in order, as a plain step would one at a time.
+    for (i, &token) in picks.iter().enumerate() {
+        // `last` and the drafts before this pick are in memory.
+        seq.n_past = pos0 + 1 + i as i32;
+        if emit_token(
+            model,
+            ctx,
+            seq,
+            token,
+            idle_slots,
+            checkpoints,
+            sched_config,
+            true,
+        ) == Emitted::Finished
+        {
+            if seq.mtp_drafted > 0 {
+                tracing::info!(
+                    "Seq {}: MTP drafted {} tokens, the model kept {} ({:.0}%)",
+                    seq.seq_id,
+                    seq.mtp_drafted,
+                    seq.mtp_accepted,
+                    100.0 * f64::from(seq.mtp_accepted) / f64::from(seq.mtp_drafted),
+                );
+            }
+            return Emitted::Finished;
+        }
+    }
+    seq.last_token = picks.last().copied();
+    Emitted::Continue
+}
+
 // ── Scheduler loop (runs on a dedicated thread) ─────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -769,6 +1176,8 @@ fn run_scheduler_loop(
     } else {
         LlamaModelParams::default().with_n_gpu_layers(1000)
     };
+    // MTP layers are skipped at load unless asked for (`--mtp`).
+    let model_params = model_params.with_load_mtp(config.mtp > 0);
     let mut model_params = pin!(model_params);
     // Patterns passed to `add_cpu_buft_override` are stored as raw pointers
     // (not copied) inside `model_params`, so they must outlive the
@@ -849,6 +1258,26 @@ fn run_scheduler_loop(
     }
     let ctx_size = NonZeroU32::new(total_ctx).unwrap_or(NonZeroU32::new(4096).unwrap());
 
+    // `--mtp`: drafting needs the model's MTP layers and one request at a
+    // time. When it runs, a step decodes the last token and every draft
+    // with logits, and may take back up to `mtp_draft` positions: the
+    // recurrent rollback window of a hybrid model is raised to that, as
+    // llama-server does (`need_n_rs_seq`).
+    let (mtp_draft, mtp_off) = mtp_drafts(
+        config.mtp,
+        sched_config.max_batch_size,
+        model.n_layer_nextn(),
+    );
+    if let Some(reason) = mtp_off {
+        tracing::warn!("{reason}");
+    }
+    let mut config = config;
+    if mtp_draft > 0 {
+        config.rs_seq = config.rs_seq.max(mtp_draft);
+        tracing::info!("MTP: the model's MTP head drafts up to {mtp_draft} tokens per step");
+    }
+    let n_outputs_max = (sched_config.max_batch_size as u32).max(mtp_draft + 1);
+
     let has_quantized_cache = config.cache_type_k != super::KvCacheType::F16
         || config.cache_type_v != super::KvCacheType::F16;
 
@@ -867,7 +1296,7 @@ fn run_scheduler_loop(
     // ceiling here is one output per concurrent slot.
     let ctx_params = super::build_ctx_params(&config, ctx_size)
         .with_n_seq_max(sched_config.max_batch_size as u32)
-        .with_n_outputs_max(sched_config.max_batch_size as u32);
+        .with_n_outputs_max(n_outputs_max);
 
     let mut ctx = match model.new_context(&backend, ctx_params) {
         Ok(c) => c,
@@ -891,7 +1320,7 @@ fn run_scheduler_loop(
                         super::KvCacheType::F16,
                     )
                     .with_n_seq_max(sched_config.max_batch_size as u32)
-                    .with_n_outputs_max(sched_config.max_batch_size as u32);
+                    .with_n_outputs_max(n_outputs_max);
 
                     match model.new_context(&backend, ctx_params) {
                         Ok(c) => c,
@@ -938,6 +1367,19 @@ fn run_scheduler_loop(
     // against a stock binary's, instead of guessing from two processes' free
     // VRAM numbers.
     ctx.memory_breakdown_print();
+
+    // After `ctx`, so it is dropped first: the drafter points at both.
+    let mut mtp_state = if mtp_draft > 0 {
+        match start_mtp(model, &backend, &config, ctx_size, &ctx, mtp_draft) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                tracing::warn!("MTP: {e} — generating without drafts");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let mut active: Vec<ActiveSequence> = Vec::with_capacity(sched_config.max_batch_size);
     // Pool of idle sequence slots in range [0, max_batch_size), each carrying
@@ -1122,6 +1564,8 @@ fn run_scheduler_loop(
                         generated_tokens: Vec::new(),
                         prompt_text,
                         raw_generated_pieces: Vec::new(),
+                        mtp_drafted: 0,
+                        mtp_accepted: 0,
                     };
 
                     // Prefill the unreused suffix of the prompt into the context.
@@ -1145,6 +1589,7 @@ fn run_scheduler_loop(
                         per_seq_ctx,
                         &tokens,
                         effective_reuse_len,
+                        mtp_state.as_mut(),
                     );
                     if let Err(ref e) = prefill_result
                         && effective_reuse_len > 0
@@ -1206,6 +1651,7 @@ fn run_scheduler_loop(
                             per_seq_ctx,
                             &tokens,
                             effective_reuse_len,
+                            mtp_state.as_mut(),
                         );
                     }
 
@@ -1413,6 +1859,27 @@ fn run_scheduler_loop(
             continue;
         }
 
+        // ── 3'. With the MTP head: one speculative step instead ─────────
+        if let Some(mtp) = mtp_state.as_mut()
+            && active.len() == 1
+            && active[0].last_token.is_some()
+        {
+            let finished = mtp_step(
+                model,
+                &mut ctx,
+                mtp,
+                &mut active[0],
+                per_seq_ctx,
+                &mut idle_slots,
+                &mut checkpoints,
+                &sched_config,
+            ) == Emitted::Finished;
+            if finished {
+                active.clear();
+            }
+            continue;
+        }
+
         // ── 3. Build batch with one token per active sequence ───────────
         //
         // `logit_of_seq` records, per seq_id, which output index of THIS batch
@@ -1553,103 +2020,18 @@ fn run_scheduler_loop(
             }
             seq.sampler.accept(token);
 
-            // End of generation?
-            if model.is_eog_token(token) {
-                send_done(seq, StopReason::Stop);
+            if emit_token(
+                model,
+                &mut ctx,
+                seq,
+                token,
+                &mut idle_slots,
+                &mut checkpoints,
+                &sched_config,
+                false,
+            ) == Emitted::Finished
+            {
                 to_remove.push(i);
-                // Clean completion — the KV cache holds exactly seq.n_past
-                // resident tokens (this EOG token was never decoded), so
-                // it's safe to keep and offer for reuse.
-                finish_sequence_clean(&ctx, seq, &mut idle_slots, &mut checkpoints, &sched_config);
-                continue;
-            }
-
-            seq.tokens_generated += 1;
-            seq.generated_tokens.push(token);
-
-            // Decode token to text.
-            match model.token_to_piece(token, &mut seq.decoder, true, None) {
-                Ok(piece) => {
-                    // Mirrors generated_tokens: every decoded piece, unfiltered
-                    // by stop-sequence truncation (see field doc comment).
-                    seq.raw_generated_pieces.push(piece.clone());
-                    match process_piece(
-                        &mut seq.pending,
-                        &seq.stop_sequences,
-                        &seq.filter_sequences,
-                        &piece,
-                    ) {
-                        PieceOutcome::Stop(out) => {
-                            if !out.is_empty() {
-                                let _ = seq.tx.try_send(StreamEvent::Token(out));
-                            }
-                            send_done(seq, StopReason::Stop);
-                            to_remove.push(i);
-                            // Clean completion.
-                            finish_sequence_clean(
-                                &ctx,
-                                seq,
-                                &mut idle_slots,
-                                &mut checkpoints,
-                                &sched_config,
-                            );
-                            continue;
-                        }
-                        PieceOutcome::Emit(out) => {
-                            match try_send_piece(&seq.tx, out, seq.seq_id) {
-                                SendOutcome::Disconnected => {
-                                    // Receiver dropped — client disconnected.
-                                    // Cache state is not confirmed-safe: full wipe.
-                                    to_remove.push(i);
-                                    let _ =
-                                        ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                                    idle_slots.push(CachedSlot {
-                                        seq_id: seq.seq_id,
-                                        tokens: Vec::new(),
-                                        text: String::new(),
-                                        last_used: std::time::Instant::now(),
-                                    });
-                                    continue;
-                                }
-                                // Slow client: keep the text at the front of the
-                                // hold-back buffer instead of dropping it, and
-                                // carry on generating.
-                                SendOutcome::Backpressure(text) => {
-                                    seq.pending.insert_str(0, &text);
-                                }
-                                SendOutcome::Sent => {}
-                            }
-                        }
-                    }
-                }
-                Err(_) => {
-                    let _ = seq.tx.try_send(StreamEvent::Error(
-                        "decode failed mid-generation — the answer is incomplete".to_string(),
-                    ));
-                    to_remove.push(i);
-                    // Decode error — cache state suspect: full wipe.
-                    let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                    idle_slots.push(CachedSlot {
-                        seq_id: seq.seq_id,
-                        tokens: Vec::new(),
-                        text: String::new(),
-                        last_used: std::time::Instant::now(),
-                    });
-                    continue;
-                }
-            }
-
-            // Check max tokens.
-            if seq.tokens_generated >= seq.max_tokens {
-                // Truncation (not a stop): flush any held-back tail as real text.
-                let tail = std::mem::take(&mut seq.pending);
-                if !tail.is_empty() {
-                    let _ = seq.tx.try_send(StreamEvent::Token(tail));
-                }
-                send_done(seq, StopReason::Length);
-                to_remove.push(i);
-                // Clean completion.
-                finish_sequence_clean(&ctx, seq, &mut idle_slots, &mut checkpoints, &sched_config);
                 continue;
             }
 
@@ -1679,6 +2061,7 @@ fn run_scheduler_loop(
 /// only `tokens[reuse_len..]` is actually sent through `ctx.decode`.
 ///
 /// Returns `(prompt_tokens, n_past, effective_max_tokens)`.
+#[allow(clippy::too_many_arguments)]
 fn prefill_sequence(
     ctx: &mut LlamaContext,
     config: &InferenceConfig,
@@ -1687,6 +2070,7 @@ fn prefill_sequence(
     per_seq_ctx: u32,
     tokens: &[LlamaToken],
     reuse_len: usize,
+    mut mtp: Option<&mut MtpState<'_>>,
 ) -> Result<(u32, i32, u32), String> {
     let n_tokens = tokens.len() as u32;
 
@@ -1774,6 +2158,18 @@ fn prefill_sequence(
         config.context_size,
     );
 
+    // The MTP head reads every decode of the target: this prompt's chunks
+    // here, each speculative step in `mtp_step`. Its own memory keeps what
+    // the target keeps of this sequence, up to `reuse_len`.
+    if let Some(mtp) = mtp.as_mut() {
+        let _ =
+            mtp.draft_ctx
+                .clear_kv_cache_seq(Some(seq.seq_id as u32), Some(reuse_len as u32), None);
+        if let Err(e) = mtp.drafter.begin(tokens) {
+            tracing::warn!("Seq {}: the MTP head could not start ({e})", seq.seq_id);
+        }
+    }
+
     for chunk_start in (reuse_len..tokens.len()).step_by(chunk_size) {
         let chunk_end = (chunk_start + chunk_size).min(tokens.len());
         let chunk = &tokens[chunk_start..chunk_end];
@@ -1790,6 +2186,14 @@ fn prefill_sequence(
         ctx.decode(&mut batch).map_err(|e| {
             format!("Prompt decode failed at chunk {chunk_start}..{chunk_end}: {e}")
         })?;
+        if let Some(mtp) = mtp.as_mut()
+            && let Err(e) = mtp.drafter.process(&batch)
+        {
+            tracing::warn!(
+                "Seq {}: the MTP head could not read the prompt ({e})",
+                seq.seq_id
+            );
+        }
     }
 
     Ok((n_tokens, tokens.len() as i32, effective_max_tokens))
@@ -2094,7 +2498,8 @@ mod tests {
     use super::super::output::stop_prefix_holdback;
     use super::{
         CachedSlot, PieceOutcome, PromptCheckpoint, SendOutcome, StreamEvent, best_checkpoint,
-        common_prefix_len, pick_slot, process_piece, text_prefix_match, try_send_piece,
+        common_prefix_len, drafts_kept, mtp_drafts, pick_slot, process_piece, text_prefix_match,
+        try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
@@ -2299,6 +2704,36 @@ mod tests {
 
     fn toks(ids: &[i32]) -> Vec<LlamaToken> {
         ids.iter().map(|&id| LlamaToken::new(id)).collect()
+    }
+
+    /// `--mtp` drafts only with MTP layers loaded and one request at a time,
+    /// and says why not otherwise; 0 asks for nothing and says nothing.
+    #[test]
+    fn mtp_drafts_only_with_mtp_layers_and_one_slot() {
+        assert_eq!(mtp_drafts(0, 1, 1), (0, None));
+        assert_eq!(mtp_drafts(3, 1, 1), (3, None));
+        let (n, why) = mtp_drafts(3, 1, 0);
+        assert_eq!(n, 0);
+        assert!(why.unwrap().contains("no MTP layers"));
+        let (n, why) = mtp_drafts(3, 4, 1);
+        assert_eq!(n, 0);
+        assert!(why.unwrap().contains("--batch-size is 4"));
+    }
+
+    /// Drafts are kept from the first while the pick at their position
+    /// matches; the pick after the last match is the next input, never a
+    /// kept draft.
+    #[test]
+    fn drafts_are_kept_up_to_the_first_pick_that_differs() {
+        let drafts = toks(&[10, 11, 12]);
+        // Every draft matched, and a fourth pick follows the last one.
+        assert_eq!(drafts_kept(&drafts, &toks(&[10, 11, 12, 13])), 3);
+        // The second pick differs: one draft kept, the pick replaces the rest.
+        assert_eq!(drafts_kept(&drafts, &toks(&[10, 99])), 1);
+        // The first pick differs: nothing kept, as a plain step.
+        assert_eq!(drafts_kept(&drafts, &toks(&[99])), 0);
+        // No drafts: the one pick is a plain step's.
+        assert_eq!(drafts_kept(&[], &toks(&[42])), 0);
     }
 
     #[test]

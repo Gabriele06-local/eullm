@@ -197,6 +197,155 @@ impl<'model> MtpSpeculative<'model> {
     }
 }
 
+/// EuLLM addition: the same llama.cpp MTP drafter as [`MtpSpeculative`],
+/// without taking ownership of the two contexts.
+///
+/// [`MtpSpeculative`] owns the target context, which suits a caller built
+/// around it; a scheduler that already owns its context, decodes with it and
+/// trims its memory directly cannot hand it over. This keeps llama.cpp's
+/// drafter state only: the caller keeps both contexts and must outlive the
+/// drafter with them (see [`Self::new`]). Like [`MtpSpeculative`], it is
+/// bound to sequence 0.
+#[derive(Debug)]
+pub struct MtpDrafter {
+    raw: NonNull<llama_cpp_sys_2::llama_rs_mtp_speculative>,
+    n_max: usize,
+}
+
+impl MtpDrafter {
+    /// Create a drafter over a target context and an MTP draft context
+    /// (`LlamaContextType::Mtp`) of the same model.
+    ///
+    /// # Safety
+    ///
+    /// llama.cpp keeps raw pointers to both contexts: neither may be dropped
+    /// while the drafter exists. Declare the drafter after both, or as the
+    /// first field of a struct that owns the draft context, so it is dropped
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if parameters are invalid or llama.cpp cannot
+    /// initialize the drafter for the loaded model.
+    pub unsafe fn new(
+        target_context: &LlamaContext<'_>,
+        draft_context: &LlamaContext<'_>,
+        params: MtpSpeculativeParams,
+    ) -> Result<Self, MtpSpeculativeError> {
+        if params.n_max <= 0 || params.n_min < 0 || params.n_min > params.n_max {
+            return Err(MtpSpeculativeError::InvalidParams);
+        }
+        let n_max =
+            usize::try_from(params.n_max).map_err(|_| MtpSpeculativeError::InvalidParams)?;
+        let raw = unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_init(
+                target_context.context.as_ptr(),
+                draft_context.context.as_ptr(),
+                params.n_max,
+                params.n_min,
+                params.p_min,
+            )
+        };
+        let raw = NonNull::new(raw).ok_or(MtpSpeculativeError::InitFailed)?;
+        Ok(Self { raw, n_max })
+    }
+
+    /// Begin a generation whose prompt is `prompt_tokens`, before its
+    /// prompt is decoded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if llama.cpp rejects the call.
+    pub fn begin(&mut self, prompt_tokens: &[LlamaToken]) -> Result<(), MtpSpeculativeError> {
+        let prompt = tokens_to_raw(prompt_tokens);
+        let status = unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_begin(
+                self.raw.as_ptr(),
+                prompt.as_ptr(),
+                prompt.len(),
+            )
+        };
+        status_to_result(status)
+    }
+
+    /// Hand the drafter a batch the target context has just decoded: every
+    /// decode of the target, prompt chunks included, must pass through here.
+    /// The batch must hold sequence 0 only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if llama.cpp cannot update the draft context.
+    pub fn process(&mut self, batch: &LlamaBatch<'_>) -> Result<(), MtpSpeculativeError> {
+        let status = unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_process(
+                self.raw.as_ptr(),
+                std::ptr::from_ref(&batch.llama_batch),
+            )
+        };
+        status_to_result(status)
+    }
+
+    /// Draft up to `n_max` tokens to follow `id_last`, which goes at
+    /// position `n_past`; `history` is every token before it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if llama.cpp rejects the call — among others while
+    /// an earlier draft has not been settled with [`Self::accept`].
+    pub fn draft(
+        &mut self,
+        n_past: i32,
+        id_last: LlamaToken,
+        history: &[LlamaToken],
+    ) -> Result<Vec<LlamaToken>, MtpSpeculativeError> {
+        if n_past < 0 {
+            return Err(MtpSpeculativeError::InvalidParams);
+        }
+        let history = tokens_to_raw(history);
+        let mut raw_out = vec![0; self.n_max];
+        let mut out_len = 0_usize;
+        let status = unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_draft(
+                self.raw.as_ptr(),
+                n_past,
+                id_last.0,
+                history.as_ptr(),
+                history.len(),
+                raw_out.as_mut_ptr(),
+                raw_out.len(),
+                &raw mut out_len,
+            )
+        };
+        if status == llama_cpp_sys_2::LLAMA_RS_STATUS_ALLOCATION_FAILED {
+            return Err(MtpSpeculativeError::DraftOverflow);
+        }
+        status_to_result(status)?;
+        raw_out.truncate(out_len);
+        Ok(raw_out.into_iter().map(LlamaToken).collect())
+    }
+
+    /// Settle the last non-empty draft: how many of its tokens, from the
+    /// first, the target agreed with.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if llama.cpp rejects the call.
+    pub fn accept(&mut self, n_accepted: u16) -> Result<(), MtpSpeculativeError> {
+        let status = unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_accept(self.raw.as_ptr(), n_accepted)
+        };
+        status_to_result(status)
+    }
+}
+
+impl Drop for MtpDrafter {
+    fn drop(&mut self) {
+        unsafe {
+            llama_cpp_sys_2::llama_rs_mtp_speculative_free(self.raw.as_ptr());
+        }
+    }
+}
+
 impl Drop for MtpSpeculative<'_> {
     fn drop(&mut self) {
         unsafe {

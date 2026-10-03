@@ -232,6 +232,34 @@ struct RuntimeOpts {
     #[arg(long, default_value_t = 0)]
     rs_seq: u32,
 
+    /// Speculative decoding with the model's own multi-token prediction
+    /// (MTP) head: after each token the model writes, the head drafts up to
+    /// N more, and one decode checks them all. Every draft the model agrees
+    /// with is kept, so the answer is the one it would have written anyway,
+    /// in fewer steps. 0 (default) turns it off; 2 measured best on a GPU
+    /// (see docs/engine-guide.md). Needs a
+    /// model whose GGUF carries its MTP layers (unsloth's `*-MTP-GGUF`
+    /// Qwen3.5/3.6, for instance) and one request at a time (`--batch-size
+    /// 1`, the default): otherwise the load says why and runs without it.
+    /// On a hybrid model (Qwen3.5/3.6) it raises the recurrent-state
+    /// rollback window to N, the drafts it may have to take back.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = 0,
+        value_parser = clap::value_parser!(u32).range(0..=8)
+    )]
+    mtp: u32,
+
+    /// With `--mtp`: stop drafting once the MTP head's own probability for
+    /// its next draft falls below P (0 to 1). Drafts it is unsure of are
+    /// mostly rejected, and each one costs a pass of the head and a position
+    /// in the check, so a threshold lets the draft length follow the text:
+    /// long where the text is predictable, none where it is not. 0 (default,
+    /// llama.cpp's own) always drafts the full N.
+    #[arg(long, value_name = "P", default_value_t = 0.0, value_parser = parse_probability)]
+    mtp_p_min: f32,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -851,6 +879,8 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -986,6 +1016,8 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1030,6 +1062,8 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1133,6 +1167,8 @@ async fn main() {
                 cpu_moe,
                 n_cpu_moe,
                 rs_seq,
+                mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2027,6 +2063,15 @@ fn candidate_facts(
     })
 }
 
+/// A probability on the command line: a number from 0 to 1.
+fn parse_probability(s: &str) -> Result<f32, String> {
+    match s.parse::<f32>() {
+        Ok(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        Ok(p) => Err(format!("{p} is not between 0 and 1")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// `--n-batch` as `--n-ubatch` leaves it (see `inference::batch_for_ubatch`),
 /// said out loud when the micro-batch raised it: a flag that changes another
 /// flag's value without a word is the confusion the raise exists to avoid.
@@ -2335,6 +2380,8 @@ async fn cmd_run(
     cpu_moe: bool,
     n_cpu_moe: u32,
     rs_seq: u32,
+    mtp: u32,
+    mtp_p_min: f32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2820,6 +2867,8 @@ async fn cmd_run(
             cpu_moe,
             n_cpu_moe,
             rs_seq,
+            mtp,
+            mtp_p_min,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -2919,6 +2968,8 @@ async fn cmd_run(
             cpu_moe,
             n_cpu_moe,
             rs_seq,
+            mtp,
+            mtp_p_min,
             ctx_checkpoints,
             checkpoint_min_step,
             batch_size,
@@ -3043,6 +3094,8 @@ async fn cmd_run(
             cpu_moe: flag_cpu_moe,
             n_cpu_moe: flag_n_cpu_moe,
             rs_seq,
+            mtp,
+            mtp_p_min,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3116,6 +3169,8 @@ async fn cmd_serve(
     cpu_moe: bool,
     n_cpu_moe: u32,
     rs_seq: u32,
+    mtp: u32,
+    mtp_p_min: f32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3222,6 +3277,8 @@ async fn cmd_serve(
         cpu_moe,
         n_cpu_moe,
         rs_seq,
+        mtp,
+        mtp_p_min,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -4782,6 +4839,18 @@ mod cli_default_parity_tests {
         assert_eq!(cap(-1, 20), 20);
         // CPU-only is a legitimate ceiling.
         assert_eq!(cap(43, 0), 0);
+    }
+
+    /// `--mtp-p-min` takes a probability, and 0 — llama.cpp's default,
+    /// which drafts the full `--mtp` every step — unless asked.
+    #[test]
+    fn the_mtp_threshold_is_a_probability() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).mtp_p_min, 0.0);
+        let asked = runtime_opts(&["eullm", "serve", "--mtp", "3", "--mtp-p-min", "0.5"]);
+        assert_eq!((asked.mtp, asked.mtp_p_min), (3, 0.5));
+        for refused in ["1.5", "-0.1", "half"] {
+            assert!(Cli::try_parse_from(["eullm", "serve", "--mtp-p-min", refused]).is_err());
+        }
     }
 
     /// `--n-ubatch` is llama.cpp's 512 unless asked, on both subcommands; a

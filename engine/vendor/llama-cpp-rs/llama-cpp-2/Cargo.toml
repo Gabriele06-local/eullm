@@ -84,6 +84,14 @@
 #     `LlamaModel::meta_val_str` prints any float to six decimals. A decision
 #     model's calibration temperature (`eullm.decision.temperature`) is read
 #     with them; the engine's tests on that read cover both.
+#   - `model/params.rs`: `with_load_mtp` / `load_mtp` (`load_mtp`), and
+#     `model.rs`: `LlamaModel::n_layer_nextn` (`llama_model_n_layer_nextn`) —
+#     loading a model's multi-token prediction layers, off by default in
+#     llama.cpp, and telling whether it has any.
+#   - `speculative.rs`: `MtpDrafter`, upstream's MTP drafter
+#     (`llama_rs_mtp_speculative_*`) without `MtpSpeculative`'s ownership of
+#     the two contexts — the engine's scheduler owns, decodes with and trims
+#     its target context itself, and keeps the drafter beside it.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"

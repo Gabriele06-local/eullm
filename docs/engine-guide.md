@@ -459,6 +459,84 @@ The batch a decode call takes, `--n-batch`, is raised to match when it is
 smaller. A dense model, or an MoE that fits whole on the GPU, copies nothing
 per pass and gains little.
 
+## Speculative decoding with the model's MTP head (`--mtp N`)
+
+Some models are trained with a multi-token prediction (MTP) head: a small
+extra layer that guesses the tokens after the next one. Qwen3.5 and Qwen3.6
+have one. With `--mtp N`, after each token the model writes the head drafts
+up to N more, one decode of the model reads them all, and the model's own
+sampler picks a token at each position in turn: every draft it agrees with
+is kept, the first it does not is replaced by its own pick, and the rest are
+taken back from the memory. One decode can settle several tokens, and every
+token is still the model's choice.
+
+```bash
+eullm serve --default-model ./Qwen3.5-9B-Q4_K_M.gguf --mtp 2
+```
+
+What it needs:
+
+- **A GGUF that still carries the MTP layers.** Most conversions drop them.
+  unsloth publishes `*-MTP-GGUF` repositories that keep them
+  (`unsloth/Qwen3.5-9B-MTP-GGUF`, `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`, ...);
+  llama.cpp's `convert_hf_to_gguf.py` keeps them unless told `--no-mtp`. A
+  model without them loads normally, and the startup log says why `--mtp`
+  is off.
+- **One request at a time**, `--batch-size 1`, the default. With more slots
+  `--mtp` is off, and the log says so.
+- An architecture llama.cpp drafts for: Qwen3.5/3.6 (`qwen35`, `qwen35moe`)
+  and the others its MTP drafter supports. Not Qwen3.8-Flash-Next
+  (`qwen4exp`) yet: its converter drops the MTP layers.
+
+A head is trained to guess one token ahead; the drafts after the first are
+its guesses on its own guesses, kept less and less often, and each costs a
+pass of the head and a position in the check. `--mtp-p-min P` stops drafting
+once the head is less sure than P of its next draft, so the draft is long
+where the text is predictable (code, lists, quotations) and short where it
+is not. `bench/mtp_sweep.sh` measures a model with each setting, on a story
+and on a piece of code:
+
+```bash
+bench/mtp_sweep.sh ./eullm ./Qwen3.5-9B-Q4_K_M.gguf --ctx-size 16384
+```
+
+How much faster depends on how often the drafts are kept and on what a
+decode costs. Measured with `bench/mtp_sweep.sh` on an RTX 5070 Ti with
+unsloth's Qwen3.5-9B-MTP (Q4_K_M), tokens per second writing a 256-token
+answer:
+
+| Setting | A story | A piece of code | Drafts kept |
+| --- | ---: | ---: | ---: |
+| no drafts | 109.6 | 109.9 | — |
+| `--mtp 1` | 138.4 (+26%) | 155.7 (+42%) | 75% |
+| `--mtp 2` | 132.6 (+21%) | 177.3 (+61%) | 58% |
+| `--mtp 3` | 121.5 (+11%) | 173.2 (+58%) | 51% |
+| `--mtp 3 --mtp-p-min 0.5` | 115.0 (+5%) | 170.6 (+55%) | 77% |
+
+`--mtp 2` is the best start: the most on code, a fifth more on prose. Code
+repeats names and patterns the head predicts well, so it gains most; prose
+gains most from a single draft. A threshold raised the share of drafts kept
+but lowered the speed: on a GPU a draft that turns out wrong costs little,
+while one never drafted is a token the check could have settled. Reading a
+prompt costs about a tenth more (4,350 tokens/s instead of 4,854), since the
+head reads it too.
+
+The head is a whole layer plus the output projection, run once per draft,
+so on a small model it costs nearly what it saves: Qwen3.5 0.8B on 4 CPU
+cores kept 40-58% of 3 drafts and wrote at 14-17 tokens/s instead of 20.
+
+The answer is the one the model writes without drafts, up to rounding: a
+token read in a decode of several is computed in a different order than one
+read alone — on a hybrid model the Gated DeltaNet layers even switch from a
+step-by-step to a chunked algorithm — and where two tokens are nearly tied
+the pick can differ, as with prompt-cache reuse (see `cache_prompt`). On
+that model, answers with real drafts and with drafts that were all wrong
+(every decode taken back) came out identical, character for character, and
+both left the plain answer at the same character. A hybrid model's
+recurrent-state rollback window is raised to N for the drafts it may take
+back (`--rs-seq`); the startup banner shows the drafts asked for, and each
+answer's end logs how many drafts the model kept.
+
 ## KV-cache reuse
 
 ### KV-cache reuse on hybrid/recurrent models (Qwen3.5/3.6): a known upstream limitation, not an eullm gap

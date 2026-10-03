@@ -94,6 +94,8 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--ctx-checkpoints` | `0` | Prompt-prefix state snapshots for hybrid/recurrent models |
 | `--checkpoint-min-step` | `8192` | Minimum new tokens between checkpoints |
 | `--rs-seq` | `0` | Recurrent-state rollback window — leave off unless you know why |
+| `--mtp` | `0` | Speculative decoding with the model's own MTP head: up to N drafted tokens checked per decode (2 measured best on a GPU). Needs a GGUF that carries the MTP layers and `--batch-size 1`; see the guide |
+| `--mtp-p-min` | `0` | With `--mtp`: stop drafting once the MTP head is less sure than P (0-1) of its next draft, so the draft length follows the text |
 | `--rust-debug` | false | Per-token NaN/Inf scan of the logits (diagnostics) |
 | `--replace` | false | Replace an existing service on the port |
 | `--daemon` | false | Run as a background daemon |

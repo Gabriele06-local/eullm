@@ -540,6 +540,13 @@ pub struct InferenceConfig {
     /// off-by-default escape hatch — not a recommended path to KV reuse
     /// on hybrid/recurrent architectures today.
     pub rs_seq: u32,
+    /// `--mtp`: how many tokens the model's MTP head drafts per step (0 =
+    /// off). Applied only to a model loaded with MTP layers and served one
+    /// request at a time; the scheduler decides, and logs why when not.
+    pub mtp: u32,
+    /// `--mtp-p-min`: the MTP head stops drafting below this probability
+    /// of its own (0 = always the full `mtp`).
+    pub mtp_p_min: f32,
 }
 
 impl Default for InferenceConfig {
@@ -563,6 +570,8 @@ impl Default for InferenceConfig {
             cpu_moe: false,
             n_cpu_moe: 0,
             rs_seq: 0,
+            mtp: 0,
+            mtp_p_min: 0.0,
         }
     }
 }
