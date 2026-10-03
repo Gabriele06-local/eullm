@@ -360,6 +360,9 @@ extern "C" void llama_rs_memory_breakdown_print(const struct llama_context * ctx
 struct llama_rs_mtp_speculative {
     common_params_speculative params;
     common_speculative * spec = nullptr;
+    // common_speculative_process takes a common_batch since b11370; the
+    // target's llama_batch is copied into this one, kept to reuse its storage.
+    common_batch batch_in;
     std::vector<llama_token> prompt;
     std::vector<llama_token> draft;
     size_t last_draft_len = 0;
@@ -416,6 +419,7 @@ extern "C" struct llama_rs_mtp_speculative * llama_rs_mtp_speculative_init(
         if (!wrapper->spec) {
             return nullptr;
         }
+        wrapper->batch_in = common_batch(ctx_tgt);
 
         return wrapper.release();
     } catch (...) {
@@ -464,7 +468,12 @@ extern "C" llama_rs_status llama_rs_mtp_speculative_process(
     }
 
     try {
-        return common_speculative_process(spec->spec, *batch)
+        spec->batch_in.clear();
+        for (int32_t k = 0; k < batch->n_tokens; ++k) {
+            spec->batch_in.add(batch->token[k], batch->pos[k], batch->seq_id[k][0],
+                               batch->logits && batch->logits[k] != 0);
+        }
+        return common_speculative_process(spec->spec, spec->batch_in)
             ? LLAMA_RS_STATUS_OK
             : LLAMA_RS_STATUS_EXCEPTION;
     } catch (...) {

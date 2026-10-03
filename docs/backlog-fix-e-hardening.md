@@ -2632,6 +2632,51 @@ diligenza manuale.
   ragione del bump — per confermare che `spark2_5` funzioni end-to-end e
   non solo a compile-time. Resta aperta anche la verifica di `qwen4exp`
   di H4-I, mai eseguita.
+- [ ] **H4-K · Bump di `llama.cpp` da `b11100` a `b11370`; `llama-cpp-rs`
+  resta a 0.1.156 — in attesa di validazione su hardware reale** *(P2)*
+  Occasione diretta: `b11370` è la base della PR #29887 di llama.cpp, la
+  cache degli esperti MoE in VRAM che portiamo in EuLLM. Il bump
+  settimanale era comunque dovuto: 11 giorni e 270 build, `7ab4ee7`
+  (22 settembre) → `bed0a85` (3 ottobre).
+
+  **Una sola rottura d'API, nel nostro wrapper MTP.** Misurato sugli header
+  prima di toccare il pin:
+  * `include/llama.h`: +95 −2, solo aggiunte (l'API `llama_batch_ext`,
+    `llama_process`, `llama_get_causal_attn`); le due righe tolte sono
+    commenti.
+  * `ggml/include/ggml-backend.h`: due funzioni nuove
+    (`ggml_backend_buft_alloc_buffer_n`, `_get_alloc_size_n`), il resto è
+    riallineamento.
+  * `tools/mtmd/mtmd-helper.h`: cambia il tipo della callback
+    `mtmd_helper_post_decode_callback`, che noi non usiamo.
+  * `common/common.h` e `common/speculative.h`: `common_batch_add` e
+    `common_batch_clear` su `llama_batch` spariscono, sostituiti dal tipo
+    `common_batch` (sopra `llama_batch_ext`), e `common_speculative_process`
+    ora prende un `common_batch`. È l'unica che ci tocca:
+    `llama_rs_mtp_speculative_process` copia il batch del modello in un
+    `common_batch` che il wrapper tiene. Aggiunta alla lista in
+    `llama-cpp-2/Cargo.toml`.
+
+  **`llama-cpp-rs` non si muove, ed è voluto.** L'ultima release, 0.1.158
+  (30 settembre), fissa llama.cpp a `b11074`, più vecchio del nostro pin:
+  non insegue un llama.cpp più nuovo. Le sue modifiche sono un ridisegno: i
+  metodi sui token lasciano `LlamaModel` per un nuovo `LlamaVocab` con altri
+  nomi, più le lifetime di `mtmd` e un `build.rs` riscritto. Adottarla
+  vuol dire adeguare il motore ovunque tokenizza: è un lavoro a parte.
+
+  Lista architetture rigenerata: 152 → 153 (`glm5-next`).
+
+  Validato qui, senza GPU: `cargo build` pulito, `cargo test` verde (632
+  test), `cargo clippy --no-deps --all-targets -- -D warnings` pulito. MTP
+  su CPU con Qwen3.5-0.8B-MTP e `--mtp 2`: bozze tenute 57/65/70% sui tre
+  prompt di controllo, contro 58/62/69% a `b11100`. Senza bozze 26-27
+  token/s contro 20 a `b11100`, sulla stessa macchina a 4 core (una sola
+  misura).
+
+  **Da validare su hardware reale prima di `main`**: ricaricare ogni
+  famiglia di modelli disponibile in locale, incluso il template di
+  ragionamento DeepSeek e un modello multimodale, e `--mtp 2` su
+  Qwen3.5-9B-MTP.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci

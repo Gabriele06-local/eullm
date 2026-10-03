@@ -9,6 +9,13 @@
 # the Rust crate and not the C++ tree, so read the pin from `git ls-tree HEAD
 # engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`, never from here.
 #
+# The 2026-10-03 bump to b11370 left this crate at 0.1.156. The latest
+# release, 0.1.158 (2026-09-30), pins llama.cpp b11074, older than our pin,
+# and its changes are a redesign rather than an adaptation: the token methods
+# leave `LlamaModel` for a new `LlamaVocab` with other names, which the engine
+# would have to follow everywhere it tokenizes. That move is its own change;
+# the one b11370 break is carried below (`llama_rs_mtp_speculative_process`).
+#
 # Upstream has caught up past and superseded the three API patches the
 # 2026-07-31 base needed (load_mode, mtmd_input_text.text_len,
 # mtmd_helper_bitmap_wrapper); none of those remain. One API patch still
@@ -92,6 +99,10 @@
 #     (`llama_rs_mtp_speculative_*`) without `MtpSpeculative`'s ownership of
 #     the two contexts — the engine's scheduler owns, decodes with and trims
 #     its target context itself, and keeps the drafter beside it.
+#   - `llama-cpp-sys-2/wrapper_common.cpp`, `llama_rs_mtp_speculative_process`:
+#     since b11370 `common_speculative_process` takes a `common_batch`, not a
+#     `llama_batch`; the target's batch is copied into one the wrapper keeps.
+#     An API-compat patch: upstream llama-cpp-rs still targets b11074.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"
