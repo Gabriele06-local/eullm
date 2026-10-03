@@ -22,6 +22,16 @@ OUT=${OUT:-$HOME/work/mtp-sweep}
 SETTINGS=${MTP_SETTINGS:-"0 1 2 3 3:0.5 4:0.5 6:0.5"}
 CODE="Write a Python function that parses an ISO 8601 date string into a datetime, with a docstring, type hints and three unit tests."
 
+# speed_check.py from before --write-prompt would time only the story.
+if ! python3 "$SPEED_CHECK" --help 2>/dev/null | grep -q -- --write-prompt; then
+    echo "$SPEED_CHECK is missing or too old (no --write-prompt): download it again" >&2
+    exit 1
+fi
+# A server left running by Ctrl+C would keep the port, and the binary busy.
+pid=
+trap '[[ -n $pid ]] && kill "$pid" 2>/dev/null' EXIT
+trap 'exit 130' INT TERM
+
 mkdir -p "$OUT"
 speed() { # a speed_check.py run's writing speed; extra arguments go to it
     python3 "$SPEED_CHECK" --url "http://127.0.0.1:$PORT/v1" --model "$MODEL" \
@@ -45,6 +55,7 @@ for setting in $SETTINGS; do
     code=$(speed --write-prompt "$CODE")
     kill "$pid"
     wait "$pid" 2>/dev/null
+    pid=
     kept=$(grep -o 'MTP drafted [0-9]* tokens, the model kept [0-9]*' "$log" |
         awk '{d += $3; k += $8} END {if (d) printf "%.0f%%", 100 * k / d; else print "-"}')
     label="--mtp $n"
