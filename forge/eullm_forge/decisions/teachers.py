@@ -24,6 +24,7 @@ import hashlib
 import importlib
 import importlib.util
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -83,9 +84,14 @@ def parse_reply(text: str, question: Question) -> int | None:
 def load_rules(spec: str):
     """The function `spec` names: `path/to/rules.py:function` or
     `package.module:function`."""
+    # The drive letter comes off first: it is a colon, and on Windows
+    # rpartition(":") would split there and leave "C" as the module. On POSIX
+    # splitdrive is a no-op, so nothing about a POSIX spec changes.
+    drive, spec = os.path.splitdrive(spec)
     target, sep, name = spec.rpartition(":")
     if not sep or not target or not name:
         raise ValueError(f"--rules takes FILE.py:FUNCTION or MODULE:FUNCTION, not {spec!r}")
+    target = drive + target
     if target.endswith(".py") or "/" in target or "\\" in target:
         path = Path(target)
         if not path.is_file():

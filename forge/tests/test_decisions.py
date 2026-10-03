@@ -11,6 +11,7 @@ test_decisions_engine.py checks the same against the engine binary.
 """
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -516,6 +517,27 @@ def test_rules_load_from_a_file_and_a_wrong_answer_is_an_error(tmp_path):
         load_rules(str(path))
     with pytest.raises(FileNotFoundError):
         load_rules(f"{tmp_path / 'none.py'}:label")
+
+
+@pytest.mark.skipif(not os.name == "nt", reason="a drive letter is a colon")
+def test_a_rules_path_with_a_drive_letter_is_not_split_on_it(tmp_path):
+    """On Windows the drive letter is a colon, and rpartition(":") took it.
+
+    The spec became target="C" and name="\\...\\my_rules.py", so the guard
+    passed ("C" is not a .py and holds no slash), the module branch ran, and
+    the call raised ModuleNotFoundError: No module named 'C'. The file this
+    test's sibling loads is the same one, so it failed on Windows for every
+    developer and nowhere else.
+    """
+    from eullm_forge.decisions.teachers import load_rules
+
+    path = tmp_path / "my_rules.py"
+    path.write_text("def label(state, question_id, question, record):\n"
+                    "    return None\n", encoding="utf-8")
+    assert load_rules(f"{path}:label").__name__ == "label"
+    # A spec with no function at all is a format error, not a module lookup.
+    with pytest.raises(ValueError, match="MODULE:FUNCTION"):
+        load_rules(str(path))
 
 
 # --- the dataset ------------------------------------------------------------------------
