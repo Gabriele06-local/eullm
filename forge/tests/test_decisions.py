@@ -717,7 +717,6 @@ def test_a_fit_that_lands_on_the_edge_of_the_range_is_not_reported_as_a_fit():
         class_result,
         fit_temperature,
     )
-    import random
 
     # The model is sure the answer is class 0; the truth is class 1.
     wrong = [class_result([-0.01, -5.0], 1, "choice")]

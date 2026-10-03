@@ -116,6 +116,13 @@ def fit_temperature(results: list[dict]) -> float:
     # here is the search's -- so it is written down rather than guessed at.
     edge = 1e-6
     if t <= MIN_TEMPERATURE * (1 + edge) or t >= MAX_FIT_TEMPERATURE / (1 + edge):
+        # Said out loud: the report shows 1.0 either way, and only this line
+        # tells a fit that landed on 1.0 from one that gave up at the edge.
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "temperature fit stopped at the edge of [%g, %g] (%.4g): keeping 1.0, "
+            "the model is not calibrated", MIN_TEMPERATURE, MAX_FIT_TEMPERATURE, t)
         return 1.0
     return t
 
