@@ -15,10 +15,13 @@ import pytest
 
 from eullm_forge.eval import EvalItem, NormIndex, keyword_coverage
 from eullm_forge.eval.norm_exam import (
+    CONTENT_RUBRIC,
     _deadline_keyword,
+    all_deadlines,
     articles_from_records,
     build_exam,
     retrieval_hits,
+    rubric_v2,
     trained_articles,
 )
 from eullm_forge.eval.retrieval import named_code
@@ -508,3 +511,48 @@ def test_consolidated_text_notes_and_inline_markers_are_not_the_article():
     assert "Note all'" not in text and "direttiva" not in text
     assert "(171)" not in text and "((173))" not in text
     assert "si presume sicuro. Se rifiuta il terzo" in text
+
+
+# The three articles the blind review of 2026-10-03 caught: a second deadline
+# in a wording the statute pattern does not know.
+HIDDEN_SECOND = [
+    "fissa una apposita udienza non oltre sessanta giorni. Tra la data del provvedimento "
+    "e l'udienza deve intercorrere un termine non inferiore a venti giorni.",
+    "La dichiarazione deve essere fatta non oltre i dieci giorni dalla data del pignoramento "
+    "e notificata entro cinque giorni dalla sua data.",
+    "Quando sono trascorsi ((cinque)) anni dall'ultima notizia. In nessun caso se non sono "
+    "trascorsi nove anni dalla maggiore eta'.",
+]
+
+
+@pytest.mark.parametrize("text", HIDDEN_SECOND)
+def test_a_second_deadline_in_any_wording_is_seen(text):
+    assert len(all_deadlines(text)) == 2
+
+
+def test_an_article_with_a_hidden_second_deadline_is_not_asked_about():
+    recs = [rec("codice_civile", f"Art. {n}. \n \n (Rubrica {n}). \n \n {t}" + FILLER)
+            for n, t in enumerate(HIDDEN_SECOND, start=10)]
+    recs.append(rec("codice_civile", "Art. 20. \n \n (Una). \n \n La domanda si propone "
+                    "entro sessanta giorni." + FILLER))
+    for seed in range(10):
+        timed = {it.metadata["articolo"] for it in build_exam(recs, per_code=10, seed=seed)
+                 if it.metadata["tipo"] in ("termine", "termine_argomento")}
+        assert timed == {"20"}
+
+
+def test_version_2_rubrics_accept_true_context_and_every_deadline_of_the_article():
+    assert rubric_v2("norm-contenuto-codice_civile-1", "old") == CONTENT_RUBRIC
+    assert "non contraddicono" in CONTENT_RUBRIC and "contraddice il testo" in CONTENT_RUBRIC
+    one = rubric_v2("norm-termine-codice_civile-2",
+                    "Corretto solo se indica il termine di 60 giorni.",
+                    "La domanda si propone entro sessanta giorni.\n\nTesto integrale "
+                    "dell'articolo: La domanda si propone entro sessanta giorni.")
+    assert "termine di 60 giorni" in one and "altri termini" not in one
+    two = rubric_v2("norm-termine-codice_procedura_penale-554-ter",
+                    "Corretto solo se indica il termine di 60 giorni.",
+                    "non oltre sessanta giorni\n\nTesto integrale dell'articolo: "
+                    + HIDDEN_SECOND[0])
+    assert "termine di 60 giorni" in two and "20 giorni" in two
+    assert rubric_v2("norm-inesistente-codice_civile-999", "Corretto solo se dice che "
+                     "l'articolo non esiste.") == "Corretto solo se dice che l'articolo non esiste."

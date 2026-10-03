@@ -10,7 +10,11 @@
 # geometry measured to be placed quickly. Ten items for five models is a few
 # minutes of generation; most of the job is loading the weights.
 #
-# Settable: JUDGE_DIR (required), JUDGE_GLOB (default answers-*.jsonl), JUDGE_QUIET,
+# JUDGE_ARGS passes options through, e.g. to grade answers already given under
+# the version-2 rubrics into a directory of their own, leaving these grades:
+#   JUDGE_ARGS="--rubric v2 --graded-dir $WORK/eval/devbig-graded-v2"
+#
+# Settable: JUDGE_DIR (required), JUDGE_GLOB (default answers-*.jsonl), JUDGE_QUIET, JUDGE_ARGS,
 # JUDGE_REPO (default: the checkout this file was submitted from).
 #
 #SBATCH --job-name=eullm-judge
@@ -57,5 +61,6 @@ source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
 # JUDGE_QUIET=1 for the held-out exam: its item ids name the articles asked.
+# shellcheck disable=SC2086
 python "$REPO/forge/scripts/judge_answers.py" "${FILES[@]}" --csv "$DIR/graded.csv" \
-    ${JUDGE_QUIET:+--quiet}
+    ${JUDGE_QUIET:+--quiet} ${JUDGE_ARGS:-}
