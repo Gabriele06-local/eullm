@@ -202,7 +202,36 @@ def _number_of(token: str) -> int | None:
 
 def _deadlines(text: str) -> set[tuple[int, str]]:
     found = set()
-    for num, unit in _DEADLINE.findall(text):
+    for num, unit in _DEADLINE.findall(_unmarked(text)):
+        n = _number_of(num)
+        if n:
+            found.add((n, _UNITS[unit.lower()]))
+    return found
+
+
+# Any "<number> <unit>", whatever precedes it. `_DEADLINE` only knows the
+# phrasings that introduce the deadline a question is built on ("entro",
+# "non oltre", "decorsi"...), so an article that also says "un termine non
+# inferiore a venti giorni" (art. 554-ter c.p.p.), "non oltre i dieci giorni"
+# (art. 2861 c.c.) or "trascorsi ((cinque)) anni" (art. 58 c.c., with
+# Normattiva's amendment marks) looked like it had one deadline when it has
+# two. "Quale termine prevede l'art. N?" then has two right answers and the
+# exam accepted one: the review of 2026-10-03 found a model marked wrong for
+# the other, true, deadline three times in eighteen.
+_ANY_DEADLINE = re.compile(r"\b(\d+|[a-zà-ù]+)\s+(giorni|giorno|mesi|mese|anni|anno|ore)\b",
+                           re.IGNORECASE)
+
+
+def _unmarked(text: str) -> str:
+    """The text without Normattiva's (( )) amendment marks, which split a
+    deadline from its number ("trascorsi ((cinque)) anni")."""
+    return text.replace("((", " ").replace("))", " ")
+
+
+def all_deadlines(text: str) -> set[tuple[int, str]]:
+    """Every distinct "<number> <unit>" an article states, however phrased."""
+    found = set()
+    for num, unit in _ANY_DEADLINE.findall(_unmarked(text)):
         n = _number_of(num)
         if n:
             found.add((n, _UNITS[unit.lower()]))
@@ -278,6 +307,61 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+# What the grader is told, per kind. Version 2 (2026-10-03). The first
+# contenuto rubric said "sbagliato se attribuisce all'articolo contenuti che
+# il testo non contiene", and the judge applied it to true context: the
+# amendment history of art. 56 Cost., the abolition of the death penalty after
+# art. 286 c.p. Checked blind on 40 answers, six of its seven harsh verdicts
+# fell on such long answers of the untuned models, so every comparison between
+# a verbose base model and a terse tuned one leaned towards the tuned one.
+# What is wrong is unchanged: contradicting the text, describing another
+# article, or inventing rules and presenting them as the article's.
+CONTENT_RUBRIC = (
+    "Il riferimento è il testo integrale dell'articolo. Corretto se ne riporta il "
+    "contenuto essenziale senza contraddirlo. Informazioni in più che non contraddicono "
+    "il testo (storia e modifiche della norma, contesto, esempi, rinvii) non sono errori. "
+    "Parziale se manca una parte essenziale dell'articolo o se riporta in modo inesatto "
+    "un suo punto. Sbagliato se descrive un altro articolo, contraddice il testo, o "
+    "presenta come contenuto dell'articolo regole che il testo non contiene.")
+
+
+def deadline_rubric(n: int, unit: str) -> str:
+    """The rubric of a deadline question."""
+    return (f"Corretto se indica il termine di {n} {unit}. Altri dettagli presenti nel "
+            "testo dell'articolo, e informazioni in più che non lo contraddicono, non sono "
+            "errori. Sbagliato se indica un termine diverso, nessun termine, o nega che "
+            "l'articolo preveda il termine.")
+
+
+_RUBRIC_DEADLINE = re.compile(r"termine di (\d+) (\w+)")
+
+
+def rubric_v2(item_id: str, rubric: str, reference: str = "") -> str:
+    """The version-2 rubric for an item graded under the first one.
+
+    So answers already given are graded again without asking the models
+    again (judge_answers.py --rubric v2). A deadline item whose article turns
+    out to state more than one deadline (see `all_deadlines`) also accepts
+    any of them: the question did not say which.
+    """
+    kind = item_id.split("-")[1] if item_id.startswith("norm-") else ""
+    if kind == "contenuto":
+        return CONTENT_RUBRIC
+    if kind in ("termine", "termine_argomento"):
+        m = _RUBRIC_DEADLINE.search(rubric)
+        if not m:
+            return rubric
+        out = deadline_rubric(int(m.group(1)), m.group(2))
+        text = reference.split("Testo integrale dell'articolo:", 1)[-1]
+        others = sorted(all_deadlines(text) - {(int(m.group(1)), m.group(2))})
+        if others:
+            alts = ", ".join(f"{k} {u}" for k, u in others)
+            out += (f" L'articolo prevede anche altri termini ({alts}) e la domanda non dice "
+                    "quale: è corretto anche indicare correttamente uno di questi.")
+        return out
+    return rubric
+
+
 def _usable(a: Article) -> bool:
     head = normalize_text(a.text[:300])
     return (150 <= len(a.text) and len(_flat(a.text)) <= MAX_REFERENCE_CHARS
@@ -324,13 +408,12 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
         for a in rng.sample(pool, min(per_code, len(pool))):
             items.append(item(
                 "contenuto", a.number, f"Che cosa prevede l'art. {a.number} {of}?",
-                _flat(a.text), [],
-                "Il riferimento è il testo integrale dell'articolo. Corretto se ne riporta "
-                "il contenuto essenziale; i dettagli presenti nel testo non sono errori. "
-                "Sbagliato se descrive un altro articolo o attribuisce all'articolo "
-                "contenuti che il testo non contiene."))
+                _flat(a.text), [], CONTENT_RUBRIC))
 
-        timed = [(a, next(iter(d))) for a in pool if len(d := _deadlines(a.text)) == 1]
+        # One deadline by the statute's phrasing AND no other number of days,
+        # months or years anywhere in the article (see `all_deadlines`).
+        timed = [(a, next(iter(d))) for a in pool
+                 if len(d := _deadlines(a.text)) == 1 and all_deadlines(a.text) == d]
         for a, (n, unit) in rng.sample(timed, min(per_code, len(timed))):
             kw = [_deadline_keyword(n, unit)]
             # The sentence that states the deadline first, so the key is
@@ -338,8 +421,7 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
             # answer says can be checked instead of counted as invented.
             ref = (f"{_sentence_with(a.text, n, unit)}\n\n"
                    f"Testo integrale dell'articolo: {_flat(a.text)}")
-            rub = (f"Corretto solo se indica il termine di {n} {unit}. Altri dettagli "
-                   "presenti nel testo dell'articolo non sono errori.")
+            rub = deadline_rubric(n, unit)
             items.append(item("termine", a.number,
                               f"Quale termine prevede l'art. {a.number} {of}?",
                               ref, kw, rub))

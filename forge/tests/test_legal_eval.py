@@ -227,3 +227,14 @@ def test_a_judge_link_skips_answers_graded_already(tmp_path):
     later = graded.stat().st_mtime + 10
     os.utime(answers, (later, later))
     assert not judge.already_graded(answers)
+
+
+def test_grades_under_another_rubric_go_to_their_own_directory(tmp_path):
+    judge = _judge_module()
+    answers = tmp_path / "answers-v0.3-open.jsonl"
+    answers.write_text('{"id": "a"}\n')
+    (tmp_path / "answers-v0.3-open.graded.jsonl").write_text('{"id": "a"}\n')
+    v2 = tmp_path / "devbig-graded-v2"
+    assert judge.graded_path(answers, v2) == v2 / "answers-v0.3-open.graded.jsonl"
+    assert judge.already_graded(answers)            # under the old rubric, yes
+    assert not judge.already_graded(answers, v2)    # under the new one, not yet

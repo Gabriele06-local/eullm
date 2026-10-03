@@ -33,6 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import Grade, ReferenceGrader  # noqa: E402
+from eullm_forge.eval.norm_exam import rubric_v2  # noqa: E402
 
 DEFAULT_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 CSV_HEADER = ["timestamp", "label", "items", "correct", "partial", "wrong",
@@ -97,8 +98,15 @@ class Greedy:
                                      skip_special_tokens=True)
 
 
+def graded_path(path: Path, out_dir: Path | None = None) -> Path:
+    """Where the grades of an answers file are written."""
+    out = path.with_suffix(".graded.jsonl")
+    return out_dir / out.name if out_dir else out
+
+
 def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
-               quiet: bool = False) -> list[Grade]:
+               quiet: bool = False, rubric: str = "v1",
+               out_dir: Path | None = None) -> list[Grade]:
     """Grade every line of one answers file; write the .graded.jsonl beside it.
 
     With a ``chat_fn`` that has a ``batch`` method, ``batch_size`` prompts
@@ -106,6 +114,10 @@ def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
     the held-out exam names the article it asks about.
     """
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
+    if rubric == "v2":
+        for r in rows:
+            r["rubric"] = rubric_v2(str(r.get("id", "")), r.get("rubric", ""),
+                                    r.get("reference", ""))
     prompts = [grader.prompt(r["question"], r.get("reference", ""), r["answer"],
                              r.get("rubric", "")) for r in rows]
     batch = getattr(grader.chat_fn, "batch", None)
@@ -115,7 +127,8 @@ def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
         raw.extend(batch(chunk) if batch and batch_size > 1 else
                    [grader.chat_fn(p) for p in chunk])
     grades = [ReferenceGrader.parse(t) for t in raw]
-    out = path.with_suffix(".graded.jsonl")
+    out = graded_path(path, out_dir)
+    out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as f:
         for r, g in zip(rows, grades):
             if not quiet:
@@ -174,7 +187,7 @@ def scored_row(label: str, grades: list[Grade]) -> list:
     return row
 
 
-def already_graded(path: Path) -> bool:
+def already_graded(path: Path, out_dir: Path | None = None) -> bool:
     """Whether ``path`` has a graded file with a grade for every answer, written
     after the answers were.
 
@@ -185,7 +198,7 @@ def already_graded(path: Path) -> bool:
     graded file older than its answers is stale (the model was asked again)
     and is graded again.
     """
-    out = path.with_suffix(".graded.jsonl")
+    out = graded_path(path, out_dir)
     if not out.is_file() or out.stat().st_mtime < path.stat().st_mtime:
         return False
 
@@ -204,6 +217,12 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--quiet", action="store_true",
                     help="totals only — for the held-out exam (see legal_eval.py)")
+    ap.add_argument("--rubric", choices=["v1", "v2"], default="v1",
+                    help="v2: grade with the rubrics of 2026-10-03 (eullm_forge.eval.norm_exam."
+                         "rubric_v2) instead of the ones written into the answers")
+    ap.add_argument("--graded-dir", type=Path,
+                    help="write the graded files (and the CSV row) here instead of beside the "
+                         "answers, so grades under another rubric do not overwrite these")
     ap.add_argument("--regrade", action="store_true",
                     help="grade again files already graded (e.g. with another --model)")
     args = ap.parse_args()
@@ -211,7 +230,7 @@ def main() -> int:
     files = [p for p in args.answers if not p.name.endswith(".graded.jsonl")]
     todo = []
     for path in files:
-        if not args.regrade and already_graded(path):
+        if not args.regrade and already_graded(path, args.graded_dir):
             print(f"[judge] {label_of(path)}: graded already, skipped", flush=True)
         else:
             todo.append(path)
@@ -220,12 +239,13 @@ def main() -> int:
         return 0
     grader = ReferenceGrader(Greedy(args.model))
     for path in todo:
-        grades = grade_file(path, grader, batch_size=args.batch_size, quiet=args.quiet)
+        grades = grade_file(path, grader, batch_size=args.batch_size, quiet=args.quiet,
+                            rubric=args.rubric, out_dir=args.graded_dir)
         note = unreadable_note(grades, path)
         if note:
             print(f"[judge] {label_of(path)}: WARNING {note}", flush=True)
         row = scored_row(label_of(path), grades)
-        append_csv_row(args.csv, row)
+        append_csv_row(args.graded_dir / args.csv.name if args.graded_dir else args.csv, row)
         print(f"[judge] {row[1]}: score {row[-1]} — correct {row[3]}, "
               f"partial {row[4]}, wrong {row[5]}", flush=True)
     return 0
