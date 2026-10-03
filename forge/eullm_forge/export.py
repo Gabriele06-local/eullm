@@ -230,8 +230,12 @@ def export_gguf(config: ExportConfig) -> str:
 
     # Step 2: Quantize if not F16
     if config.quantization == QUANT_F16:
-        # Just rename F16 output
-        f16_output.rename(output_path)
+        # Just rename F16 output. os.replace and not Path.rename: rename is
+        # MoveFileEx without replace semantics on Windows, so it refuses a
+        # target that exists -- and exporting onto the same -o twice is the
+        # normal way to re-run an export. os.replace is what the rest of the
+        # package already writes a file with.
+        os.replace(f16_output, output_path)
         logger.info("  F16 output (no quantization): %s", output_path)
     else:
         quantize_bin = _find_quantize_binary(llama_cpp)
