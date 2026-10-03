@@ -809,6 +809,10 @@ fn start_mtp<'m>(
     let draft_ctx = model
         .new_context_with_ctx_other(backend, params, target)
         .map_err(|e| format!("could not create the MTP draft context: {e}"))?;
+    // What the head's own context takes beside the target's — not yet
+    // charged by `--fit`, so a load that barely fits shows it here.
+    tracing::info!("MTP draft context memory:");
+    draft_ctx.memory_breakdown_print();
     let draft = MtpSpeculativeParams {
         n_max: n_max as i32,
         n_min: 0,

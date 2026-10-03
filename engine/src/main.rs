@@ -236,7 +236,8 @@ struct RuntimeOpts {
     /// (MTP) head: after each token the model writes, the head drafts up to
     /// N more, and one decode checks them all. Every draft the model agrees
     /// with is kept, so the answer is the one it would have written anyway,
-    /// in fewer steps. 0 (default) turns it off; 2-3 is typical. Needs a
+    /// in fewer steps. 0 (default) turns it off; 2 measured best on a GPU
+    /// (see docs/engine-guide.md). Needs a
     /// model whose GGUF carries its MTP layers (unsloth's `*-MTP-GGUF`
     /// Qwen3.5/3.6, for instance) and one request at a time (`--batch-size
     /// 1`, the default): otherwise the load says why and runs without it.

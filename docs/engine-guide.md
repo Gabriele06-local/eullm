@@ -471,7 +471,7 @@ taken back from the memory. One decode can settle several tokens, and every
 token is still the model's choice.
 
 ```bash
-eullm serve --default-model ./Qwen3.5-9B-Q4_K_M.gguf --mtp 3
+eullm serve --default-model ./Qwen3.5-9B-Q4_K_M.gguf --mtp 2
 ```
 
 What it needs:
@@ -501,12 +501,29 @@ bench/mtp_sweep.sh ./eullm ./Qwen3.5-9B-Q4_K_M.gguf --ctx-size 16384
 ```
 
 How much faster depends on how often the drafts are kept and on what a
-decode costs. The head is a whole layer plus the output projection, run
-once per draft, so on a small model it costs nearly what it saves: Qwen3.5
-0.8B on 4 CPU cores kept 40-58% of 3 drafts and wrote at 14-17 tokens/s
-instead of 20. It pays on a GPU, where one decode of a few tokens costs
-little more than a decode of one, and on large models, where the head is a
-small part of the work.
+decode costs. Measured with `bench/mtp_sweep.sh` on an RTX 5070 Ti with
+unsloth's Qwen3.5-9B-MTP (Q4_K_M), tokens per second writing a 256-token
+answer:
+
+| Setting | A story | A piece of code | Drafts kept |
+| --- | ---: | ---: | ---: |
+| no drafts | 109.6 | 109.9 | — |
+| `--mtp 1` | 138.4 (+26%) | 155.7 (+42%) | 75% |
+| `--mtp 2` | 132.6 (+21%) | 177.3 (+61%) | 58% |
+| `--mtp 3` | 121.5 (+11%) | 173.2 (+58%) | 51% |
+| `--mtp 3 --mtp-p-min 0.5` | 115.0 (+5%) | 170.6 (+55%) | 77% |
+
+`--mtp 2` is the best start: the most on code, a fifth more on prose. Code
+repeats names and patterns the head predicts well, so it gains most; prose
+gains most from a single draft. A threshold raised the share of drafts kept
+but lowered the speed: on a GPU a draft that turns out wrong costs little,
+while one never drafted is a token the check could have settled. Reading a
+prompt costs about a tenth more (4,350 tokens/s instead of 4,854), since the
+head reads it too.
+
+The head is a whole layer plus the output projection, run once per draft,
+so on a small model it costs nearly what it saves: Qwen3.5 0.8B on 4 CPU
+cores kept 40-58% of 3 drafts and wrote at 14-17 tokens/s instead of 20.
 
 The answer is the one the model writes without drafts, up to rounding: a
 token read in a decode of several is computed in a different order than one
