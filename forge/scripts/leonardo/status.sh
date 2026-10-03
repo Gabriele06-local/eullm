@@ -54,6 +54,15 @@ while IFS='|' read -r id name state elapsed; do
             flag "$id $name ended $state after $elapsed — log: logs/$name-$id.out" ;;
         COMPLETED*|TIMEOUT*)
             case "$name" in
+                # Two jobs the eullm-p* glob below would take, and both are
+                # short on purpose rather than stalled. sbatch_quantize.slurm
+                # submits eullm-p3-gguf on lrd_all_serial with no --gres at
+                # all, a CPU quantize that is done in minutes; and
+                # sbatch_backfill_probe.slurm's own header says eullm-probe
+                # "does nothing but report where it landed and exit", so it
+                # ends in seconds every time it is run. Neither resumes a
+                # chain, so there is no work for them to have failed to do.
+                eullm-p3-gguf|eullm-probe) ;;
                 # eullm-s3-*: stage-3 chains submitted under a name of their
                 # own (-J), one per experiment.
                 eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*)

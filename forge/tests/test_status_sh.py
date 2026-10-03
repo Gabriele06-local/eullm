@@ -158,6 +158,31 @@ def test_a_named_stage3_link_that_did_nothing_is_flagged(tmp_path, runs):
     assert "61 eullm-s3-q35-9b-v04 ended COMPLETED after only 00:03:00" in out
 
 
+def test_jobs_that_are_short_on_purpose_are_not_stalled_links(tmp_path, runs):
+    """Two jobs the eullm-p* glob took, and both are short on purpose.
+
+    sbatch_quantize.slurm submits eullm-p3-gguf on lrd_all_serial with no
+    --gres at all -- a CPU quantize, done in minutes. sbatch_backfill_probe's
+    own header says eullm-probe "does nothing but report where it landed and
+    exit", so it ends in seconds every time it runs. Neither resumes a chain,
+    so neither has work it could have failed to do, and a morning check that
+    cries wolf is one that gets ignored. The real chain link beside them keeps
+    its alarm.
+    """
+    (runs / "logs" / "eullm-p3-gguf-62.out").write_text(
+        "[quant] llama-quantize model-f16.gguf model-Q4_K_M.gguf\n")
+    (runs / "logs" / "eullm-probe-61.out").write_text("[probe] backfill window found\n")
+    (runs / "logs" / "eullm-p2-8b-63.out").write_text("[distill] nothing at all happened\n")
+    out = run_status(tmp_path, queue=[],
+                     ended=[("61", "eullm-probe", "COMPLETED", "00:00:21"),
+                            ("62", "eullm-p3-gguf", "COMPLETED", "00:04:30"),
+                            ("63", "eullm-p2-8b", "COMPLETED", "00:00:21")])
+    assert "eullm-probe ended COMPLETED" not in out, out
+    assert "eullm-p3-gguf ended COMPLETED" not in out, out
+    assert "63 eullm-p2-8b ended COMPLETED after only 00:00:21" in out
+    assert "[!!] 1 thing(s) above need a look" in out, out
+
+
 def test_grpo_progress_is_shown_and_a_stop_is_flagged(tmp_path, runs):
     logs = runs.parent / "grpo" / "logs"
     logs.mkdir(parents=True)
