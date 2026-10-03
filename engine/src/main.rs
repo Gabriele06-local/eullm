@@ -260,6 +260,19 @@ struct RuntimeOpts {
     #[arg(long, value_name = "P", default_value_t = 0.0, value_parser = parse_probability)]
     mtp_p_min: f32,
 
+    /// For MoE models whose experts do not all fit in VRAM: keep every
+    /// expert in RAM and give the VRAM they would have taken to a cache of
+    /// the ones the model uses most. `auto` sizes it from the VRAM left once
+    /// the rest of the model is placed (with --fit, on by default); a number
+    /// asks for that many MiB. It speeds up writing, not the reading of a
+    /// long prompt: on an RTX 5070 Ti, Qwen3.8-Flash-Next (IQ2_XS) wrote 49.4
+    /// tokens/s with an 8,000 MiB cache against 22.4 without, and read a
+    /// prompt 17% slower. One CUDA GPU only; elsewhere the load says why and
+    /// runs without it. Experimental: the cache is llama.cpp PR #29887, which
+    /// this build carries ahead of a llama.cpp release.
+    #[arg(long, value_name = "auto|MIB", value_parser = fit::parse_moe_cache)]
+    moe_cache: Option<fit::MoeCache>,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -881,6 +894,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                moe_cache,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1018,6 +1032,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                moe_cache,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1064,6 +1079,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                moe_cache,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1169,6 +1185,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                moe_cache,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2382,6 +2399,7 @@ async fn cmd_run(
     rs_seq: u32,
     mtp: u32,
     mtp_p_min: f32,
+    moe_cache: Option<fit::MoeCache>,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2426,6 +2444,8 @@ async fn cmd_run(
     // too — only when the user hasn't already chosen one explicitly.
     let mut cpu_moe = cpu_moe;
     let mut n_cpu_moe = n_cpu_moe;
+    // The expert cache `--moe-cache` comes to for the launch model, once sized.
+    let mut moe_cache_bytes: u64 = 0;
     // What the user actually asked for, before --fit specializes the mut
     // bindings above to the LAUNCH model. The API server must inherit these
     // originals: with --fit it re-sizes each model it loads against them,
@@ -2753,63 +2773,101 @@ async fn cmd_run(
             let sizing_reserve = companion_reserve_bytes
                 .saturating_add(mmproj_placement.reserve(mmproj_bytes))
                 .saturating_add(fit::ubatch_reserve_bytes(n_ubatch));
-            let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
-                fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
+            // An expert cache, asked for and with room for one, places the
+            // experts itself: all in RAM, the VRAM they leave to the cache.
+            // Otherwise the usual MoE sizing below decides, as before.
+            let cache = moe_cache.and_then(|request| match fit::moe_cache_support() {
+                Ok(()) => fit::run_moe_cache(
+                    &gguf_path,
+                    ctx_size,
+                    kv_bpe_k,
+                    kv_bpe_v,
+                    sizing_reserve,
+                    request,
+                    cpu_moe,
+                    n_cpu_moe,
+                ),
+                Err(why) => {
+                    println!("[EULLM] --moe-cache: {why}; running without the cache.");
+                    None
+                }
+            });
+            if let Some(cache) = cache {
+                println!(
+                    "[EULLM] MoE model: expert tensors in CPU RAM, {} of VRAM caching the \
+                     ones it uses most{}.",
+                    fit::gib(cache.bytes),
+                    cache
+                        .asked_bytes
+                        .map(|asked| format!(
+                            " (--moe-cache asked for {}, that is what was left)",
+                            fit::gib(asked)
+                        ))
+                        .unwrap_or_default()
+                );
+                cpu_moe = cache.cpu_moe;
+                n_cpu_moe = cache.n_cpu_moe;
+                gpu_layers = -1;
+                moe_cache_bytes = cache.bytes;
             } else {
-                fit::MoeFitDecision::NotMoe
-            };
-            match moe_decision {
-                fit::MoeFitDecision::Proceed { n_cpu_moe: computed } if computed > 0 => {
-                    println!(
-                        "[EULLM] MoE model: keeping expert tensors on CPU RAM for the \
-                         first {computed} layers so the rest fits in VRAM."
-                    );
-                    n_cpu_moe = computed;
-                    gpu_layers = -1;
-                }
-                fit::MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
-                    println!(
-                        "[EULLM] MoE model: even with every expert tensor on CPU RAM, the \
-                         rest doesn't fit fully — offloading a reduced layer split too."
-                    );
-                    cpu_moe = true;
-                    gpu_layers = gl;
-                }
-                // Dense model, a MoE that already fits fully as-is
-                // (computed == 0), or an unreadable layout.
-                // Only a `--fit` the user typed may stop and ask; automatic
-                // sizing applies the split and logs it, because a default
-                // that interrupts every launch of a model too big for the
-                // card is its own kind of failure.
-                _ => match if fit_explicit {
-                    fit::run_fit(
-                        &gguf_path,
-                        gpu_layers,
-                        ctx_size,
-                        fit_strict,
-                        kv_bpe_k,
-                        kv_bpe_v,
-                        sizing_reserve,
-                    )
+                let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
+                    fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
                 } else {
-                    fit::run_fit_headless(
-                        &gguf_path,
-                        gpu_layers,
-                        ctx_size,
-                        fit_strict,
-                        kv_bpe_k,
-                        kv_bpe_v,
-                        sizing_reserve,
-                    )
-                } {
-                    fit::FitOutcome::Proceed(n) => gpu_layers = n,
-                    fit::FitOutcome::Abort => {
-                        // Clean return: don't load, don't bind a port. If we
-                        // were invoked from the picker flow, the user lands
-                        // back there.
-                        return;
+                    fit::MoeFitDecision::NotMoe
+                };
+                match moe_decision {
+                    fit::MoeFitDecision::Proceed { n_cpu_moe: computed } if computed > 0 => {
+                        println!(
+                            "[EULLM] MoE model: keeping expert tensors on CPU RAM for the \
+                             first {computed} layers so the rest fits in VRAM."
+                        );
+                        n_cpu_moe = computed;
+                        gpu_layers = -1;
                     }
-                },
+                    fit::MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
+                        println!(
+                            "[EULLM] MoE model: even with every expert tensor on CPU RAM, the \
+                             rest doesn't fit fully — offloading a reduced layer split too."
+                        );
+                        cpu_moe = true;
+                        gpu_layers = gl;
+                    }
+                    // Dense model, a MoE that already fits fully as-is
+                    // (computed == 0), or an unreadable layout.
+                    // Only a `--fit` the user typed may stop and ask; automatic
+                    // sizing applies the split and logs it, because a default
+                    // that interrupts every launch of a model too big for the
+                    // card is its own kind of failure.
+                    _ => match if fit_explicit {
+                        fit::run_fit(
+                            &gguf_path,
+                            gpu_layers,
+                            ctx_size,
+                            fit_strict,
+                            kv_bpe_k,
+                            kv_bpe_v,
+                            sizing_reserve,
+                        )
+                    } else {
+                        fit::run_fit_headless(
+                            &gguf_path,
+                            gpu_layers,
+                            ctx_size,
+                            fit_strict,
+                            kv_bpe_k,
+                            kv_bpe_v,
+                            sizing_reserve,
+                        )
+                    } {
+                        fit::FitOutcome::Proceed(n) => gpu_layers = n,
+                        fit::FitOutcome::Abort => {
+                            // Clean return: don't load, don't bind a port. If we
+                            // were invoked from the picker flow, the user lands
+                            // back there.
+                            return;
+                        }
+                    },
+                }
             }
 
             let capped = fit::apply_gpu_layers_ceiling(gpu_layers, ceiling);
@@ -2823,6 +2881,19 @@ async fn cmd_run(
                     }
                 );
                 gpu_layers = capped;
+            }
+        } else if let Some(request) = moe_cache {
+            // Without sizing, a size given in MiB is used as given and the
+            // experts go where the user's own flags put them.
+            match (request, fit::moe_cache_support()) {
+                (fit::MoeCache::Mib(mib), Ok(())) => moe_cache_bytes = u64::from(mib) << 20,
+                (fit::MoeCache::Auto, Ok(())) => println!(
+                    "[EULLM] --moe-cache auto needs --fit to size the cache; running without \
+                     it. Give a size in MiB to use one with --no-fit."
+                ),
+                (_, Err(why)) => {
+                    println!("[EULLM] --moe-cache: {why}; running without the cache.")
+                }
             }
         }
 
@@ -2869,6 +2940,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            moe_cache_bytes,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -2970,6 +3042,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            moe_cache_bytes,
             ctx_checkpoints,
             checkpoint_min_step,
             batch_size,
@@ -3096,6 +3169,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            moe_cache,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3171,6 +3245,7 @@ async fn cmd_serve(
     rs_seq: u32,
     mtp: u32,
     mtp_p_min: f32,
+    moe_cache: Option<fit::MoeCache>,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3279,6 +3354,7 @@ async fn cmd_serve(
         rs_seq,
         mtp,
         mtp_p_min,
+        moe_cache,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -4851,6 +4927,20 @@ mod cli_default_parity_tests {
         for refused in ["1.5", "-0.1", "half"] {
             assert!(Cli::try_parse_from(["eullm", "serve", "--mtp-p-min", refused]).is_err());
         }
+    }
+
+    #[test]
+    fn the_expert_cache_is_off_unless_asked_and_takes_auto_or_mib() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).moe_cache, None);
+        assert_eq!(
+            runtime_opts(&["eullm", "serve", "--moe-cache", "auto"]).moe_cache,
+            Some(fit::MoeCache::Auto)
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--moe-cache", "6000"]).moe_cache,
+            Some(fit::MoeCache::Mib(6000))
+        );
+        assert!(Cli::try_parse_from(["eullm", "serve", "--moe-cache", "0"]).is_err());
     }
 
     /// `--n-ubatch` is llama.cpp's 512 unless asked, on both subcommands; a

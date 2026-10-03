@@ -165,6 +165,9 @@ pub struct AppState {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--moe-cache`, as the user gave it: every load sizes its own cache
+    /// from it (see `fit::plan_moe_cache`).
+    pub moe_cache: Option<crate::fit::MoeCache>,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -459,6 +462,14 @@ impl AppState {
         // loaded has its own size, layer count, and (possibly) expert
         // layout.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
+        // The expert cache, where this machine can run one.
+        let moe_cache = self.moe_cache.and_then(|request| match crate::fit::moe_cache_support() {
+            Ok(()) => Some(request),
+            Err(why) => {
+                tracing::info!("--moe-cache: {why}; loading without the cache");
+                None
+            }
+        });
         let info = crate::fit::read_gguf_info(&gguf_path);
         let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let layout = match (&info, file_size) {
@@ -482,6 +493,7 @@ impl AppState {
                 cpu_moe: self.cpu_moe,
                 n_cpu_moe: self.n_cpu_moe,
                 mmproj_offload: self.mmproj_offload,
+                moe_cache,
             },
         };
 
@@ -528,13 +540,25 @@ impl AppState {
                     );
                 }
             }
-            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
-                Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement, moe_cache_bytes) = match &plan {
+                Some(plan) => (
+                    plan.gpu_layers,
+                    plan.cpu_moe,
+                    plan.n_cpu_moe,
+                    plan.mmproj,
+                    plan.moe_cache_bytes,
+                ),
+                // Without sizing a size in MiB is used as given; `auto` has
+                // nothing to size against.
                 None => (
                     self.gpu_layers,
                     self.cpu_moe,
                     self.n_cpu_moe,
                     crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
+                    match moe_cache {
+                        Some(crate::fit::MoeCache::Mib(mib)) => u64::from(mib) << 20,
+                        _ => 0,
+                    },
                 ),
             };
 
@@ -561,6 +585,7 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                moe_cache_bytes,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -735,6 +760,7 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                moe_cache_bytes,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -2691,6 +2717,8 @@ pub struct ServeConfig {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--moe-cache` (see `AppState::moe_cache`).
+    pub moe_cache: Option<crate::fit::MoeCache>,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3005,6 +3033,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         rs_seq: cfg.rs_seq,
         mtp: cfg.mtp,
         mtp_p_min: cfg.mtp_p_min,
+        moe_cache: cfg.moe_cache,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3178,6 +3207,7 @@ impl AppState {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            moe_cache: None,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

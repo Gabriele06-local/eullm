@@ -803,6 +803,7 @@ fn start_mtp<'m>(
 ) -> Result<MtpState<'m>, String> {
     let params = super::build_ctx_params(config, ctx_size)
         .with_context_type(LlamaContextType::Mtp)
+        .with_moe_cache_size(0)
         .with_n_rs_seq(0)
         .with_n_seq_max(1)
         .with_n_outputs_max(n_max + 1);

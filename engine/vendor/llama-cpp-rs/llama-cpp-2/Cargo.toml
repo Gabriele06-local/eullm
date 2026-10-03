@@ -16,6 +16,11 @@
 # would have to follow everywhere it tokenizes. That move is its own change;
 # the one b11370 break is carried below (`llama_rs_mtp_speculative_process`).
 #
+# The submodule is pinned to 6b7b03a, llama.cpp PR #29887 (the MoE expert
+# cache) as a single commit on top of b11370, anchored on the mirror as
+# refs/eullm/pinned/<sha> because the mirror carries no PR refs. When upstream
+# merges it, move the pin to the release that contains it.
+#
 # Upstream has caught up past and superseded the three API patches the
 # 2026-07-31 base needed (load_mode, mtmd_input_text.text_len,
 # mtmd_helper_bitmap_wrapper); none of those remain. One API patch still
@@ -103,6 +108,11 @@
 #     since b11370 `common_speculative_process` takes a `common_batch`, not a
 #     `llama_batch`; the target's batch is copied into one the wrapper keeps.
 #     An API-compat patch: upstream llama-cpp-rs still targets b11074.
+#   - `context/params/get_set.rs`: `with_moe_cache_size` / `moe_cache_size`
+#     (`moe_cache_size`), the GPU cache for MoE experts kept in host memory.
+#     The field comes from llama.cpp PR #29887, which the submodule carries
+#     on top of b11370 until upstream merges it; drop both with that commit
+#     if upstream renames the field.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"

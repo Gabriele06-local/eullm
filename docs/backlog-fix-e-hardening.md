@@ -2677,6 +2677,47 @@ diligenza manuale.
   famiglia di modelli disponibile in locale, incluso il template di
   ragionamento DeepSeek e un modello multimodale, e `--mtp 2` su
   Qwen3.5-9B-MTP.
+- [ ] **H4-L · Cache degli esperti MoE in VRAM (`--moe-cache`), dalla PR
+  #29887 di llama.cpp portata sopra `b11370` — in attesa di validazione su
+  GPU e della fusione a monte** *(P1)*
+  Il punto 1 di Strata ("dove stanno gli esperti"), nella versione che
+  llama.cpp sta per avere: con gli esperti in RAM, la VRAM che la divisione
+  solita dava a strati interi di esperti diventa una cache LRU degli esperti
+  più usati. Misurato con `llama-server` della PR sul PC di riferimento (RTX
+  5070 Ti, Ryzen 9 5950X, 64 GB), Qwen3.8-Flash-Next IQ2_XS: scrittura 22,4 →
+  33,1 (cache 4.000 MiB) → 49,4 token/s (8.000 MiB); lettura dei prompt 249 →
+  206 token/s, perché la cache serve solo i passi fino a 32 token. Con l'MTP
+  di llama.cpp (testa di unsloth, vedi sotto) peggiora: 52% di bozze tenute,
+  2,05 token per controllo, −15/20% in scrittura.
+
+  **Come è portata.** Il sottomodulo punta a `6b7b03a`, l'unico commit della
+  PR sopra `bed0a85` (`b11370`). Lo specchio `eullm/llama.cpp` non ha i ref
+  delle PR, quindi il commit va ancorato a mano come
+  `refs/eullm/pinned/6b7b03aaba0526c8c4d2ca8c168e0ea170e1b223` prima che
+  chiunque (CI compresa) aggiorni il sottomodulo; il controllo di
+  `mirror-sync.yml` poi lo trova. Quando la PR viene fusa, si sposta il pin
+  sulla release che la contiene e `with_moe_cache_size` si allinea al nome
+  definitivo del campo.
+
+  **In EuLLM.** `--moe-cache auto|MiB`, condiviso da `run` e `serve`.
+  `fit::plan_moe_cache` decide prima della solita divisione MoE: tutti gli
+  esperti in RAM (o quelli che lascia `--n-cpu-moe`), il resto del modello
+  tutto sulla GPU, e alla cache la stessa VRAM che la divisione avrebbe dato
+  agli esperti, a passi di 256 MiB e mai sotto 512 MiB in automatico. Solo con
+  una GPU CUDA (`fit::moe_cache_support`): la cache rifiuta più dispositivi.
+  Il contesto della testa MTP non la riceve.
+
+  **La testa MTP di unsloth non è allineata a llama.cpp ufficiale.**
+  `mtp-Qwen3.8-Flash-Next-*.gguf` dichiara lo strato MTP con rapporto di
+  compressione 0, mentre `conversion/qwen4exp.py` scrive 4 (lo strato MTP è
+  QSA, i suoi pesi `indexer` ci sono): con 0 il grafo MTP prepara gli
+  ingressi QSA senza usarli e si ferma su `GGML_ASSERT(buffer)`. Cambiato il
+  valore nel file (un byte), funziona. EuLLM non carica teste MTP da file
+  separati: per Qwen3.8-Flash-Next l'MTP resta fuori finché non conviene.
+
+  **Da validare su GPU**: `eullm serve ... --moe-cache auto` sullo stesso
+  modello, con `bench/speed_check.py`, contro i 49,4 token/s della prova con
+  `llama-server`.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci

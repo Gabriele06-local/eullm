@@ -409,6 +409,10 @@ pub(crate) fn build_ctx_params_with_cache(
         .with_n_threads_batch(config.threads as i32)
         .with_n_rs_seq(config.rs_seq);
 
+    if config.moe_cache_bytes > 0 {
+        params = params.with_moe_cache_size(config.moe_cache_bytes as usize);
+    }
+
     if cache_type_k != KvCacheType::F16 || cache_type_v != KvCacheType::F16 {
         params = params.with_type_k(cache_type_k).with_type_v(cache_type_v);
     }
@@ -547,6 +551,12 @@ pub struct InferenceConfig {
     /// `--mtp-p-min`: the MTP head stops drafting below this probability
     /// of its own (0 = always the full `mtp`).
     pub mtp_p_min: f32,
+    /// Bytes of VRAM for a cache of the MoE experts kept in RAM (0 = none):
+    /// the size `--moe-cache` comes to once the load is sized, never the
+    /// flag itself (see `fit::plan_moe_cache`). Every context of this
+    /// model gets it except the MTP draft context, which reads no experts
+    /// of the model's.
+    pub moe_cache_bytes: u64,
 }
 
 impl Default for InferenceConfig {
@@ -572,6 +582,7 @@ impl Default for InferenceConfig {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            moe_cache_bytes: 0,
         }
     }
 }

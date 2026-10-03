@@ -459,6 +459,46 @@ The batch a decode call takes, `--n-batch`, is raised to match when it is
 smaller. A dense model, or an MoE that fits whole on the GPU, copies nothing
 per pass and gains little.
 
+#### Writing faster: the expert cache (`--moe-cache`, experimental)
+
+Of the experts in RAM, a model uses some far more often than others. With
+`--moe-cache auto`, every expert stays in RAM and the VRAM the usual split
+would have given whole layers of them becomes a cache instead: llama.cpp
+copies an expert to the card the first time a token needs it and keeps the
+ones used most recently, so most tokens find their experts already there.
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto
+```
+
+`auto` sizes the cache from the VRAM left once the rest of the model, its
+context and the usual reserves are placed; `--moe-cache 6000` asks for 6,000
+MiB, cut to what is left when that is less. The log and the banner say how
+large it came out. Measured on Qwen3.8-Flash-Next IQ2_XS with an RTX 5070 Ti
+(llama.cpp's own server, same build of the cache):
+
+| Setting | Writes (tokens/s) | Reads a prompt (tokens/s) |
+|---|---:|---:|
+| The usual split, experts of the last layers on the GPU | 22.4 | 249 |
+| Every expert in RAM, 4,000 MiB cache | 33.1 | 206 |
+| Every expert in RAM, 8,000 MiB cache | 49.4 | 206 |
+
+The cache serves the decode steps (batches of up to 32 tokens). Reading a
+prompt still copies the experts to the card a pass at a time, all of them
+now rather than all but the last layers', so it is slower, by 17% there:
+`--n-ubatch` is the setting for that, and the two share the same VRAM.
+
+Combined with `--mtp` it was slower, not faster: on that model the head's
+drafts were kept 52% of the time, and each check of 3 tokens reads up to 3
+times the experts of a single step, most of them copied in. Keep `--mtp` for
+models that fit in VRAM.
+
+It needs one CUDA GPU: with more than one, or another backend, the load says
+why and runs without it. The cache is llama.cpp PR #29887, which this build
+carries ahead of a llama.cpp release; its size and its behaviour may change
+when upstream merges it.
+
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
 Some models are trained with a multi-token prediction (MTP) head: a small

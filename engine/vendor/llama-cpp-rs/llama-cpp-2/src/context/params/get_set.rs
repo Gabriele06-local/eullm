@@ -745,6 +745,30 @@ impl LlamaContextParams {
         self.context_params.op_offload
     }
 
+    /// Set the size in bytes of the GPU cache for the MoE experts kept in
+    /// host memory; `0` (the default) disables it. Experimental in llama.cpp:
+    /// one GPU only, and it needs op offload, which is on by default.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use llama_cpp_2::context::params::LlamaContextParams;
+    /// let params = LlamaContextParams::default().with_moe_cache_size(1 << 30);
+    /// assert_eq!(params.moe_cache_size(), 1 << 30);
+    /// ```
+    #[must_use]
+    pub fn with_moe_cache_size(mut self, bytes: usize) -> Self {
+        self.context_params.moe_cache_size = bytes;
+        self
+    }
+
+    /// Get the size in bytes of the GPU cache for the MoE experts kept in
+    /// host memory; `0` when disabled.
+    #[must_use]
+    pub fn moe_cache_size(&self) -> usize {
+        self.context_params.moe_cache_size
+    }
+
     /// Set whether to use full sliding window attention
     ///
     /// # Examples

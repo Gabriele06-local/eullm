@@ -39,6 +39,9 @@ pub struct ModelBanner {
     pub mtp: u32,
     /// `--mtp-p-min`: the head's confidence below which it stops drafting.
     pub mtp_p_min: f32,
+    /// VRAM for the cache of the experts kept in RAM (`--moe-cache`, once
+    /// sized); 0 for none.
+    pub moe_cache_bytes: u64,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// 0 means the sequential engine; anything higher is the batching scheduler.
@@ -116,6 +119,12 @@ impl ModelBanner {
             println!(
                 "  CPU MoE:       first {} layers (expert tensors on CPU RAM)",
                 self.n_cpu_moe
+            );
+        }
+        if self.moe_cache_bytes > 0 {
+            println!(
+                "  Expert cache:  {} of VRAM for the experts used most (--moe-cache)",
+                crate::fit::gib(self.moe_cache_bytes)
             );
         }
         if self.rs_seq > 0 {

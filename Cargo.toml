@@ -15,7 +15,8 @@ members = [
     # `[workspace.dependencies]`), so no root inheritance table is needed.
     #
     # llama.cpp C++ source is a git submodule (b11100 at the 0.1.156
-    # re-vendor, b11370 since; 0.1.158 pins an older llama.cpp, see
+    # re-vendor, b11370 since, with llama.cpp PR #29887 on top until upstream
+    # merges it; 0.1.158 pins an older llama.cpp, see
     # engine/vendor/llama-cpp-rs/llama-cpp-2/Cargo.toml), fetched through the
     # EU-hosted mirror
     # https://github.com/eullm/llama.cpp (see .gitmodules). Read the current

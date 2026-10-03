@@ -86,6 +86,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--batch-size` | `1` | Concurrent requests served by the batching scheduler (raise `--ctx-size` with it) |
 | `--n-batch` | `2048` | Prefill batch size (tokens per eval) |
 | `--n-ubatch` | `512` | Prompt tokens one GPU pass reads (llama.cpp's micro-batch). Raise it, to 2048-8192, for an MoE model whose experts do not all fit in VRAM: the experts in RAM are copied to the GPU once per pass, so fewer passes read a long prompt faster. `--fit` keeps fewer experts on the GPU to make room. Raises `--n-batch` to match |
+| `--moe-cache` | off | `auto` or a size in MiB: an MoE model whose experts do not all fit in VRAM keeps them all in RAM and caches the ones it uses most in the VRAM they would have taken. Speeds up writing, not prompt reading. One CUDA GPU only; experimental (llama.cpp PR #29887); see the guide |
 | `--cache-type-k` | `f16` | KV cache type for keys (f16, q8_0, q4_0). Quantizing frees VRAM for more layers |
 | `--cache-type-v` | `f16` | KV cache type for values (f16, q8_0, q4_0) |
 | `--no-flash-attn` | false | Disable flash attention (on by default), for the generation model and the decision model alike |
