@@ -9,8 +9,10 @@ that speaks /v1/chat/completions — EuLLM, llama-server, vLLM, or an engine
 written for one model — so that two of them can be compared on one machine:
 
 * writes answers: tokens per second of a 256-token answer to a short request,
-  thinking off. Taken from the second of two runs, so that the first one's
-  warm-up (graphs captured, caches filled) does not count;
+  thinking off: a story unless `--write-prompt` asks for something else (a
+  piece of code, say, which a drafting engine predicts better than prose).
+  Taken from the second of two runs, so that the first one's warm-up (graphs
+  captured, caches filled) does not count;
 * reads a prompt: tokens per second over a long document the server has never
   seen, with a one-token answer, so that the time is the reading. A fresh
   number at the start of the document defeats any prompt cache, which would
@@ -111,13 +113,18 @@ def main(argv=None):
         default=8000,
         help="length of the document read; the server's context must hold it",
     )
+    parser.add_argument(
+        "--write-prompt",
+        default=STORY,
+        help="the request whose answer is timed (default: a short story)",
+    )
     parser.add_argument("--timeout", type=float, default=1800)
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
     model = args.model or first_model(base, args.api_key, args.timeout)
     print(f"{base}  model {model}")
 
-    runs = [chat(base, model, STORY, 256, args) for _ in range(2)]
+    runs = [chat(base, model, args.write_prompt, 256, args) for _ in range(2)]
     _, written, seconds = runs[-1]
     first = runs[0][1] / runs[0][2] if runs[0][2] else 0
     print(
