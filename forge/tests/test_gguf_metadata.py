@@ -231,6 +231,35 @@ def test_export_writes_the_metadata_into_the_gguf(tmp_path, stand_in_llama_cpp, 
     assert sorted(p.name for p in tmp_path.glob("m*.gguf*")) == ["m.gguf"]
 
 
+def test_f16_export_replaces_a_target_that_is_already_there(tmp_path, stand_in_llama_cpp):
+    """Exporting twice onto the same -o is how an export is re-run.
+
+    The F16 branch moved the converter's output onto the target with
+    Path.rename, which on Windows is MoveFileEx without replace semantics and
+    raises FileExistsError when the target is there -- and cli.py catches only
+    (FileNotFoundError, ValueError, RuntimeError), so the second run ended in a
+    traceback with the previous GGUF still in place.
+    """
+    from eullm_forge.export import ExportConfig, export_gguf
+
+    model = tmp_path / "merged"
+    model.mkdir()
+    target = tmp_path / "m.gguf"
+
+    def export(temperature):
+        return export_gguf(ExportConfig(
+            model_path=str(model), output_path=str(target), quantization="f16",
+            metadata={KEY: ("float32", temperature)}))
+
+    export(1.25)
+    assert read_fields(target)[KEY] == ("float32", 1.25)
+    # The second run has to replace it, not refuse it.
+    export(2.5)
+    assert read_fields(target)[KEY] == ("float32", 2.5)
+    # ...and leave neither the F16 intermediate nor a partial behind.
+    assert sorted(p.name for p in tmp_path.glob("m*.gguf*")) == ["m.gguf"]
+
+
 def test_export_refuses_a_value_before_it_converts_anything(tmp_path, stand_in_llama_cpp):
     from eullm_forge.export import ExportConfig, export_gguf
 
