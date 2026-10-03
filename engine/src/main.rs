@@ -250,6 +250,15 @@ struct RuntimeOpts {
     )]
     mtp: u32,
 
+    /// With `--mtp`: stop drafting once the MTP head's own probability for
+    /// its next draft falls below P (0 to 1). Drafts it is unsure of are
+    /// mostly rejected, and each one costs a pass of the head and a position
+    /// in the check, so a threshold lets the draft length follow the text:
+    /// long where the text is predictable, none where it is not. 0 (default,
+    /// llama.cpp's own) always drafts the full N.
+    #[arg(long, value_name = "P", default_value_t = 0.0, value_parser = parse_probability)]
+    mtp_p_min: f32,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -853,6 +862,7 @@ async fn main() {
                 n_cpu_moe,
                 rs_seq,
                 mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -987,6 +997,7 @@ async fn main() {
                 n_cpu_moe,
                 rs_seq,
                 mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1031,6 +1042,7 @@ async fn main() {
                 n_cpu_moe,
                 rs_seq,
                 mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1132,6 +1144,7 @@ async fn main() {
                 n_cpu_moe,
                 rs_seq,
                 mtp,
+                mtp_p_min,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2026,6 +2039,15 @@ fn candidate_facts(
     })
 }
 
+/// A probability on the command line: a number from 0 to 1.
+fn parse_probability(s: &str) -> Result<f32, String> {
+    match s.parse::<f32>() {
+        Ok(p) if (0.0..=1.0).contains(&p) => Ok(p),
+        Ok(p) => Err(format!("{p} is not between 0 and 1")),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 /// A generation model named on the command line, under the name requests
 /// will use for it (see `launch_companion_name`), and its GGUF. An Ollama
 /// tag (`qwen3:8b`) is taken as the store name it stands for.
@@ -2322,6 +2344,7 @@ async fn cmd_run(
     n_cpu_moe: u32,
     rs_seq: u32,
     mtp: u32,
+    mtp_p_min: f32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2805,6 +2828,7 @@ async fn cmd_run(
             n_cpu_moe,
             rs_seq,
             mtp,
+            mtp_p_min,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -2905,6 +2929,7 @@ async fn cmd_run(
             n_cpu_moe,
             rs_seq,
             mtp,
+            mtp_p_min,
             ctx_checkpoints,
             checkpoint_min_step,
             batch_size,
@@ -3028,6 +3053,7 @@ async fn cmd_run(
             n_cpu_moe: flag_n_cpu_moe,
             rs_seq,
             mtp,
+            mtp_p_min,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3101,6 +3127,7 @@ async fn cmd_serve(
     n_cpu_moe: u32,
     rs_seq: u32,
     mtp: u32,
+    mtp_p_min: f32,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3207,6 +3234,7 @@ async fn cmd_serve(
         n_cpu_moe,
         rs_seq,
         mtp,
+        mtp_p_min,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -4767,6 +4795,18 @@ mod cli_default_parity_tests {
         assert_eq!(cap(-1, 20), 20);
         // CPU-only is a legitimate ceiling.
         assert_eq!(cap(43, 0), 0);
+    }
+
+    /// `--mtp-p-min` takes a probability, and 0 — llama.cpp's default,
+    /// which drafts the full `--mtp` every step — unless asked.
+    #[test]
+    fn the_mtp_threshold_is_a_probability() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).mtp_p_min, 0.0);
+        let asked = runtime_opts(&["eullm", "serve", "--mtp", "3", "--mtp-p-min", "0.5"]);
+        assert_eq!((asked.mtp, asked.mtp_p_min), (3, 0.5));
+        for refused in ["1.5", "-0.1", "half"] {
+            assert!(Cli::try_parse_from(["eullm", "serve", "--mtp-p-min", refused]).is_err());
+        }
     }
 
     #[test]

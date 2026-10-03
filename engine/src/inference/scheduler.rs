@@ -812,7 +812,7 @@ fn start_mtp<'m>(
     let draft = MtpSpeculativeParams {
         n_max: n_max as i32,
         n_min: 0,
-        p_min: 0.0,
+        p_min: config.mtp_p_min,
     };
     // SAFETY: `MtpState` declares the drafter before the draft context, so
     // it is dropped first, and the target context outlives the state.

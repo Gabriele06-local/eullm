@@ -536,6 +536,9 @@ pub struct InferenceConfig {
     /// off). Applied only to a model loaded with MTP layers and served one
     /// request at a time; the scheduler decides, and logs why when not.
     pub mtp: u32,
+    /// `--mtp-p-min`: the MTP head stops drafting below this probability
+    /// of its own (0 = always the full `mtp`).
+    pub mtp_p_min: f32,
 }
 
 impl Default for InferenceConfig {
@@ -559,6 +562,7 @@ impl Default for InferenceConfig {
             n_cpu_moe: 0,
             rs_seq: 0,
             mtp: 0,
+            mtp_p_min: 0.0,
         }
     }
 }

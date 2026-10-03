@@ -458,6 +458,18 @@ What it needs:
   and the others its MTP drafter supports. Not Qwen3.8-Flash-Next
   (`qwen4exp`) yet: its converter drops the MTP layers.
 
+A head is trained to guess one token ahead; the drafts after the first are
+its guesses on its own guesses, kept less and less often, and each costs a
+pass of the head and a position in the check. `--mtp-p-min P` stops drafting
+once the head is less sure than P of its next draft, so the draft is long
+where the text is predictable (code, lists, quotations) and short where it
+is not. `bench/mtp_sweep.sh` measures a model with each setting, on a story
+and on a piece of code:
+
+```bash
+bench/mtp_sweep.sh ./eullm ./Qwen3.5-9B-Q4_K_M.gguf --ctx-size 16384
+```
+
 How much faster depends on how often the drafts are kept and on what a
 decode costs. The head is a whole layer plus the output projection, run
 once per draft, so on a small model it costs nearly what it saves: Qwen3.5

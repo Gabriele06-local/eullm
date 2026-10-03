@@ -160,6 +160,8 @@ pub struct AppState {
     /// `--mtp`: MTP drafts per step for every model this server loads (see
     /// `InferenceConfig::mtp`).
     pub mtp: u32,
+    /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
+    pub mtp_p_min: f32,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -554,6 +556,7 @@ impl AppState {
                 n_cpu_moe,
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
+                mtp_p_min: self.mtp_p_min,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -726,6 +729,7 @@ impl AppState {
                 n_cpu_moe: self.n_cpu_moe,
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
+                mtp_p_min: self.mtp_p_min,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -2674,6 +2678,8 @@ pub struct ServeConfig {
     /// `--mtp`: MTP drafts per step for every model this server loads (see
     /// `InferenceConfig::mtp`).
     pub mtp: u32,
+    /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
+    pub mtp_p_min: f32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -2985,6 +2991,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         n_cpu_moe: cfg.n_cpu_moe,
         rs_seq: cfg.rs_seq,
         mtp: cfg.mtp,
+        mtp_p_min: cfg.mtp_p_min,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3156,6 +3163,7 @@ impl AppState {
             n_cpu_moe: 0,
             rs_seq: 0,
             mtp: 0,
+            mtp_p_min: 0.0,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

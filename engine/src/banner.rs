@@ -37,6 +37,8 @@ pub struct ModelBanner {
     /// `--mtp`: drafts per step asked for (whether the model can is the
     /// scheduler's to say).
     pub mtp: u32,
+    /// `--mtp-p-min`: the head's confidence below which it stops drafting.
+    pub mtp_p_min: f32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// 0 means the sequential engine; anything higher is the batching scheduler.
@@ -124,6 +126,12 @@ impl ModelBanner {
                 "  MTP drafts:    up to {} per step (speculative decoding with the model's MTP head)",
                 self.mtp
             );
+            if self.mtp_p_min > 0.0 {
+                println!(
+                    "                 while the head is at least {:.0}% sure of its next draft",
+                    100.0 * self.mtp_p_min
+                );
+            }
         }
         if self.ctx_checkpoints > 0 {
             println!(
