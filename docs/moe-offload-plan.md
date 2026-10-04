@@ -123,15 +123,15 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - Pinned experts only: those in the GPU's pinned host buffer, where `--no-mmap` puts them (the default with `--moe-cache` when the RAM allows). From pageable memory the copy into a slot holds the host until the slot's previous reader has run, and the copies and the splits alternate again; a mapped model, even one the expert cache pinned, keeps the usual copies.
 - Costs: the slots' VRAM (about 2 × 235 MiB on Qwen3.8-Flash-Next IQ2_XS), kept from the first long prompt on and taken from what `--fit` leaves free. They are made only if a twentieth of the card, at least 512 MiB, stays free beside them for what a compute allocates as it goes (the CUDA pool, cuBLAS), which aborts the process when it finds no room; otherwise the line on stderr says how much was needed, and lowering `--moe-cache` by the difference makes room. The padding past each copy is cleared by the kernels that read it (MMQ, MMVQ), as in the compute buffer.
 
-**To measure** (reference PC, the 33,200-token prompt of the table above), each command twice, with `LLAMA_MOE_PREFETCH=0` and `=1`:
+**To measure** (reference PC, the 33,200-token prompt of the table above), with `LLAMA_MOE_PREFETCH=0` and `=1` on the same server flags:
 
 ```bash
-LLAMA_MOE_PREFETCH=1 eullm serve --default-model <Qwen3.8-Flash-Next IQ2_XS> \
-  --ctx-size 40960 --moe-cache auto --n-ubatch 4096
+bench/prefetch_check.sh <eullm> <Qwen3.8-Flash-Next IQ2_XS>
+N_UBATCH=2048 bench/prefetch_check.sh <eullm> <Qwen3.8-Flash-Next IQ2_XS>
 ```
 
-1. Correctness first: the same greedy answer to the same long prompt with both (`temperature 0`, `cache_prompt: false`), token for token. The kernels and their inputs are the same; only when the copies run changes. With `=1` the server's stderr must show `moe prefetch: on, ...` after the first long prompt; `off, <why>` means the measurement compares nothing.
-2. Then the reading speed with `bench/speed_check.py`, at `--n-ubatch` 2048 and 4096, and `LLAMA_MOE_PREFETCH_SLOTS=3` once.
+1. Correctness first: the same greedy answer to the same long prompt with both (`temperature 0`, `cache_prompt: false`), token for token. The kernels and their inputs are the same; only when the copies run changes. With `=1` the server's stderr must show `moe prefetch: on, ...` after the first long prompt; `off, <why>` means the measurement compares nothing. The script asks each server twice and says which of these it found.
+2. Then the reading speed, which the script measures with `bench/speed_check.py`: at `--n-ubatch` 4096 and 2048, and once with `LLAMA_MOE_PREFETCH_SLOTS=3`.
 3. `nsys profile` of one micro-batch shows whether the copies overlap the kernels (copy engine and compute busy at the same time) or still alternate.
 
 ## 3. Upstream
