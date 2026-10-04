@@ -269,7 +269,11 @@ struct RuntimeOpts {
     /// tokens/s with an 8,000 MiB cache against 22.4 without, and read a
     /// prompt 17% slower. One CUDA GPU only; elsewhere the load says why and
     /// runs without it. Experimental: the cache is llama.cpp PR #29887, which
-    /// this build carries ahead of a llama.cpp release.
+    /// this build carries ahead of a llama.cpp release. Unless told
+    /// otherwise, a load with a cache reads prompts 2048 tokens at a time
+    /// (--n-ubatch) and reads the model into memory when the RAM can spare
+    /// the experts (--no-mmap, --mmap): on that model, 55 tokens/s writing
+    /// and 960 reading a prompt.
     #[arg(long, value_name = "auto|MIB", value_parser = fit::parse_moe_cache)]
     moe_cache: Option<fit::MoeCache>,
 
@@ -280,9 +284,15 @@ struct RuntimeOpts {
     /// a staging buffer of the driver's, which the expert cache's copies
     /// measured at 9 GB/s on an RTX 5070 Ti over PCIe 4.0 x16. Loading reads
     /// the whole file up front, and memory pinned for the experts cannot be
-    /// swapped out: the RAM has to hold them.
+    /// swapped out: the RAM has to hold them. --moe-cache does this by itself
+    /// when the RAM can spare the experts.
     #[arg(long)]
     no_mmap: bool,
+
+    /// Keep the model file mapped where --moe-cache would read it into
+    /// memory to pin its experts.
+    #[arg(long, conflicts_with = "no_mmap")]
+    mmap: bool,
 
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
@@ -337,7 +347,8 @@ struct RuntimeOpts {
     n_batch: u32,
 
     /// Physical micro-batch: how many prompt tokens the GPU processes in
-    /// one pass (llama.cpp's `n_ubatch`; default 512, llama.cpp's own).
+    /// one pass (llama.cpp's `n_ubatch`; default 512, llama.cpp's own, and
+    /// 2048 for a model loaded with an expert cache, see --moe-cache).
     /// Raise it, to 2048-8192, for an MoE model whose experts do not all
     /// fit in VRAM: the experts kept in RAM are copied to the GPU once per
     /// micro-batch of a prompt, so a 32k-token prompt read 512 tokens at a
@@ -348,10 +359,9 @@ struct RuntimeOpts {
     #[arg(
         long,
         value_name = "N",
-        default_value_t = inference::DEFAULT_N_UBATCH,
         value_parser = clap::value_parser!(u32).range(32..=16_384)
     )]
-    n_ubatch: u32,
+    n_ubatch: Option<u32>,
 
     /// KV cache type for keys. Options: f16 (default, best GPU compat), q8_0, q4_0
     #[arg(long, default_value = "f16")]
@@ -907,6 +917,7 @@ async fn main() {
                 mtp_p_min,
                 moe_cache,
                 no_mmap,
+                mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -934,7 +945,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
-            let n_batch = launch_n_batch(n_batch, n_ubatch);
+            let n_batch = launch_n_batch(n_batch, n_ubatch.unwrap_or(inference::DEFAULT_N_UBATCH));
             let residency = residency_config(
                 &store,
                 mmproj.as_deref(),
@@ -1046,6 +1057,7 @@ async fn main() {
                 mtp_p_min,
                 moe_cache,
                 no_mmap,
+                mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1094,6 +1106,7 @@ async fn main() {
                 mtp_p_min,
                 moe_cache,
                 no_mmap,
+                mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1121,7 +1134,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
-            let n_batch = launch_n_batch(n_batch, n_ubatch);
+            let n_batch = launch_n_batch(n_batch, n_ubatch.unwrap_or(inference::DEFAULT_N_UBATCH));
             let residency = residency_config(
                 &store,
                 mmproj.as_deref(),
@@ -1201,6 +1214,7 @@ async fn main() {
                 mtp_p_min,
                 moe_cache,
                 no_mmap,
+                mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2416,6 +2430,7 @@ async fn cmd_run(
     mtp_p_min: f32,
     moe_cache: Option<fit::MoeCache>,
     no_mmap: bool,
+    mmap: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2423,7 +2438,7 @@ async fn cmd_run(
     batch_size: usize,
     flash_attn: bool,
     n_batch: u32,
-    n_ubatch: u32,
+    n_ubatch: Option<u32>,
     cache_type_k: inference::KvCacheType,
     cache_type_v: inference::KvCacheType,
     web: bool,
@@ -2462,6 +2477,14 @@ async fn cmd_run(
     let mut n_cpu_moe = n_cpu_moe;
     // The expert cache `--moe-cache` comes to for the launch model, once sized.
     let mut moe_cache_bytes: u64 = 0;
+    // `--n-batch`, `--n-ubatch` and `--no-mmap` as given, for the API server,
+    // which sizes every model it loads from them; the launch model's own may
+    // change below with an expert cache (`fit::MOE_CACHE_N_UBATCH`,
+    // `fit::plan_read_into_memory`).
+    let (n_batch_flag, n_ubatch_flag, no_mmap_flag) = (n_batch, n_ubatch, no_mmap);
+    let mut n_batch = n_batch;
+    let mut n_ubatch = n_ubatch.unwrap_or(inference::DEFAULT_N_UBATCH);
+    let mut no_mmap = no_mmap;
     // What the user actually asked for, before --fit specializes the mut
     // bindings above to the LAUNCH model. The API server must inherit these
     // originals: with --fit it re-sizes each model it loads against them,
@@ -2802,6 +2825,7 @@ async fn cmd_run(
                     request,
                     cpu_moe,
                     n_cpu_moe,
+                    n_ubatch_flag.is_none(),
                 ),
                 Err(why) => {
                     println!("[EULLM] --moe-cache: {why}; running without the cache.");
@@ -2825,6 +2849,26 @@ async fn cmd_run(
                 n_cpu_moe = cache.n_cpu_moe;
                 gpu_layers = -1;
                 moe_cache_bytes = cache.bytes;
+                if let Some(larger) = cache.n_ubatch {
+                    n_ubatch = larger;
+                    n_batch = inference::batch_for_ubatch(n_batch, larger);
+                    println!(
+                        "[EULLM] --moe-cache: reading prompts {larger} tokens at a time \
+                         (--n-ubatch), so that the experts in RAM are copied to the GPU once \
+                         per {larger} prompt tokens instead of {}.",
+                        inference::DEFAULT_N_UBATCH
+                    );
+                }
+                let (read_in, why) = fit::plan_read_into_memory(
+                    no_mmap,
+                    mmap,
+                    cache.host_bytes,
+                    fit::system_ram_bytes(),
+                );
+                if let Some(why) = why {
+                    println!("[EULLM] {why}.");
+                }
+                no_mmap = read_in;
             } else {
                 let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
                     fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
@@ -3177,8 +3221,8 @@ async fn cmd_run(
             ctx_size,
             threads: resolved_threads,
             flash_attn,
-            n_batch,
-            n_ubatch,
+            n_batch: n_batch_flag,
+            n_ubatch: n_ubatch_flag,
             cache_type_k,
             cache_type_v,
             batch_size: launch_batch_size,
@@ -3188,7 +3232,8 @@ async fn cmd_run(
             mtp,
             mtp_p_min,
             moe_cache,
-            no_mmap,
+            no_mmap: no_mmap_flag,
+            mmap,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3255,7 +3300,7 @@ async fn cmd_serve(
     threads: Option<u32>,
     flash_attn: bool,
     n_batch: u32,
-    n_ubatch: u32,
+    n_ubatch: Option<u32>,
     cache_type_k: inference::KvCacheType,
     cache_type_v: inference::KvCacheType,
     web: bool,
@@ -3266,6 +3311,7 @@ async fn cmd_serve(
     mtp_p_min: f32,
     moe_cache: Option<fit::MoeCache>,
     no_mmap: bool,
+    mmap: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3376,6 +3422,7 @@ async fn cmd_serve(
         mtp_p_min,
         moe_cache,
         no_mmap,
+        mmap,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -4964,24 +5011,29 @@ mod cli_default_parity_tests {
         assert!(Cli::try_parse_from(["eullm", "serve", "--moe-cache", "0"]).is_err());
     }
 
-    /// `--no-mmap` is off unless asked, on both subcommands.
+    /// `--no-mmap` and `--mmap` are off unless asked, on both subcommands,
+    /// and cannot be asked together.
     #[test]
     fn the_model_file_is_mapped_unless_no_mmap_is_asked() {
-        assert!(!runtime_opts(&["eullm", "serve"]).no_mmap);
+        let neither = runtime_opts(&["eullm", "serve"]);
+        assert!(!neither.no_mmap && !neither.mmap);
         assert!(runtime_opts(&["eullm", "serve", "--no-mmap"]).no_mmap);
         assert!(runtime_opts(&["eullm", "run", "x", "--no-mmap"]).no_mmap);
+        assert!(runtime_opts(&["eullm", "serve", "--mmap"]).mmap);
+        assert!(Cli::try_parse_from(["eullm", "serve", "--mmap", "--no-mmap"]).is_err());
     }
 
-    /// `--n-ubatch` is llama.cpp's 512 unless asked, on both subcommands; a
+    /// `--n-ubatch` is unset unless asked, on both subcommands: llama.cpp's
+    /// 512 then, or an expert cache's choice (`fit::MOE_CACHE_N_UBATCH`). A
     /// micro-batch above `--n-batch` raises the batch to hold it, and a value
     /// outside 32..=16384 is refused when the command line is read.
     #[test]
     fn the_micro_batch_defaults_to_llama_cpps_and_raises_the_batch() {
-        assert_eq!(runtime_opts(&["eullm", "run", "m.gguf"]).n_ubatch, 512);
-        assert_eq!(runtime_opts(&["eullm", "serve"]).n_ubatch, 512);
+        assert_eq!(runtime_opts(&["eullm", "run", "m.gguf"]).n_ubatch, None);
+        assert_eq!(runtime_opts(&["eullm", "serve"]).n_ubatch, None);
         let asked = runtime_opts(&["eullm", "serve", "--n-ubatch", "4096"]);
-        assert_eq!(asked.n_ubatch, 4096);
-        assert_eq!(launch_n_batch(asked.n_batch, asked.n_ubatch), 4096);
+        assert_eq!(asked.n_ubatch, Some(4096));
+        assert_eq!(launch_n_batch(asked.n_batch, 4096), 4096);
         let larger = runtime_opts(&[
             "eullm",
             "run",
@@ -4991,7 +5043,8 @@ mod cli_default_parity_tests {
             "--n-ubatch",
             "4096",
         ]);
-        assert_eq!(launch_n_batch(larger.n_batch, larger.n_ubatch), 8192);
+        assert_eq!(larger.n_ubatch, Some(4096));
+        assert_eq!(launch_n_batch(larger.n_batch, 4096), 8192);
         for refused in ["16", "32768"] {
             assert!(Cli::try_parse_from(["eullm", "serve", "--n-ubatch", refused]).is_err());
         }

@@ -1629,6 +1629,12 @@ impl InferenceEngine {
         self.config.context_size
     }
 
+    /// The micro-batch this engine was loaded with: `--n-ubatch`, or what
+    /// an expert cache chose for it.
+    pub fn n_ubatch(&self) -> u32 {
+        self.config.n_ubatch
+    }
+
     /// Whether a multimodal projector is loaded, i.e. whether
     /// [`Self::generate_multimodal`] can read attachments.
     #[cfg(feature = "multimodal")]

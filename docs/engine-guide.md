@@ -532,6 +532,28 @@ eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-0
   --ctx-size 40960 --moe-cache auto --no-mmap
 ```
 
+**What `--moe-cache` does by itself.** Unless told otherwise, a load that
+gets an expert cache:
+
+- reads prompts 2,048 tokens at a time instead of llama.cpp's 512, so that
+  a long prompt copies the experts to the card a quarter as often. The
+  larger compute buffer comes out of the cache. On the model above: 964
+  tokens/s reading a 33,200-token prompt instead of 452, 54.9 writing instead
+  of 58.1. `--n-ubatch` sets it either way: 512 for the fastest writing, 4096
+  for the fastest reading (1,240 there, 47.1 writing).
+- reads the model into memory, as `--no-mmap` does, when pinning its experts
+  leaves a quarter of the RAM and at least 8 GiB to everything else. `--mmap`
+  keeps the file mapped. Where the RAM's size is not known (Windows), the file
+  stays mapped; `--no-mmap` reads it in anyway.
+
+The startup log says what it chose and why. With both, the command above
+needs neither flag:
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto
+```
+
 **Where a decode step goes.** `LLAMA_MOE_CACHE_STATS=64` prints, every 64
 decode steps of up to 8 tokens, one line like this:
 

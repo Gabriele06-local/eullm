@@ -1102,7 +1102,24 @@ pub struct MoeCachePlan {
     pub bytes: u64,
     /// The size `--moe-cache` asked for, when there was less room than that.
     pub asked_bytes: Option<u64>,
+    /// Bytes of the experts kept in RAM, which the cache copies from.
+    pub host_bytes: u64,
+    /// The micro-batch the load takes: [`MOE_CACHE_N_UBATCH`] when the
+    /// caller left it to the plan and the cache keeps its size beside the
+    /// larger compute buffer, `None` to keep the caller's.
+    pub n_ubatch: Option<u32>,
 }
+
+/// The micro-batch a load with an expert cache takes when `--n-ubatch` was
+/// not given. A prompt copies the experts kept in RAM to the GPU once per
+/// micro-batch, so at 2,048 tokens it copies them a quarter as often as at
+/// llama.cpp's 512, and the compute buffer that grows with it comes out of
+/// the cache. Measured on Qwen3.8-Flash-Next IQ2_XS with the experts pinned
+/// (RTX 5070 Ti, 40,960-token context): a 33,200-token prompt read at 964
+/// tokens/s instead of 452, answers written at 54.9 instead of 58.1, the
+/// cache 6.75 GiB instead of 8. At 4,096 reading reached 1,240 and writing
+/// fell to 47.1.
+pub const MOE_CACHE_N_UBATCH: u32 = 2048;
 
 /// Size a load's expert cache. `None` when it gets none: not a MoE model,
 /// one whose experts all fit on the GPU anyway, or no room for a cache once
@@ -1125,6 +1142,7 @@ pub fn plan_moe_cache(
     kv_bytes_per_elem_v: f64,
     cpu_moe: bool,
     n_cpu_moe: u32,
+    auto_n_ubatch: bool,
 ) -> Option<MoeCachePlan> {
     let (Some((free_vram, total_vram)), Some(info), Some(layout)) = (vram, info, layout) else {
         return None;
@@ -1161,28 +1179,109 @@ pub fn plan_moe_cache(
     if room <= 0.0 || in_ram == 0 {
         return None;
     }
-    let room = (room as u64).min(in_ram);
     let step_down = |bytes: u64| bytes / MOE_CACHE_STEP_BYTES * MOE_CACHE_STEP_BYTES;
-    let (bytes, asked_bytes) = match request {
-        MoeCache::Auto => (step_down(room), None),
-        MoeCache::Mib(mib) => {
-            let asked = u64::from(mib) * 1024 * 1024;
-            if asked <= room {
-                (asked, None)
-            } else {
-                (step_down(room), Some(asked))
-            }
+    // The cache a given room holds, as the request asks: (bytes, asked).
+    let size = |room: f64| -> Option<(u64, Option<u64>)> {
+        if room <= 0.0 {
+            return None;
         }
+        let room = (room as u64).min(in_ram);
+        let (bytes, asked_bytes) = match request {
+            MoeCache::Auto => (step_down(room), None),
+            MoeCache::Mib(mib) => {
+                let asked = u64::from(mib) * 1024 * 1024;
+                if asked <= room {
+                    (asked, None)
+                } else {
+                    (step_down(room), Some(asked))
+                }
+            }
+        };
+        if bytes == 0 || (request == MoeCache::Auto && bytes < MOE_CACHE_MIN_BYTES) {
+            return None;
+        }
+        Some((bytes, asked_bytes))
     };
-    if bytes == 0 || (request == MoeCache::Auto && bytes < MOE_CACHE_MIN_BYTES) {
-        return None;
-    }
+    // The larger micro-batch first, when the caller sized with the default
+    // and left the choice here: its compute buffer comes out of the cache,
+    // and a size the user asked for wins over it.
+    let larger = auto_n_ubatch
+        .then(|| size(room - ubatch_reserve_bytes(MOE_CACHE_N_UBATCH) as f64))
+        .flatten()
+        .filter(|&(_, asked_bytes)| asked_bytes.is_none());
+    let ((bytes, asked_bytes), n_ubatch) = match larger {
+        Some(sized) => (sized, Some(MOE_CACHE_N_UBATCH)),
+        None => (size(room)?, None),
+    };
     Some(MoeCachePlan {
         cpu_moe: cpu_moe || n_cpu_moe == 0,
         n_cpu_moe,
         bytes,
         asked_bytes,
+        host_bytes: in_ram,
+        n_ubatch,
     })
+}
+
+/// Whether pinning `host_bytes` of experts leaves the rest of the machine
+/// enough RAM: a quarter of it, and at least 8 GiB. Pinned pages can be
+/// neither swapped out nor dropped. The same rule the expert cache's own
+/// pinning applies (llama.cpp patch `0002`).
+pub fn pin_fits_in_ram(host_bytes: u64, ram_total: u64) -> bool {
+    host_bytes <= ram_total.saturating_sub(pinned_ram_reserve(ram_total))
+}
+
+fn pinned_ram_reserve(ram_total: u64) -> u64 {
+    (ram_total / 4).max(8 << 30)
+}
+
+/// Whether a load reads the model into memory instead of mapping its file,
+/// and the line that says why when the expert cache decided it. `--no-mmap`
+/// always reads it in. With an expert cache (`cache_host_bytes` of experts
+/// in RAM), reading it in is what puts those experts in pinned memory, which
+/// the GPU copies from at the bus's speed: done whenever the RAM can spare
+/// them, unless `--mmap` keeps the file mapped.
+pub fn plan_read_into_memory(
+    no_mmap: bool,
+    keep_mapped: bool,
+    cache_host_bytes: u64,
+    ram_total: Option<u64>,
+) -> (bool, Option<String>) {
+    if no_mmap {
+        return (true, None);
+    }
+    if keep_mapped || cache_host_bytes == 0 {
+        return (false, None);
+    }
+    match ram_total {
+        Some(ram) if pin_fits_in_ram(cache_host_bytes, ram) => (
+            true,
+            Some(format!(
+                "--moe-cache: reading the model into memory, so that its {} of experts in RAM \
+                 are pinned for the GPU's copies (--mmap keeps the file mapped)",
+                gib(cache_host_bytes)
+            )),
+        ),
+        Some(ram) => (
+            false,
+            Some(format!(
+                "--moe-cache: keeping the model file mapped: pinning its {} of experts in RAM \
+                 would leave less than {} of the {} of RAM to the rest (--no-mmap reads it \
+                 into memory anyway)",
+                gib(cache_host_bytes),
+                gib(pinned_ram_reserve(ram)),
+                gib(ram)
+            )),
+        ),
+        None => (
+            false,
+            Some(
+                "--moe-cache: keeping the model file mapped: the size of the RAM is not known \
+                 here (--no-mmap reads it into memory anyway)"
+                    .to_string(),
+            ),
+        ),
+    }
 }
 
 /// Whether llama.cpp's expert cache can run on this machine: one GPU, a
@@ -1503,6 +1602,7 @@ pub fn run_moe_cache(
     request: MoeCache,
     cpu_moe: bool,
     n_cpu_moe: u32,
+    auto_n_ubatch: bool,
 ) -> Option<MoeCachePlan> {
     let info = read_gguf_info(model_path);
     let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
@@ -1521,6 +1621,7 @@ pub fn run_moe_cache(
         kv_bytes_per_elem_v,
         cpu_moe,
         n_cpu_moe,
+        auto_n_ubatch,
     )
 }
 
@@ -1735,6 +1836,10 @@ pub struct OffloadFlags {
     /// `--moe-cache`, or `None` without the flag or where the cache cannot
     /// run (see [`moe_cache_support`]).
     pub moe_cache: Option<MoeCache>,
+    /// No `--n-ubatch` was given: the reserve was sized for the default
+    /// micro-batch, and an expert cache may raise it (see
+    /// [`MOE_CACHE_N_UBATCH`]).
+    pub auto_n_ubatch: bool,
 }
 
 /// What sizing decided, before the `--gpu-layers` ceiling: what the load
@@ -1784,6 +1889,10 @@ pub struct OffloadPlan {
     pub capped_from: Option<i32>,
     /// VRAM for the expert cache, in bytes; `0` for none.
     pub moe_cache_bytes: u64,
+    /// Bytes of the experts the cache copies from, kept in RAM; `0` for none.
+    pub moe_cache_host_bytes: u64,
+    /// The micro-batch the expert cache chose (see [`MoeCachePlan::n_ubatch`]).
+    pub n_ubatch: Option<u32>,
 }
 
 /// Size one load: where the projector goes, then MoE expert offload, then
@@ -1837,6 +1946,7 @@ pub fn plan_offload(
             kv_bytes_per_elem_v,
             flags.cpu_moe,
             flags.n_cpu_moe,
+            flags.auto_n_ubatch,
         )
     });
     if let Some(cache) = cache {
@@ -1856,6 +1966,8 @@ pub fn plan_offload(
             free_vram: vram.map(|(free, _)| free),
             capped_from: (capped != -1).then_some(-1),
             moe_cache_bytes: cache.bytes,
+            moe_cache_host_bytes: cache.host_bytes,
+            n_ubatch: cache.n_ubatch,
         };
     }
 
@@ -1927,6 +2039,8 @@ pub fn plan_offload(
         free_vram: vram.map(|(free, _)| free),
         capped_from: (capped != gpu_layers).then_some(gpu_layers),
         moe_cache_bytes: 0,
+        moe_cache_host_bytes: 0,
+        n_ubatch: None,
     }
 }
 
@@ -2557,6 +2671,7 @@ mod plan_offload_tests {
             n_cpu_moe: 0,
             mmproj_offload: None,
             moe_cache: None,
+            auto_n_ubatch: false,
         }
     }
 
@@ -2825,6 +2940,7 @@ mod plan_offload_tests {
                 F16.1,
                 cpu_moe,
                 n_cpu_moe,
+                false,
             )
         };
         let card = (14 * GIB, 16 * GIB);
@@ -2861,6 +2977,99 @@ mod plan_offload_tests {
         assert_eq!(cache(MoeCache::Auto, (tight, 16 * GIB), false, 0), None);
         let small = cache(MoeCache::Mib(300), (tight, 16 * GIB), false, 0).unwrap();
         assert_eq!(small.bytes, 300 * MIB);
+
+        // Every expert is in RAM for the cache to copy from; with
+        // `--n-cpu-moe 40`, the 40 layers' worth.
+        let expert_bytes: u64 = layout.expert_bytes_per_layer.iter().sum();
+        assert_eq!(auto.host_bytes, expert_bytes);
+        assert_eq!(split.host_bytes, 40 * 400 * MIB);
+        // Without `auto_n_ubatch` the plan keeps the caller's micro-batch.
+        assert_eq!(auto.n_ubatch, None);
+    }
+
+    /// Left to choose, a load with an expert cache reads prompts with the
+    /// larger micro-batch, whose compute buffer comes out of the cache, as
+    /// long as the cache still gets its minimum, or the size asked for.
+    #[test]
+    fn an_expert_cache_reads_prompts_with_a_larger_micro_batch_when_left_to_it() {
+        let (info, layout, _) = moe();
+        let cache = |request, vram: (u64, u64), auto_n_ubatch| {
+            plan_moe_cache(
+                request,
+                Some(vram),
+                Some(&info),
+                Some(&layout),
+                4096,
+                F16.0,
+                F16.1,
+                false,
+                0,
+                auto_n_ubatch,
+            )
+        };
+        let card = (14 * GIB, 16 * GIB);
+        let default = cache(MoeCache::Auto, card, false).unwrap();
+        let larger = cache(MoeCache::Auto, card, true).unwrap();
+        assert_eq!(larger.n_ubatch, Some(MOE_CACHE_N_UBATCH));
+        let extra = ubatch_reserve_bytes(MOE_CACHE_N_UBATCH);
+        assert!(larger.bytes < default.bytes);
+        assert!(default.bytes - larger.bytes <= extra + 256 * MIB);
+        assert_eq!(larger.bytes % (256 * MIB), 0);
+
+        // A size asked for that still fits beside the larger buffer: both.
+        let asked = cache(MoeCache::Mib(2000), card, true).unwrap();
+        assert_eq!((asked.bytes, asked.n_ubatch), (2000 * MIB, Some(MOE_CACHE_N_UBATCH)));
+        // One that fits only with the default micro-batch keeps it, whole.
+        let (usable, fixed) = moe_budget(card.0, card.1, &info, &layout, 4096, F16.0, F16.1);
+        let room_mib = ((usable - fixed) as u64 / MIB) as u32;
+        let snug = cache(MoeCache::Mib(room_mib - 64), card, true).unwrap();
+        assert_eq!(snug.bytes, u64::from(room_mib - 64) * MIB);
+        assert_eq!((snug.asked_bytes, snug.n_ubatch), (None, None));
+
+        // Too little room for a cache beside the larger buffer: the default
+        // micro-batch, and the cache it leaves room for.
+        let fixed_and_floor = fixed as u64 + 16 * GIB * 12 / 100 + 320 * MIB;
+        let tight = (fixed_and_floor + GIB, 16 * GIB);
+        let kept = cache(MoeCache::Auto, tight, true).unwrap();
+        assert_eq!(kept.n_ubatch, None);
+        assert_eq!(kept.bytes, cache(MoeCache::Auto, tight, false).unwrap().bytes);
+    }
+
+    /// Pinned experts must leave a quarter of the RAM, and at least 8 GiB.
+    #[test]
+    fn experts_are_pinned_only_when_the_ram_can_spare_them() {
+        // The reference PC: 62.7 GiB of RAM, 33.02 GiB of experts.
+        let ram = 62 * GIB + 700 * MIB;
+        assert!(pin_fits_in_ram(33 * GIB, ram));
+        assert!(!pin_fits_in_ram(48 * GIB, ram));
+        // On 32 GiB the floor is 8 GiB, a quarter.
+        assert!(pin_fits_in_ram(24 * GIB, 32 * GIB));
+        assert!(!pin_fits_in_ram(24 * GIB + MIB, 32 * GIB));
+        // On 16 GiB the 8 GiB floor is more than a quarter.
+        assert!(pin_fits_in_ram(8 * GIB, 16 * GIB));
+        assert!(!pin_fits_in_ram(9 * GIB, 16 * GIB));
+        assert!(!pin_fits_in_ram(GIB, 4 * GIB));
+    }
+
+    /// `--no-mmap` always reads the model in; an expert cache does when the
+    /// RAM can spare its experts, and says so either way; `--mmap` keeps the
+    /// mapping.
+    #[test]
+    fn an_expert_cache_reads_the_model_into_memory_when_the_ram_allows() {
+        let ram = Some(62 * GIB);
+        assert_eq!(plan_read_into_memory(true, false, 0, None), (true, None));
+        assert_eq!(plan_read_into_memory(false, false, 0, ram), (false, None));
+        assert_eq!(plan_read_into_memory(false, true, 33 * GIB, ram), (false, None));
+
+        let (read, why) = plan_read_into_memory(false, false, 33 * GIB, ram);
+        assert!(read);
+        assert!(why.unwrap().contains("--mmap keeps"));
+        let (read, why) = plan_read_into_memory(false, false, 50 * GIB, ram);
+        assert!(!read);
+        assert!(why.unwrap().contains("--no-mmap reads"));
+        let (read, why) = plan_read_into_memory(false, false, 33 * GIB, None);
+        assert!(!read);
+        assert!(why.unwrap().contains("not known"));
     }
 
     #[test]
