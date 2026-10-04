@@ -4879,7 +4879,13 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
     });
 
     use std::io::Write;
-    let mut stdout = std::io::stdout().lock();
+    // Not `stdout().lock()`: the log lines go to stdout too, and the
+    // generation thread writes some (`Multimodal stream: …`, or the batch
+    // being raised for a large image) before its first token. Held across
+    // this loop, the lock left that thread waiting on it and this loop
+    // waiting on a token: every `run --image` hung after the prompt, with
+    // nothing printed. Locking per write lets both through.
+    let mut stdout = std::io::stdout();
     while let Some(ev) = rx.recv().await {
         match ev {
             inference::StreamEvent::Token(t) => {
