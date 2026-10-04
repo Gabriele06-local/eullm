@@ -38,6 +38,9 @@
 #                 has ended, a short serial job runs compare_graded.py against
 #                 each and writes everything to <graded dir>/report.txt, so
 #                 nobody has to watch the queue to know when to look
+#   ROUND_REPORT_FILE  the report's file name in ROUND_REPORT_DIR (default
+#                 report.txt): two rounds grading into one directory keep
+#                 their reports apart
 #   ROUND_REPORT_DIR  where the grades are (default ROUND_OUT; give the
 #                 --graded-dir of ROUND_JUDGE_ARGS when there is one)
 #   ROUND_EMBEDDER / ROUND_RERANKER / ROUND_OPEN_TAG  retrieve with BM25 +
@@ -170,9 +173,9 @@ if [ -n "${ROUND_REPORT:-}" ]; then
     done
     report=$(sbatch --parsable --dependency="afterany:$prev" --partition=lrd_all_serial \
              --time=00:15:00 --cpus-per-task=1 --mem=4G --job-name=eullm-report \
-             --output="$RDIR/report.txt" --wrap="$WRAP") ||
+             --output="$RDIR/${ROUND_REPORT_FILE:-report.txt}" --wrap="$WRAP") ||
         { echo "[round] could not submit the report (judge $prev is queued)" >&2; exit 1; }
-    echo "[round] report submitted: ${report%%;*} (afterany $prev) -> $RDIR/report.txt"
+    echo "[round] report submitted: ${report%%;*} (afterany $prev) -> $RDIR/${ROUND_REPORT_FILE:-report.txt}"
 else
     echo "[round] results will be in $OUT/graded.csv"
 fi

@@ -289,3 +289,63 @@ def test_an_absent_prompt_drops_the_whole_article_not_just_its_first_chunk(tmp_p
     # a named one: which of the twenty comes first is the ranking's business,
     # and this test is about article 15 being gone.
     assert len(re.findall(r"^\[\d+\]", content, re.M)) == 3
+
+
+def test_hybrid_prompts_use_the_hybrid_index_and_still_drop_an_absent_article(
+        tmp_path, monkeypatch):
+    """--embedder builds the prompts on the index the released models use.
+
+    The embedding model is a stand-in that ranks the continuation chunk of
+    art. 15 first, where the answer is: an assente row must still not show it.
+    """
+    import importlib.util
+
+    np = pytest.importorskip("numpy")
+    from eullm_forge.eval import EvalItem, NormIndex, dense
+
+    filler = " Il presente articolo contiene disposizioni di dettaglio sufficienti."
+    records = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+                "text": f"Art. {n}. \n \n (Materia numero {n}). \n \n "
+                        f"Il ricorso è proposto entro sessanta giorni dalla notifica."
+                        f"{filler * 2}"} for n in range(1, 21)]
+    records += [
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": f"Art. 21. \n \n (Accertamento). \n \n Disposizione generale.{filler * 2}"},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+         "text": f"Il ricorso è proposto entro venti giorni dall'atto emanato.{filler * 2}"},
+    ]
+    norms = tmp_path / "legislazione_z.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+                     encoding="utf-8")
+    built = {}
+
+    def fake_build_hybrid(paths, embedder_id, *, reranker_id=None, cache_dir=None):
+        base = NormIndex.from_files(paths)
+        vecs = np.eye(len(base.records), dtype=np.float32)
+        built.update(embedder=embedder_id, reranker=reranker_id, cache=cache_dir)
+        return dense.HybridIndex(base, vecs, lambda q: vecs[len(base.records) - 1])
+
+    monkeypatch.setattr(dense, "build_hybrid", fake_build_hybrid)
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_grpo_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_grpo_prompts3", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    index = dense.build_hybrid([norms], "emb")
+    item = EvalItem(id="a21", domain="legal", lang="it",
+                    question="Nel codice civile, entro quanti giorni si propone il ricorso?",
+                    keywords=["20 giorni|venti giorni"],
+                    metadata={"code": "codice_civile", "articolo": "21",
+                              "tipo": "termine_argomento"})
+    assert "entro venti giorni" in mod.prompt_row(item, index, k=3)["prompt"][0]["content"]
+    absent = mod.prompt_row(item, index, k=3, absent=True)["prompt"][0]["content"]
+    assert "entro venti giorni" not in absent and "Art. 21." not in absent
+
+    out = tmp_path / "prompts.jsonl"
+    assert mod.main(["--norms", str(norms), "--per-code", "20", "--out", str(out),
+                     "--embedder", "Qwen/Qwen3-Embedding-0.6B",
+                     "--reranker", "Qwen/Qwen3-Reranker-0.6B",
+                     "--retrieval-cache", str(tmp_path / "cache")]) == 0
+    assert built == {"embedder": "Qwen/Qwen3-Embedding-0.6B",
+                     "reranker": "Qwen/Qwen3-Reranker-0.6B", "cache": tmp_path / "cache"}
+    assert out.read_text(encoding="utf-8").strip()
