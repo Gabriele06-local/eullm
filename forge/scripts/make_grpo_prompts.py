@@ -26,6 +26,11 @@ article more often and put different neighbours next to it; the second
 round trains on what the model will actually be shown. The embedding and
 reranking models run on a GPU (sbatch_grpo_prompts.slurm).
 
+With ``--judged N`` the file also holds N questions on what an article
+provides ("contenuto"), which no program can check: each row carries the
+question, the article and the exam's version-2 rubric, and grpo_train.py
+--judge-url has a judge grade the answers (`eullm_forge.rl.judge_reward`).
+
 No article of an ``--exclude-exam`` file is drawn: training on the exam's
 articles would turn the exam into a memory test. The file holds counts and
 prompts, never an exam item.
@@ -43,9 +48,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import NormIndex, load_eval_set, open_book_prompt  # noqa: E402
-from eullm_forge.eval.norm_exam import build_exam  # noqa: E402
+from eullm_forge.eval.norm_exam import build_exam, rubric_v2  # noqa: E402
 from eullm_forge.eval.retrieval import record_articles  # noqa: E402
-from eullm_forge.rl import DEADLINE_TYPES  # noqa: E402
+from eullm_forge.rl import DEADLINE_TYPES, JUDGED_TYPES  # noqa: E402
 
 KEPT = DEADLINE_TYPES | {"inesistente"}
 
@@ -83,10 +88,16 @@ def prompt_row(item, index: NormIndex, k: int, absent: bool = False) -> dict | N
         found = index.search(item.question, k)
         note = index.missing_article_note(item.question)
         content, tipo = open_book_prompt(item.question, found, note=note), item.metadata["tipo"]
-    return {"id": item.id + ("-assente" if absent else ""),
-            "prompt": [{"role": "user", "content": content}],
-            "tipo": tipo, "keywords": list(item.keywords or []),
-            "code": code, "articolo": art}
+    row = {"id": item.id + ("-assente" if absent else ""),
+           "prompt": [{"role": "user", "content": content}],
+           "tipo": tipo, "keywords": list(item.keywords or []),
+           "code": code, "articolo": art}
+    if tipo in JUDGED_TYPES:
+        # What the judge reads: the same three fields judge_answers.py reads
+        # from an answers file, so the reward grades as the exam does.
+        row.update(question=item.question, reference=item.reference or "",
+                   rubric=rubric_v2(item.id, item.rubric or "", item.reference or ""))
+    return row
 
 
 def cap_share(rows: list[dict], tipo: str, share: float, rng: random.Random) -> list[dict]:
@@ -112,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="share of by-topic deadline questions also asked without their article")
     ap.add_argument("--inesistente-share", type=float, default=0.2,
                     help="largest share of the prompts that may ask about a nonexistent article")
+    ap.add_argument("--judged", type=int, default=0,
+                    help="also this many questions on what an article provides, graded by a "
+                         "judge during training (grpo_train.py --judge-url)")
     ap.add_argument("-k", type=int, default=3, help="retrieved texts per question, as the exam")
     ap.add_argument("--embedder", help="retrieve with BM25 fused with this embedding model "
                     "(eullm_forge.eval.dense); default BM25 alone")
@@ -129,10 +143,11 @@ def main(argv: list[str] | None = None) -> int:
                              cache_dir=args.retrieval_cache)
     else:
         index = NormIndex.from_files(args.norms)
-    items = [it for it in build_exam(index.records, per_code=args.per_code, seed=args.seed,
-                                     exclude=exclude)
-             if it.metadata.get("tipo") in KEPT]
+    drawn = build_exam(index.records, per_code=args.per_code, seed=args.seed, exclude=exclude)
+    items = [it for it in drawn if it.metadata.get("tipo") in KEPT]
     rng = random.Random(args.seed)
+    judged = [it for it in drawn if it.metadata.get("tipo") in JUDGED_TYPES]
+    judged = rng.sample(judged, min(args.judged, len(judged)))
     rows = [r for it in items if (r := prompt_row(it, index, args.k))]
     topic = [it for it in items if it.metadata["tipo"] == "termine_argomento"]
     for it in rng.sample(topic, int(round(len(topic) * args.absent_share))):
@@ -145,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     # eight right answers teaches nothing and costs a full generation, and a
     # file that is mostly "say it is not there" pushes towards refusing.
     rows = cap_share(rows, "inesistente", args.inesistente_share, rng)
+    rows += [r for it in judged if (r := prompt_row(it, index, args.k))]
     rng.shuffle(rows)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

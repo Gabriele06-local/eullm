@@ -22,6 +22,8 @@
 #                every norm-exam-dev*.jsonl in $WORK/eval)
 #   GP_SEED      draw (default 1: the first round's prompts were seed 0)
 #   GP_PER_CODE  questions of each kind per code (default 400)
+#   GP_JUDGED    also this many questions on what an article provides, for a
+#                GRPO run with a judge (make_grpo_prompts.py --judged; default 0)
 #   GP_NORMS     legislation files (default $WORK/norms/legislazione_*.chunks.jsonl)
 #   GP_CACHE     embedding cache (default $WORK/eval/retrieval-cache)
 #   GP_REPO      checkout to run (default: the one this file was submitted from)
@@ -74,6 +76,7 @@ echo "[gp] excluding: ${EXCLUDE[*]}"
 # no half file for the chain behind it to train on.
 python "$REPO/forge/scripts/make_grpo_prompts.py" --norms "${NORMS[@]}" \
     --exclude-exam "${EXCLUDE[@]}" --per-code "${GP_PER_CODE:-400}" --seed "${GP_SEED:-1}" \
+    --judged "${GP_JUDGED:-0}" \
     --embedder "${GP_EMBEDDER:-Qwen/Qwen3-Embedding-0.6B}" "${RR[@]}" \
     --retrieval-cache "${GP_CACHE:-$WORK/eval/retrieval-cache}" --out "$OUT.partial" &&
     mv -f "$OUT.partial" "$OUT"

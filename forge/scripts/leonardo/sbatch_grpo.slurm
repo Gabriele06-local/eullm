@@ -28,6 +28,12 @@
 #   GRPO_ARGS     extra grpo_train.py options, e.g. "--max-steps 600 --lr 3e-6"
 #   GRPO_LIBS     where TRL is (default $WORK/pylibs/grpo)
 #   GRPO_REPO     checkout to run (default: the one this file was submitted from)
+#   GRPO_JUDGE_GGUF  a judge model as GGUF: started with llama-server on the
+#                 LAST GPU of the job, the policy trains on the others, and
+#                 grpo_train.py gets --judge-url (prompts made with
+#                 make_grpo_prompts.py --judged). Still three GPUs, so still
+#                 placed like every other link; needs the CUDA llama-server
+#                 (sbatch_build_llama_server.slurm)
 #
 # Two-hour links, chained, never one long job: on Leonardo a 2 h request is
 # backfilled into gaps within the hour, a 24 h one waits for a whole node to
@@ -89,6 +95,12 @@ fail=0
 PYTHONPATH="$LIBS:$REPO/forge:${PYTHONPATH:-}" python -c "import trl" 2>/dev/null ||
     { echo "[grpo] TRL does not import from $LIBS — run setup_grpo_libs.sh" >&2; fail=1; }
 [ "$GPUS" -ge 1 ] || { echo "[grpo] no GPU visible" >&2; fail=1; }
+SERVER="${LCPP_SERVER:-$LCPP_DIR/build-cuda/bin/llama-server}"
+if [ -n "${GRPO_JUDGE_GGUF:-}" ]; then
+    [ -s "$GRPO_JUDGE_GGUF" ] || { echo "[grpo] no judge GGUF at $GRPO_JUDGE_GGUF" >&2; fail=1; }
+    [ -x "$SERVER" ] || { echo "[grpo] no llama-server at $SERVER" >&2; fail=1; }
+    [ "$GPUS" -ge 2 ] || { echo "[grpo] a judge needs a GPU of its own: $GPUS visible" >&2; fail=1; }
+fi
 [ "$fail" -eq 0 ] || exit 1
 
 # shellcheck disable=SC1091
@@ -96,7 +108,46 @@ source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
 export PYTHONPATH="$LIBS:$REPO/forge:${PYTHONPATH:-}"
+JUDGE=()
+PROCS="$GPUS"
+if [ -n "${GRPO_JUDGE_GGUF:-}" ]; then
+    # The GPUs as Slurm numbered them; the last one judges.
+    IFS=, read -r -a DEVS <<< "${CUDA_VISIBLE_DEVICES:-$(seq -s, 0 $((GPUS - 1)))}"
+    JUDGE_DEV="${DEVS[-1]}"
+    POLICY_DEVS="$(IFS=,; echo "${DEVS[*]:0:${#DEVS[@]}-1}")"
+    PROCS=$((${#DEVS[@]} - 1))
+    if [ -s "$(dirname "$SERVER")/../modules.txt" ] && command -v module >/dev/null 2>&1; then
+        # shellcheck disable=SC2046
+        module load $(cat "$(dirname "$SERVER")/../modules.txt") 2>/dev/null || true
+    fi
+    PORT="$(python -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
+    mkdir -p "$GRPO_OUT"
+    SLOTS="${GRPO_JUDGE_SLOTS:-16}"
+    CUDA_VISIBLE_DEVICES="$JUDGE_DEV" "$SERVER" -m "$GRPO_JUDGE_GGUF" --host 127.0.0.1 \
+        --port "$PORT" -ngl 999 -np "$SLOTS" -c $((SLOTS * 8192)) --no-webui \
+        > "$GRPO_OUT/judge-server-${SLURM_JOB_ID:-local}.log" 2>&1 &
+    JUDGE_PID=$!
+    # Added to the heartbeat's trap, not in place of it: replacing it left
+    # the heartbeat loop running after the job, holding its output open.
+    trap 'kill "$JUDGE_PID" 2>/dev/null; _heartbeat_end' EXIT INT TERM
+    echo "[grpo] judge   $GRPO_JUDGE_GGUF on GPU $JUDGE_DEV, port $PORT; policy on $POLICY_DEVS"
+    ready=0
+    for _ in $(seq 1 "${GRPO_JUDGE_WAIT:-900}"); do
+        kill -0 "$JUDGE_PID" 2>/dev/null || break
+        if python -c "import urllib.request,sys; sys.exit(urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=5).status != 200)" 2>/dev/null; then
+            ready=1; break
+        fi
+        sleep 1
+    done
+    if [ "$ready" -ne 1 ]; then
+        echo "[grpo] the judge did not come up:" >&2
+        tail -15 "$GRPO_OUT/judge-server-${SLURM_JOB_ID:-local}.log" >&2
+        exit 1
+    fi
+    export CUDA_VISIBLE_DEVICES="$POLICY_DEVS"
+    JUDGE=(--judge-url "http://127.0.0.1:$PORT")
+fi
 # shellcheck disable=SC2086
-accelerate launch --num_processes "$GPUS" --num_machines 1 --mixed_precision bf16 \
+accelerate launch --num_processes "$PROCS" --num_machines 1 --mixed_precision bf16 \
     --dynamo_backend no "$REPO/forge/scripts/grpo_train.py" \
-    --model "$GRPO_MODEL" --prompts "$GRPO_PROMPTS" --out "$GRPO_OUT" ${GRPO_ARGS:-}
+    --model "$GRPO_MODEL" --prompts "$GRPO_PROMPTS" --out "$GRPO_OUT" "${JUDGE[@]}" ${GRPO_ARGS:-}

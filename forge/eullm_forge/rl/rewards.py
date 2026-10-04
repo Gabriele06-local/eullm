@@ -33,6 +33,9 @@ from ..eval.norm_exam import _UNITS, _number_of
 
 DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente"})
+# Kinds no program can check: what an article provides is graded by a judge
+# model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
+JUDGED_TYPES = frozenset({"contenuto"})
 
 #: How many different deadlines a right answer may name: the one asked, and
 #: one more for the article that also mentions, say, a notice period.
@@ -173,11 +176,14 @@ def _text(completion) -> str:
     return "".join(m.get("content", "") for m in completion if isinstance(m, dict))
 
 
-def answer_reward(completions, tipo, keywords, **_) -> list[float]:
+def answer_reward(completions, tipo, keywords, **_) -> list[float | None]:
     """TRL reward function: one score per completion.
 
     TRL passes the dataset's other columns as keyword lists aligned with the
     completions, so ``tipo`` and ``keywords`` come from the prompts file
-    written by make_grpo_prompts.py.
+    written by make_grpo_prompts.py. A judged kind gets None, which TRL reads
+    as "this function does not score this completion": the judge reward
+    does.
     """
-    return [score_answer(_text(c), t, k) for c, t, k in zip(completions, tipo, keywords)]
+    return [None if t in JUDGED_TYPES else score_answer(_text(c), t, k)
+            for c, t, k in zip(completions, tipo, keywords)]
