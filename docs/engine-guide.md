@@ -499,6 +499,45 @@ why and runs without it. The cache is llama.cpp PR #29887, which this build
 carries ahead of a llama.cpp release; its size and its behaviour may change
 when upstream merges it.
 
+**Pinned experts.** With the cache on, the experts it copies from are
+*pinned* when the model loads: registered with the GPU driver, so that
+copying one to the card is a direct transfer at the bus's full speed instead
+of one the driver stages through a buffer of its own, a piece at a time.
+Reading a prompt copies from the same experts and gains the same way. One
+line at load says how much was pinned and how long it took, or why nothing
+was:
+
+```
+llama_moe_cache: pinned N GiB of host experts in K ranges, in S s
+```
+
+Pinned memory cannot be swapped out or handed back to the page cache while
+the model is loaded, so the experts are pinned only when that leaves a
+quarter of the RAM, and at least 8 GiB, to everything else.
+`LLAMA_MOE_CACHE_PIN=0` leaves them as they were, to compare.
+
+**Where a decode step goes.** `LLAMA_MOE_CACHE_STATS=64` prints, every 64
+decode steps of up to 8 tokens, one line like this:
+
+```
+llama_moe_cache: 64 steps of 1.0 tokens: X ms/step = A ms to the routers of 48 layers + B ms in the cache + C ms after; M MiB/step copied, H% of the experts in VRAM; copying takes T ms/step (R GB/s)
+```
+
+- *to the routers*: from the start of the step until llama.cpp has read
+  back, layer after layer, which experts each router chose. Mostly the GPU
+  computing the layers up to there.
+- *in the cache*: choosing what to evict and starting the copies; with
+  experts not pinned, also the driver staging them. The GPU waits meanwhile.
+- *after*: the rest, from the last layer's experts to the next step.
+- *M MiB copied* and *H% in VRAM*: what the experts not in VRAM cost.
+- *copying takes*: measured on one step in 8, which waits for its copies to
+  finish so as to time them, and is left out of the times above.
+
+The statistics cost a little speed: measure tokens per second without them.
+At exit the cache's totals print too. Both variables are read by the
+patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
+and may change or go once it is settled.
+
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
 Some models are trained with a multi-token prediction (MTP) head: a small

@@ -1,6 +1,8 @@
 # Experts in RAM: the half of Strata llama.cpp lacks — implementation plan
 
-**Status:** plan, not started · 3 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
+**Status:** phases 1 and 2 written, to be measured on the reference PC · 4 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
+
+**How our changes are carried.** As patch files in `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, which the build script applies to a copy of the submodule (`llama_patches.rs`): the submodule stays at 6b7b03a, and nothing has to be pushed to the mirror for a change to build. `0001` gives CUDA a way to pin host memory on request; `0002` is phases 1 and 2 in the cache.
 
 ---
 
@@ -14,6 +16,9 @@ Qwen3.8-Flash-Next IQ2_XS on the reference PC, measured with `bench/speed_check.
 | EuLLM 0.7.20, the usual split | 21.5 | 256 |
 | llama.cpp + PR #29887, 8,000 MiB cache | 49.4 | 206 |
 | the same, with llama.cpp's MTP (2 drafts) | 36.3 | 196 |
+| EuLLM, `--moe-cache auto` | 43.6 | 210 |
+
+With `--moe-cache auto` the GPU was busy 59% of the time and the CPU idle.
 
 **Plain decoding is level.** Strata's paper gives 47-57 tokens/s without its MTP layer (finding 2, on an RTX 5070 with DDR5). The cache brings llama.cpp to 49.4.
 
@@ -40,12 +45,16 @@ Timers in the cache's callbacks, reported per step and per layer: time waiting o
 
 **Deliverable:** a table of where a step goes, on the reference PC. It decides how much phases 2 and 3 can win, and in which order.
 
+**Written** (patch `0002`): `LLAMA_MOE_CACHE_STATS=N` prints to stderr, every N steps of up to 8 tokens, the time per step split into the time until each layer's router is read back, the time in the cache's `prepare` and the rest; MiB copied and the share of experts found in VRAM; and the copy time and rate, from one step in 8 that waits for its copies. Per-layer figures are the per-step ones divided by the layers the line names. What it cannot see: the scheduler's own wait at each read-back is inside "to the routers", not apart from the GPU's computing.
+
 ### Phase 2 — Pin the experts (small; a candidate for a first upstream PR)
 
 Register the expert ranges of the mmap with CUDA. `ggml_backend_cuda_register_host_buffer` exists (`ggml/src/ggml-cuda/ggml-cuda.cu`:5021, behind `GGML_CUDA_REGISTER_HOST`), and llama.cpp never calls it.
 - Pin only the experts: about 35 GB for IQ2_XS out of 64 GB. Leave the 27 GB of n-gram tables (PLE) pageable: a token reads 16 rows of them.
 - Expected: misses and prompt-reading copies at the full PCIe 4.0 rate instead of through a staging buffer. It helps every model with experts in RAM, cache or not.
 - Risks: the pinned pages are read in at load (35 GB up front). The RAM left must hold everything else. Windows refuses one 34-43 GB pinned range (Strata finding 13), so pin in several.
+
+**Written** (patches `0001` and `0002`): CUDA's `ggml_backend_pin_host_buffer` / `ggml_backend_unpin_host_buffer` procs pin on request and say why they could not (read-only registration, which a read-only mmap needs). The cache pins the pages of the experts it copies from when it is created, in page-aligned ranges merged where tensors share a page (the load line says how many), only if that leaves a quarter of the RAM and at least 8 GiB to the rest, and unpins them when the context is freed. Experts loaded without mmap are in CUDA's pinned host buffer already and are left alone. `LLAMA_MOE_CACHE_PIN=0` turns it off for the comparison.
 
 ### Phase 3 — The CPU computes the misses, in parallel with the GPU (the core; weeks)
 
@@ -78,7 +87,7 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
   - code written with AI help must be disclosed, and the person submitting must be able to explain every line;
   - issues, PR descriptions and replies must be written by a person;
   - a feature starts as an issue.
-- Until then our changes are separate commits on top of 6b7b03a, anchored on `eullm/llama.cpp` like the PR commit, and rebased at every weekly bump.
+- Until then our changes are patch files on top of 6b7b03a (`llama-cpp-sys-2/patches/`), regenerated at every weekly bump that breaks them; each one turns into a commit for an upstream PR as it is.
 
 ## 4. Risks
 
@@ -87,6 +96,6 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
 - On AVX2 the i-quant dot products run at about 5 GB/s per core (Strata finding 7). Sixteen cores would exceed what DDR4 delivers, so on the reference PC RAM bandwidth caps the CPU half.
 - The PR supports one GPU only.
 
-## 5. First step
+## 5. Next step
 
-Phase 1, then phase 2. Code starts once this plan is agreed.
+Measure phases 1 and 2 on the reference PC: `bench/speed_check.py` with and without `LLAMA_MOE_CACHE_PIN=0`, then one run with `LLAMA_MOE_CACHE_STATS=64` for the table of where a step goes. Phase 3 or 4 follows from that table.

@@ -2715,9 +2715,26 @@ diligenza manuale.
   valore nel file (un byte), funziona. EuLLM non carica teste MTP da file
   separati: per Qwen3.8-Flash-Next l'MTP resta fuori finché non conviene.
 
-  **Da validare su GPU**: `eullm serve ... --moe-cache auto` sullo stesso
-  modello, con `bench/speed_check.py`, contro i 49,4 token/s della prova con
-  `llama-server`.
+  **Misurato in EuLLM** (`--moe-cache auto`, stesso PC, 2026-10-04): 43,6
+  token/s in scrittura, 210 in lettura, GPU al 59% e CPU ferma. Diagnosi e
+  fasi successive in `docs/moe-offload-plan.md`.
+
+  **Patch nostre sopra la PR (fasi 1 e 2 del piano).** Non sono commit da
+  ancorare sullo specchio ma file in
+  `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, che il build script
+  applica a una copia del sottomodulo in `OUT_DIR` (`llama_patches.rs`, test
+  in `engine/tests/llama_patches.rs`); il sottomodulo resta pulito su
+  `6b7b03a`. `0001` dà a CUDA due proc per bloccare in memoria (pin) un
+  intervallo su richiesta, senza `GGML_CUDA_REGISTER_HOST`; `0002` blocca gli
+  esperti da cui la cache copia e, con `LLAMA_MOE_CACHE_STATS=N`, stampa su
+  stderr dove va il tempo di un passo. `LLAMA_MOE_CACHE_PIN=0` lascia gli
+  esperti come prima, per il confronto. Al primo build dopo questo cambio
+  llama.cpp si ricompila da capo: la directory di build CMake cambia sorgente.
+
+  **Da validare su GPU**: `eullm serve ... --moe-cache auto` con
+  `bench/speed_check.py` (senza statistiche) e con `LLAMA_MOE_CACHE_PIN=0`
+  per il confronto; poi una corsa con `LLAMA_MOE_CACHE_STATS=64` per la
+  tabella della fase 1.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci

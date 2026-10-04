@@ -22,3 +22,7 @@ When the submodule moves, `cargo test --test llama_patches` in `engine/` says
 which patches still apply. Regenerate the ones that do not against the new
 commit, and delete the ones upstream has taken.
 
+| Patch | What it does |
+|---|---|
+| `0001-cuda-pin-host-memory-on-request.patch` | CUDA procs to pin and unpin host memory on request (read-only registration), reporting why pinning failed |
+| `0002-moe-cache-pin-host-experts-and-step-statistics.patch` | The MoE expert cache pins the experts it copies from (`LLAMA_MOE_CACHE_PIN=0` to compare), and `LLAMA_MOE_CACHE_STATS=N` reports where a decode step goes |
