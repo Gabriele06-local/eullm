@@ -21,18 +21,18 @@ def _gguf(tmp_path: Path, magic: bytes = b"GGUF") -> Path:
 
 def test_the_shipped_cards_pass_for_their_own_repository(tmp_path):
     for model in ("legal-it-8b", "legal-it-4b"):
-        assert publish_hf.problems(f"eullm/{model}", _gguf(tmp_path), f"{model}-Q4_K_M.gguf",
+        assert publish_hf.problems(f"EuLLM/{model}", _gguf(tmp_path), f"{model}-Q4_K_M.gguf",
                                    CARDS / model / "README.md") == []
 
 
 def test_a_card_of_the_other_model_is_caught(tmp_path):
-    found = publish_hf.problems("eullm/legal-it-4b", _gguf(tmp_path), "legal-it-4b-Q4_K_M.gguf",
+    found = publish_hf.problems("EuLLM/legal-it-4b", _gguf(tmp_path), "legal-it-4b-Q4_K_M.gguf",
                                 CARDS / "legal-it-8b" / "README.md")
     assert any("not the card of legal-it-4b" in p for p in found)
 
 
 def test_a_file_that_is_not_gguf_or_a_name_without_quant_is_refused(tmp_path):
-    found = publish_hf.problems("eullm/legal-it-8b", _gguf(tmp_path, b"PK\x03\x04"),
+    found = publish_hf.problems("EuLLM/legal-it-8b", _gguf(tmp_path, b"PK\x03\x04"),
                                 "legal-it-8b.gguf", CARDS / "legal-it-8b" / "README.md")
     assert any("not a GGUF file" in p for p in found)
     assert any("must end with the quantization" in p for p in found)
@@ -40,7 +40,7 @@ def test_a_file_that_is_not_gguf_or_a_name_without_quant_is_refused(tmp_path):
 
 def test_dry_run_hashes_and_sends_nothing(tmp_path, capsys):
     g = _gguf(tmp_path)
-    rc = publish_hf.main(["--repo", "eullm/legal-it-8b", "--gguf", str(g),
+    rc = publish_hf.main(["--repo", "EuLLM/legal-it-8b", "--gguf", str(g),
                           "--name", "legal-it-8b-Q4_K_M.gguf",
                           "--card", str(CARDS / "legal-it-8b" / "README.md"), "--dry-run"])
     out = capsys.readouterr().out
