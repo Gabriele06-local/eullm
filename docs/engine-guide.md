@@ -595,6 +595,19 @@ At exit the cache's totals print too. Both variables are read by the
 patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
 and may change or go once it is settled.
 
+**Copying the experts ahead while reading a prompt (experimental, off by
+default).** Reading a prompt copies each layer's experts to the card and
+then computes them, one after the other, with the GPU idle during the copy.
+`LLAMA_MOE_PREFETCH=1` copies the next expert tensor on a second stream of
+the GPU while the current one computes, into two slots of VRAM the size of
+the largest expert tensor (about 470 MiB on the model above, taken on top of
+what `--fit` planned: lower `--moe-cache` by as much). It applies to batches
+of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`), one GPU, and wants
+the experts pinned (`--no-mmap`). One line on stderr says it is on, with the
+slots' size, or why it is off. Not yet measured: compare the same greedy
+answer and the reading speed with `LLAMA_MOE_PREFETCH=0` and `=1` before
+relying on it (`docs/moe-offload-plan.md`, phase 6).
+
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
 Some models are trained with a multi-token prediction (MTP) head: a small
