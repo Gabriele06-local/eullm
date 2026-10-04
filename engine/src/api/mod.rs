@@ -487,13 +487,32 @@ impl AppState {
             }
             _ => None,
         };
+        let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
+        let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
+        // The MTP head drafts only on the scheduler with one slot, which a
+        // model with a projector never gets (see `batch_size` below); its
+        // context comes after the load, so sizing must leave it room.
+        let drafts = self.mtp > 0
+            && mmproj_path.is_none()
+            && override_batch_size.unwrap_or(self.batch_size) == 1;
+        let mtp_reserve = if drafts {
+            crate::fit::mtp_reserve_bytes(
+                info.as_ref(),
+                effective_ctx,
+                kv_bpe_k,
+                kv_bpe_v,
+                self.n_ubatch.unwrap_or(crate::inference::DEFAULT_N_UBATCH),
+            )
+        } else {
+            0
+        };
         let sizing = Sizing {
             info: info.as_ref(),
             layout: layout.as_ref(),
             file_size,
             ctx_size: effective_ctx,
-            kv_bpe_k: crate::inference::cache_type_bytes_per_elem(&cache_type_k),
-            kv_bpe_v: crate::inference::cache_type_bytes_per_elem(&cache_type_v),
+            kv_bpe_k,
+            kv_bpe_v,
             // The projector is loaded with the model, always, so sizing has
             // to count it — see `fit::place_mmproj` for where it goes and why.
             mmproj_bytes: crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref()),
@@ -505,6 +524,7 @@ impl AppState {
                 moe_cache,
                 auto_n_ubatch: self.n_ubatch.is_none(),
             },
+            mtp_reserve,
         };
 
         let mut make_more_room = false;
@@ -1026,7 +1046,8 @@ impl AppState {
             // than the flat reserve the fit charges (`--n-ubatch`).
             .saturating_add(crate::fit::ubatch_reserve_bytes(
                 self.n_ubatch.unwrap_or(crate::inference::DEFAULT_N_UBATCH),
-            ));
+            ))
+            .saturating_add(sizing.mtp_reserve);
         crate::fit::plan_offload(
             crate::fit::vram_bytes(),
             sizing.info,
@@ -1855,6 +1876,9 @@ struct Sizing<'a> {
     kv_bpe_v: f64,
     mmproj_bytes: u64,
     flags: crate::fit::OffloadFlags,
+    /// What `--mtp`'s draft context will take once the model has loaded
+    /// (`fit::mtp_reserve_bytes`); `0` when the load will draft nothing.
+    mtp_reserve: u64,
 }
 
 /// Free a generation model taken out of the residents, so that its memory

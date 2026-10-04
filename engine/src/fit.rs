@@ -71,6 +71,10 @@ pub struct GgufInfo {
     /// per-architecture attention-cadence default when the explicit key is
     /// missing.
     pub architecture: Option<String>,
+    /// Layers of a multi-token-prediction head (`<arch>.nextn_predict_layers`),
+    /// counted in `n_layers`, when the model carries one: what `--mtp`'s draft
+    /// context runs (see [`mtp_reserve_bytes`]).
+    pub nextn_layers: Option<u32>,
 }
 
 impl GgufInfo {
@@ -275,6 +279,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
     let mut key_length: Option<u32> = None;
     let mut value_length: Option<u32> = None;
     let mut full_attention_interval: Option<u32> = None;
+    let mut nextn_layers: Option<u32> = None;
     let mut architecture: Option<String> = None;
 
     // The metadata keys we want, each an integer stored as u32 or u64 depending
@@ -329,6 +334,8 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             Some(&mut value_length)
         } else if key_bytes.ends_with(b".full_attention_interval") {
             Some(&mut full_attention_interval)
+        } else if key_bytes.ends_with(b".nextn_predict_layers") {
+            Some(&mut nextn_layers)
         } else {
             None
         };
@@ -362,7 +369,9 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         // without it would always miss it. Dense models simply scan on to the
         // buffer's end — every unwanted value is skipped by cursor
         // arithmetic, and the truncation tolerance above already covers the
-        // case where the buffer ends first.
+        // case where the buffer ends first. `nextn_predict_layers` is in the
+        // set for the same reason: a model with an MTP head writes it after
+        // `full_attention_interval` (qwen35, key 32 against 30).
         if n_layers.is_some()
             && n_embd.is_some()
             && n_head.is_some()
@@ -370,6 +379,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             && key_length.is_some()
             && value_length.is_some()
             && full_attention_interval.is_some()
+            && nextn_layers.is_some()
         {
             break;
         }
@@ -384,6 +394,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         value_length,
         full_attention_interval,
         architecture,
+        nextn_layers,
     })
 }
 
@@ -813,6 +824,55 @@ pub(crate) fn decision_reserve_bytes(path: &Path, max_ctx: u32) -> u64 {
     let info = read_gguf_info(path);
     kv_cache_bytes(info.as_ref(), max_ctx, 2.0, 2.0).saturating_add(DECISION_COMPUTE_RESERVE_BYTES)
 }
+
+/// What `--mtp`'s draft context takes beside the model's own (see
+/// `inference::scheduler::start_mtp`): the KV cache of the model's MTP
+/// layers at `ctx` — attention layers, each paying for every token — and a
+/// compute buffer for a micro-batch of `n_ubatch` tokens through them. `0`
+/// for a model without MTP layers, where `--mtp` loads no head.
+///
+/// The draft context is built once the model has loaded, so the free VRAM a
+/// load is sized against still holds this memory: without the reserve, a
+/// model sized to fill the card left the head no room, and the load that
+/// created it was the one that failed.
+///
+/// Measured with the draft context's memory breakdown on Qwen3.5-0.8B-MTP
+/// (4,096 tokens of context, micro-batch 512): 8 MiB of KV, exactly this
+/// formula's, and 27 MiB of compute, 54 bytes per token of micro-batch and
+/// per unit of `n_embd`. [`MTP_COMPUTE_BYTES_PER_TOKEN_EMBD`] covers that
+/// with a fifth to spare. Not yet measured on an MoE model's head, whose
+/// experts the compute buffer may have to hold a copy of.
+pub(crate) fn mtp_reserve_bytes(
+    info: Option<&GgufInfo>,
+    ctx: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    n_ubatch: u32,
+) -> u64 {
+    let Some(info) = info else {
+        return 0;
+    };
+    let Some(nextn) = info.nextn_layers.filter(|&n| n > 0 && n < info.n_layers) else {
+        return 0;
+    };
+    let per_token_per_layer = match info.kv_elems_per_token_per_layer() {
+        Some((k_elems, v_elems)) => k_elems * kv_bytes_per_elem_k + v_elems * kv_bytes_per_elem_v,
+        None => FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER,
+    };
+    let kv = per_token_per_layer * f64::from(nextn) * f64::from(ctx);
+    let n_embd = f64::from(info.n_embd.filter(|&n| n > 0).unwrap_or(4096));
+    let compute = (f64::from(n_ubatch) * n_embd * MTP_COMPUTE_BYTES_PER_TOKEN_EMBD)
+        .max(MTP_COMPUTE_FLOOR_BYTES);
+    (kv + compute) as u64
+}
+
+/// Compute buffer of `--mtp`'s draft context, per token of micro-batch and
+/// per unit of `n_embd` (see [`mtp_reserve_bytes`]).
+const MTP_COMPUTE_BYTES_PER_TOKEN_EMBD: f64 = 64.0;
+
+/// The least compute buffer [`mtp_reserve_bytes`] counts, for a small model
+/// on a small micro-batch.
+const MTP_COMPUTE_FLOOR_BYTES: f64 = 32.0 * 1024.0 * 1024.0;
 
 /// Coarse KV reserve used only when the GGUF header doesn't expose the
 /// attention dims: ~128 B per token per layer (a rough F16 ballpark for
@@ -2230,6 +2290,7 @@ mod tests {
             value_length: None,
             full_attention_interval: None,
             architecture: None,
+            nextn_layers: None,
         }
     }
 
@@ -2510,6 +2571,7 @@ mod tests {
             value_length: None,
             full_attention_interval: None,
             architecture: None,
+            nextn_layers: None,
         };
         let free = 15 * 1024 * 1024 * 1024; // ~15 GiB free, 18.5 GB model
         let file = 18_500_000_000;
@@ -2652,6 +2714,7 @@ mod plan_offload_tests {
             value_length: Some(128),
             full_attention_interval: None,
             architecture: Some("qwen3".into()),
+            nextn_layers: None,
         }
     }
 
@@ -3230,6 +3293,96 @@ mod plan_offload_tests {
         assert!(roomy.full, "a MoE that fits whole: {:?}", roomy.basis);
     }
 
+    /// Qwen3.5-0.8B-MTP's draft context, as its memory breakdown measured
+    /// it at a 4,096-token context and a 512-token micro-batch: 8 MiB of KV
+    /// for its one MTP layer (2 KV heads of 256, F16), which the formula
+    /// gives exactly, and 27 MiB of compute, which the floor covers.
+    #[test]
+    fn the_mtp_head_context_is_reserved_as_measured() {
+        let qwen35_08b = GgufInfo {
+            n_embd: Some(1024),
+            key_length: Some(256),
+            value_length: Some(256),
+            full_attention_interval: Some(4),
+            architecture: Some("qwen35".into()),
+            nextn_layers: Some(1),
+            ..attention(25, 2)
+        };
+        let reserve = |info: &GgufInfo, ctx, n_ubatch| {
+            mtp_reserve_bytes(Some(info), ctx, F16.0, F16.1, n_ubatch)
+        };
+        assert_eq!(reserve(&qwen35_08b, 4096, 512), 8 * MIB + 32 * MIB);
+        assert!(reserve(&qwen35_08b, 4096, 512) >= 8 * MIB + 27 * MIB);
+        // The KV grows with the context, the compute with the micro-batch
+        // and the model's width.
+        assert_eq!(reserve(&qwen35_08b, 32768, 512), 64 * MIB + 32 * MIB);
+        let wider = GgufInfo {
+            n_embd: Some(4096),
+            ..qwen35_08b.clone()
+        };
+        assert_eq!(reserve(&wider, 4096, 2048), 8 * MIB + 512 * MIB);
+        // No MTP layers, no head: nothing to reserve, and a count the
+        // model's own layers cannot hold is a corrupt header.
+        for nextn_layers in [None, Some(0), Some(25)] {
+            let info = GgufInfo {
+                nextn_layers,
+                ..qwen35_08b.clone()
+            };
+            assert_eq!(reserve(&info, 4096, 512), 0, "{nextn_layers:?}");
+        }
+        assert_eq!(mtp_reserve_bytes(None, 4096, F16.0, F16.1, 512), 0);
+    }
+
+    /// A model sized to fill the card left `--mtp`'s head no room: its
+    /// context is built after the load, from the VRAM sizing had handed out.
+    /// Reserved, it costs the model the layers it needs instead.
+    #[test]
+    fn a_model_that_fills_the_card_leaves_the_mtp_head_its_room() {
+        let (info, file_size) = dense();
+        let info = GgufInfo {
+            n_embd: Some(5120),
+            nextn_layers: Some(1),
+            ..info
+        };
+        let total = 16 * GIB;
+        // The least free VRAM, in 64 MiB steps, at which the whole model
+        // goes on the GPU.
+        let fits_whole = |free| {
+            compute_fit(
+                Some((free, total)),
+                Some(&info),
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+            ) == FitDecision::FitsFully
+        };
+        let free = (1..=total / (64 * MIB))
+            .map(|steps| steps * 64 * MIB)
+            .find(|&free| fits_whole(free))
+            .expect("the fixture fits whole on this card");
+        let plan = |reserve| {
+            plan_offload(
+                Some((free, total)),
+                Some(&info),
+                None,
+                file_size,
+                4096,
+                F16.0,
+                F16.1,
+                reserve,
+                0,
+                flags(),
+            )
+        };
+        assert!(plan(0).full);
+        let head = mtp_reserve_bytes(Some(&info), 4096, F16.0, F16.1, 512);
+        assert!(head > 0);
+        let with_head = plan(head);
+        assert!(!with_head.full, "{:?}", with_head.basis);
+        assert!(with_head.gpu_layers >= 0 && (with_head.gpu_layers as u32) < info.n_layers);
+    }
+
     #[test]
     fn a_sequential_engine_reserves_its_kv_cache_and_compute_buffer() {
         // Qwen3-0.6B: 28 layers, 8 KV heads of 128 — 112 KiB per token.
@@ -3397,6 +3550,33 @@ mod key_length_tests {
         assert_eq!(info.kv_elems_per_token_per_layer(), Some((1024.0, 512.0)));
     }
 
+    /// A model with an MTP head writes `nextn_predict_layers` after
+    /// `full_attention_interval` (Qwen3.5-0.8B-MTP: keys 30 and 32), where the
+    /// parser used to stop once every other key it wanted was in hand.
+    #[test]
+    fn the_mtp_layer_count_is_read_after_the_attention_interval() {
+        let data = header(&[
+            (b"qwen35.block_count", 25),
+            (b"qwen35.embedding_length", 1024),
+            (b"qwen35.attention.head_count", 8),
+            (b"qwen35.attention.head_count_kv", 2),
+            (b"qwen35.attention.key_length", 256),
+            (b"qwen35.attention.value_length", 256),
+            (b"qwen35.full_attention_interval", 4),
+            (b"qwen35.nextn_predict_layers", 1),
+        ]);
+        let info = parse_gguf_header(&data).expect("header parses");
+        assert_eq!(info.full_attention_interval, Some(4));
+        assert_eq!(info.nextn_layers, Some(1));
+        let without = header(&[(b"qwen3.block_count", 36)]);
+        assert_eq!(
+            parse_gguf_header(&without)
+                .expect("header parses")
+                .nextn_layers,
+            None
+        );
+    }
+
     /// Qwen3.6-35B-A3B's tokenizer block (248k-token vocabulary) overruns
     /// the 8 MiB read budget on its own, so the buffer ends mid-array. The
     /// hyperparameter keys all precede it — a truncation there must degrade
@@ -3432,7 +3612,9 @@ mod key_length_tests {
     /// later duplicate that would overwrite an already-parsed value proves
     /// the stop happened by design, not because the buffer ran out. The
     /// wanted set includes `full_attention_interval`, which hybrid models
-    /// write AFTER the attention dims, so the fixture is hybrid-shaped.
+    /// write AFTER the attention dims, and `nextn_predict_layers`, which a
+    /// model with an MTP head writes after that, so the fixture is shaped
+    /// like one. A model without either reads on to the buffer's end.
     #[test]
     fn stops_reading_once_every_wanted_key_is_in_hand() {
         let data = header(&[
@@ -3443,11 +3625,13 @@ mod key_length_tests {
             (b"arch.attention.key_length", 256),
             (b"arch.attention.value_length", 256),
             (b"arch.full_attention_interval", 4),
+            (b"arch.nextn_predict_layers", 1),
             (b"arch.block_count", 99),
         ]);
         let info = parse_gguf_header(&data).expect("parses");
         assert_eq!(info.n_layers, 40);
         assert_eq!(info.full_attention_interval, Some(4));
+        assert_eq!(info.nextn_layers, Some(1));
     }
 
     /// The sizer must never hand the loader a split the loader will refuse.
@@ -3468,6 +3652,7 @@ mod key_length_tests {
             value_length: Some(256),
             full_attention_interval: Some(4),
             architecture: Some("qwen35".to_string()),
+            nextn_layers: None,
         };
         // The reported case: 14.38 GiB free on a 15.92 GiB card, 15.66 GiB
         // of weights, 4096 context, F16 cache.
@@ -3557,6 +3742,7 @@ mod key_length_tests {
             value_length: Some(256),
             full_attention_interval: None,
             architecture: None,
+            nextn_layers: None,
         };
         let hybrid = GgufInfo {
             full_attention_interval: Some(4),
@@ -3593,6 +3779,7 @@ mod key_length_tests {
             value_length: Some(128),
             full_attention_interval: None,
             architecture: None,
+            nextn_layers: None,
         };
         let assumed = GgufInfo {
             key_length: None,
@@ -3821,6 +4008,7 @@ mod moe_fit_tests {
             value_length: None,
             full_attention_interval: None,
             architecture: None,
+            nextn_layers: None,
         }
     }
 
