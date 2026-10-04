@@ -630,6 +630,10 @@ answer:
 | `--mtp 3` | 121.5 (+11%) | 173.2 (+58%) | 51% |
 | `--mtp 3 --mtp-p-min 0.5` | 115.0 (+5%) | 170.6 (+55%) | 77% |
 
+Measured with llama.cpp b11100. After the move to b11370 the same model
+on the same card wrote 114.8 and 120.2 tokens/s without drafts, and 146.1
+(+27%) and 194.3 (+62%) with `--mtp 2`, keeping the same 58% of the drafts.
+
 `--mtp 2` is the best start: the most on code, a fifth more on prose. Code
 repeats names and patterns the head predicts well, so it gains most; prose
 gains most from a single draft. A threshold raised the share of drafts kept
