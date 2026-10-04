@@ -406,3 +406,38 @@ def test_the_retrieval_check_measures_the_teachers_topic_questions(tmp_path, cap
     out = capsys.readouterr().out
     assert "argomento_insegnante n=1" in out
     assert "citazione" not in out
+
+
+def test_the_pairs_limit_is_a_budget_per_file_not_a_prefix(tmp_path, capsys):
+    """--pairs takes several files and the limit used to span the first one.
+
+    topic[:limit] cut the concatenation, so with two files of three questions
+    and --pairs-limit 2 the second contributed nothing at all -- and the line
+    below went on saying the items came from every file given. The job script
+    passes --pairs unquoted with RET_PAIRS_LIMIT, so this is the path a real
+    submission takes.
+    """
+    norms = tmp_path / "legislazione_cpc.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r) for r in CITAZIONE) + "\n")
+
+    def pairs_file(tag):
+        path = tmp_path / f"pairs-{tag}.jsonl"
+        path.write_text("\n".join(json.dumps({
+            "task": "openbook_grounded", "named": False,
+            "key": f"ob-g-cpc-{tag}{i}",
+            "instruction": f"Domanda {tag}{i}: che cosa dice l'art. {163 + i} del c.p.c.?",
+            "output": "x"}) for i in range(3)) + "\n", encoding="utf-8")
+        return path
+
+    a, b = pairs_file("A"), pairs_file("B")
+
+    script = Path(__file__).resolve().parents[1] / "scripts" / "check_retrieval.py"
+    spec = importlib.util.spec_from_file_location("check_retrieval2", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.main(["--pairs", str(a), str(b), "--pairs-limit", "2",
+                     "--norms", str(norms), "--boost", "3"]) == 0
+    out = capsys.readouterr().out
+    # Two questions per file, so four in all, and the second file is named.
+    assert "4 items from 2 file(s)" in out, out
+    assert "argomento_insegnante n=4" in out, out
