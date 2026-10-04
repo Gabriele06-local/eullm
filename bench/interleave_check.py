@@ -2,7 +2,7 @@
 """Does an answer keep coming while the server reads another request's long
 prompt? Roadmap item 0.7-D, checked on any machine.
 
-    eullm serve --batch-size 2 --default-model qwen3-8b
+    eullm serve --batch-size 2 --ctx-size 32768 --default-model qwen3-8b
     python3 bench/interleave_check.py --url http://127.0.0.1:11434 --model qwen3-8b
 
 Streams one answer from /api/generate and, once its first tokens have
@@ -14,7 +14,8 @@ the answer's speed before and during it. A server that reads a prompt whole
 before anything else moves stops the answer for the whole reading; one that
 reads it in chunks between the answer's tokens (EuLLM with `--batch-size` 2
 or more) keeps it coming, a little slower. With `--batch-size 1` the second
-request waits for the first instead, which this reports too.
+request waits for the first instead, which this reports too. `--ctx-size` is
+split among the slots: each must hold the long prompt.
 
 Standard library only.
 """

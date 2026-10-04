@@ -146,7 +146,9 @@ longest pause in the streamed answer meanwhile, and the answer's speed
 before and during. With `--batch-size 2` or more EuLLM reads the prompt in
 chunks between the answer's tokens and the answer keeps coming, a little
 slower; a server that reads a prompt whole stops it for the whole reading.
-Standard library only.
+`--ctx-size` is split among the slots, so give each room for the prompt
+(`--batch-size 2 --ctx-size 32768` for the default 8,000 tokens). Standard
+library only.
 
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
