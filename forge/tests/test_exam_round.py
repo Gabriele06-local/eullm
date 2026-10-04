@@ -152,3 +152,24 @@ def test_links_must_be_a_positive_number(leonardo):
     run, _ = leonardo
     r, calls = run(ROUND_EXAM_LINKS="0")
     assert r.returncode == 1 and "positive number" in r.stderr
+
+
+def test_a_round_can_queue_its_own_report_after_the_last_judge_link(leonardo):
+    run, work = leonardo
+    graded = work / "eval" / "graded-v2"
+    r, calls = run(ROUND_JUDGE_LINKS="2", ROUND_REPORT="v0.3-hyb base-hyb",
+                   ROUND_REPORT_DIR=str(graded), ROUND_JUDGE_ARGS="--rubric v2")
+    assert r.returncode == 0, r.stdout + r.stderr
+    exam, j1, j2, report = calls.splitlines()
+    assert "sbatch_judge.slurm" in j2 and "--dependency=afterany:102" in j2
+    assert "--dependency=afterany:103" in report and "--partition=lrd_all_serial" in report
+    assert f"--output={graded}/report.txt" in report
+    assert "--baseline v0.3-hyb" in report and "--baseline base-hyb" in report
+    assert graded.is_dir()
+    assert f"-> {graded}/report.txt" in r.stdout
+
+
+def test_without_a_report_the_round_says_where_the_grades_are(leonardo):
+    run, _ = leonardo
+    r, calls = run()
+    assert len(calls.splitlines()) == 2 and "results will be in" in r.stdout
