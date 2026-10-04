@@ -33,6 +33,8 @@ while [ $# -gt 0 ]; do
         --label) label="$2"; shift ;;
         --embedder) how="$how+emb"; shift ;;
         --reranker) how="$how+rr"; shift ;;
+        --gguf) how="$how+gguf:$(basename "$2")"; shift ;;
+        --llama-server) shift ;;
     esac
     shift
 done
@@ -104,3 +106,29 @@ def test_a_hybrid_round_is_labelled_apart_and_passes_the_models(job):
     assert r.returncode == 0, r.stdout + r.stderr
     assert asked == ["a-hyb+emb+rr", "b-hyb+emb+rr"]
     assert (out / "answers-a-open.jsonl").read_text() == "{}\n{}\n{}\n"
+
+
+def test_a_gguf_label_answers_with_the_gguf_and_the_others_do_not(job, tmp_path):
+    run, _ = job
+    gguf = tmp_path / "a-q4_k_m.gguf"
+    gguf.write_bytes(b"GGUF")
+    server = tmp_path / "llama-server"
+    server.write_text("#!/bin/sh\n")
+    server.chmod(0o755)
+    r, asked = run(EXAM_OPEN_ONLY="1", EXAM_GGUF=f"a={gguf}", LCPP_SERVER=str(server))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert asked == ["a-open+gguf:a-q4_k_m.gguf", "b-open"]
+
+
+def test_a_gguf_round_without_the_server_or_the_file_fails_before_asking(job, tmp_path):
+    run, _ = job
+    gguf = tmp_path / "a-q4_k_m.gguf"
+    gguf.write_bytes(b"GGUF")
+    r, asked = run(EXAM_GGUF=f"a={gguf}", LCPP_SERVER=str(tmp_path / "missing"))
+    assert r.returncode == 1 and asked == []
+    assert "no llama-server" in r.stderr
+    server = tmp_path / "llama-server"
+    server.write_text("#!/bin/sh\n")
+    server.chmod(0o755)
+    r, asked = run(EXAM_GGUF=f"a={tmp_path / 'nope.gguf'}", LCPP_SERVER=str(server))
+    assert r.returncode == 1 and asked == [] and "no GGUF" in r.stderr
