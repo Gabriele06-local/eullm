@@ -64,7 +64,7 @@ class Greedy:
 
     def __init__(self, model_id: str, max_new_tokens: int = 120):
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
 
         if not torch.cuda.is_available():
             raise RuntimeError("no GPU visible — this runs inside a GPU job")
@@ -72,9 +72,16 @@ class Greedy:
         self.max_new_tokens = max_new_tokens
         self.tok = AutoTokenizer.from_pretrained(model_id)
         t0 = time.time()
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_id, dtype=torch.bfloat16, device_map="balanced",
-        )
+        kwargs = {"dtype": torch.bfloat16, "device_map": "balanced"}
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(model_id, **kwargs)
+        except ValueError as exc:
+            # Qwen3.5/3.6 and Ministral 3 ship as image-and-text models, which
+            # AutoModelForCausalLM refuses; they grade text all the same
+            # (legal_eval.load_model does the same for the exam).
+            if "Unrecognized configuration class" not in str(exc):
+                raise
+            self.model = AutoModelForImageTextToText.from_pretrained(model_id, **kwargs)
         self.model.eval()
         print(f"[judge] loaded {model_id} in {time.time() - t0:.0f}s", flush=True)
 
@@ -86,8 +93,13 @@ class Greedy:
         self.tok.padding_side = "left"
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
+        # Thinking off, as legal_eval.chat_prompt asks the models: a hybrid
+        # Qwen 3.x judge (Qwen3.6-27B) otherwise spends its whole budget in a
+        # <think> block and never writes the grade line. A template without
+        # the switch (Qwen3-30B-A3B-Instruct-2507) ignores it.
         texts = [self.tok.apply_chat_template([{"role": "user", "content": p}],
-                                              tokenize=False, add_generation_prompt=True)
+                                              tokenize=False, add_generation_prompt=True,
+                                              enable_thinking=False)
                  for p in prompts]
         enc = self.tok(texts, return_tensors="pt", padding=True,
                        add_special_tokens=False).to(self.model.device)

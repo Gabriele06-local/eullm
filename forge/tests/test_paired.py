@@ -159,3 +159,46 @@ def test_answers_of_the_held_out_exam_are_not_exported(tmp_path):
     d.mkdir()
     _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "correct", 10)])
     assert _script("export_grade_review").main([str(d), "--out", str(tmp_path / "r.csv")]) == 2
+
+
+def test_a_review_subset_holds_exactly_the_answers_on_the_sheet(tmp_path):
+    src = tmp_path / "devbig"
+    src.mkdir()
+    for label in ("a", "b"):
+        (src / f"answers-{label}.jsonl").write_text("".join(
+            json.dumps({"id": f"norm-contenuto-codice_civile-{i}", "answer": f"{label}{i}"}) + "\n"
+            for i in range(10)))
+    sheet = tmp_path / "review.csv"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["n", "chiave", "giudizio"])
+        w.writerows([[1, "r1", "corretto"], [2, "r2", "sbagliato"], [3, "r3", ""]])
+    (tmp_path / "review.csv.keys.json").write_text(json.dumps({
+        "r1": "a|norm-contenuto-codice_civile-3", "r2": "a|norm-contenuto-codice_civile-7",
+        "r3": "b|norm-contenuto-codice_civile-0"}))
+    out = tmp_path / "devreview"
+    subset = _script("review_subset")
+    assert subset.main([str(sheet), "--answers", str(src), "--out", str(out)]) == 0
+    a = [json.loads(x)["id"] for x in (out / "answers-a.jsonl").read_text().splitlines()]
+    b = [json.loads(x)["id"] for x in (out / "answers-b.jsonl").read_text().splitlines()]
+    assert a == ["norm-contenuto-codice_civile-3", "norm-contenuto-codice_civile-7"]
+    assert b == ["norm-contenuto-codice_civile-0"]
+    # not a development name: refused
+    assert subset.main([str(sheet), "--answers", str(src), "--out",
+                        str(tmp_path / "final-v3")]) == 2
+
+
+def test_compare_without_a_baseline_still_measures_the_judge(tmp_path, capsys):
+    d = tmp_path / "devreview"
+    d.mkdir()
+    _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "wrong", 10)])
+    sheet = tmp_path / "review.csv"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["chiave", "giudizio"])
+        w.writerow(["r1", "corretto"])
+    (tmp_path / "review.csv.keys.json").write_text(
+        json.dumps({"r1": "a|norm-contenuto-codice_civile-1"}))
+    assert _script("compare_graded").main([str(d), "--human", str(sheet)]) == 0
+    out = capsys.readouterr().out
+    assert "against" not in out and "judge vs person on 1 answers" in out
