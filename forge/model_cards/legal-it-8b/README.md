@@ -117,7 +117,7 @@ Domanda per domanda, 7 risposte sono giuste solo con il Q4 e 5 solo con il bf16 
 ## Addestramento
 
 1. **Base:** [mistralai/Ministral-3-8B-Instruct-2512](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512), Apache 2.0.
-2. **SFT a libro aperto:** circa 19.000 esempi nel formato del prompt sopra.
+2. **SFT a libro aperto:** 18.972 esempi nel formato del prompt sopra.
    - L'85% sono domande e risposte scritte da Qwen3-30B-A3B-Instruct-2507 a partire da un singolo articolo, con l'indicazione di non aggiungere nulla che il testo non dica. Il prompt di addestramento contiene però i testi che il retrieval restituisce per quella domanda, così il modello impara a trovare quello giusto tra gli altri.
    - Il 15% sono domande su articoli inesistenti, con la nota nel prompt e una risposta che dice che l'articolo non c'è.
    - LoRA rank 32, learning rate 1e-4, 1 epoca, sequenze fino a 4.096 token, batch effettivo 16. LoRA unito ai pesi.
@@ -126,13 +126,13 @@ Domanda per domanda, 7 risposte sono giuste solo con il Q4 e 5 solo con il bf16 
    - LoRA rank 32, learning rate 1e-5, 250 passi, 8 risposte per prompt. LoRA unito ai pesi.
 4. **Conversione:** GGUF F16 con llama.cpp, poi Q4_K_M con `llama-quantize`. Solo testo: la parte visiva del modello di partenza non è inclusa.
 
-**Dati.** Solo testi normativi pubblici, da Normattiva: i codici civile, penale, di procedura civile e penale, del consumo e del processo amministrativo, la Costituzione, la legge n. 241/1990 e il d.P.R. n. 1199/1971, nel testo vigente all'aprile 2026. Né l'SFT né il GRPO usano sentenze o dati personali.
+**Dati.** Solo testi normativi pubblici, da Normattiva: i codici civile, penale, di procedura civile e penale, del consumo e del processo amministrativo, la Costituzione, la legge n. 241/1990 e il d.P.R. n. 1199/1971, nel testo vigente scaricato da Normattiva nel 2026. Né l'SFT né il GRPO usano sentenze o dati personali.
 
 **Calcolo.** L'addestramento è stato svolto sul supercomputer Leonardo di CINECA, nell'ambito dell'allocazione EuroHPC AI Factory EHPC-AIF-2026PG01-1147. Ringraziamo l'EuroHPC Joint Undertaking per l'accesso a Leonardo, ospitato da CINECA (Italia).
 
 ## Limiti
 
-- **Copertura.** Conosce le norme che gli vengono date nel prompt. La qualità dipende dal retrieval e dalla raccolta normativa: norme abrogate o modificate dopo l'aprile 2026, leggi non incluse nella raccolta e giurisprudenza non sono coperte.
+- **Copertura.** Conosce le norme che gli vengono date nel prompt. La qualità dipende dal retrieval e dalla raccolta normativa: norme abrogate o modificate dopo la raccolta (2026), leggi non incluse nella raccolta e giurisprudenza non sono coperte.
 - **Errori.** Circa una risposta su dieci sugli esami riservati è sbagliata o incompleta. Sui termini sbaglia meno, ma sbaglia.
 - **Valutazione automatica.** I risultati vengono da un giudice automatico e da controlli automatici, non da una revisione di giuristi.
 - **Lingua.** Addestrato e valutato solo in italiano.
@@ -150,7 +150,7 @@ Apache 2.0, come il modello di partenza Ministral-3-8B-Instruct-2512. I testi no
 
 - **Held-out results:** on 429 held-out questions it answers 89.0% correctly, against 80.9% for its base model with the same retrieval. The paired difference is significant under every criterion.
 - **Quantization:** Q4_K_M scores the same as bf16 (435 vs 437 of 472).
-- **Training:** open-book SFT on about 19k pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).
+- **Training:** open-book SFT on 18,972 pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).
 - **Intended use:** with the retrieval described above (BM25 + Qwen3-Embedding-0.6B + Qwen3-Reranker-0.6B).
 - **Not legal advice.**
 - **Compute:** trained on Leonardo (CINECA) through the EuroHPC AI Factory allocation EHPC-AIF-2026PG01-1147.

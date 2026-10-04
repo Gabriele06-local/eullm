@@ -91,6 +91,14 @@ Le domande sono costruite automaticamente dal testo degli articoli: che cosa pre
 
 Il 4B vale quanto la versione dell'8B addestrata con il solo SFT (363 su 429).
 
+Contro il modello di partenza, domanda per domanda (test esatto di McNemar):
+
+- con il giudice, solo le risposte corrette: 51 domande giuste solo per legal-it-4b, 19 solo per il modello di partenza;
+- contando giuste anche le risposte parziali: 46 a 12;
+- senza giudice: 22 a 5.
+
+Tutte e tre le differenze sono significative (p < 0,01).
+
 ### Come sono valutate le risposte
 
 - **Con il giudice.** Qwen3-30B-A3B-Instruct-2507 confronta ogni risposta con il testo dell'articolo e la classifica come corretta, parziale o sbagliata. Su 40 risposte valutate alla cieca anche in modo indipendente, l'accordo è stato tra il 68% e l'85% a seconda del criterio. Per questo ogni confronto è riportato anche contando giuste le risposte parziali e senza giudice.
@@ -110,7 +118,7 @@ Domanda per domanda, 8 risposte sono giuste solo con il Q4 e 12 solo con il bf16
 ## Addestramento
 
 1. **Base:** [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507), Apache 2.0.
-2. **SFT a libro aperto:** circa 19.000 esempi nel formato del prompt sopra.
+2. **SFT a libro aperto:** 18.972 esempi nel formato del prompt sopra.
    - L'85% sono domande e risposte scritte da Qwen3-30B-A3B-Instruct-2507 a partire da un singolo articolo, con l'indicazione di non aggiungere nulla che il testo non dica. Il prompt di addestramento contiene però i testi che il retrieval restituisce per quella domanda, così il modello impara a trovare quello giusto tra gli altri.
    - Il 15% sono domande su articoli inesistenti, con la nota nel prompt e una risposta che dice che l'articolo non c'è.
    - LoRA rank 32, learning rate 1e-4, 1 epoca, sequenze fino a 4.096 token, batch effettivo 16. LoRA unito ai pesi.
@@ -119,13 +127,13 @@ Domanda per domanda, 8 risposte sono giuste solo con il Q4 e 12 solo con il bf16
    - LoRA rank 32, learning rate 1e-5, 250 passi, 8 risposte per prompt. LoRA unito ai pesi.
 4. **Conversione:** GGUF F16 con llama.cpp, poi Q4_K_M con `llama-quantize`.
 
-**Dati.** Solo testi normativi pubblici, da Normattiva: i codici civile, penale, di procedura civile e penale, del consumo e del processo amministrativo, la Costituzione, la legge n. 241/1990 e il d.P.R. n. 1199/1971, nel testo vigente all'aprile 2026. Né l'SFT né il GRPO usano sentenze o dati personali.
+**Dati.** Solo testi normativi pubblici, da Normattiva: i codici civile, penale, di procedura civile e penale, del consumo e del processo amministrativo, la Costituzione, la legge n. 241/1990 e il d.P.R. n. 1199/1971, nel testo vigente scaricato da Normattiva nel 2026. Né l'SFT né il GRPO usano sentenze o dati personali.
 
 **Calcolo.** L'addestramento è stato svolto sul supercomputer Leonardo di CINECA, nell'ambito dell'allocazione EuroHPC AI Factory EHPC-AIF-2026PG01-1147. Ringraziamo l'EuroHPC Joint Undertaking per l'accesso a Leonardo, ospitato da CINECA (Italia).
 
 ## Limiti
 
-- **Copertura.** Conosce le norme che gli vengono date nel prompt. La qualità dipende dal retrieval e dalla raccolta normativa: norme abrogate o modificate dopo l'aprile 2026, leggi non incluse nella raccolta e giurisprudenza non sono coperte.
+- **Copertura.** Conosce le norme che gli vengono date nel prompt. La qualità dipende dal retrieval e dalla raccolta normativa: norme abrogate o modificate dopo la raccolta (2026), leggi non incluse nella raccolta e giurisprudenza non sono coperte.
 - **Errori.** Circa una risposta su sette sugli esami riservati è sbagliata o incompleta. Sui termini sbaglia meno, ma sbaglia.
 - **Valutazione automatica.** I risultati vengono da un giudice automatico e da controlli automatici, non da una revisione di giuristi.
 - **Lingua.** Addestrato e valutato solo in italiano.
@@ -141,9 +149,9 @@ Apache 2.0, come il modello di partenza Qwen3-4B-Instruct-2507. I testi normativ
 
 **legal-it-4b** is a 4B model, fine-tuned from Qwen3-4B-Instruct-2507, that answers questions on Italian law **from the legal texts placed in its prompt** (retrieval-augmented, open book). The Q4_K_M GGUF is 2.5 GB.
 
-- **Held-out results:** on 429 held-out questions it answers 85.1% correctly, against 77.6% for its base model with the same retrieval. [legal-it-8b](https://huggingface.co/eullm/legal-it-8b) reaches 89.0%.
+- **Held-out results:** on 429 held-out questions it answers 85.1% correctly, against 77.6% for its base model with the same retrieval; the paired difference is significant under every criterion. [legal-it-8b](https://huggingface.co/eullm/legal-it-8b) reaches 89.0%.
 - **Quantization:** Q4_K_M scores the same as bf16 (426 vs 422 of 472, p = 0.50).
-- **Training:** open-book SFT on about 19k pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).
+- **Training:** open-book SFT on 18,972 pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).
 - **Intended use:** with the retrieval described above (BM25 + Qwen3-Embedding-0.6B + Qwen3-Reranker-0.6B).
 - **Not legal advice.**
 - **Compute:** trained on Leonardo (CINECA) through the EuroHPC AI Factory allocation EHPC-AIF-2026PG01-1147.
