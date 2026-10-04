@@ -42,7 +42,9 @@ docker compose run --rm forge forge Qwen/Qwen3-14B --profile legal-it
 ```
 
 `/output` is the working directory, so the CLI's relative defaults
-(`./output`, `./datasets`, `./eval-out`) land in that volume. `--shm-size`:
+(`./output`, `./datasets`, `./eval-out`) land in that volume. For the
+legal-it anonymizer, which loads spaCy's Italian model, build with
+`--build-arg FORGE_EXTRAS=legal` (about 560 MB more). `--shm-size`:
 PyTorch's data loader workers pass batches through shared memory, and
 Docker's default is 64 MB. The container runs as uid 10001; a host directory
 mounted in place of a volume must be writable by it.

@@ -76,11 +76,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 # Forge itself, and what llama.cpp's converter needs beyond it (its tokenizer
 # formats: sentencepiece, and the protobuf version that reads them).
+# FORGE_EXTRAS, comma-separated extras of Forge's pyproject: "legal" adds
+# spaCy's Italian model, which the legal-it anonymizer loads (about 560 MB).
+ARG FORGE_EXTRAS=""
 WORKDIR /opt/eullm
 COPY forge/pyproject.toml forge/
 COPY forge/eullm_forge/ forge/eullm_forge/
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install ./forge \
+    pip install "./forge${FORGE_EXTRAS:+[$FORGE_EXTRAS]}" \
         "sentencepiece>=0.1.98,<0.3.0" \
         "protobuf>=4.21.0,<5.0.0"
 
