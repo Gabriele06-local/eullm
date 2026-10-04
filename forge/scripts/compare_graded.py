@@ -15,6 +15,11 @@ the two disagree how often the answer judged right was the longer one (see
 A difference is called real at p < 0.05 on BOTH the strict and the lenient
 count: a result that flips with how "partial" is read is not a result.
 
+The ``no-judge`` column and line score the deadline and absent-article
+questions by a check that needs no model at all (`eullm_forge.eval.paired.
+verifiable`): the same comparison, on the part of the exam where the judge
+cannot be the reason for a difference.
+
 ``--human`` adds how the judge agrees with a person on the answers they
 labelled (export_grade_review.py writes the sheet).
 
@@ -67,12 +72,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     print(f"{'model':<28} {'n':>5} {'correct':>8} {'partial':>8} {'wrong':>6} "
-          f"{'unparsed':>9} {'chars':>7}")
+          f"{'unparsed':>9} {'chars':>7}  {'no-judge':>9}")
     for label in sorted(models):
         g = models[label]
         c = g.counts()
+        ok, nv = g.verif_counts()
         print(f"{label:<28} {len(g.grades):>5} {c['correct']:>8} {c['partial']:>8} "
-              f"{c['wrong']:>6} {c['unparsed']:>9} {g.mean_length():>7.0f}")
+              f"{c['wrong']:>6} {c['unparsed']:>9} {g.mean_length():>7.0f}  {ok:>4}/{nv:<4}")
 
     rows = []
     if args.baseline:
@@ -91,6 +97,9 @@ def main(argv: list[str] | None = None) -> int:
                   f"p={c.p_lenient:.3f}  longer-right {lw}  -> {v}")
             if kinds:
                 print(f"{'':<28} by kind: {kinds}")
+            if c.verif_n:
+                print(f"{'':<28} no judge (deadlines, absent articles; n={c.verif_n}): "
+                      f"{c.verif_a_only}:{c.verif_base_only} p={c.p_verif:.3f}")
             rows.append([label, args.baseline, c.n, c.a_only, c.base_only, c.diff,
                          f"{c.p:.4f}", c.a_only_lenient - c.base_only_lenient,
                          f"{c.p_lenient:.4f}", v, lw, f"{models[label].mean_length():.0f}",
