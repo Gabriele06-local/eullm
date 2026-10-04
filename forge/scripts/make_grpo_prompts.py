@@ -18,6 +18,14 @@ Every prompt is built by the code the exam and the engine use
 (`NormIndex.search`, `missing_article_note`, `open_book_prompt`), so RL
 trains on exactly the input the model will be graded and used on.
 
+With ``--embedder`` (and ``--reranker``) the texts are retrieved the way the
+released models retrieve them -- BM25 fused with embeddings, reranked
+(`eullm_forge.eval.dense`) -- instead of by BM25 alone. The first GRPO round
+trained on BM25 contexts and is used with hybrid ones, which find the right
+article more often and put different neighbours next to it; the second
+round trains on what the model will actually be shown. The embedding and
+reranking models run on a GPU (sbatch_grpo_prompts.slurm).
+
 No article of an ``--exclude-exam`` file is drawn: training on the exam's
 articles would turn the exam into a memory test. The file holds counts and
 prompts, never an exam item.
@@ -105,12 +113,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--inesistente-share", type=float, default=0.2,
                     help="largest share of the prompts that may ask about a nonexistent article")
     ap.add_argument("-k", type=int, default=3, help="retrieved texts per question, as the exam")
+    ap.add_argument("--embedder", help="retrieve with BM25 fused with this embedding model "
+                    "(eullm_forge.eval.dense); default BM25 alone")
+    ap.add_argument("--reranker", help="with --embedder: reorder the fused list with this model")
+    ap.add_argument("--retrieval-cache", type=Path,
+                    help="where the document embeddings are cached")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args(argv)
 
     exclude = exam_articles(args.exclude_exam)
-    index = NormIndex.from_files(args.norms)
+    if args.embedder:
+        from eullm_forge.eval.dense import build_hybrid
+        index = build_hybrid(args.norms, args.embedder, reranker_id=args.reranker,
+                             cache_dir=args.retrieval_cache)
+    else:
+        index = NormIndex.from_files(args.norms)
     items = [it for it in build_exam(index.records, per_code=args.per_code, seed=args.seed,
                                      exclude=exclude)
              if it.metadata.get("tipo") in KEPT]
@@ -135,8 +153,9 @@ def main(argv: list[str] | None = None) -> int:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     counts = Counter(r["tipo"] for r in rows)
     kinds = ", ".join(f"{k} {v}" for k, v in sorted(counts.items()))
-    print(f"[grpo] {len(rows)} prompts ({kinds}), {len(exclude)} exam articles left out "
-          f"-> {args.out}")
+    from eullm_forge.eval.dense import describe
+    print(f"[grpo] {len(rows)} prompts ({kinds}), {len(exclude)} exam articles left out, "
+          f"retrieval {describe(index)} -> {args.out}")
     return 0
 
 
