@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from eullm_forge.rl import answer_reward, score_answer
+from eullm_forge.rl import abstains, answer_reward, score_answer
 
 SIXTY = ["60 giorni|sessanta giorni"]
 
@@ -104,6 +104,34 @@ def test_the_deadline_the_article_also_mentions_is_allowed():
 ])
 def test_saying_it_is_not_there_scores_where_it_is_true(answer, tipo):
     assert score_answer(answer, tipo) == 1.0
+
+
+@pytest.mark.parametrize("answer,tipo", [
+    ("Il testo fornito non contiene l'articolo richiesto.", "assente"),
+    ("Il brano riportato non contiene la disposizione richiesta.", "assente"),
+    ("La raccolta fornita non contiene l'art. 2999 del codice civile.", "inesistente"),
+    ("Dagli atti riportati non risulta alcuna disposizione in merito.", "assente"),
+    ("Non risulta nessuna norma che disciplini la materia.", "assente"),
+    ("Nel brano riportato non compare la disposizione di cui si chiede.", "assente"),
+    ("La raccolta non include l'articolo richiesto.", "assente"),
+])
+def test_the_abstention_is_paid_in_either_number(answer, tipo):
+    """"Non contiene" is "non contengono" with one text instead of many.
+
+    Only the plural was in the set, so the singular -- and "non risulta
+    alcuna", which is how the answer is usually put -- were correct
+    abstentions that scored nothing. Under GRPO an unpaid-but-correct phrasing
+    loses, so the policy is trained off it.
+    """
+    assert score_answer(answer, tipo) == 1.0
+
+
+@pytest.mark.parametrize("answer", [
+    "Il testo contiene l'articolo richiesto.",
+    "L'articolo 5 contiene la prescrizione di sessanta giorni.",
+])
+def test_saying_it_is_there_is_not_an_abstention(answer):
+    assert not abstains(answer)
 
 
 @pytest.mark.parametrize("answer", [
