@@ -7,10 +7,14 @@
 //! - **Sequential** (`InferenceEngine`): one request at a time.
 //! - **Continuous batching** (`SchedulerHandle`): multiple concurrent requests.
 //!
-//! Supports **dynamic model swapping**: when a request specifies a model that
-//! is not loaded, the server unloads the current model and loads the new one.
-//! Requests the old model was still answering are cut off with an error, as
-//! they always were; the residents are kept in `resident::ResidentModels`.
+//! Supports **models loaded on request**: when a request names a model that
+//! is not loaded, the server loads it, and makes room first. With one model
+//! at a time (`--max-loaded-models 1`, the default) that is a swap: the loaded
+//! model goes, and requests it was still answering are cut off with an error,
+//! as they always were. With several, the model goes only when the new one
+//! needs its place or its memory, the least recently used first, and a busy
+//! one is waited for rather than cut off. The residents are kept in
+//! `resident::ResidentModels`.
 
 mod auth;
 mod decision_policy;

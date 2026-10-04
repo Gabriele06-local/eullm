@@ -1,6 +1,6 @@
 # MVP 3 — several resident chat models, then `model: "auto"`: implementation plan
 
-**Status:** plan, not started · 1 October 2026. Written against `main` at 6f886c7: line numbers refer to that commit and will drift as the code moves. Ollama's behaviour was checked against docs.ollama.com/faq and docs.ollama.com/api/ps. Part of the [Reflex roadmap](reflex-roadmap.md), MVP 3.
+**Status:** implemented · commits 1-6 merged with #624, 7-14 with #644 (October 2026). Hardware validation (§5) is partial: `tools/residency_check.sh` passed 7 of 7 on 1 October, before commits 7-14 (its embedder check, V5, has not run on a GPU yet), and a short `tools/auto_check.sh` passed 9 of 9 (answers identical, router 15-19 ms, VRAM stable); the full run (AutoBench, the one-hour soak, the router on the CPU) and LUMI are still to do. Planned on 1 October 2026 against `main` at 6f886c7: line numbers refer to that commit and will drift as the code moves. Ollama's behaviour was checked against docs.ollama.com/faq and docs.ollama.com/api/ps. Part of the [Reflex roadmap](reflex-roadmap.md), MVP 3.
 
 ---
 
@@ -598,7 +598,8 @@ python3 bench/reflexbench/autobench.py --small qwen3-4b --large qwen3-8b \
 Each commit passes `cargo test` and `clippy -D warnings` (no dead code: pure functions land with their first caller) and changes nothing at the default except the defects it names.
 
 Real-model tests are `#[ignore]`, CPU, and run single-threaded:
-`EULLM_GENERATION_TEST_MODEL=stories260K.gguf EULLM_DECISION_TEST_MODEL=Qwen3-0.6B-Q8_0.gguf cargo test -p eullm-engine -- --ignored real_model_ --test-threads=1`.
+`EULLM_GENERATION_TEST_MODEL=stories260K.gguf EULLM_DECISION_TEST_MODEL=Qwen3-0.6B-Q8_0.gguf cargo test -p eullm-engine -- --ignored real_model_ --test-threads=1 --skip real_model_every_mode`.
+The one skipped compares the batched decision mode with separate evaluation, and only an F32 model holds it to its tolerance (on Q8_0 the batch's rounding moves it by 0.39 nats, which is noise, not a defect): `EULLM_DECISION_TEST_MODEL=stories260K.gguf cargo test -p eullm-engine -- --ignored real_model_every_mode`.
 Tests copy the tiny GGUF under several names into a temporary store, so they get distinct models without `same_file` deduplicating them.
 
 **1. `fix(engine): keep_alive counts from the end of a request, and 0 unloads after it`** (F1, F2)

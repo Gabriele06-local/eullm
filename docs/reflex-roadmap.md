@@ -1,8 +1,8 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0 done; MVP 1 measured on MuSiQue, its Italian set next; MVP 2
-to 4 under way, MCP already working through jev-style's server · 1 October
-2026
+**Status:** MVP 0 done; MVP 1 measured on MuSiQue, its Italian set next;
+MVP 2 done; MVP 3 done, its GPU validation half run; MVP 4's code merged, its
+first model not trained yet · 4 October 2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -255,7 +255,7 @@ when it may stop at most about one sufficient case in ten:
   company's documents take one. The Italian set is what says how the gate
   does on those.
 
-## MVP 2 — adapters, not a runtime  [🔧 now]
+## MVP 2 — adapters, not a runtime  [✅ done]
 
 - [✅ done] **MCP through jev-style's server.** jev-style (Apache-2.0)
   ships an MCP server that talks to any `/v1/systemone`. Tried against
@@ -265,38 +265,42 @@ when it may stop at most about one sufficient case in ten:
   ([#610](https://github.com/eullm/eullm/pull/610)). Claude Code, Claude Desktop and Cursor can now call `decide`,
   `noul`, `choice` and `score` on a local EuLLM; the set-up is in
   [`engine.md`](engine.md#jev-style-with-eullm-mcp-server-cli-python-client).
-- [🔧 now] **EuLLM's own MCP server, for what jev-style's lacks**
-  (`adapters/reflex-mcp`): `select_tools`, the two-stage selection MVP 0
+- [✅ done] **EuLLM's own MCP server, for what jev-style's lacks**
+  (`adapters/reflex-mcp`, [#633](https://github.com/eullm/eullm/pull/633)): `select_tools`, the two-stage selection MVP 0
   measured — the embeddings keep a shortlist, Reflex judges it, "none"
   included — and `rag_gate`, MVP 1's gate with a threshold calibrated on the
   user's own cases. It talks to a local EuLLM unless told otherwise.
-- [🔧 now] Examples for LangGraph and n8n (`examples/decision-langgraph`,
-  `examples/decision-n8n`): the orchestrator orchestrates, Reflex decides,
+- [✅ done] Examples for LangGraph and n8n (`examples/decision-langgraph`,
+  `examples/decision-n8n`, [#634](https://github.com/eullm/eullm/pull/634)): the orchestrator orchestrates, Reflex decides,
   a chat model on EuLLM writes.
-- [🔧 now] A server-side policy, `EULLM_DECISION_POLICY`, an `EULLM_*`
+- [✅ done] A server-side policy, `EULLM_DECISION_POLICY`
+  ([#623](https://github.com/eullm/eullm/pull/623)), an `EULLM_*`
   setting like every perimeter setting of the engine (see
   `engine/CLAUDE.md`): options the operator denies are removed before the
   model sees them, whatever a client asks, and the audit trail says so.
 
-## MVP 3 — several chat models resident, then `model: "auto"`  [🆕 next]
+## MVP 3 — several chat models resident, then `model: "auto"`  [✅ done]
 
 - [✅ done] The implementation plan, [`reflex-mvp3-plan.md`](reflex-mvp3-plan.md):
   how the engine's one generation slot becomes several, how they are sized,
   evicted and locked, where Reflex picks the model, the benchmark that
   decides whether it should, and fourteen commits in order, each behind the
-  flag with its tests and its GPU checks. Reading the code for it found six
-  defects in today's engine, fixed first: `keep_alive: 0` with a prompt
+  flag with its tests and its GPU checks. Reading the code for it found seven
+  defects in the engine (F1-F7 in the plan), fixed first, among them: `keep_alive: 0` with a prompt
   unloads the model before it answers; the idle deadline is counted from the
   start of a request, so a long generation can be unloaded mid-stream; a
   swap aborts the requests still running on the old model, though the docs
   say they finish; a sequential model's weights can outlive its unload and
   its idle context is not counted as taken; there is no `/api/ps`.
-- **The engine keeps one chat model loaded today**, next to the embedding
-  and decision slots; asking for another model swaps it, which takes
-  seconds. Choosing per request between two local chat models needs both
-  resident: a second chat slot, VRAM sizing for both, a scheduler per model.
-  Built behind a flag, with its own tests, validated on GPU before merge —
-  the one part of this roadmap that changes the engine's memory management.
+- [✅ done] **Several chat models resident** (`--max-loaded-models`,
+  [#624](https://github.com/eullm/eullm/pull/624)), next to the embedding
+  and decision slots: each sized against the VRAM the others leave, a
+  scheduler per model, the least recently used one unloaded when a new one
+  needs its place, `/api/ps` listing them. With the default of 1 the engine
+  swaps as it always did. `tools/residency_check.sh` passed 7 of 7 on the
+  RTX 5070 Ti on 1 October, before the routing commits.
+- [🔧 now] Its last GPU checks: the embedder beside two streaming models
+  (V5 in the plan) and a 32B alone (V3), with `tools/residency_check.sh`.
 - **Large-VRAM testing on EuroHPC**, where two big models fit side by side:
   - **LUMI-G** — AMD MI250X, 64 GB per GCD, eight GCDs per node. The
     development allocation EHPC-DEV-2026D09-278 funds exactly this kind of
@@ -306,24 +310,37 @@ when it may stop at most about one sufficient case in ten:
     allocation EHPC-AIF-2026PG01-1147 exists to train `legal-it-4b` and ends
     on 2 November 2026: engine tests there only if its budget leaves room.
     See [`leonardo-allocation-plan.md`](leonardo-allocation-plan.md).
-- Then `model: "auto"` on the OpenAI and Ollama endpoints: Reflex picks the
-  resident model that answers, with no change in the application. Measured
-  in large-model calls avoided, latency, and quality against always using
-  the large one.
+- [✅ done] **`model: "auto"`** on the OpenAI and Ollama endpoints
+  (`--auto-model`, [#644](https://github.com/eullm/eullm/pull/644)): Reflex
+  picks the resident model that answers, with no change in the application,
+  says which in the answer and the audit trail, and falls back when the
+  choice cannot load. A short `tools/auto_check.sh` passed 9 of 9 on the
+  RTX 5070 Ti: answers identical to asking the model by name, the router
+  deciding in 15-19 ms, VRAM stable.
+- [🔧 now] The full measurement: AutoBench on two model pairs with the
+  Jev-Style 0.8B and 2B as routers, at 1, 4 and 16 concurrent requests, a
+  one-hour soak, and the router on the CPU — large-model calls avoided,
+  latency and quality against always using the large one, judged by the
+  plan's kill criterion (§3).
 
 ## MVP 4 — decision models trained on your decisions  [🔧 now]
 
-- [🔧 now] Opt-in, local capture of traces: `EULLM_DECISION_TRACES` keeps
+- [✅ done] Opt-in, local capture of traces
+  ([#623](https://github.com/eullm/eullm/pull/623)): `EULLM_DECISION_TRACES` keeps
   each decision with its state, personal data redacted, and
   `POST /v1/systemone/feedback` records the right answer, the outcome or the
   correction against the decision it belongs to.
-- [🔧 now] Forge trains a small decision model from them, in EuLLM's own
+- [✅ done] Forge trains a small decision model from them, in EuLLM's own
   codes readout, with corrections, rules or a large model as the teacher
-  (`forge/eullm_forge/decisions`).
-- [🔧 now] A qualification test before any decision model is swapped in
-  (`bench/reflexbench/qualify.py`): calibration, noise between evaluation
+  (`forge/eullm_forge/decisions`,
+  [#626](https://github.com/eullm/eullm/pull/626)).
+- [✅ done] A qualification test before any decision model is swapped in
+  (`bench/reflexbench/qualify.py`, #626): calibration, noise between evaluation
   modes, accuracy on the domain's set, latency, and a pass or a fail.
   "Interchangeable" is earned by passing it, not by a configuration line.
+- [🆕 next] The first decision model of our own: the RAG gate, trained on
+  MVP 1's Italian set (`docs/forge.md`) and qualified with
+  `qualify.py`. It waits on that set's run.
 
 ## Beyond MVP 4  [🆕 next]
 
