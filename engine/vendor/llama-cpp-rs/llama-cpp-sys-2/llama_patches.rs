@@ -494,8 +494,10 @@ pub fn reset_build_dir_if_moved(build_dir: &Path, src: &Path) {
         _ => false,
     };
     if !same {
-        println!(
-            "cargo:warning=llama.cpp now builds from {}: rebuilding it from scratch",
+        // stderr, not a cargo warning: cargo replays a build script's warnings
+        // on every build that does not rerun it, and this one happens once
+        eprintln!(
+            "llama.cpp now builds from {}: rebuilding it from scratch",
             src.display()
         );
         let _ = fs::remove_dir_all(build_dir);
