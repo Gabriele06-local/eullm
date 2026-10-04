@@ -50,6 +50,42 @@ def make_checkpoints(root: Path, steps) -> None:
         (d / "training_state.pt").write_bytes(b"x")
 
 
+# --- the CLI gives every flag the type the config declares --------------------
+
+def _parse(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["distill.py", *argv])
+    return distill._parse_args()
+
+
+def test_a_numeric_flag_arrives_as_a_number(monkeypatch):
+    """"3" stayed a string, and range() said so deep in the trainer.
+
+    The module has `from __future__ import annotations`, so a dataclass field's
+    .type is the string "int" under PEP 563 and the identity tests in
+    _parse_args never fired: every flag fell through to the str branch.
+    """
+    cfg = _parse(monkeypatch, "--num-train-epochs", "3", "--learning-rate", "1e-4")
+    assert cfg.num_train_epochs == 3 and isinstance(cfg.num_train_epochs, int)
+    assert cfg.learning_rate == pytest.approx(1e-4) and isinstance(cfg.learning_rate, float)
+    assert list(range(cfg.num_train_epochs)) == [0, 1, 2]
+
+
+def test_a_bool_flag_can_be_turned_off(monkeypatch):
+    """--bf16 false used to leave bf16 true, with nothing said.
+
+    A bool field never got BooleanOptionalAction, so --bf16 took a value:
+    the string "false", which bool() reads as true.
+    """
+    assert _parse(monkeypatch, "--no-bf16").bf16 is False
+    assert _parse(monkeypatch, "--bf16").bf16 is True
+
+
+def test_a_flag_the_config_does_not_type_still_arrives_as_a_string(monkeypatch):
+    """The list fields are split by the trainer, not by argparse."""
+    cfg = _parse(monkeypatch, "--student-lora-target-modules", "q_proj,v_proj")
+    assert cfg.student_lora_target_modules == "q_proj,v_proj"
+
+
 # ── which checkpoint is the newest ───────────────────────────────────────
 
 def test_step_is_read_as_a_number_not_a_string(tmp_path):
