@@ -179,6 +179,12 @@ fn answer(lines: &[Value]) -> String {
         .collect()
 }
 
+/// A raw prompt of exactly `n` tokens on the test model: "the" is one token,
+/// and so is each " the" after it (a leading space would be one more).
+fn the_times(n: usize) -> String {
+    format!("the{}", " the".repeat(n.saturating_sub(1)))
+}
+
 /// The last line of a generation that ended as it should: done, for a reason
 /// a generation ends with, and no error anywhere.
 fn assert_finished(lines: &[Value]) {
@@ -1239,4 +1245,154 @@ async fn real_model_mtp_drafts_do_not_change_the_answer() {
         proposed > 0 && kept == 0,
         "wrong drafts: {kept} of {proposed} kept"
     );
+}
+
+/// With more than one slot a prompt is read a chunk at a time, between the
+/// tokens of the answers already going (roadmap 0.7-D). It used to be read
+/// whole as soon as its request was taken, and every answer stopped until it
+/// was: one long prompt froze every other conversation on the server.
+///
+/// An answer streams while a 3,500-token prompt arrives, read 16 tokens at a
+/// time beside it: the answer must keep coming while the prompt is read, and
+/// the prompt's own answer must be the one a server with a single slot,
+/// reading it whole, gives. The prompt's request asks for one token, so the
+/// time it takes is the time its prompt takes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_long_prompt_is_read_between_the_tokens_of_an_answer() {
+    let chunked = start(&["tiny-a"], |state| {
+        state.ctx_size = 8192;
+        state.batch_size = 2;
+        state.n_batch = 256;
+        state.n_ubatch = Some(16);
+    })
+    .await;
+    let long_prompt = the_times(3500);
+    let long_body = json!({
+        "model": "tiny-a", "prompt": long_prompt, "raw": true, "stream": false,
+        "cache_prompt": false, "options": { "temperature": 0, "seed": 1, "num_predict": 1 },
+    });
+
+    // The answer already going, timed token by token.
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/generate", chunked.base))
+        .json(&json!({
+            "model": "tiny-a", "prompt": "Once upon a time", "stream": true,
+            "options": { "num_predict": 3000 },
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let token_times = Arc::new(std::sync::Mutex::new(Vec::<Instant>::new()));
+    let times = Arc::clone(&token_times);
+    let streaming = tokio::spawn(async move {
+        let mut body = response.bytes_stream();
+        let mut pending = String::new();
+        let mut lines = Vec::new();
+        while let Some(chunk) = body.next().await {
+            pending.push_str(&String::from_utf8_lossy(&chunk.expect("chunk")));
+            while let Some(end) = pending.find('\n') {
+                let line: String = pending.drain(..=end).collect();
+                let line: Value = serde_json::from_str(line.trim()).expect("a JSON line");
+                if line["done"] != true {
+                    times.lock().unwrap().push(Instant::now());
+                }
+                lines.push(line);
+            }
+        }
+        lines
+    });
+    while token_times.lock().unwrap().len() < 8 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let sent = Instant::now();
+    let (status, read_in_chunks) = chunked.generate(long_body.clone()).await;
+    let answered = Instant::now();
+    assert_eq!(status, 200, "{read_in_chunks:?}");
+    assert_finished(&read_in_chunks);
+    assert_eq!(read_in_chunks.last().unwrap()["prompt_eval_count"], 3500);
+
+    let beside = token_times
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|t| **t > sent && **t < answered)
+        .count();
+    let lines = streaming.await.expect("the answer streamed");
+    assert_finished(&lines);
+    let answer_ended = *token_times.lock().unwrap().last().unwrap();
+    assert!(
+        answer_ended > answered,
+        "the answer ended before the prompt was read: make it longer"
+    );
+    // 3,500 tokens in chunks of 16 are 219 chunks, each after a token of the
+    // answer. Read whole, the prompt let out only what the answer wrote while
+    // the request was on its way: a handful.
+    assert!(
+        beside >= 100,
+        "{beside} tokens of the answer while the prompt was read"
+    );
+
+    let whole = start(&["tiny-a"], |state| {
+        state.ctx_size = 8192;
+        state.n_batch = 256;
+        state.n_ubatch = Some(16);
+    })
+    .await;
+    let (status, read_whole) = whole.generate(long_body).await;
+    assert_eq!(status, 200, "{read_whole:?}");
+    assert_eq!(answer(&read_in_chunks), answer(&read_whole));
+}
+
+/// A prompt read in chunks answers as the same prompt read whole, at the
+/// lengths where the chunks' edges fall (1 token, the batch, the batch and
+/// one more), from nothing and from a prefix the slot kept from the turn
+/// before. Greedy, on the CPU, where the two are the same arithmetic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_prompt_read_in_chunks_answers_as_one_read_whole() {
+    let configure = |slots: usize| {
+        move |state: &mut AppState| {
+            state.ctx_size = 4096;
+            state.batch_size = slots;
+            state.n_batch = 64;
+            state.n_ubatch = Some(16);
+        }
+    };
+    let chunked = start(&["tiny-a"], configure(2)).await;
+    let whole = start(&["tiny-a"], configure(1)).await;
+    let ask = |prompt: String, cache_prompt: bool| {
+        json!({
+            "model": "tiny-a", "prompt": prompt, "raw": true, "stream": false,
+            "cache_prompt": cache_prompt,
+            "options": { "temperature": 0, "seed": 1, "num_predict": 16 },
+        })
+    };
+
+    for words in [1, 64, 65, 200] {
+        let prompt = the_times(words);
+        let (status, a) = chunked.generate(ask(prompt.clone(), false)).await;
+        assert_eq!(status, 200, "{a:?}");
+        assert_finished(&a);
+        assert_eq!(a.last().unwrap()["prompt_eval_count"], words, "{a:?}");
+        let (status, b) = whole.generate(ask(prompt, false)).await;
+        assert_eq!(status, 200, "{b:?}");
+        assert_eq!(answer(&a), answer(&b), "{words} tokens");
+    }
+
+    // A second turn that extends the first: read from the prefix its slot
+    // kept, in chunks on one server, whole on the other.
+    let first = " Once upon a time".repeat(10);
+    let second = format!("{first}{}", " there was a dog".repeat(30));
+    for server in [&chunked, &whole] {
+        let (status, lines) = server.generate(ask(first.clone(), true)).await;
+        assert_eq!(status, 200, "{lines:?}");
+    }
+    let (_, a) = chunked.generate(ask(second.clone(), true)).await;
+    let (_, b) = whole.generate(ask(second, true)).await;
+    assert_finished(&a);
+    assert_finished(&b);
+    assert_eq!(answer(&a), answer(&b));
 }

@@ -65,7 +65,7 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   loop; l'endpoint `DELETE /api/requests/{id}` è rinviato a 0.9 (richiede il
   registry dei request_id, valore marginale finché il receiver-drop copre i casi reali).
 
-- [ ] **0.7-D · Mixed chunked prefill** *(P0)*
+- [x] **0.7-D · Mixed chunked prefill** *(P0 — implementato il 2026-10-04)*
   Oggi `prefill_sequence` decodifica tutti i chunk di un prompt lungo prima di
   restituire il controllo: le sequenze in streaming subiscono pause (head-of-line
   blocking). Rilevante solo con concorrenza (`eullm serve`); a `batch_size=1` il
@@ -80,6 +80,26 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   partenza del cursore. La cancellazione diventa verificabile anche tra i chunk di
   prefill (sinergia con 0.7-C). Testare prompt da 1, `n_batch` e `n_batch+1` token.
   Output identico a parità di seed rispetto al prefill monolitico.
+
+  **Fatto così** (`scheduler.rs`, step 7). Con più di uno slot una richiesta
+  nuova non viene più letta all'arrivo: `prefill_setup` fa i controlli e
+  prepara lo slot (con lo stesso ripiego su checkpoint o su prefill da zero
+  se il reuse fallisce), e il prompt entra in una coda (`PendingPrefill`, con
+  il cursore che parte dal prefisso riusato). A ogni giro: prima un token per
+  ogni sequenza che sta rispondendo (decode-first), poi un chunk del prompt più
+  vecchio in coda, di `n_ubatch` token se qualcuno sta rispondendo, di
+  `n_batch` se è solo. Due chiamate a `llama_decode` separate invece di un
+  solo batch misto: un chunk che fallisce resta del suo prompt (ripiego o
+  errore a quella richiesta sola) invece di far cadere tutte le sequenze del
+  batch, e i chunk partono dalle stesse posizioni dei micro-batch del prefill
+  intero, quindi l'output è identico. Con uno slot (default, e quindi con
+  `--mtp`) il prompt si legge intero come prima. La cancellazione si vede tra
+  un chunk e l'altro. Test su modello vero (`real_model_tests.rs`): risposta
+  identica al prefill intero a 1, `n_batch`, `n_batch+1` e 200 token, anche da
+  un prefisso riusato; un prompt di 3.500 token letto a chunk di 16 lascia
+  passare ≥100 token di una risposta in corso (letto intero: 16, il test
+  fallisce). Il batch misto in un'unica chiamata resta un'ottimizzazione
+  possibile, da misurare.
 
 - [x] **0.7-E · Auto-composizione `--fit` + `--n-cpu-moe`** *(implementato
   0.6.70-rc14)*

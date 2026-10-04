@@ -569,6 +569,18 @@ requests at the same time, and raise `--ctx-size` with it.
 
 With 16 concurrent requests on a consumer GPU, EULLM achieves ~2.5x throughput vs Ollama. See [benchmarks](benchmarks.md) for details.
 
+**A long prompt does not stop the others.** With more than one slot, a new
+request's prompt is read a chunk at a time between the decode steps of the
+answers already being written: every answering request gets its next token,
+then the prompt advances by one micro-batch (`--n-ubatch`), and so on until
+it is read. A 30,000-token RAG prompt used to be read whole the moment its
+request was taken, and every other answer on the server stopped until it
+was. Alone on the server a prompt is read a whole batch (`--n-batch`) at a
+time, as before, and with one slot (the default) nothing changes. Either way
+llama.cpp computes it one micro-batch at a time from the same positions, so
+the answer is the one a prompt read whole gets. Prompts wait in arrival
+order; one is read at a time.
+
 ### Context window and batch slots
 
 The `--ctx-size` flag sets the **total** KV cache budget, shared across all batch slots (matching Ollama/llama.cpp server behaviour). Each slot gets `ctx_size / batch_size` tokens of context:
