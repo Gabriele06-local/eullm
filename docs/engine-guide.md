@@ -600,13 +600,17 @@ default).** Reading a prompt copies each layer's experts to the card and
 then computes them, one after the other, with the GPU idle during the copy.
 `LLAMA_MOE_PREFETCH=1` copies the next expert tensor on a second stream of
 the GPU while the current one computes, into two slots of VRAM the size of
-the largest expert tensor (about 470 MiB on the model above, taken on top of
-what `--fit` planned: lower `--moe-cache` by as much). It applies to batches
-of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`), one GPU, and wants
-the experts pinned (`--no-mmap`). One line on stderr says it is on, with the
-slots' size, or why it is off. Not yet measured: compare the same greedy
-answer and the reading speed with `LLAMA_MOE_PREFETCH=0` and `=1` before
-relying on it (`docs/moe-offload-plan.md`, phase 6).
+the largest expert tensor (about 470 MiB in all on the model above). It
+applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
+on one NVIDIA GPU (a CUDA build), with the model read into memory rather
+than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
+allows. The slots come out of the VRAM `--fit` leaves free, and only if a
+twentieth of the card, at least 512 MiB, stays free beside them; if not, it
+stays off and says how much it needed, and lowering `--moe-cache` by the
+difference makes room. One line on stderr says it is on, with the slots'
+size, or why it is off. Not yet measured: compare the same greedy answer and
+the reading speed with `LLAMA_MOE_PREFETCH=0` and `=1` before relying on it
+(`docs/moe-offload-plan.md`, phase 6).
 
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
