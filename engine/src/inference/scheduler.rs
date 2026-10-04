@@ -978,6 +978,13 @@ fn drafts_kept(drafts: &[LlamaToken], picks: &[LlamaToken]) -> usize {
         .count()
 }
 
+/// Test-only: every MTP draft replaced by a token the model never picks, so
+/// a test can show that an answer whose every draft is taken back is the
+/// answer with real drafts (`api::real_model_tests`).
+#[cfg(test)]
+pub(crate) static FORCE_WRONG_DRAFTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// One step of speculative decoding for the single active sequence: the
 /// MTP head drafts up to `n_max` tokens after `seq.last_token`, one decode
 /// reads that token and every draft, and the sequence's own sampler picks a
@@ -1019,6 +1026,12 @@ fn mtp_step(
         .max_tokens
         .saturating_sub(seq.tokens_generated.saturating_add(1)) as usize;
     drafts.truncate(room_ctx.min(room_tokens));
+    #[cfg(test)]
+    if FORCE_WRONG_DRAFTS.load(std::sync::atomic::Ordering::Relaxed) {
+        // The vocabulary's last token, a reserved one no answer picks.
+        let never = LlamaToken(model.n_vocab() - 1);
+        drafts.iter_mut().for_each(|draft| *draft = never);
+    }
     // Drafting decoded `last` and the drafts into the draft context; the
     // verify decode below hands it those positions again, read by the
     // target. llama-server drops them first, as here.

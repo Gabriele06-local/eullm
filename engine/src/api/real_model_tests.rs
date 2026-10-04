@@ -7,6 +7,14 @@
 //! EULLM_GENERATION_TEST_MODEL=/path/to/stories260K.gguf \
 //!     cargo test -p eullm-engine -- --ignored real_model_ --test-threads=1
 //! ```
+//!
+//! The MTP test needs a model that keeps its MTP layers instead, such as
+//! unsloth's Qwen3.5-0.8B-MTP (about 50 s on four CPU cores):
+//!
+//! ```text
+//! EULLM_MTP_TEST_MODEL=/path/to/Qwen3.5-0.8B-MTP-Q4_K_M.gguf \
+//!     cargo test -p eullm-engine -- --ignored real_model_mtp --test-threads=1
+//! ```
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -27,14 +35,21 @@ fn test_model() -> PathBuf {
         .into()
 }
 
-/// A store holding a copy of the test model under each of `names`, laid out
-/// the way a pull leaves one.
-fn store_of_copies(dir: &Path, names: &[&str]) -> ModelStore {
-    let source = test_model();
+/// The GGUF the MTP test runs on: one that keeps its MTP layers, such as
+/// unsloth's Qwen3.5-0.8B-MTP.
+fn mtp_test_model() -> PathBuf {
+    std::env::var("EULLM_MTP_TEST_MODEL")
+        .expect("set EULLM_MTP_TEST_MODEL to a GGUF with MTP layers")
+        .into()
+}
+
+/// A store holding a copy of `source` under each of `names`, laid out the
+/// way a pull leaves one.
+fn store_of_copies(source: &Path, dir: &Path, names: &[&str]) -> ModelStore {
     for name in names {
         let model_dir = dir.join(name);
         std::fs::create_dir_all(&model_dir).expect("model dir");
-        std::fs::copy(&source, model_dir.join("model.gguf")).expect("copy the test model");
+        std::fs::copy(source, model_dir.join("model.gguf")).expect("copy the test model");
         let manifest = json!({
             "id": name, "name": name, "description": "test copy", "languages": ["en"],
             "base": "test", "vram_gb": 1, "size_bytes": 0, "license": "MIT",
@@ -63,8 +78,17 @@ impl Drop for TestServer {
 /// Small and on one thread: a CPU shared with other work, and a model of a
 /// few hundred thousand parameters, need no more.
 async fn start(names: &[&str], configure: impl FnOnce(&mut AppState)) -> TestServer {
+    start_on(&test_model(), names, configure).await
+}
+
+/// [`start`], over copies of `source` rather than the test model.
+async fn start_on(
+    source: &Path,
+    names: &[&str],
+    configure: impl FnOnce(&mut AppState),
+) -> TestServer {
     let dir = std::env::temp_dir().join(format!("eullm-resident-{}", uuid::Uuid::new_v4()));
-    let store = store_of_copies(&dir, names);
+    let store = store_of_copies(source, &dir, names);
     let absent = Path::new("/nonexistent/eullm-test/.env");
     let mut state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
     state.ctx_size = 2048;
@@ -1159,4 +1183,60 @@ async fn real_model_auto_answers_on_every_endpoint_and_says_how() {
             }
         }
     }
+}
+
+/// `--mtp` must not change what the model writes: each draft is checked by
+/// the model, kept only when it is the token the model picks, and the
+/// positions it rejects are taken back. Greedy, the answer with the head's
+/// real drafts is therefore the answer with drafts that are all wrong —
+/// every decode taken back — character for character; and the real drafts
+/// are kept while the wrong ones never are. (Against the answer written
+/// without drafts it can differ: a token decoded among several is computed
+/// in another order than one decoded alone, and a hybrid model's recurrent
+/// layers even switch algorithm. See docs/engine-guide.md.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF with MTP layers in EULLM_MTP_TEST_MODEL"]
+async fn real_model_mtp_drafts_do_not_change_the_answer() {
+    use crate::inference::scheduler::FORCE_WRONG_DRAFTS;
+    use std::sync::atomic::Ordering;
+
+    let server = start_on(&mtp_test_model(), &["mtp-model"], |state| {
+        state.mtp = 2;
+    })
+    .await;
+    let body = json!({
+        "model": "mtp-model",
+        "prompt": "List the first ten prime numbers, separated by commas.",
+        "stream": false,
+        "cache_prompt": false,
+        "options": { "temperature": 0, "seed": 1, "num_predict": 96 },
+    });
+
+    let (status, real) = server.generate(body.clone()).await;
+    assert!(status.is_success(), "{real:?}");
+    assert_finished(&real);
+    FORCE_WRONG_DRAFTS.store(true, Ordering::Relaxed);
+    let (status, wrong) = server.generate(body).await;
+    FORCE_WRONG_DRAFTS.store(false, Ordering::Relaxed);
+    assert!(status.is_success(), "{wrong:?}");
+    assert_finished(&wrong);
+
+    assert_eq!(answer(&real), answer(&wrong));
+    let drafts = |lines: &[Value]| {
+        let last = lines.last().expect("an answer");
+        (
+            last["draft_n"].as_u64().unwrap_or(0),
+            last["draft_n_accepted"].as_u64().unwrap_or(0),
+        )
+    };
+    let (proposed, kept) = drafts(&real);
+    assert!(
+        proposed > 0 && kept > 0,
+        "real drafts: {kept} of {proposed} kept"
+    );
+    let (proposed, kept) = drafts(&wrong);
+    assert!(
+        proposed > 0 && kept == 0,
+        "wrong drafts: {kept} of {proposed} kept"
+    );
 }

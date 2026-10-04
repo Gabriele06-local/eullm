@@ -672,7 +672,11 @@ step-by-step to a chunked algorithm — and where two tokens are nearly tied
 the pick can differ, as with prompt-cache reuse (see `cache_prompt`). On
 that model, answers with real drafts and with drafts that were all wrong
 (every decode taken back) came out identical, character for character, and
-both left the plain answer at the same character. A hybrid model's
+both left the plain answer at the same character. A test checks the first
+half on every model with MTP layers it is given:
+`EULLM_MTP_TEST_MODEL=… cargo test -p eullm-engine -- --ignored real_model_mtp`
+fails if a draft the model rejected, or a token decoded after one, ever
+reaches the answer. A hybrid model's
 recurrent-state rollback window is raised to N for the drafts it may take
 back (`--rs-seq`); the startup banner shows the drafts asked for, and each
 answer says how many drafts the head proposed and the model kept: `draft_n`
