@@ -19,22 +19,33 @@ pip install -e ".[dev]"
 
 ### Docker (recommended for GPU isolation)
 
-Using Docker avoids installing PyTorch and CUDA libraries on your system:
+Using Docker avoids installing PyTorch and CUDA libraries on your system. The
+image also carries llama.cpp's GGUF converter and `llama-quantize`, built from
+the llama.cpp the engine uses, so the export stage runs inside it with no
+`LLAMA_CPP_PATH` to set. From the repository root, with the submodule checked
+out (`git submodule update --init --recursive`):
 
 ```bash
-# Build the image
-docker build -t eullm-forge forge/
+# Build the image (PyTorch for CUDA 13: driver r580 or newer; for an older
+# one add --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu126)
+docker build -f forge/Dockerfile -t eullm/forge .
 
 # Run a verticalizzazione pipeline
-docker run --gpus all \
+docker run --gpus all --shm-size=8g \
   -v eullm-models:/models \
   -v eullm-output:/output \
   -v eullm-hf:/data/huggingface \
-  eullm-forge forge Qwen/Qwen3-14B --profile legal-it
+  eullm/forge forge Qwen/Qwen3-14B --profile legal-it
 
-# Or via docker compose (from repo root)
+# Or via docker compose
 docker compose run --rm forge forge Qwen/Qwen3-14B --profile legal-it
 ```
+
+`/output` is the working directory, so the CLI's relative defaults
+(`./output`, `./datasets`, `./eval-out`) land in that volume. `--shm-size`:
+PyTorch's data loader workers pass batches through shared memory, and
+Docker's default is 64 MB. The container runs as uid 10001; a host directory
+mounted in place of a volume must be writable by it.
 
 ### Dependencies
 

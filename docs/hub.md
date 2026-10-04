@@ -15,30 +15,35 @@ cargo build --release
 
 ### Docker
 
+From the repository root (the image builds with the workspace's lockfile):
+
 ```bash
 # Build and run
-docker build -t eullm-hub hub/
-docker run -p 3000:3000 -v eullm-models:/models eullm-hub
+docker build -f hub/Dockerfile -t eullm/hub .
+docker run -d -p 3000:3000 -v eullm-models:/models eullm/hub
 
-# Or via docker compose (from repo root)
-docker compose up hub
+# Or via docker compose
+docker compose up -d hub
 ```
+
+It runs as uid 10001 with its storage in `/models`, the volume compose shares
+with the engine.
 
 ## Running
 
 ```bash
-# Default: port 8080, storage at ~/.eullm/hub/models/
+# Default: port 3000, storage at ~/.eullm/hub/models/
 eullm-hub
 
 # Custom port and storage
-EULLM_HUB_PORT=3000 EULLM_HUB_STORAGE=/data/models eullm-hub
+EULLM_HUB_PORT=8080 EULLM_HUB_STORAGE=/data/models eullm-hub
 ```
 
 ### Configuration
 
 | Environment variable | Default | Description |
 |---|---|---|
-| `EULLM_HUB_PORT` | `8080` | API server port |
+| `EULLM_HUB_PORT` | `3000` | API server port |
 | `EULLM_HUB_STORAGE` | `~/.eullm/hub/models/` | Root directory for GGUF model files |
 
 ### Storage layout
@@ -61,7 +66,7 @@ Place GGUF files in `{storage_root}/{model-name}/` and they become available for
 Health check.
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:3000/health
 ```
 
 ```json
@@ -75,7 +80,7 @@ curl http://localhost:8080/health
 List all available models with metadata, card URLs, and download URLs.
 
 ```bash
-curl http://localhost:8080/v1/models
+curl http://localhost:3000/v1/models
 ```
 
 ```json
@@ -106,7 +111,7 @@ curl http://localhost:8080/v1/models
 Get a specific model's metadata. Returns 404 if not found.
 
 ```bash
-curl http://localhost:8080/v1/models/legal-it-4b
+curl http://localhost:3000/v1/models/legal-it-4b
 ```
 
 ### `GET /v1/models/{name}/card`
@@ -114,7 +119,7 @@ curl http://localhost:8080/v1/models/legal-it-4b
 Get the model card documenting capabilities, training methodology, and limitations.
 
 ```bash
-curl http://localhost:8080/v1/models/legal-it-4b/card
+curl http://localhost:3000/v1/models/legal-it-4b/card
 ```
 
 **Model card structure:**
@@ -153,7 +158,7 @@ curl http://localhost:8080/v1/models/legal-it-4b/card
 Get the AI Act compliance card per Regulation (EU) 2024/1689.
 
 ```bash
-curl http://localhost:8080/v1/models/legal-it-4b/compliance
+curl http://localhost:3000/v1/models/legal-it-4b/compliance
 ```
 
 **Compliance card structure:**
@@ -213,10 +218,10 @@ Download the GGUF model file. Streams the file with `Content-Disposition: attach
 
 ```bash
 # Download a model
-curl -O http://localhost:8080/v1/models/legal-it-4b/download
+curl -O http://localhost:3000/v1/models/legal-it-4b/download
 
 # Or use wget
-wget http://localhost:8080/v1/models/legal-it-4b/download -O legal-it-4b.gguf
+wget http://localhost:3000/v1/models/legal-it-4b/download -O legal-it-4b.gguf
 ```
 
 Returns 404 if the GGUF file hasn't been uploaded to the Hub storage directory.

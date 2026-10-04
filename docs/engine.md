@@ -23,7 +23,7 @@ cargo build --release --features metal    # macOS Apple Silicon
 
 #### Build requirements
 
-- Rust 1.75+
+- Rust 1.85+ (the crates are edition 2024)
 - C/C++ compiler (gcc/clang) — needed by llama.cpp
 - CMake 3.14+
 - libclang (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora) — needed by `bindgen` for FFI bindings
@@ -33,19 +33,32 @@ cargo build --release --features metal    # macOS Apple Silicon
 
 ### Docker
 
+From the repository root, with llama.cpp's submodule checked out
+(`git submodule update --init --recursive`):
+
 ```bash
-# CPU only
-docker build -t eullm-engine engine/
-docker run -p 11434:11434 -v eullm-models:/models eullm-engine
+# docker compose: the API on 11434 and the chat UI on 11435, this machine only
+docker compose up -d engine                      # CPU
+docker compose --profile gpu up -d engine-gpu    # NVIDIA GPU
 
-# With NVIDIA GPU
-docker build -t eullm-engine --build-arg FEATURES=cuda engine/
-docker run --gpus all -p 11434:11434 -v eullm-models:/models eullm-engine
+# Or the images alone
+docker build -f engine/Dockerfile -t eullm/engine .
+docker run -d -p 127.0.0.1:11434:11434 -v eullm-models:/models \
+  -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine
 
-# Or via docker compose (from repo root)
-docker compose up engine              # CPU
-docker compose --profile gpu up engine-gpu   # GPU
+docker build -f engine/Dockerfile.cuda -t eullm/engine:cuda .
+docker run -d --gpus all -p 127.0.0.1:11434:11434 -v eullm-models:/models \
+  -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine:cuda
 ```
+
+The container runs `eullm serve` (add `--ui` after the image name for the
+chat UI, as compose does) as uid 10001, with its models in `/models` and its
+audit trail in `/data/audit`. `EULLM_ALLOWED_IPS` admits the Docker addresses
+a published port's callers arrive from; to serve other machines, publish on
+all interfaces and set `EULLM_API_KEYS`. The CUDA image needs the NVIDIA
+Container Toolkit and a driver for CUDA 13 (r580 or newer); its header gives
+the build arguments for CUDA 12 and for datacenter GPUs. Details:
+[Getting Started](getting-started.md#path-a-docker-recommended).
 
 ## CLI Commands
 
