@@ -194,3 +194,98 @@ def test_default_wikitext_is_requested_with_its_config(monkeypatch):
         distill_module.WIKITEXT_DEFAULT,
         distill_module.WIKITEXT_DEFAULT_CONFIG,
     ), f"the default must carry its config, got {seen[0]!r}"
+
+
+def _trainer_with_stub_models(vocab, length):
+    """A DistillationTrainer whose teacher and student are fixed tensors.
+
+    Enough for train_step: it only calls each model with the batch and reads
+    .logits, so the loss it computes is the real one over the real labels.
+    """
+    import torch
+
+    from eullm_forge.distill import DistillationTrainer, DistillConfig
+
+    class Fixed(torch.nn.Module):
+        """Returns the same logits every call.
+
+        The student's are a Parameter so train_step's backward() has something
+        to differentiate; the teacher's are under no_grad in the real trainer
+        and are read only.
+        """
+
+        def __init__(self, logits, *, trainable=False):
+            super().__init__()
+            if trainable:
+                self.logits = torch.nn.Parameter(logits)
+            else:
+                self.register_buffer("logits", logits)
+
+        def forward(self, input_ids=None, attention_mask=None):
+            class Out:
+                pass
+            out = Out()
+            out.logits = self.logits
+            return out
+
+    trainer = DistillationTrainer.__new__(DistillationTrainer)
+    trainer.config = DistillConfig(temperature=2.0, alpha=0.5)
+    trainer.device = torch.device("cpu")
+    torch.manual_seed(1)
+    trainer.teacher = Fixed(torch.randn(2, length, vocab))
+    trainer.student = Fixed(torch.randn(2, length, vocab), trainable=True)
+    trainer.optimizer = torch.optim.SGD(trainer.student.parameters(), lr=1e-9)
+    return trainer
+
+
+def test_the_kd_loss_does_not_read_the_padding():
+    """Two batches that differ only where attention_mask says to ignore must
+    give the same loss.
+
+    The loader pads every sample to max_length, and the labels used to be the
+    raw shifted input_ids -- nothing ever set a label to -100 -- so most of
+    what the loss read was padding. Changing one token at a padded position
+    moved it.
+    """
+    import torch
+
+    vocab, length = 50, 64
+    trainer = _trainer_with_stub_models(vocab, length)
+
+    def loss_of(input_ids, attention_mask):
+        return trainer.train_step({"input_ids": input_ids,
+                                  "attention_mask": attention_mask})
+
+    ids = torch.zeros(2, length, dtype=torch.long)    # 0 = PAD
+    ids[0, :8] = torch.randint(1, vocab, (8,))
+    ids[1, :40] = torch.randint(1, vocab, (40,))
+    mask = torch.zeros(2, length, dtype=torch.long)
+    mask[0, :8] = 1
+    mask[1, :40] = 1
+
+    base = loss_of(ids, mask)
+
+    ignored = ids.clone()
+    ignored[0, 50] = 7                               # a padded position
+    assert mask[0, 50] == 0
+    assert abs(loss_of(ignored, mask) - base) < 1e-6, "the loss read a padded token"
+
+    kept = ids.clone()
+    kept[0, 3] = 7                                    # a real token
+    assert mask[0, 3] == 1
+    assert abs(loss_of(kept, mask) - base) > 1e-6, \
+        "the loss stopped depending on the text at all"
+
+
+def test_a_batch_of_nothing_but_padding_is_zero_and_not_nan():
+    import math
+
+    import torch
+
+    vocab, length = 50, 16
+    trainer = _trainer_with_stub_models(vocab, length)
+    value = trainer.train_step({"input_ids": torch.zeros(2, length, dtype=torch.long),
+                                "attention_mask": torch.zeros(2, length,
+                                                               dtype=torch.long)})
+    assert math.isfinite(value), f"a padded batch gave {value}"
+    assert value == 0.0
