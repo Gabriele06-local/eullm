@@ -1020,7 +1020,7 @@ and guard show EuLLM's message instead of failing on the body:
 | 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
 | 404 | `not_found` | `model` names a model the server does not have |
 | 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
-| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, not `Content-Type: application/json` |
+| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, a body labelled as something JSON is not (`multipart/form-data`, …); one with no `Content-Type`, `text/plain` or curl's `application/x-www-form-urlencoded` is read as JSON |
 | 500 | `internal_error` | The model failed to load, or llama.cpp failed |
 
 The other endpoints keep the error bodies Ollama and OpenAI clients read.
@@ -1449,6 +1449,8 @@ What differs from jev-style's own server:
 ## API Reference
 
 The Engine exposes two sets of endpoints: the native EULLM API (Ollama-compatible) and an OpenAI-compatible API. CORS is enabled for browser-based tools.
+
+Request bodies are JSON. As Ollama does, the Engine reads a body as JSON when its `Content-Type` is `application/json`, missing, `text/plain` or `application/x-www-form-urlencoded` — the last is what `curl -d` sends, so Ollama's curl examples work as they stand. A body labelled as anything else (`multipart/form-data`, `application/octet-stream`) gets a 415.
 
 ### EULLM API (Ollama-compatible)
 
