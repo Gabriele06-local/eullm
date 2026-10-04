@@ -42,7 +42,8 @@ pub struct ModelBanner {
     /// VRAM for the cache of the experts kept in RAM (`--moe-cache`, once
     /// sized); 0 for none.
     pub moe_cache_bytes: u64,
-    /// `--no-mmap`: the model was read into memory, not mapped.
+    /// The model was read into memory, not mapped: `--no-mmap`, or an
+    /// expert cache choosing it (`fit::plan_read_into_memory`).
     pub no_mmap: bool,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
@@ -129,8 +130,9 @@ impl ModelBanner {
                 crate::fit::gib(self.moe_cache_bytes)
             );
         }
+        // `--no-mmap`, or `--moe-cache` choosing it: the log says which.
         if self.no_mmap {
-            println!("  Model file:    read into memory, not mapped (--no-mmap)");
+            println!("  Model file:    read into memory, not mapped");
         }
         if self.rs_seq > 0 {
             println!(
