@@ -50,6 +50,42 @@ def make_checkpoints(root: Path, steps) -> None:
         (d / "training_state.pt").write_bytes(b"x")
 
 
+# --- the CLI gives every flag the type the config declares --------------------
+
+def _parse(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["distill.py", *argv])
+    return distill._parse_args()
+
+
+def test_a_numeric_flag_arrives_as_a_number(monkeypatch):
+    """"3" stayed a string, and range() said so deep in the trainer.
+
+    The module has `from __future__ import annotations`, so a dataclass field's
+    .type is the string "int" under PEP 563 and the identity tests in
+    _parse_args never fired: every flag fell through to the str branch.
+    """
+    cfg = _parse(monkeypatch, "--num-train-epochs", "3", "--learning-rate", "1e-4")
+    assert cfg.num_train_epochs == 3 and isinstance(cfg.num_train_epochs, int)
+    assert cfg.learning_rate == pytest.approx(1e-4) and isinstance(cfg.learning_rate, float)
+    assert list(range(cfg.num_train_epochs)) == [0, 1, 2]
+
+
+def test_a_bool_flag_can_be_turned_off(monkeypatch):
+    """--bf16 false used to leave bf16 true, with nothing said.
+
+    A bool field never got BooleanOptionalAction, so --bf16 took a value:
+    the string "false", which bool() reads as true.
+    """
+    assert _parse(monkeypatch, "--no-bf16").bf16 is False
+    assert _parse(monkeypatch, "--bf16").bf16 is True
+
+
+def test_a_flag_the_config_does_not_type_still_arrives_as_a_string(monkeypatch):
+    """The list fields are split by the trainer, not by argparse."""
+    cfg = _parse(monkeypatch, "--student-lora-target-modules", "q_proj,v_proj")
+    assert cfg.student_lora_target_modules == "q_proj,v_proj"
+
+
 # ── which checkpoint is the newest ───────────────────────────────────────
 
 def test_step_is_read_as_a_number_not_a_string(tmp_path):
@@ -62,6 +98,32 @@ def test_unnumbered_directories_never_win(tmp_path):
     make_checkpoints(tmp_path, [500])
     (tmp_path / "checkpoint-final").mkdir()
     assert distill.latest_checkpoint(tmp_path).name == "checkpoint-500"
+
+
+def test_a_checkpoint_a_kill_caught_mid_write_is_skipped(tmp_path, capsys):
+    """The adapter is written first, the optimizer state second.
+
+    A walltime kill between the two leaves a checkpoint-N/ with the weights
+    and no training_state.pt, and load_checkpoint reads that file. Returning
+    it costs the rest of the chain: the link dies, the next link picks the same
+    directory, and the complete checkpoints that would have loaded are never
+    tried. The comment above prune_checkpoints already said the run's way back
+    is the one before it.
+    """
+    make_checkpoints(tmp_path, [2, 4, 6])
+    cut_short = tmp_path / "checkpoint-400"
+    cut_short.mkdir()
+    (cut_short / "adapter_model.safetensors").write_bytes(b"pesi")
+
+    assert distill.latest_checkpoint(tmp_path).name == "checkpoint-6"
+    assert "checkpoint-400" in capsys.readouterr().err
+
+
+def test_only_half_written_checkpoints_resumes_nothing_at_all(tmp_path):
+    make_checkpoints(tmp_path, [])
+    for step in (7, 8):
+        (tmp_path / f"checkpoint-{step}").mkdir()
+    assert distill.latest_checkpoint(tmp_path) is None
 
 
 def test_no_checkpoints_is_none_not_an_error(tmp_path):
@@ -404,7 +466,11 @@ def test_resuming_from_a_non_finite_checkpoint_is_caught_at_load(monkeypatch,
                                                                  tmp_path):
     """A checkpoint already holding nan would make every step nan; catching
     it at load costs one model load instead of the whole link."""
+    # A checkpoint that finished being written: latest_checkpoint skips one
+    # with no training_state.pt (a write cut short), and this test is about
+    # the nan, not about a half-written directory.
     (tmp_path / "checkpoint-4").mkdir()
+    (tmp_path / "checkpoint-4" / "training_state.pt").write_bytes(b"x")
     monkeypatch.setattr(distill, "_reload_student_from_checkpoint",
                         lambda *a, **k: TinyStudent(float("nan")))
     monkeypatch.setattr(distill, "load_checkpoint", lambda *a, **k: 4)

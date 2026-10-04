@@ -51,6 +51,44 @@ def kind_of(item_id: str) -> str:
     return m.group(1) if m else "?"
 
 
+_RUBRIC_DEADLINE = re.compile(r"termine di (\d+) (\w+)")
+
+
+def verifiable(row: dict) -> float | None:
+    """1.0 / 0.0 by a check that needs no judge, or None for a kind that does.
+
+    A deadline question has a number for an answer, and an absent article
+    one sentence: both are checked the way the GRPO reward checks them
+    (`eullm_forge.rl.rewards`), so this score cannot share the judge's
+    habits. On forty answers graded blind by a second model the judge agreed
+    on 68-85%, whichever judge and rubric; a difference that holds here as
+    well as under the judge does not depend on it.
+
+    A deadline answer is right when it names the deadline the question was
+    built on -- or, for an item drawn before the builder learnt to skip them,
+    another deadline its article states (the version-2 rubric's rule) -- and
+    not more than `MAX_DEADLINES` of them, nor a refusal.
+    """
+    from ..rl.rewards import MAX_DEADLINES, abstains, mentioned_deadlines, refuses
+    from .norm_exam import _UNITS, all_deadlines
+
+    kind = kind_of(str(row.get("id", "")))
+    answer = row.get("answer") or ""
+    if kind == "inesistente":
+        return 1.0 if abstains(answer) and not mentioned_deadlines(answer) else 0.0
+    if kind in ("termine", "termine_argomento"):
+        m = _RUBRIC_DEADLINE.search(row.get("rubric") or "")
+        if not m:
+            return None
+        wanted = (int(m.group(1)), _UNITS.get(m.group(2).lower(), m.group(2)))
+        article = (row.get("reference") or "").split("Testo integrale dell'articolo:", 1)[-1]
+        named = mentioned_deadlines(answer)
+        if refuses(answer) or len(named) > MAX_DEADLINES:
+            return 0.0
+        return 1.0 if named & ({wanted} | all_deadlines(article)) else 0.0
+    return None
+
+
 @dataclass
 class Graded:
     """One model's graded answers, by item id."""
@@ -58,6 +96,11 @@ class Graded:
     label: str
     grades: dict[str, str] = field(default_factory=dict)
     lengths: dict[str, int] = field(default_factory=dict)
+    #: judge-free scores of the items that have one (see `verifiable`)
+    verif: dict[str, float] = field(default_factory=dict)
+
+    def verif_counts(self) -> tuple[int, int]:
+        return int(sum(self.verif.values())), len(self.verif)
 
     def right(self, item_id: str, lenient: bool = False) -> bool:
         g = self.grades.get(item_id)
@@ -89,6 +132,9 @@ def load_graded(path: Path) -> Graded:
             r = json.loads(line)
             out.grades[r["id"]] = r.get("grade", "unparsed")
             out.lengths[r["id"]] = len(r.get("answer") or "")
+            v = verifiable(r)
+            if v is not None:
+                out.verif[r["id"]] = v
     return out
 
 
@@ -117,6 +163,13 @@ class Comparison:
     p_lenient: float
     by_kind: dict[str, tuple[int, int]]
     longer_wins: float | None   # among discordant items, share where the right answer is longer
+    verif_a_only: int = 0       # judge-free: a right, base not
+    verif_base_only: int = 0
+    verif_n: int = 0
+
+    @property
+    def p_verif(self) -> float:
+        return mcnemar_p(self.verif_a_only, self.verif_base_only)
 
     @property
     def diff(self) -> int:
@@ -145,9 +198,12 @@ def compare(a: Graded, base: Graded) -> Comparison:
         if la != lb:
             discordant += 1
             longer += (la > lb) == ar
+    shared = sorted(set(a.verif) & set(base.verif))
+    va = sum(a.verif[i] > base.verif[i] for i in shared)
+    vb = sum(base.verif[i] > a.verif[i] for i in shared)
     return Comparison(a.label, base.label, len(ids), b, c, mcnemar_p(b, c), bl, cl,
                       mcnemar_p(bl, cl), {k: (v[0], v[1]) for k, v in sorted(by_kind.items())},
-                      longer / discordant if discordant else None)
+                      longer / discordant if discordant else None, va, vb, len(shared))
 
 
 def human_agreement(rows: list[dict], models: dict[str, Graded]) -> dict:

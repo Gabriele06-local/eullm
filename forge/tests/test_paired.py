@@ -159,3 +159,88 @@ def test_answers_of_the_held_out_exam_are_not_exported(tmp_path):
     d.mkdir()
     _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "correct", 10)])
     assert _script("export_grade_review").main([str(d), "--out", str(tmp_path / "r.csv")]) == 2
+
+
+def test_a_review_subset_holds_exactly_the_answers_on_the_sheet(tmp_path):
+    src = tmp_path / "devbig"
+    src.mkdir()
+    for label in ("a", "b"):
+        (src / f"answers-{label}.jsonl").write_text("".join(
+            json.dumps({"id": f"norm-contenuto-codice_civile-{i}", "answer": f"{label}{i}"}) + "\n"
+            for i in range(10)))
+    sheet = tmp_path / "review.csv"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["n", "chiave", "giudizio"])
+        w.writerows([[1, "r1", "corretto"], [2, "r2", "sbagliato"], [3, "r3", ""]])
+    (tmp_path / "review.csv.keys.json").write_text(json.dumps({
+        "r1": "a|norm-contenuto-codice_civile-3", "r2": "a|norm-contenuto-codice_civile-7",
+        "r3": "b|norm-contenuto-codice_civile-0"}))
+    out = tmp_path / "devreview"
+    subset = _script("review_subset")
+    assert subset.main([str(sheet), "--answers", str(src), "--out", str(out)]) == 0
+    a = [json.loads(x)["id"] for x in (out / "answers-a.jsonl").read_text().splitlines()]
+    b = [json.loads(x)["id"] for x in (out / "answers-b.jsonl").read_text().splitlines()]
+    assert a == ["norm-contenuto-codice_civile-3", "norm-contenuto-codice_civile-7"]
+    assert b == ["norm-contenuto-codice_civile-0"]
+    # not a development name: refused
+    assert subset.main([str(sheet), "--answers", str(src), "--out",
+                        str(tmp_path / "final-v3")]) == 2
+
+
+def test_compare_without_a_baseline_still_measures_the_judge(tmp_path, capsys):
+    d = tmp_path / "devreview"
+    d.mkdir()
+    _write_graded(d, "a", [("norm-contenuto-codice_civile-1", "wrong", 10)])
+    sheet = tmp_path / "review.csv"
+    with sheet.open("w", newline="", encoding="utf-8-sig") as f:
+        w = csv.writer(f, delimiter=";")
+        w.writerow(["chiave", "giudizio"])
+        w.writerow(["r1", "corretto"])
+    (tmp_path / "review.csv.keys.json").write_text(
+        json.dumps({"r1": "a|norm-contenuto-codice_civile-1"}))
+    assert _script("compare_graded").main([str(d), "--human", str(sheet)]) == 0
+    out = capsys.readouterr().out
+    assert "against" not in out and "judge vs person on 1 answers" in out
+
+
+def test_deadline_and_absent_questions_are_scored_without_a_judge():
+    from eullm_forge.eval.paired import verifiable
+
+    ref = ("La domanda si propone entro sessanta giorni.\n\nTesto integrale dell'articolo: "
+           "La domanda si propone entro sessanta giorni dalla notifica.")
+    row = {"id": "norm-termine-codice_civile-2", "reference": ref,
+           "rubric": "Corretto solo se indica il termine di 60 giorni."}
+    assert verifiable({**row, "answer": "Il termine è di sessanta giorni."}) == 1.0
+    assert verifiable({**row, "answer": "Entro 60 giorni dalla notifica."}) == 1.0
+    assert verifiable({**row, "answer": "Il termine è di trenta giorni."}) == 0.0
+    assert verifiable({**row, "answer": "L'articolo non esiste."}) == 0.0
+    # an item drawn before the builder skipped two-deadline articles: either counts
+    two = {"id": "norm-termine-codice_procedura_penale-554-ter",
+           "rubric": "Corretto solo se indica il termine di 60 giorni.",
+           "reference": "non oltre sessanta giorni\n\nTesto integrale dell'articolo: fissa "
+                        "l'udienza non oltre sessanta giorni; un termine non inferiore a "
+                        "venti giorni."}
+    assert verifiable({**two, "answer": "Non inferiore a venti giorni."}) == 1.0
+    absent = {"id": "norm-inesistente-codice_civile-3000"}
+    assert verifiable({**absent, "answer": "L'art. 3000 non esiste nel codice."}) == 1.0
+    assert verifiable({**absent, "answer": "Prevede il termine di trenta giorni."}) == 0.0
+    assert verifiable({"id": "norm-contenuto-codice_civile-1", "answer": "x"}) is None
+
+
+def test_the_comparison_carries_the_judge_free_split(tmp_path, capsys):
+    d = tmp_path / "devbig"
+    d.mkdir()
+    ref = "x\n\nTesto integrale dell'articolo: si propone entro sessanta giorni."
+    rub = "Corretto solo se indica il termine di 60 giorni."
+    for label, answer, grade in (("a", "sessanta giorni", "correct"),
+                                 ("b", "trenta giorni", "correct")):
+        with (d / f"answers-{label}.graded.jsonl").open("w") as f:
+            for i in range(8):
+                f.write(json.dumps({"id": f"norm-termine-codice_civile-{i}", "answer": answer,
+                                    "reference": ref, "rubric": rub, "grade": grade}) + "\n")
+    assert _script("compare_graded").main([str(d), "--baseline", "b"]) == 0
+    out = capsys.readouterr().out
+    assert "8/8" in out and "0/8" in out
+    # the judge saw no difference; the check without a judge sees all of it
+    assert "no judge (deadlines, absent articles; n=8): 8:0 p=0.008" in out

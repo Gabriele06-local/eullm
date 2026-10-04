@@ -33,9 +33,18 @@
 #   ROUND_PER_CODE  items of each kind per code (default 10, make_norm_exam.py's)
 #   ROUND_CODES   only these codes, space-separated (default: all)
 #   ROUND_OPEN_ONLY  1 = ask open book only (EXAM_OPEN_ONLY)
+#   ROUND_JUDGE_ARGS  options for judge_answers.py (JUDGE_ARGS), e.g. "--rubric v2"
+#   ROUND_REPORT  space-separated baseline labels: once the last judge link
+#                 has ended, a short serial job runs compare_graded.py against
+#                 each and writes everything to <graded dir>/report.txt, so
+#                 nobody has to watch the queue to know when to look
+#   ROUND_REPORT_DIR  where the grades are (default ROUND_OUT; give the
+#                 --graded-dir of ROUND_JUDGE_ARGS when there is one)
 #   ROUND_EMBEDDER / ROUND_RERANKER / ROUND_OPEN_TAG  retrieve with BM25 +
 #                embeddings + reranker, labelled "<model>-<tag>" (see
 #                sbatch_norm_exam.slurm's EXAM_EMBEDDER)
+#   ROUND_GGUF    label=file.gguf pairs: those models answer with the GGUF
+#                 (sbatch_norm_exam.slurm's EXAM_GGUF)
 #   ROUND_EXAM_LINKS / ROUND_JUDGE_LINKS  2 h links for the exam and for the
 #                 judge (default 1 each). A large development set does not fit
 #                 one link: each link skips what an earlier one finished
@@ -116,7 +125,7 @@ mkdir -p "$OUT" logs
 export EXAM_MODELS="$ROUND_MODELS" EXAM_ITEMS="$ITEMS" EXAM_OUT="$OUT"
 export EXAM_NORMS="${NORMS[*]}" EXAM_REPO="$REPO" EXAM_OPEN_ONLY="${ROUND_OPEN_ONLY:-0}"
 export EXAM_EMBEDDER="${ROUND_EMBEDDER:-}" EXAM_RERANKER="${ROUND_RERANKER:-}"
-export EXAM_OPEN_TAG="${ROUND_OPEN_TAG:-open}"
+export EXAM_OPEN_TAG="${ROUND_OPEN_TAG:-open}" EXAM_GGUF="${ROUND_GGUF:-}"
 GPUS="${ROUND_GPUS:-1}"
 case "$GPUS" in ''|*[!0-9]*) echo "[round] ROUND_GPUS must be a number" >&2; exit 1 ;; esac
 EXAM_LINKS="${ROUND_EXAM_LINKS:-1}"
@@ -141,7 +150,7 @@ for i in $(seq 1 "$EXAM_LINKS"); do
     echo "[round] exam link $i/$EXAM_LINKS submitted: $prev"
 done
 
-export JUDGE_DIR="$OUT" JUDGE_REPO="$REPO"
+export JUDGE_DIR="$OUT" JUDGE_REPO="$REPO" JUDGE_ARGS="${ROUND_JUDGE_ARGS:-}"
 if [ "${ROUND_QUIET:-1}" = "0" ]; then unset JUDGE_QUIET; else export JUDGE_QUIET=1; fi
 kind="afterok"
 for i in $(seq 1 "$JUDGE_LINKS"); do
@@ -151,4 +160,19 @@ for i in $(seq 1 "$JUDGE_LINKS"); do
     prev="${judge%%;*}"
     kind="afterany"
 done
-echo "[round] results will be in $OUT/graded.csv"
+if [ -n "${ROUND_REPORT:-}" ]; then
+    RDIR="${ROUND_REPORT_DIR:-$OUT}"
+    mkdir -p "$RDIR"
+    CMP="$EULLM_VENV/bin/python $REPO/forge/scripts/compare_graded.py $RDIR"
+    WRAP="cd $RDIR"
+    for base in $ROUND_REPORT; do
+        WRAP+="; echo; $CMP --baseline $base"
+    done
+    report=$(sbatch --parsable --dependency="afterany:$prev" --partition=lrd_all_serial \
+             --time=00:15:00 --cpus-per-task=1 --mem=4G --job-name=eullm-report \
+             --output="$RDIR/report.txt" --wrap="$WRAP") ||
+        { echo "[round] could not submit the report (judge $prev is queued)" >&2; exit 1; }
+    echo "[round] report submitted: ${report%%;*} (afterany $prev) -> $RDIR/report.txt"
+else
+    echo "[round] results will be in $OUT/graded.csv"
+fi

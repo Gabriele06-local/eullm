@@ -59,7 +59,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, get_type_hints
 
 import torch
 import torch.nn.functional as F
@@ -183,14 +183,27 @@ def _parse_args() -> DistillConfig:
     parser.add_argument("--config", type=str, default=None,
                         help="YAML config path (CLI args override YAML).")
     # Allow every DistillConfig field as a CLI arg.
+    #
+    # This module has `from __future__ import annotations`, so under PEP 563 a
+    # field's .type is the string "int", not int: the identity tests below
+    # never fired and every flag landed on the str branch. So --bf16 false
+    # left bf16 true with nothing said, and range(epochs) raised TypeError deep
+    # in the trainer. get_type_hints resolves the strings; it is asked once,
+    # and an annotation it cannot resolve falls back to the string rather than
+    # taking the whole parser down over one field.
+    try:
+        declared_types = get_type_hints(DistillConfig)
+    except Exception:                          # a name this module cannot see
+        declared_types = {}
     for f in DistillConfig.__dataclass_fields__.values():
         flag = "--" + f.name.replace("_", "-")
         kw = {"default": None}
-        if f.type is bool:
+        declared = declared_types.get(f.name, f.type)
+        if declared is bool:
             kw["action"] = argparse.BooleanOptionalAction
-        elif f.type is int:
+        elif declared is int:
             kw["type"] = int
-        elif f.type is float:
+        elif declared is float:
             kw["type"] = float
         else:
             kw["type"] = str
@@ -563,10 +576,26 @@ def _checkpoint_step(path: Path) -> int:
 
 
 def latest_checkpoint(output_dir: Path) -> Optional[Path]:
+    """The newest checkpoint that finished being written, or None.
+
+    A checkpoint is written in two calls -- the adapter, then the optimizer
+    state -- so a walltime kill between them leaves a checkpoint-N/ with the
+    weights and no training_state.pt. Returning that one costs the whole rest
+    of the chain: load_checkpoint reads the state, dies, and the next link
+    picks the same directory again, while the complete checkpoints that would
+    have loaded sit right there unused. So the state file is the test, and a
+    skipped one is said out loud rather than passed over in silence.
+    """
     if not output_dir.is_dir():
         return None
     candidates = sorted(output_dir.glob("checkpoint-*"), key=_checkpoint_step)
-    return candidates[-1] if candidates else None
+    for path in reversed(candidates):
+        if (path / "training_state.pt").is_file():
+            return path
+        print(f"[resume] {path.name} is missing its training_state.pt, "
+              "a write was cut short: skipping to the one before it",
+              file=sys.stderr)
+    return None
 
 
 def prune_checkpoints(output_dir: Path, keep: int) -> list:

@@ -67,7 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pairs", nargs="+", type=Path, default=[],
                     help="open-book pairs: measure on their topic questions")
     ap.add_argument("--pairs-limit", type=int, default=0,
-                    help="use only the first N topic questions of --pairs (0 = all)")
+                    help="use only the first N topic questions of each --pairs "
+                         "file (0 = all)")
     ap.add_argument("--norms", nargs="+", type=Path, required=True)
     ap.add_argument("--boost", nargs="+", type=int, default=[0, 3])
     ap.add_argument("-k", type=int, default=3)
@@ -79,8 +80,15 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     items = [it for path in args.exams for it in load_eval_set(path)]
-    topic = [q for path in args.pairs for q in topic_questions(path)]
-    items.extend(topic[:args.pairs_limit] if args.pairs_limit else topic)
+    # A limit per file, not a prefix of the concatenation: taking one meant
+    # that with two --pairs files and a limit below the first file's size the
+    # second contributed nothing at all, while the count below went on saying
+    # the items came from every file given. sbatch_retrieval.slurm passes
+    # --pairs unquoted with several files and RET_PAIRS_LIMIT defaulting to
+    # 500, which is a per-file budget there.
+    for path in args.pairs:
+        found = topic_questions(path)
+        items.extend(found[:args.pairs_limit] if args.pairs_limit else found)
     if not items:
         ap.error("give exam files or --pairs")
     records = NormIndex.from_files(args.norms).records

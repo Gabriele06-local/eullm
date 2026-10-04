@@ -8,11 +8,12 @@ paying for it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
-from eullm_forge.rl import answer_reward, score_answer
+from eullm_forge.rl import abstains, answer_reward, score_answer
 
 SIXTY = ["60 giorni|sessanta giorni"]
 
@@ -104,6 +105,40 @@ def test_the_deadline_the_article_also_mentions_is_allowed():
 ])
 def test_saying_it_is_not_there_scores_where_it_is_true(answer, tipo):
     assert score_answer(answer, tipo) == 1.0
+
+
+@pytest.mark.parametrize("answer,tipo", [
+    ("Il testo fornito non contiene l'articolo richiesto.", "assente"),
+    ("Il brano riportato non contiene la disposizione richiesta.", "assente"),
+    ("La raccolta fornita non contiene l'art. 2999 del codice civile.", "inesistente"),
+    ("Dagli atti riportati non risulta alcuna disposizione in merito.", "assente"),
+    ("Non risulta nessuna norma che disciplini la materia.", "assente"),
+    ("Nel brano riportato non compare la disposizione di cui si chiede.", "assente"),
+    ("La raccolta non include l'articolo richiesto.", "assente"),
+])
+def test_the_abstention_is_paid_in_either_number(answer, tipo):
+    """"Non contiene" is "non contengono" with one text instead of many.
+
+    Only the plural was in the set, so the singular -- and "non risulta
+    alcuna", which is how the answer is usually put -- were correct
+    abstentions that scored nothing. Under GRPO an unpaid-but-correct phrasing
+    loses, so the policy is trained off it.
+    """
+    assert score_answer(answer, tipo) == 1.0
+
+
+@pytest.mark.parametrize("answer", [
+    "Il testo contiene l'articolo richiesto.",
+    "L'articolo 5 contiene la prescrizione di sessanta giorni.",
+    # An inesistente answer that invents the article and says what it leaves
+    # out is describing one, not saying it is absent.
+    "L'art. 2999 disciplina il trasporto; la norma non include i contratti a termine.",
+    "L'art. 3000 prevede che il venditore consegni la cosa; non comprende le spese di trasporto.",
+    "L'art. 1500 riguarda la locazione e non risulta alcuna eccezione per gli immobili urbani.",
+    "L'articolo stabilisce l'obbligo di custodia, che non riporta limiti di valore.",
+])
+def test_saying_it_is_there_is_not_an_abstention(answer):
+    assert not abstains(answer)
 
 
 @pytest.mark.parametrize("answer", [
@@ -250,5 +285,7 @@ def test_an_absent_prompt_drops_the_whole_article_not_just_its_first_chunk(tmp_p
     # these are the lines the article's own text would put in the prompt.
     assert "entro venti giorni dalla notifica all'atto" not in content
     assert "L'azione di accertamento decade dopo un anno dalla notifica" not in content
-    # ...and the other articles are still there, or there is no prompt at all.
-    assert "Art. 20." in content
+    # ...and other articles are still there, or there is no prompt at all. Not
+    # a named one: which of the twenty comes first is the ranking's business,
+    # and this test is about article 15 being gone.
+    assert len(re.findall(r"^\[\d+\]", content, re.M)) == 3

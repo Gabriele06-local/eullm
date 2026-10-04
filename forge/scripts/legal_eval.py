@@ -39,6 +39,15 @@ the answers file, so a wrong answer can be told apart from a wrong retrieval.
 The keyword score is a first sort. `judge_answers.py` grades the answers
 files against the references with a large model, which is the number to
 decide on.
+
+THE FILE THAT SHIPS. With ``--gguf`` the answers come from that GGUF through
+llama-server (`eullm_forge.eval.gguf`) instead of the bf16 weights; the
+positional model is still the merged directory it was made from, whose
+tokenizer builds the very same prompts. Two runs differing only in --gguf
+measure what quantization costs on these questions:
+
+    python forge/scripts/legal_eval.py <merged-dir> --label NAME-q4 \
+        --gguf <merged-dir's q4_k_m.gguf> --norms ...
 """
 
 from __future__ import annotations
@@ -190,14 +199,21 @@ def main() -> int:
                     help="where the document embeddings are cached")
     ap.add_argument("--batch-size", type=int, default=0,
                     help="questions generated together (default: 16 on GPU, 1 on CPU)")
+    ap.add_argument("--gguf", help="answer with this GGUF through llama-server instead of the "
+                    "bf16 weights; the positional model gives the tokenizer")
+    ap.add_argument("--llama-server", help="llama-server binary (default $LCPP_SERVER, else "
+                    "$LCPP_DIR/build-cuda/bin/llama-server)")
+    ap.add_argument("--server-parallel", type=int, default=4,
+                    help="with --gguf: questions decoded together")
+    ap.add_argument("--server-ctx", type=int, default=16384,
+                    help="with --gguf: context tokens per question (prompt + answer)")
     ap.add_argument("--quiet", action="store_true",
                     help="print totals only, never a question or an answer: for the "
                          "held-out exam, whose questions nobody improving the models "
                          "should read (see make_norm_exam.py)")
     args = ap.parse_args()
 
-    import torch
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoTokenizer
+    from transformers import AutoTokenizer
 
     items = load_eval_set(args.items) if args.items else load_seed()
     index = None
@@ -212,14 +228,8 @@ def main() -> int:
         print(f"[eval] open book: {len(index.records):,} legislation records, "
               f"{args.k} per question, retrieval {describe(index)}", flush=True)
     tok = AutoTokenizer.from_pretrained(args.model)
-    cuda = torch.cuda.is_available()
-    model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count(),
-                       fallback_cls=AutoModelForImageTextToText)
-    model.eval()
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
-    batch = args.batch_size or (16 if cuda else 1)
-    print(f"[eval] {len(items)} items on {'GPU' if cuda else 'CPU'}, batch {batch}", flush=True)
 
     contexts, prompts = {}, []
     for it in items:
@@ -230,8 +240,29 @@ def main() -> int:
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             content = open_book_prompt(it.question, found, note=note)
         prompts.append(chat_prompt(tok, content))
-    results = generate_answers(model, tok, prompts, batch_size=batch,
-                               max_new_tokens=args.max_new_tokens, end_ids=end_ids)
+    if args.gguf:
+        from eullm_forge.eval.gguf import LlamaServer, generate_answers_gguf
+        log = Path(args.answers).with_suffix(".server.log") if args.answers else None
+        print(f"[eval] {len(items)} items from {args.gguf} via llama-server, "
+              f"{args.server_parallel} at a time", flush=True)
+        with LlamaServer(args.gguf, binary=args.llama_server, parallel=args.server_parallel,
+                         ctx_per_slot=args.server_ctx, log_path=log) as server:
+            results = generate_answers_gguf(server, tok, prompts,
+                                            max_new_tokens=args.max_new_tokens,
+                                            end_ids=end_ids, parallel=args.server_parallel)
+    else:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+
+        cuda = torch.cuda.is_available()
+        model = load_model(AutoModelForCausalLM, args.model, torch.cuda.device_count(),
+                           fallback_cls=AutoModelForImageTextToText)
+        model.eval()
+        batch = args.batch_size or (16 if cuda else 1)
+        print(f"[eval] {len(items)} items on {'GPU' if cuda else 'CPU'}, batch {batch}",
+              flush=True)
+        results = generate_answers(model, tok, prompts, batch_size=batch,
+                                   max_new_tokens=args.max_new_tokens, end_ids=end_ids)
     answers = {it.id: text for it, (text, _) in zip(items, results)}
     ended = sum(e for _, e in results)
     if not args.quiet:
@@ -262,7 +293,8 @@ def main() -> int:
                                     "context": contexts.get(it.id)},
                                    ensure_ascii=False) + "\n")
     if args.csv:
-        append_csv_row(Path(args.csv), summary_row(args.label, args.model, report, ended))
+        append_csv_row(Path(args.csv),
+                       summary_row(args.label, args.gguf or args.model, report, ended))
     return 0
 
 

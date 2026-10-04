@@ -215,24 +215,34 @@ class DistillationTrainer:
     def kd_loss(self, student_logits, teacher_logits, labels):
         """Compute knowledge distillation loss.
 
-        Combines KL divergence (soft targets) with cross-entropy (hard targets).
+        Combines KL divergence (soft targets) with cross-entropy (hard
+        targets), both over the positions `labels` does not mark -100, so the
+        padding the loader adds is not part of either.
         """
         import torch.nn.functional as F
 
         T = self.config.temperature
         alpha = self.config.alpha
 
+        keep = labels != -100
+        n = int(keep.sum())
+        if n == 0:
+            return student_logits.sum() * 0.0        # a zero with the graph
+
         # Soft target loss (KL divergence)
         student_soft = F.log_softmax(student_logits / T, dim=-1)
         teacher_soft = F.softmax(teacher_logits / T, dim=-1)
-        kd_loss = F.kl_div(student_soft, teacher_soft, reduction="batchmean") * (T * T)
+        # batchmean over every position, so scale back to the kept ones
+        kd_loss = F.kl_div(student_soft, teacher_soft, reduction="none").sum(-1)
+        kd_loss = (kd_loss * keep).sum() / n * (T * T)
 
         # Hard target loss (cross-entropy)
         ce_loss = F.cross_entropy(
             student_logits.view(-1, student_logits.size(-1)),
             labels.view(-1),
             ignore_index=-100,
-        )
+            reduction="sum",
+        ) / n
 
         return alpha * kd_loss + (1 - alpha) * ce_loss
 
@@ -262,8 +272,19 @@ class DistillationTrainer:
         )
         student_logits = student_outputs.logits
 
-        # Labels are shifted input_ids
+        # Labels are shifted input_ids, and the padding is masked out of them.
+        #
+        # The loader pads every sample to max_length, so without this the
+        # loss was computed over mostly padding: measured on a batch of an
+        # 8-token and a 40-token document at length 64, 63.5% of the labels
+        # were PAD and ignore_index=-100 fired on none of them, because
+        # nothing ever set one. A token changed at a position attention_mask
+        # says to ignore moved the loss, which is the definition of a loss
+        # reading the padding. scripts/distill.py, the stage-2 trainer that
+        # actually runs, masks the same way.
         labels = input_ids[:, 1:].contiguous()
+        keep = attention_mask[:, 1:].bool()
+        labels = labels.masked_fill(~keep, -100)
         student_logits = student_logits[:, :-1, :].contiguous()
         teacher_logits = teacher_logits[:, :-1, :].contiguous()
 
