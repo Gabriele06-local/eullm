@@ -7,8 +7,11 @@ through a driver buffer from pageable memory; the large-batch copies the
 scheduler makes from the same tensors gain the same way. Only the expert pages
 are pinned, in page-aligned ranges merged where tensors share a page, and only
 if they leave a quarter of the RAM and at least 8 GiB to everything else.
-LLAMA_MOE_CACHE_PIN=0 leaves them pageable. One line on stderr says what was
-pinned, or why not.
+LLAMA_MOE_CACHE_PIN=0 leaves them pageable. Experts loaded without mmap are
+in the backend's pinned host buffer already and are left alone. One line on
+stderr says what was pinned, or why not; a failure suggests loading without
+mmap, since some drivers refuse to pin a read-only file mapping ("operation
+not supported" on the reference PC).
 
 Statistics (phase 1). LLAMA_MOE_CACHE_STATS=N prints to stderr, every N steps
 of up to 8 tokens that went through the cache, the time per step split into
@@ -21,7 +24,7 @@ stderr as well while the statistics are on.
 EuLLM patch on llama.cpp 6b7b03a (b11370 + PR #29887). Needs 0001 to pin.
 
 diff --git a/src/llama-moe-cache.cpp b/src/llama-moe-cache.cpp
-index 7708aeb..c7332d5 100644
+index 7708aeb..3c225d3 100644
 --- a/src/llama-moe-cache.cpp
 +++ b/src/llama-moe-cache.cpp
 @@ -6,11 +6,19 @@
@@ -121,7 +124,7 @@ index 7708aeb..c7332d5 100644
      std::vector<group> groups;
      std::vector<moe_cache_lru::fill> fills;
  
-@@ -333,10 +395,102 @@ struct llama_moe_cache::impl {
+@@ -333,10 +395,108 @@ struct llama_moe_cache::impl {
              LLAMA_LOG_INFO("%s: %2zu layers, %s: %5d slots (%.1f%%)\n", __func__,
                  g.layers.size(), ggml_type_name(g.ref.back()->type), g.n_slots, 100.0*g.n_slots/(g.layers.size()*n_expert));
          }
@@ -145,6 +148,28 @@ index 7708aeb..c7332d5 100644
 +
 +    // pin the host experts, so that the copies run at the full bus speed instead of being staged by the driver
 +    void pin_experts(ggml_backend_dev_t dev) {
++        // the pages of the experts the cache copies from; tensors that share a page share a range
++        const uintptr_t page = llama_moe_cache_page_size();
++        ggml_backend_buffer_type_t pinned_buft = ggml_backend_dev_host_buffer_type(dev);
++        std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
++        size_t already = 0;
++        for (const binding & b : bindings) {
++            if (pinned_buft != nullptr && ggml_backend_buffer_get_type(b.src->buffer) == pinned_buft) {
++                already += ggml_nbytes(b.src); // loaded without mmap into memory the backend pinned
++                continue;
++            }
++            const uintptr_t first = (uintptr_t) b.src->data & ~(page - 1);
++            const uintptr_t last  = ((uintptr_t) b.src->data + ggml_nbytes(b.src) + page - 1) & ~(page - 1);
++            ranges.emplace_back(first, last);
++        }
++        if (ranges.empty()) {
++            if (already > 0) {
++                fprintf(stderr, "llama_moe_cache: host experts already in pinned memory (%.2f GiB, the model was loaded without mmap)\n",
++                    already/1073741824.0);
++            }
++            return;
++        }
++
 +        const char * env = getenv("LLAMA_MOE_CACHE_PIN");
 +        if (env != nullptr && strcmp(env, "0") == 0) {
 +            fprintf(stderr, "llama_moe_cache: host experts left in pageable memory (LLAMA_MOE_CACHE_PIN=0)\n");
@@ -156,22 +181,6 @@ index 7708aeb..c7332d5 100644
 +        auto * unpin = (void (*)(void *))                 ggml_backend_reg_get_proc_address(reg, "ggml_backend_unpin_host_buffer");
 +        if (pin == nullptr || unpin == nullptr) {
 +            fprintf(stderr, "llama_moe_cache: host experts not pinned: the %s backend cannot pin host memory\n", ggml_backend_reg_name(reg));
-+            return;
-+        }
-+
-+        // the pages of the experts the cache copies from; tensors that share a page share a range
-+        const uintptr_t page = llama_moe_cache_page_size();
-+        ggml_backend_buffer_type_t pinned_buft = ggml_backend_dev_host_buffer_type(dev);
-+        std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
-+        for (const binding & b : bindings) {
-+            if (pinned_buft != nullptr && ggml_backend_buffer_get_type(b.src->buffer) == pinned_buft) {
-+                continue; // loaded without mmap into memory the backend already pinned
-+            }
-+            const uintptr_t first = (uintptr_t) b.src->data & ~(page - 1);
-+            const uintptr_t last  = ((uintptr_t) b.src->data + ggml_nbytes(b.src) + page - 1) & ~(page - 1);
-+            ranges.emplace_back(first, last);
-+        }
-+        if (ranges.empty()) {
 +            return;
 +        }
 +        std::sort(ranges.begin(), ranges.end());
@@ -209,7 +218,7 @@ index 7708aeb..c7332d5 100644
 +            const size_t size = r.second - r.first;
 +            if (const char * err = pin((void *) r.first, size)) {
 +                if (done == 0) {
-+                    fprintf(stderr, "llama_moe_cache: host experts not pinned: %s\n", err);
++                    fprintf(stderr, "llama_moe_cache: host experts not pinned: %s; loading the model without mmap puts them in pinned memory\n", err);
 +                } else {
 +                    fprintf(stderr, "llama_moe_cache: pinned %.2f of %.2f GiB of host experts, then could not pin more: %s\n",
 +                        done/1073741824.0, total/1073741824.0, err);
@@ -224,7 +233,7 @@ index 7708aeb..c7332d5 100644
      }
  
      bool resolve(const ggml_tensor * node, ggml_backend_t target, ggml_tensor ** cached_weight, void ** cache_entry) {
-@@ -367,6 +521,63 @@ struct llama_moe_cache::impl {
+@@ -367,6 +527,63 @@ struct llama_moe_cache::impl {
                  l.planned_epoch = 0;
              }
          }
@@ -288,7 +297,7 @@ index 7708aeb..c7332d5 100644
      }
  
      bool prepare(const binding * entry, const int32_t * ids, size_t n_ids, const int32_t ** remapped_ids) {
-@@ -381,6 +592,8 @@ struct llama_moe_cache::impl {
+@@ -381,6 +598,8 @@ struct llama_moe_cache::impl {
              return true;
          }
  
@@ -297,7 +306,7 @@ index 7708aeb..c7332d5 100644
          l.planned_ids.assign(ids, ids + n_ids);
          l.remapped_ids.resize(n_ids);
  
-@@ -409,19 +622,44 @@ struct llama_moe_cache::impl {
+@@ -409,19 +628,44 @@ struct llama_moe_cache::impl {
          st.misses += fills.size();
          st.bytes  += bytes;
  

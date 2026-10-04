@@ -516,6 +516,19 @@ the model is loaded, so the experts are pinned only when that leaves a
 quarter of the RAM, and at least 8 GiB, to everything else.
 `LLAMA_MOE_CACHE_PIN=0` leaves them as they were, to compare.
 
+Some drivers refuse to pin the pages of a mapped model file: the line then
+reads `host experts not pinned: operation not supported`, as it did on the
+reference PC (RTX 5070 Ti, Linux). `--no-mmap` takes the other road: the
+model is read into memory instead of mapped, and llama.cpp puts the experts
+kept in RAM into memory the driver pins as it allocates it. The line then
+reads `host experts already in pinned memory`. Loading reads the whole file
+up front, so it takes longer, and the RAM has to hold the experts.
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto --no-mmap
+```
+
 **Where a decode step goes.** `LLAMA_MOE_CACHE_STATS=64` prints, every 64
 decode steps of up to 8 tokens, one line like this:
 

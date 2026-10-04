@@ -557,6 +557,12 @@ pub struct InferenceConfig {
     /// model gets it except the MTP draft context, which reads no experts
     /// of the model's.
     pub moe_cache_bytes: u64,
+    /// `--no-mmap`: read the model into memory instead of mapping its file.
+    /// Expert tensors kept in RAM then land in the GPU backend's pinned host
+    /// buffer, which llama.cpp gives weights overridden to the CPU only when
+    /// the file is not mapped ("avoid using a host buffer when using mmap",
+    /// `llama-model-loader.cpp`).
+    pub no_mmap: bool,
 }
 
 impl Default for InferenceConfig {
@@ -583,6 +589,7 @@ impl Default for InferenceConfig {
             mtp: 0,
             mtp_p_min: 0.0,
             moe_cache_bytes: 0,
+            no_mmap: false,
         }
     }
 }
@@ -1700,6 +1707,13 @@ impl InferenceEngine {
         } else {
             // -1 = offload all layers
             LlamaModelParams::default().with_n_gpu_layers(1000)
+        };
+        // Only when asked: llama.cpp's default load mode (auto) maps the file
+        // unless a device cannot use mapped memory, and is left to decide.
+        let model_params = if config.no_mmap {
+            model_params.with_use_mmap(false)
+        } else {
+            model_params
         };
         let mut model_params = pin!(model_params);
         // Patterns passed to `add_cpu_buft_override` are stored as raw pointers

@@ -168,6 +168,9 @@ pub struct AppState {
     /// `--moe-cache`, as the user gave it: every load sizes its own cache
     /// from it (see `fit::plan_moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--no-mmap`: every model this server loads is read into memory
+    /// rather than mapped (see `InferenceConfig::no_mmap`).
+    pub no_mmap: bool,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -586,6 +589,7 @@ impl AppState {
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
+                no_mmap: self.no_mmap,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -761,6 +765,7 @@ impl AppState {
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
+                no_mmap: self.no_mmap,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -2719,6 +2724,8 @@ pub struct ServeConfig {
     pub mtp_p_min: f32,
     /// `--moe-cache` (see `AppState::moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--no-mmap` (see `AppState::no_mmap`).
+    pub no_mmap: bool,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3034,6 +3041,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         mtp: cfg.mtp,
         mtp_p_min: cfg.mtp_p_min,
         moe_cache: cfg.moe_cache,
+        no_mmap: cfg.no_mmap,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3208,6 +3216,7 @@ impl AppState {
             mtp: 0,
             mtp_p_min: 0.0,
             moe_cache: None,
+            no_mmap: false,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

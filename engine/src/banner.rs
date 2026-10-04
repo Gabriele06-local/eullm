@@ -42,6 +42,8 @@ pub struct ModelBanner {
     /// VRAM for the cache of the experts kept in RAM (`--moe-cache`, once
     /// sized); 0 for none.
     pub moe_cache_bytes: u64,
+    /// `--no-mmap`: the model was read into memory, not mapped.
+    pub no_mmap: bool,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// 0 means the sequential engine; anything higher is the batching scheduler.
@@ -126,6 +128,9 @@ impl ModelBanner {
                 "  Expert cache:  {} of VRAM for the experts used most (--moe-cache)",
                 crate::fit::gib(self.moe_cache_bytes)
             );
+        }
+        if self.no_mmap {
+            println!("  Model file:    read into memory, not mapped (--no-mmap)");
         }
         if self.rs_seq > 0 {
             println!(

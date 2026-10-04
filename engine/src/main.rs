@@ -273,6 +273,17 @@ struct RuntimeOpts {
     #[arg(long, value_name = "auto|MIB", value_parser = fit::parse_moe_cache)]
     moe_cache: Option<fit::MoeCache>,
 
+    /// Read the model into memory instead of mapping its file. Expert
+    /// tensors kept in RAM (by --moe-cache, --cpu-moe, --n-cpu-moe or the
+    /// --fit split) then go to memory the GPU driver has pinned, which the
+    /// card copies from directly; from a mapped file each copy goes through
+    /// a staging buffer of the driver's, which the expert cache's copies
+    /// measured at 9 GB/s on an RTX 5070 Ti over PCIe 4.0 x16. Loading reads
+    /// the whole file up front, and memory pinned for the experts cannot be
+    /// swapped out: the RAM has to hold them.
+    #[arg(long)]
+    no_mmap: bool,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -895,6 +906,7 @@ async fn main() {
                 mtp,
                 mtp_p_min,
                 moe_cache,
+                no_mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1033,6 +1045,7 @@ async fn main() {
                 mtp,
                 mtp_p_min,
                 moe_cache,
+                no_mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1080,6 +1093,7 @@ async fn main() {
                 mtp,
                 mtp_p_min,
                 moe_cache,
+                no_mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1186,6 +1200,7 @@ async fn main() {
                 mtp,
                 mtp_p_min,
                 moe_cache,
+                no_mmap,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2400,6 +2415,7 @@ async fn cmd_run(
     mtp: u32,
     mtp_p_min: f32,
     moe_cache: Option<fit::MoeCache>,
+    no_mmap: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -2941,6 +2957,7 @@ async fn cmd_run(
             mtp,
             mtp_p_min,
             moe_cache_bytes,
+            no_mmap,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -3043,6 +3060,7 @@ async fn cmd_run(
             mtp,
             mtp_p_min,
             moe_cache_bytes,
+            no_mmap,
             ctx_checkpoints,
             checkpoint_min_step,
             batch_size,
@@ -3170,6 +3188,7 @@ async fn cmd_run(
             mtp,
             mtp_p_min,
             moe_cache,
+            no_mmap,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3246,6 +3265,7 @@ async fn cmd_serve(
     mtp: u32,
     mtp_p_min: f32,
     moe_cache: Option<fit::MoeCache>,
+    no_mmap: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3355,6 +3375,7 @@ async fn cmd_serve(
         mtp,
         mtp_p_min,
         moe_cache,
+        no_mmap,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -4941,6 +4962,14 @@ mod cli_default_parity_tests {
             Some(fit::MoeCache::Mib(6000))
         );
         assert!(Cli::try_parse_from(["eullm", "serve", "--moe-cache", "0"]).is_err());
+    }
+
+    /// `--no-mmap` is off unless asked, on both subcommands.
+    #[test]
+    fn the_model_file_is_mapped_unless_no_mmap_is_asked() {
+        assert!(!runtime_opts(&["eullm", "serve"]).no_mmap);
+        assert!(runtime_opts(&["eullm", "serve", "--no-mmap"]).no_mmap);
+        assert!(runtime_opts(&["eullm", "run", "x", "--no-mmap"]).no_mmap);
     }
 
     /// `--n-ubatch` is llama.cpp's 512 unless asked, on both subcommands; a

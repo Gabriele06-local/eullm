@@ -1179,6 +1179,14 @@ fn run_scheduler_loop(
     };
     // MTP layers are skipped at load unless asked for (`--mtp`).
     let model_params = model_params.with_load_mtp(config.mtp > 0);
+    // `--no-mmap`: experts kept in RAM go to the backend's pinned host buffer.
+    // Only when asked: llama.cpp's default load mode (auto) maps the file
+    // unless a device cannot use mapped memory, and is left to decide.
+    let model_params = if config.no_mmap {
+        model_params.with_use_mmap(false)
+    } else {
+        model_params
+    };
     let mut model_params = pin!(model_params);
     // Patterns passed to `add_cpu_buft_override` are stored as raw pointers
     // (not copied) inside `model_params`, so they must outlive the

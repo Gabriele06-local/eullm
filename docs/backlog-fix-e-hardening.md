@@ -2731,10 +2731,18 @@ diligenza manuale.
   esperti come prima, per il confronto. Al primo build dopo questo cambio
   llama.cpp si ricompila da capo: la directory di build CMake cambia sorgente.
 
-  **Da validare su GPU**: `eullm serve ... --moe-cache auto` con
-  `bench/speed_check.py` (senza statistiche) e con `LLAMA_MOE_CACHE_PIN=0`
-  per il confronto; poi una corsa con `LLAMA_MOE_CACHE_STATS=64` per la
-  tabella della fase 1.
+  **Misurato con le statistiche** (stesso PC, 2026-10-04): passo di 20-21
+  ms, di cui 13,7-14 fino ai router dei 48 strati, 5-8 nella cache (copie)
+  e 1,4 dopo; 46-76 MiB copiati per token a 9 GB/s, 88-93% degli esperti
+  già in VRAM. Il pinning è stato rifiutato dal driver (`operation not
+  supported`): registrare un file mappato in sola lettura su Linux non è
+  affidabile. Da qui `--no-mmap`: senza mmap llama.cpp mette da sé gli
+  esperti forzati in RAM nel buffer host bloccato di CUDA (`CUDA_Host`),
+  come suggerisce il suo stesso avviso, che EuLLM nascondeva.
+
+  **Da validare su GPU**: `eullm serve ... --moe-cache auto --no-mmap`
+  con `bench/speed_check.py`, contro la stessa senza `--no-mmap`, e una
+  corsa con `LLAMA_MOE_CACHE_STATS=64` per vedere le copie al nuovo ritmo.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci
