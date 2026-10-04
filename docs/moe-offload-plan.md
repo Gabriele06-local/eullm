@@ -1,6 +1,6 @@
 # Experts in RAM: the half of Strata llama.cpp lacks — implementation plan
 
-**Status:** phase 1 measured on the reference PC; phase 2's pinning refused by its driver, now through `--no-mmap`, to be measured · 4 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
+**Status:** phases 1 and 2 measured on the reference PC; phase 2's pinning goes through `--no-mmap`, since the driver refused to pin the mapped file · 4 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
 
 **How our changes are carried.** As patch files in `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, which the build script applies to a copy of the submodule (`llama_patches.rs`): the submodule stays at 6b7b03a, and nothing has to be pushed to the mirror for a change to build. `0001` gives CUDA a way to pin host memory on request; `0002` is phases 1 and 2 in the cache.
 
@@ -17,6 +17,7 @@ Qwen3.8-Flash-Next IQ2_XS on the reference PC, measured with `bench/speed_check.
 | llama.cpp + PR #29887, 8,000 MiB cache | 49.4 | 206 |
 | the same, with llama.cpp's MTP (2 drafts) | 36.3 | 196 |
 | EuLLM, `--moe-cache auto` | 43.6 | 210 |
+| EuLLM, `--moe-cache auto --no-mmap` (experts pinned) | 58.1 | 451.5 |
 
 With `--moe-cache auto` the GPU was busy 59% of the time and the CPU idle.
 
@@ -68,7 +69,9 @@ Register the expert ranges of the mmap with CUDA. `ggml_backend_cuda_register_ho
 
 **Written** (patches `0001` and `0002`): CUDA's `ggml_backend_pin_host_buffer` / `ggml_backend_unpin_host_buffer` procs pin on request and say why they could not (read-only registration, which a read-only mmap needs). The cache pins the pages of the experts it copies from when it is created, in page-aligned ranges merged where tensors share a page (the load line says how many), only if that leaves a quarter of the RAM and at least 8 GiB to the rest, and unpins them when the context is freed. Experts loaded without mmap are in CUDA's pinned host buffer already and are left alone. `LLAMA_MOE_CACHE_PIN=0` turns it off for the comparison.
 
-**On the reference PC the driver refused** (`host experts not pinned: operation not supported`): registering a read-only file mapping with `cudaHostRegister` is not something Linux drivers reliably allow, and the usual answer is to copy the file into memory that is pinned. llama.cpp already does that when the model is not mapped: weights overridden to the CPU then go to the backend's pinned host buffer instead of the mapped file (`llama-model-loader.cpp`, which warns that CPU overrides with mmap are slower and suggests `--load-mode none`; EuLLM hides llama.cpp's log, so it was never seen). EuLLM's `--no-mmap` asks for that. To be measured.
+**On the reference PC the driver refused** (`host experts not pinned: operation not supported`): registering a read-only file mapping with `cudaHostRegister` is not something Linux drivers reliably allow, and the usual answer is to copy the file into memory that is pinned. llama.cpp already does that when the model is not mapped: weights overridden to the CPU then go to the backend's pinned host buffer instead of the mapped file (`llama-model-loader.cpp`, which warns that CPU overrides with mmap are slower and suggests `--load-mode none`; EuLLM hides llama.cpp's log, so it was never seen). EuLLM's `--no-mmap` asks for that.
+
+**Measured** (same PC and model): 33.02 GiB of experts in pinned memory; writes 44.4 → 58.1 tokens/s (+31%), a prompt read 211 → 451.5 tokens/s (2.1×). `free` shows the pinned experts as shared memory (33 GB), with 24 GB of the 62 still available.
 
 ### Phase 3 — The CPU computes the misses, in parallel with the GPU (the core; weeks)
 
@@ -112,4 +115,8 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
 
 ## 5. Next step
 
-Measure `--no-mmap` on the reference PC: `bench/speed_check.py` with and without it, and one run with `LLAMA_MOE_CACHE_STATS=64` to see the copies at the new rate. Then the GPU's busy time per step, to split "up to the routers" into computing and waiting: phase 4 if the waiting is large, phase 3 otherwise.
+1. One run with `--no-mmap` and `LLAMA_MOE_CACHE_STATS=64`: the step table at the new copy rate.
+2. Reading prompts with the experts pinned: `--n-ubatch 2048` and `4096`, which copy the experts once per 2,048 or 4,096 tokens instead of 512. Before pinning, 4,096 took the usual split from 256 to 822 tokens/s.
+3. `--no-mmap` on by itself with `--moe-cache` when the RAM holds the experts with room to spare, since that is when it pays.
+4. The 1-2 ms per token EuLLM spends around the decode.
+5. The GPU's busy time per step, to split "up to the routers" into computing and waiting: phase 4 if the waiting is large, phase 3 otherwise.

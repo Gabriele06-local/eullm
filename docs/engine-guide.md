@@ -522,7 +522,10 @@ reference PC (RTX 5070 Ti, Linux). `--no-mmap` takes the other road: the
 model is read into memory instead of mapped, and llama.cpp puts the experts
 kept in RAM into memory the driver pins as it allocates it. The line then
 reads `host experts already in pinned memory`. Loading reads the whole file
-up front, so it takes longer, and the RAM has to hold the experts.
+up front, so it takes longer, and the RAM has to hold the experts. On the
+reference PC it took Qwen3.8-Flash-Next IQ2_XS from 44.4 to 58.1 tokens/s
+writing and from 211 to 451.5 tokens/s reading a prompt, with 33 GiB of
+experts pinned and 24 of the 62 GB of RAM still available.
 
 ```bash
 eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \

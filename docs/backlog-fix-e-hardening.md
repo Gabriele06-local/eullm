@@ -2740,9 +2740,12 @@ diligenza manuale.
   esperti forzati in RAM nel buffer host bloccato di CUDA (`CUDA_Host`),
   come suggerisce il suo stesso avviso, che EuLLM nascondeva.
 
-  **Da validare su GPU**: `eullm serve ... --moe-cache auto --no-mmap`
-  con `bench/speed_check.py`, contro la stessa senza `--no-mmap`, e una
-  corsa con `LLAMA_MOE_CACHE_STATS=64` per vedere le copie al nuovo ritmo.
+  **Misurato con `--no-mmap`**: 33,02 GiB di esperti in memoria bloccata;
+  scrittura 44,4 → 58,1 token/s (+31%), lettura 211 → 451,5 (2,1×).
+
+  **Prossimo**: statistiche con `--no-mmap`; `--n-ubatch 2048/4096` con gli
+  esperti bloccati; `--no-mmap` automatico con `--moe-cache` quando la RAM
+  basta; i 1-2 ms per token spesi da EuLLM attorno al decode.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci
