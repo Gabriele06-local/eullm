@@ -1118,6 +1118,28 @@ pub struct GenerateResult {
     /// reason it is carried on the streaming event: without it the API cannot
     /// tell a finished answer from a truncated one.
     pub stop_reason: StopReason,
+    /// Where the time went — see [`AnswerStats`].
+    pub stats: AnswerStats,
+}
+
+/// How a finished answer spent its time, and what the MTP head did for it.
+///
+/// `prompt_time` and `eval_time` are Ollama's `prompt_eval_duration` and
+/// `eval_duration`: reading the prompt (the decode calls that prefill it,
+/// images included), then writing the answer. They were reported as 0 and as
+/// the whole request, so a client dividing tokens by them got a prompt read
+/// at infinite speed and an answer written slower than it was. What else the
+/// request took (building a context, tokenizing) is in `duration_ms` only.
+///
+/// `draft_n` and `draft_n_accepted` are the MTP drafts proposed for this
+/// answer and the ones the model kept (`--mtp`; both 0 without it), under
+/// llama-server's names for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnswerStats {
+    pub prompt_time: std::time::Duration,
+    pub eval_time: std::time::Duration,
+    pub draft_n: u32,
+    pub draft_n_accepted: u32,
 }
 
 /// Why generation stopped.
@@ -1162,6 +1184,8 @@ pub enum StreamEvent {
         duration_ms: u64,
         /// Why generation ended — see [`StopReason`].
         stop_reason: StopReason,
+        /// Where the time went — see [`AnswerStats`].
+        stats: AnswerStats,
     },
     /// An error occurred during generation.
     Error(String),
@@ -2170,6 +2194,7 @@ impl InferenceEngine {
 
         // Prefill in chunks of n_batch tokens. llama.cpp asserts (SIGABRT)
         // if a single decode call processes more tokens than n_batch.
+        let prefill_start = std::time::Instant::now();
         {
             let chunk_size = self.config.n_batch as usize;
             let last_idx = tokens.len() - 1;
@@ -2189,6 +2214,8 @@ impl InferenceEngine {
                     .map_err(|e| format!("Prompt decode failed: {e}"))?;
             }
         }
+        let prompt_time = prefill_start.elapsed();
+        let eval_start = std::time::Instant::now();
 
         // Sample tokens — use a small batch (capacity 1) for the decode loop.
         // When a grammar is requested (e.g. format:"json"), we prepend a
@@ -2281,6 +2308,11 @@ impl InferenceEngine {
             tokens_prompt,
             duration_ms,
             stop_reason,
+            stats: AnswerStats {
+                prompt_time,
+                eval_time: eval_start.elapsed(),
+                ..AnswerStats::default()
+            },
         })
     }
 
@@ -2389,6 +2421,7 @@ impl InferenceEngine {
         );
 
         // Prefill in chunks of n_batch tokens (same fix as generate()).
+        let prefill_start = std::time::Instant::now();
         {
             let chunk_size = self.config.n_batch as usize;
             let last_idx = tokens.len() - 1;
@@ -2417,6 +2450,8 @@ impl InferenceEngine {
                 }
             }
         }
+        let prompt_time = prefill_start.elapsed();
+        let eval_start = std::time::Instant::now();
 
         let mut sampler = sampling::build_sampler(&self.model, request, 1234);
 
@@ -2521,6 +2556,11 @@ impl InferenceEngine {
             tokens_prompt,
             duration_ms,
             stop_reason,
+            stats: AnswerStats {
+                prompt_time,
+                eval_time: eval_start.elapsed(),
+                ..AnswerStats::default()
+            },
         });
     }
 
@@ -2829,6 +2869,7 @@ impl InferenceEngine {
 
         // ── 6. mtmd-aware prefill: text chunks via llama_decode, media
         //      chunks via mtmd_encode + llama_decode, all handled internally.
+        let prefill_start = std::time::Instant::now();
         let new_n_past = match chunks.eval_chunks(
             mtmd_ctx,
             &ctx,
@@ -2848,6 +2889,8 @@ impl InferenceEngine {
                 return;
             }
         };
+        let prompt_time = prefill_start.elapsed();
+        let eval_start = std::time::Instant::now();
 
         let max_output = effective_ctx.saturating_sub(tokens_prompt);
         let max_tokens = request.max_tokens.min(max_output);
@@ -2968,6 +3011,11 @@ impl InferenceEngine {
             tokens_prompt,
             duration_ms,
             stop_reason,
+            stats: AnswerStats {
+                prompt_time,
+                eval_time: eval_start.elapsed(),
+                ..AnswerStats::default()
+            },
         });
     }
 }
@@ -3407,6 +3455,7 @@ mod stop_reason_tests {
             tokens_prompt: 1,
             duration_ms: 1,
             stop_reason: StopReason::Length,
+            stats: AnswerStats::default(),
         };
         assert_eq!(r.stop_reason.as_api_str(), "length");
     }

@@ -675,7 +675,13 @@ that model, answers with real drafts and with drafts that were all wrong
 both left the plain answer at the same character. A hybrid model's
 recurrent-state rollback window is raised to N for the drafts it may take
 back (`--rs-seq`); the startup banner shows the drafts asked for, and each
-answer's end logs how many drafts the model kept.
+answer says how many drafts the head proposed and the model kept: `draft_n`
+and `draft_n_accepted` beside Ollama's durations, in llama-server's `timings`
+on `/v1/chat/completions`, and on the answer's audit line. `speed_check.py`
+prints the share kept after the speed, and `bench/mtp_sweep.sh` reads it from
+there; `TEMPERATURE=0.8 bench/mtp_sweep.sh …` measures it at the default
+sampling temperature, where a draft is kept only when it is the token the
+model samples.
 
 ## KV-cache reuse
 

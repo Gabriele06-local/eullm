@@ -30,7 +30,7 @@ use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
 
 use super::output::{PieceOutcome, process_piece};
-use super::{GenerateRequest, InferenceConfig, StopReason, StreamEvent};
+use super::{AnswerStats, GenerateRequest, InferenceConfig, StopReason, StreamEvent};
 
 /// Below this many tokens per slot, a reasoning model routinely runs out of
 /// room mid-answer. Not a hard limit — just the threshold at which staying
@@ -147,6 +147,9 @@ struct ActiveSequence {
     /// model kept (see `mtp_step`); both 0 without `--mtp`.
     mtp_drafted: u32,
     mtp_accepted: u32,
+    /// How long reading the prompt took, from `start`; the answer's own time
+    /// is what follows it. Set when the prefill succeeds.
+    prompt_time: std::time::Duration,
 }
 
 /// An idle sequence slot together with the exact token history currently
@@ -1575,6 +1578,7 @@ fn run_scheduler_loop(
                         raw_generated_pieces: Vec::new(),
                         mtp_drafted: 0,
                         mtp_accepted: 0,
+                        prompt_time: std::time::Duration::ZERO,
                     };
 
                     // Prefill the unreused suffix of the prompt into the context.
@@ -1671,6 +1675,7 @@ fn run_scheduler_loop(
                             seq.n_past = n_past;
                             seq.max_tokens = effective_max;
                             seq.prefilled = true;
+                            seq.prompt_time = seq.start.elapsed();
 
                             // Sample the first generated token directly from prefill logits.
                             // Use output index -1 (= last output). Only the final prompt
@@ -2377,12 +2382,18 @@ fn try_send_piece(tx: &mpsc::Sender<StreamEvent>, out: String, seq_id: i32) -> S
 /// `tokens_generated >= max_tokens` would misreport an EOS that happens to
 /// land exactly on the last allowed token.
 fn send_done(seq: &ActiveSequence, stop_reason: StopReason) {
-    let duration_ms = seq.start.elapsed().as_millis() as u64;
+    let elapsed = seq.start.elapsed();
     let _ = seq.tx.try_send(StreamEvent::Done {
         tokens_generated: seq.tokens_generated,
         tokens_prompt: seq.tokens_prompt,
-        duration_ms,
+        duration_ms: elapsed.as_millis() as u64,
         stop_reason,
+        stats: AnswerStats {
+            prompt_time: seq.prompt_time,
+            eval_time: elapsed.saturating_sub(seq.prompt_time),
+            draft_n: seq.mtp_drafted,
+            draft_n_accepted: seq.mtp_accepted,
+        },
     });
 }
 

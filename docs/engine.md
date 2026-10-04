@@ -1512,11 +1512,21 @@ curl -X POST http://localhost:11434/api/generate \
   "total_duration": 1500000000,
   "load_duration": 0,
   "prompt_eval_count": 15,
-  "prompt_eval_duration": 0,
+  "prompt_eval_duration": 90000000,
   "eval_count": 128,
-  "eval_duration": 1200000000
+  "eval_duration": 1400000000
 }
 ```
+
+The durations are Ollama's, in nanoseconds: `prompt_eval_duration` is the time
+spent reading the prompt (images included), `eval_duration` the time spent
+writing the answer, and `total_duration` the whole request, including
+`load_duration` when the request had to load its model. With `--mtp`, the
+answer also says how many drafts the MTP head proposed and the model kept,
+under llama-server's names: `"draft_n"` and `"draft_n_accepted"`. On
+`/v1/chat/completions` the same figures come in llama-server's `timings`
+object (`prompt_n`, `prompt_ms`, `predicted_n`, `predicted_ms`, and the two
+draft counts), which OpenAI clients ignore.
 
 **Parameters:**
 
@@ -1927,6 +1937,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), `policy_removed` (only when the [decision policy](#a-server-side-decision-policy-eullm_decision_policy) removed options: per question, the options the model never read), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 | `routing` | Object, `route` only | How [`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model) routed one request: `requested`, `model` (chosen), `reason`, `fallback`, `candidates` (offered, in order), `excluded` (with `why`), `decision_model`, `decision_ms`, `dry_run` (only for `POST /api/route`), `error`. The line's `id` is the route's id; its `model` is the decision model, and its `decision` the decision record as above |
 | `route` | Object, routed answers only | `id` (the `route` line's), `requested` (`auto`), and `fallback` (`load_failed: …`, only when the chosen model did not load) |
+| `draft_n`, `draft_n_accepted` | u32, `--mtp` only | The MTP drafts the model proposed for this answer, and the ones it kept. Absent when it drafted none |
 
 **Example audit entry:**
 

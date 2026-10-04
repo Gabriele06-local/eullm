@@ -4425,6 +4425,7 @@ async fn interactive_chat(
                     tokens_prompt,
                     duration_ms,
                     stop_reason,
+                    ..
                 } => {
                     // Strip any trailing stop sequence that was printed as part of the stream.
                     // Use trim_end() before matching: some models append \n after the
@@ -4897,11 +4898,14 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
                 duration_ms,
                 // The one-shot multimodal probe prints no stop reason.
                 stop_reason: _,
+                stats,
             } => {
                 let _ = writeln!(stdout);
                 let _ = writeln!(
                     stdout,
-                    "[done — {tokens_generated} tokens, prompt {tokens_prompt}, {duration_ms} ms]"
+                    "[done — {tokens_generated} tokens, prompt {tokens_prompt} read in {} ms, \
+                     {duration_ms} ms]",
+                    stats.prompt_time.as_millis()
                 );
             }
             inference::StreamEvent::Error(e) => {
