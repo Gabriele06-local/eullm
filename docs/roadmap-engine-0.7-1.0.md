@@ -350,7 +350,8 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   con `--moe-cache` un draft rifiutato non paga più tutti i suoi esperti: molti
   sono già in VRAM. Si decide con la prova D: `llama-server` con l'MTP su
   Qwen3.6-35B-A3B-MTP con gli esperti in RAM, e poi `bench/mtp_sweep.sh` sullo
-  stesso modello in EuLLM.
+  stesso modello in EuLLM. Lo script c'è: `bench/mtp_test_d.sh` (0, 1 e 2
+  bozze, esperti in RAM bloccati con `--load-mode none` e cache in VRAM).
 
   Sotto-voci, ciascuna con la misura che la decide:
   - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
@@ -361,7 +362,8 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
     testa è già Q8_0, ma attenzione e FFN dello strato MTP sono Q4_K/Q6_K.
     Le accettazioni misurate (58-75%) escludono il crollo che colibri vede con
     una testa int4 (0-4%); una variante con lo strato MTP in Q8_0 dice se ne
-    resta da guadagnare.
+    resta da guadagnare: `bench/mtp_head_q8.sh` la prepara (due Q4_K_M dalla
+    stessa sorgente Q8_0, che differiscono solo nello strato MTP) e le misura.
   - **Rejection sampling di Leviathan a temperatura > 0.** Oggi una bozza è
     tenuta se è il token che il modello campiona: senza perdita, ma a
     temperatura alta ne scarta di accettabili. Serve che lo shim esponga le
