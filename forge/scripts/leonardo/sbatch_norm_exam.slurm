@@ -28,6 +28,12 @@
 #   EXAM_OPEN_TAG  suffix of the open-book label (default "open"); give the
 #                hybrid runs another one ("hyb") so both sit in one directory
 #                and compare_graded.py sets them side by side
+#   EXAM_GGUF    space-separated label=file.gguf pairs: those labels of
+#                EXAM_MODELS answer with the GGUF through llama-server, the
+#                model's path giving the tokenizer (legal_eval.py --gguf), so
+#                "grpo-v04-q4=<merged>" with "grpo-v04-q4=<its q4_k_m.gguf>"
+#                is the shipped file asked exactly like the bf16 "grpo-v04".
+#                Needs the CUDA llama-server (sbatch_build_llama_server.slurm)
 #   EXAM_REPO    checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-exam
@@ -68,7 +74,23 @@ for pair in $EXAM_MODELS; do
     path="${pair#*=}"
     [ -f "$path/config.json" ] || { echo "[exam] no model at $path (${pair%%=*})" >&2; fail=1; }
 done
+gguf_of() {  # the GGUF EXAM_GGUF gives this label, or nothing
+    local p
+    for p in ${EXAM_GGUF:-}; do [ "${p%%=*}" = "$1" ] && { echo "${p#*=}"; return; }; done
+}
+SERVER="${LCPP_SERVER:-$LCPP_DIR/build-cuda/bin/llama-server}"
+for pair in ${EXAM_GGUF:-}; do
+    [ -f "${pair#*=}" ] || { echo "[exam] no GGUF at ${pair#*=} (${pair%%=*})" >&2; fail=1; }
+    [ -x "$SERVER" ] || { echo "[exam] no llama-server at $SERVER -- sbatch_build_llama_server.slurm" >&2; fail=1; }
+done
 [ "$fail" -eq 0 ] || exit 1
+# The CUDA build records the modules it was compiled with; its libraries
+# come from them.
+if [ -n "${EXAM_GGUF:-}" ] && [ -s "$(dirname "$SERVER")/../modules.txt" ] &&
+   command -v module >/dev/null 2>&1; then
+    # shellcheck disable=SC2046
+    module load $(cat "$(dirname "$SERVER")/../modules.txt") 2>/dev/null || true
+fi
 mkdir -p "$OUT"
 
 # shellcheck disable=SC1091
@@ -96,11 +118,15 @@ status=0
 for pair in $EXAM_MODELS; do
     label="${pair%%=*}"; path="${pair#*=}"
     echo "[exam] === $label ==="
+    GGUF=()
+    g="$(gguf_of "$label")"
+    [ -z "$g" ] || GGUF=(--gguf "$g" --llama-server "$SERVER")
     if [ "${EXAM_OPEN_ONLY:-0}" != "1" ]; then
         if done_already "$OUT/answers-$label.jsonl"; then
             echo "[exam] $label: answered already, skipped"
         else
-            "${EVAL[@]}" "$path" --label "$label" --answers "$OUT/answers-$label.jsonl" || status=1
+            "${EVAL[@]}" "$path" --label "$label" "${GGUF[@]}" \
+                --answers "$OUT/answers-$label.jsonl" || status=1
         fi
     fi
     if [ -n "${EXAM_NORMS:-}" ]; then
@@ -108,7 +134,7 @@ for pair in $EXAM_MODELS; do
             echo "[exam] $label-$TAG: answered already, skipped"
         else
             # shellcheck disable=SC2086
-            "${EVAL[@]}" "$path" --label "$label-$TAG" --norms $EXAM_NORMS "${RETRIEVAL[@]}" \
+            "${EVAL[@]}" "$path" --label "$label-$TAG" --norms $EXAM_NORMS "${RETRIEVAL[@]}" "${GGUF[@]}" \
                 --answers "$OUT/answers-$label-$TAG.jsonl" || status=1
         fi
     fi

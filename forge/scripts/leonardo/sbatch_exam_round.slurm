@@ -43,6 +43,8 @@
 #   ROUND_EMBEDDER / ROUND_RERANKER / ROUND_OPEN_TAG  retrieve with BM25 +
 #                embeddings + reranker, labelled "<model>-<tag>" (see
 #                sbatch_norm_exam.slurm's EXAM_EMBEDDER)
+#   ROUND_GGUF    label=file.gguf pairs: those models answer with the GGUF
+#                 (sbatch_norm_exam.slurm's EXAM_GGUF)
 #   ROUND_EXAM_LINKS / ROUND_JUDGE_LINKS  2 h links for the exam and for the
 #                 judge (default 1 each). A large development set does not fit
 #                 one link: each link skips what an earlier one finished
@@ -123,7 +125,7 @@ mkdir -p "$OUT" logs
 export EXAM_MODELS="$ROUND_MODELS" EXAM_ITEMS="$ITEMS" EXAM_OUT="$OUT"
 export EXAM_NORMS="${NORMS[*]}" EXAM_REPO="$REPO" EXAM_OPEN_ONLY="${ROUND_OPEN_ONLY:-0}"
 export EXAM_EMBEDDER="${ROUND_EMBEDDER:-}" EXAM_RERANKER="${ROUND_RERANKER:-}"
-export EXAM_OPEN_TAG="${ROUND_OPEN_TAG:-open}"
+export EXAM_OPEN_TAG="${ROUND_OPEN_TAG:-open}" EXAM_GGUF="${ROUND_GGUF:-}"
 GPUS="${ROUND_GPUS:-1}"
 case "$GPUS" in ''|*[!0-9]*) echo "[round] ROUND_GPUS must be a number" >&2; exit 1 ;; esac
 EXAM_LINKS="${ROUND_EXAM_LINKS:-1}"
