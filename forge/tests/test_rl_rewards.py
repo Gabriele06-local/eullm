@@ -349,3 +349,39 @@ def test_hybrid_prompts_use_the_hybrid_index_and_still_drop_an_absent_article(
     assert built == {"embedder": "Qwen/Qwen3-Embedding-0.6B",
                      "reranker": "Qwen/Qwen3-Reranker-0.6B", "cache": tmp_path / "cache"}
     assert out.read_text(encoding="utf-8").strip()
+
+
+def test_judged_content_prompts_carry_what_the_judge_reads(tmp_path):
+    """--judged adds "contenuto" rows with the exam's question, article and v2 rubric."""
+    import importlib.util
+
+    from eullm_forge.eval.norm_exam import CONTENT_RUBRIC
+
+    filler = " Il presente articolo contiene disposizioni di dettaglio sufficienti."
+    records = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+                "text": f"Art. {n}. \n \n (Materia {n}). \n \n Il ricorso è proposto "
+                        f"entro sessanta giorni dalla notifica.{filler * 2}"}
+               for n in range(1, 31)]
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in records) + "\n",
+                     encoding="utf-8")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_grpo_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_grpo_prompts4", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = tmp_path / "prompts.jsonl"
+    assert mod.main(["--norms", str(norms), "--per-code", "50", "--judged", "4",
+                     "--out", str(out)]) == 0
+    rows = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
+    judged = [r for r in rows if r["tipo"] == "contenuto"]
+    assert len(judged) == 4
+    for r in judged:
+        assert r["question"].startswith("Che cosa prevede l'art. ")
+        assert "Il ricorso è proposto" in r["reference"]
+        assert r["rubric"] == CONTENT_RUBRIC
+        assert r["question"] in r["prompt"][0]["content"]
+    assert all("question" not in r for r in rows if r["tipo"] != "contenuto")
+    # without --judged the file is what it was
+    plain = tmp_path / "plain.jsonl"
+    assert mod.main(["--norms", str(norms), "--per-code", "50", "--out", str(plain)]) == 0
+    assert "contenuto" not in plain.read_text(encoding="utf-8")

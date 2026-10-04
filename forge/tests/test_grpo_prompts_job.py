@@ -67,6 +67,7 @@ def test_prompts_are_drawn_hybrid_away_from_every_exam(job):
     r, args = run()
     assert r.returncode == 0, r.stdout + r.stderr
     excluded = args[args.index("--exclude-exam") + 1:args.index("--per-code")]
+    assert args[args.index("--judged") + 1] == "0"
     assert sorted(Path(p).name for p in excluded) == [
         "norm-exam-devbig.jsonl", "norm-exam-v3.jsonl", "norm-exam-v4.jsonl"]
     assert args[args.index("--embedder") + 1] == "Qwen/Qwen3-Embedding-0.6B"

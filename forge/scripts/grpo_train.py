@@ -13,6 +13,11 @@ already answers in the open-book format (a merged stage-3 model), not from a
 base model: RL sharpens what the model can already do sometimes, it does not
 teach a format from nothing.
 
+With ``--judge-url`` the questions on what an article provides
+("contenuto", make_grpo_prompts.py --judged) are graded by a judge model
+behind that URL (`eullm_forge.rl.judge_reward`); without it a prompts file
+holding such questions is refused, since nothing could score them.
+
 The adapter lands in ``--out/adapter`` like stage 3's, so
 leonardo/sbatch_stage3_package.slurm merges and packages it unchanged, with
 ``S3_BASE`` the model given here as ``--model``.
@@ -31,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.identity import load_text_model, lora_target_modules  # noqa: E402
-from eullm_forge.rl import answer_reward  # noqa: E402
+from eullm_forge.rl import JUDGED_TYPES, answer_reward  # noqa: E402
 from eullm_forge.rl.guard import RunGuard  # noqa: E402
 
 
@@ -64,6 +69,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--beta", type=float, default=0.02,
                     help="KL to the starting model: keeps it from drifting off what it could do")
     ap.add_argument("--temperature", type=float, default=1.0)
+    ap.add_argument("--judge-url", help="OpenAI-compatible chat endpoint of the judge that "
+                    "grades the judged questions (e.g. http://127.0.0.1:8080)")
+    ap.add_argument("--judge-parallel", type=int, default=8,
+                    help="grading requests sent to the judge at once")
     ap.add_argument("--limit", type=int, default=0,
                     help="use only the first N prompts (smoke tests)")
     args = ap.parse_args(argv)
@@ -74,6 +83,13 @@ def main(argv: list[str] | None = None) -> int:
               "(move it away to train again)", flush=True)
         return 0
 
+    rows = load_prompts(args.prompts)
+    if args.limit:
+        rows = rows[:args.limit]
+    judged = sum(r["tipo"] in JUDGED_TYPES for r in rows)
+    if judged and not args.judge_url:
+        raise SystemExit(f"[grpo] {judged} prompts need a judge: give --judge-url")
+
     import torch
     from datasets import Dataset
     from peft import LoraConfig
@@ -81,11 +97,18 @@ def main(argv: list[str] | None = None) -> int:
     from transformers.trainer_utils import get_last_checkpoint
     from trl import GRPOConfig, GRPOTrainer
 
-    rows = load_prompts(args.prompts)
-    if args.limit:
-        rows = rows[:args.limit]
+    # Every row has every column (a dataset is a table); the judge's three
+    # are empty on the rows it does not grade.
     dataset = Dataset.from_list(
-        [{"prompt": r["prompt"], "tipo": r["tipo"], "keywords": r["keywords"]} for r in rows])
+        [{"prompt": r["prompt"], "tipo": r["tipo"], "keywords": r["keywords"],
+          "question": r.get("question", ""), "reference": r.get("reference", ""),
+          "rubric": r.get("rubric", "")} for r in rows])
+    rewards = [answer_reward]
+    if args.judge_url:
+        from eullm_forge.rl.judge_reward import JudgeReward
+        rewards.append(JudgeReward(args.judge_url, parallel=args.judge_parallel))
+        print(f"[grpo] {judged} of {len(rows)} prompts graded by the judge at "
+              f"{args.judge_url}", flush=True)
 
     cuda = torch.cuda.is_available()
     tok = AutoTokenizer.from_pretrained(args.model)
@@ -131,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
             if guard.observe(state.global_step, logs):
                 control.should_training_stop = True
 
-    trainer = GRPOTrainer(model=model, reward_funcs=[answer_reward], args=config,
+    trainer = GRPOTrainer(model=model, reward_funcs=rewards, args=config,
                           train_dataset=dataset, processing_class=tok, peft_config=peft_config,
                           callbacks=[Guard()])
 
