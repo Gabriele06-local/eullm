@@ -16,7 +16,11 @@
 #   * a job pending for a reason that never resolves by itself
 #     (DependencyNeverSatisfied, a hold);
 #   * a watcher whose file exists but is empty. One that simply waits long
-#     is shown, not flagged: the package watcher waits a whole training run.
+#     is shown, not flagged: the package watcher waits a whole training run;
+#   * no GPU job running or queued at all. On 2026-10-04 the allocation spent
+#     1.8 node-hours in a day with ~530 left for 29 days, and it was the user
+#     who noticed. Idle GPUs are flagged, unspent hours are not: the rule is
+#     never to run out of useful work, not to burn the budget on filler.
 #
 # Read-only: it submits, cancels and writes nothing. It prints counts and
 # log lines of the pipeline, never the held-out exam.
@@ -126,6 +130,18 @@ for name in $(squeue --me -h -o "%j" | grep '^wait-' | sort -u); do
     fi
 done
 [ "$found" -eq 1 ] || echo "   none queued"
+
+echo
+echo "== GPU work =="
+# Anything on the GPU partition counts, running or waiting for its turn or
+# for a dependency: a chain queued behind a serial job is work lined up.
+gpu_jobs="$(squeue --me -h -p boost_usr_prod -o "%i" 2>/dev/null | grep -c .)"
+used="$(sacct -X -n -S "$SINCE" -r boost_usr_prod -o ElapsedRaw,NNodes 2>/dev/null |
+        awk '{s += $1 * $2} END {printf "%.1f", s / 3600}')"
+echo "   $gpu_jobs GPU job(s) running or queued; ${used:-0.0} node-hours since $SINCE"
+if [ "$gpu_jobs" -eq 0 ]; then
+    flag "no GPU job running or queued: the allocation is idle -- decide the next useful GPU work now"
+fi
 
 echo
 echo "== GRPO =="

@@ -31,14 +31,19 @@ def _exe(path: Path, body: str) -> None:
 
 
 def run_status(tmp_path: Path, queue: list[tuple[str, str, str]],
-               ended: list[tuple[str, str, str, str]]) -> str:
+               ended: list[tuple[str, str, str, str]],
+               gpu_queue: list[str] | None = None) -> str:
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
     q_reason = "\\n".join("|".join(j) for j in queue)
     q_state = "\\n".join(f"{n} {s}" for n, s, _ in queue)
     q_name = "\\n".join(n for n, _, _ in queue)
+    # what is on the GPU partition: by default one job, so that the tests of
+    # other situations are not also an idle allocation
+    q_gpu = "\\n".join(["1"] if gpu_queue is None else gpu_queue)
     _exe(bin_ / "squeue", f"""#!/usr/bin/env bash
 case "$*" in
+  *boost_usr_prod*) [ -n "{q_gpu}" ] && printf '{q_gpu}\\n' ;;
   *"%j|%T|%r"*) printf '{q_reason}\\n' ;;
   *"%j %T"*) printf '{q_state}\\n' ;;
   *) printf '{q_name}\\n' ;;
@@ -48,6 +53,7 @@ esac
     short = "\\n".join(f"{n}|{s}" for _, n, s, _ in ended)
     _exe(bin_ / "sacct", f"""#!/usr/bin/env bash
 case "$*" in
+  *ElapsedRaw*) printf '6480 1\\n' ;;
   *JobID*) printf '{rows}\\n' ;;
   *) printf '{short}\\n' ;;
 esac
@@ -198,3 +204,14 @@ def test_grpo_progress_is_shown_and_a_stop_is_flagged(tmp_path, runs):
     assert "     [grpo] step 20/250 reward 0.744" in out
     assert "[!!] eullm-grpo-71.out: STOP: 20 steps in a row" in out
     assert "1 thing(s) above need a look" in out
+
+
+def test_an_idle_gpu_queue_is_flagged_and_a_queued_chain_is_not(tmp_path, runs):
+    """2026-10-04: a day at 1.8 node-hours, noticed by the user, not by this."""
+    out = run_status(tmp_path, queue=[("eullm-gguf-grpo-v04", "RUNNING", "None")],
+                     ended=[], gpu_queue=[])
+    assert "the allocation is idle" in out
+    assert "1.8 node-hours since" in out
+    out = run_status(tmp_path, queue=[("eullm-grpo-r2-v04", "PENDING", "Dependency")],
+                     ended=[], gpu_queue=["59332673"])
+    assert "idle" not in out and "nothing wrong found" in out

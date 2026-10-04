@@ -158,6 +158,16 @@ proposing a new request shape.
    and that the same chain is not already queued, and stops at the first
    failed check, so running it twice cannot duplicate jobs.
 
+8. **The GPU queue is never empty, and nothing in it is filler.** Every
+   message that ends a piece of work states what GPU work is running or
+   queued next, and if there is none, proposes the next *useful* GPU job
+   in that same message — the user should never be the one to notice the
+   allocation is idle. On 2026-10-04 a day went by at 1.8 node-hours with
+   ~530 left for 29 days, and it was the user who noticed. The aim is not
+   to spend the hours; running out early with better models is fine, burning
+   them on runs that answer nothing is not. `status.sh` flags an empty GPU
+   queue with `[!!]`.
+
 Rules 1 and 2 are also enforced by the build: `tests/test_leonardo_job_shape.py`
 fails CI for any `boost_usr_prod` script over 2 h, over three GPUs, or over
 8 cores and 123 GB per GPU. Written down, the rules were still broken by the
