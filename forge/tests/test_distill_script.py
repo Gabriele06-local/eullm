@@ -430,7 +430,11 @@ def test_resuming_from_a_non_finite_checkpoint_is_caught_at_load(monkeypatch,
                                                                  tmp_path):
     """A checkpoint already holding nan would make every step nan; catching
     it at load costs one model load instead of the whole link."""
+    # A checkpoint that finished being written: latest_checkpoint skips one
+    # with no training_state.pt (a write cut short), and this test is about
+    # the nan, not about a half-written directory.
     (tmp_path / "checkpoint-4").mkdir()
+    (tmp_path / "checkpoint-4" / "training_state.pt").write_bytes(b"x")
     monkeypatch.setattr(distill, "_reload_student_from_checkpoint",
                         lambda *a, **k: TinyStudent(float("nan")))
     monkeypatch.setattr(distill, "load_checkpoint", lambda *a, **k: 4)
