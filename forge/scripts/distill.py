@@ -59,7 +59,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, get_type_hints
 
 import torch
 import torch.nn.functional as F
@@ -183,14 +183,27 @@ def _parse_args() -> DistillConfig:
     parser.add_argument("--config", type=str, default=None,
                         help="YAML config path (CLI args override YAML).")
     # Allow every DistillConfig field as a CLI arg.
+    #
+    # This module has `from __future__ import annotations`, so under PEP 563 a
+    # field's .type is the string "int", not int: the identity tests below
+    # never fired and every flag landed on the str branch. So --bf16 false
+    # left bf16 true with nothing said, and range(epochs) raised TypeError deep
+    # in the trainer. get_type_hints resolves the strings; it is asked once,
+    # and an annotation it cannot resolve falls back to the string rather than
+    # taking the whole parser down over one field.
+    try:
+        declared_types = get_type_hints(DistillConfig)
+    except Exception:                          # a name this module cannot see
+        declared_types = {}
     for f in DistillConfig.__dataclass_fields__.values():
         flag = "--" + f.name.replace("_", "-")
         kw = {"default": None}
-        if f.type is bool:
+        declared = declared_types.get(f.name, f.type)
+        if declared is bool:
             kw["action"] = argparse.BooleanOptionalAction
-        elif f.type is int:
+        elif declared is int:
             kw["type"] = int
-        elif f.type is float:
+        elif declared is float:
             kw["type"] = float
         else:
             kw["type"] = str
