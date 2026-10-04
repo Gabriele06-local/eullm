@@ -2632,6 +2632,120 @@ diligenza manuale.
   ragione del bump — per confermare che `spark2_5` funzioni end-to-end e
   non solo a compile-time. Resta aperta anche la verifica di `qwen4exp`
   di H4-I, mai eseguita.
+- [ ] **H4-K · Bump di `llama.cpp` da `b11100` a `b11370`; `llama-cpp-rs`
+  resta a 0.1.156 — in attesa di validazione su hardware reale** *(P2)*
+  Occasione diretta: `b11370` è la base della PR #29887 di llama.cpp, la
+  cache degli esperti MoE in VRAM che portiamo in EuLLM. Il bump
+  settimanale era comunque dovuto: 11 giorni e 270 build, `7ab4ee7`
+  (22 settembre) → `bed0a85` (3 ottobre).
+
+  **Una sola rottura d'API, nel nostro wrapper MTP.** Misurato sugli header
+  prima di toccare il pin:
+  * `include/llama.h`: +95 −2, solo aggiunte (l'API `llama_batch_ext`,
+    `llama_process`, `llama_get_causal_attn`); le due righe tolte sono
+    commenti.
+  * `ggml/include/ggml-backend.h`: due funzioni nuove
+    (`ggml_backend_buft_alloc_buffer_n`, `_get_alloc_size_n`), il resto è
+    riallineamento.
+  * `tools/mtmd/mtmd-helper.h`: cambia il tipo della callback
+    `mtmd_helper_post_decode_callback`, che noi non usiamo.
+  * `common/common.h` e `common/speculative.h`: `common_batch_add` e
+    `common_batch_clear` su `llama_batch` spariscono, sostituiti dal tipo
+    `common_batch` (sopra `llama_batch_ext`), e `common_speculative_process`
+    ora prende un `common_batch`. È l'unica che ci tocca:
+    `llama_rs_mtp_speculative_process` copia il batch del modello in un
+    `common_batch` che il wrapper tiene. Aggiunta alla lista in
+    `llama-cpp-2/Cargo.toml`.
+
+  **`llama-cpp-rs` non si muove, ed è voluto.** L'ultima release, 0.1.158
+  (30 settembre), fissa llama.cpp a `b11074`, più vecchio del nostro pin:
+  non insegue un llama.cpp più nuovo. Le sue modifiche sono un ridisegno: i
+  metodi sui token lasciano `LlamaModel` per un nuovo `LlamaVocab` con altri
+  nomi, più le lifetime di `mtmd` e un `build.rs` riscritto. Adottarla
+  vuol dire adeguare il motore ovunque tokenizza: è un lavoro a parte.
+
+  Lista architetture rigenerata: 152 → 153 (`glm5-next`).
+
+  Validato qui, senza GPU: `cargo build` pulito, `cargo test` verde (632
+  test), `cargo clippy --no-deps --all-targets -- -D warnings` pulito. MTP
+  su CPU con Qwen3.5-0.8B-MTP e `--mtp 2`: bozze tenute 57/65/70% sui tre
+  prompt di controllo, contro 58/62/69% a `b11100`. Senza bozze 26-27
+  token/s contro 20 a `b11100`, sulla stessa macchina a 4 core (una sola
+  misura).
+
+  **Da validare su hardware reale prima di `main`**: ricaricare ogni
+  famiglia di modelli disponibile in locale, incluso il template di
+  ragionamento DeepSeek e un modello multimodale, e `--mtp 2` su
+  Qwen3.5-9B-MTP.
+- [ ] **H4-L · Cache degli esperti MoE in VRAM (`--moe-cache`), dalla PR
+  #29887 di llama.cpp portata sopra `b11370` — in attesa di validazione su
+  GPU e della fusione a monte** *(P1)*
+  Il punto 1 di Strata ("dove stanno gli esperti"), nella versione che
+  llama.cpp sta per avere: con gli esperti in RAM, la VRAM che la divisione
+  solita dava a strati interi di esperti diventa una cache LRU degli esperti
+  più usati. Misurato con `llama-server` della PR sul PC di riferimento (RTX
+  5070 Ti, Ryzen 9 5950X, 64 GB), Qwen3.8-Flash-Next IQ2_XS: scrittura 22,4 →
+  33,1 (cache 4.000 MiB) → 49,4 token/s (8.000 MiB); lettura dei prompt 249 →
+  206 token/s, perché la cache serve solo i passi fino a 32 token. Con l'MTP
+  di llama.cpp (testa di unsloth, vedi sotto) peggiora: 52% di bozze tenute,
+  2,05 token per controllo, −15/20% in scrittura.
+
+  **Come è portata.** Il sottomodulo punta a `6b7b03a`, l'unico commit della
+  PR sopra `bed0a85` (`b11370`). Lo specchio `eullm/llama.cpp` non ha i ref
+  delle PR, quindi il commit va ancorato a mano come
+  `refs/eullm/pinned/6b7b03aaba0526c8c4d2ca8c168e0ea170e1b223` prima che
+  chiunque (CI compresa) aggiorni il sottomodulo; il controllo di
+  `mirror-sync.yml` poi lo trova. Quando la PR viene fusa, si sposta il pin
+  sulla release che la contiene e `with_moe_cache_size` si allinea al nome
+  definitivo del campo.
+
+  **In EuLLM.** `--moe-cache auto|MiB`, condiviso da `run` e `serve`.
+  `fit::plan_moe_cache` decide prima della solita divisione MoE: tutti gli
+  esperti in RAM (o quelli che lascia `--n-cpu-moe`), il resto del modello
+  tutto sulla GPU, e alla cache la stessa VRAM che la divisione avrebbe dato
+  agli esperti, a passi di 256 MiB e mai sotto 512 MiB in automatico. Solo con
+  una GPU CUDA (`fit::moe_cache_support`): la cache rifiuta più dispositivi.
+  Il contesto della testa MTP non la riceve.
+
+  **La testa MTP di unsloth non è allineata a llama.cpp ufficiale.**
+  `mtp-Qwen3.8-Flash-Next-*.gguf` dichiara lo strato MTP con rapporto di
+  compressione 0, mentre `conversion/qwen4exp.py` scrive 4 (lo strato MTP è
+  QSA, i suoi pesi `indexer` ci sono): con 0 il grafo MTP prepara gli
+  ingressi QSA senza usarli e si ferma su `GGML_ASSERT(buffer)`. Cambiato il
+  valore nel file (un byte), funziona. EuLLM non carica teste MTP da file
+  separati: per Qwen3.8-Flash-Next l'MTP resta fuori finché non conviene.
+
+  **Misurato in EuLLM** (`--moe-cache auto`, stesso PC, 2026-10-04): 43,6
+  token/s in scrittura, 210 in lettura, GPU al 59% e CPU ferma. Diagnosi e
+  fasi successive in `docs/moe-offload-plan.md`.
+
+  **Patch nostre sopra la PR (fasi 1 e 2 del piano).** Non sono commit da
+  ancorare sullo specchio ma file in
+  `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, che il build script
+  applica a una copia del sottomodulo in `OUT_DIR` (`llama_patches.rs`, test
+  in `engine/tests/llama_patches.rs`); il sottomodulo resta pulito su
+  `6b7b03a`. `0001` dà a CUDA due proc per bloccare in memoria (pin) un
+  intervallo su richiesta, senza `GGML_CUDA_REGISTER_HOST`; `0002` blocca gli
+  esperti da cui la cache copia e, con `LLAMA_MOE_CACHE_STATS=N`, stampa su
+  stderr dove va il tempo di un passo. `LLAMA_MOE_CACHE_PIN=0` lascia gli
+  esperti come prima, per il confronto. Al primo build dopo questo cambio
+  llama.cpp si ricompila da capo: la directory di build CMake cambia sorgente.
+
+  **Misurato con le statistiche** (stesso PC, 2026-10-04): passo di 20-21
+  ms, di cui 13,7-14 fino ai router dei 48 strati, 5-8 nella cache (copie)
+  e 1,4 dopo; 46-76 MiB copiati per token a 9 GB/s, 88-93% degli esperti
+  già in VRAM. Il pinning è stato rifiutato dal driver (`operation not
+  supported`): registrare un file mappato in sola lettura su Linux non è
+  affidabile. Da qui `--no-mmap`: senza mmap llama.cpp mette da sé gli
+  esperti forzati in RAM nel buffer host bloccato di CUDA (`CUDA_Host`),
+  come suggerisce il suo stesso avviso, che EuLLM nascondeva.
+
+  **Misurato con `--no-mmap`**: 33,02 GiB di esperti in memoria bloccata;
+  scrittura 44,4 → 58,1 token/s (+31%), lettura 211 → 451,5 (2,1×).
+
+  **Prossimo**: statistiche con `--no-mmap`; `--n-ubatch 2048/4096` con gli
+  esperti bloccati; `--no-mmap` automatico con `--moe-cache` quando la RAM
+  basta; i 1-2 ms per token spesi da EuLLM attorno al decode.
 - [ ] **H3-S · `--base-model` di Forge accetta un repo Hub arbitrario** *(P2)*
   *Aperta 2026-09-08 a margine di CVE-2026-69112 in `accelerate` (path traversal
   in `load_checkpoint_in_model` / `load_checkpoint_and_dispatch`: le voci

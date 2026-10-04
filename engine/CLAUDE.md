@@ -118,6 +118,14 @@ changed to `mtmd_helper_bitmap_wrapper`) — full details in backlog item H3-R.
   not a valid intermediate state — it does not compile. Re-vendoring
   `llama-cpp-rs` means copying its updated source into
   `engine/vendor/llama-cpp-rs/`, not editing a version string.
+- **EuLLM's own llama.cpp changes are patch files, and move with the pin.**
+  They live in `llama-cpp-sys-2/patches/*.patch` (git diffs against the
+  pinned commit, a description above each) and the build script applies them
+  to a copy of the submodule in `OUT_DIR` (`llama_patches.rs`), so the
+  submodule is never edited in place and nothing has to be pushed to the
+  `eullm/llama.cpp` mirror. A bump regenerates every patch that no longer
+  applies and drops every one upstream has taken; `cargo test --test
+  llama_patches` in `engine/` names the ones that fail.
 - **Validate every bump on real hardware before it lands**, not just on a
   green `cargo build`: reload every locally available model family at least
   once, including a multimodal one and the DeepSeek reasoning template — a

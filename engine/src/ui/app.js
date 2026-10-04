@@ -118,6 +118,13 @@
       .replace(/<think>[\s\S]*$/, "")
       .trim();
 
+  // /api/chat streams the reasoning apart when asked to think, in Ollama's
+  // `message.thinking`. Put back in front of the answer as a `<think>` block,
+  // it renders as the same reasoning section and strips the same way; left
+  // open while no answer has come, so it reads as reasoning in progress.
+  const withThinking = (thinking, answer) =>
+    !thinking ? answer : answer ? `<think>${thinking}</think>${answer}` : `<think>${thinking}`;
+
   // {role, content}, plus `media: {base64, kind}` on a user turn that carried
   // an attachment (see toApiMessages for how it is re-sent).
   const history = [];
@@ -865,6 +872,7 @@
     abortController = new AbortController();
     const t0 = performance.now();
     let assistantText = "";
+    let thinkingText = "";
     let tokenCount = 0;
 
     try {
@@ -943,13 +951,15 @@
               markAttachmentFailed();
               return;
             }
+            const thought = ndjson ? (obj.message?.thinking || "") : "";
             delta = ndjson
               ? (obj.message?.content || "")
               : (obj.choices?.[0]?.delta?.content || "");
-            if (delta) {
+            if (thought || delta) {
+              thinkingText += thought;
               assistantText += delta;
               tokenCount++;
-              contentEl.innerHTML = renderContent(assistantText);
+              contentEl.innerHTML = renderContent(withThinking(thinkingText, assistantText));
               scrollToBottom();
             }
           } catch (e) {
@@ -961,9 +971,10 @@
       // Tag the turn with the model that wrote it: after a mid-conversation
       // model switch, the send path uses this to tell the new model that the
       // earlier assistant turns are not its own words (see modelSwitchNotice).
+      const reply = withThinking(thinkingText, assistantText);
       history.push({
         role: "assistant",
-        content: stripThink(assistantText) || assistantText,
+        content: stripThink(reply) || reply,
         model: currentModel,
       });
       const dt = (performance.now() - t0) / 1000;

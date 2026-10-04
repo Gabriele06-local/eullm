@@ -62,6 +62,7 @@ pub const SUPPORTED_ARCHITECTURES: &[&str] = &[
     "glm-dsa",
     "glm4",
     "glm4moe",
+    "glm5-next",
     "gpt-oss",
     "gpt2",
     "gptj",

@@ -409,6 +409,10 @@ pub(crate) fn build_ctx_params_with_cache(
         .with_n_threads_batch(config.threads as i32)
         .with_n_rs_seq(config.rs_seq);
 
+    if config.moe_cache_bytes > 0 {
+        params = params.with_moe_cache_size(config.moe_cache_bytes as usize);
+    }
+
     if cache_type_k != KvCacheType::F16 || cache_type_v != KvCacheType::F16 {
         params = params.with_type_k(cache_type_k).with_type_v(cache_type_v);
     }
@@ -547,6 +551,18 @@ pub struct InferenceConfig {
     /// `--mtp-p-min`: the MTP head stops drafting below this probability
     /// of its own (0 = always the full `mtp`).
     pub mtp_p_min: f32,
+    /// Bytes of VRAM for a cache of the MoE experts kept in RAM (0 = none):
+    /// the size `--moe-cache` comes to once the load is sized, never the
+    /// flag itself (see `fit::plan_moe_cache`). Every context of this
+    /// model gets it except the MTP draft context, which reads no experts
+    /// of the model's.
+    pub moe_cache_bytes: u64,
+    /// `--no-mmap`: read the model into memory instead of mapping its file.
+    /// Expert tensors kept in RAM then land in the GPU backend's pinned host
+    /// buffer, which llama.cpp gives weights overridden to the CPU only when
+    /// the file is not mapped ("avoid using a host buffer when using mmap",
+    /// `llama-model-loader.cpp`).
+    pub no_mmap: bool,
 }
 
 impl Default for InferenceConfig {
@@ -572,6 +588,8 @@ impl Default for InferenceConfig {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            moe_cache_bytes: 0,
+            no_mmap: false,
         }
     }
 }
@@ -1611,6 +1629,12 @@ impl InferenceEngine {
         self.config.context_size
     }
 
+    /// The micro-batch this engine was loaded with: `--n-ubatch`, or what
+    /// an expert cache chose for it.
+    pub fn n_ubatch(&self) -> u32 {
+        self.config.n_ubatch
+    }
+
     /// Whether a multimodal projector is loaded, i.e. whether
     /// [`Self::generate_multimodal`] can read attachments.
     #[cfg(feature = "multimodal")]
@@ -1689,6 +1713,13 @@ impl InferenceEngine {
         } else {
             // -1 = offload all layers
             LlamaModelParams::default().with_n_gpu_layers(1000)
+        };
+        // Only when asked: llama.cpp's default load mode (auto) maps the file
+        // unless a device cannot use mapped memory, and is left to decide.
+        let model_params = if config.no_mmap {
+            model_params.with_use_mmap(false)
+        } else {
+            model_params
         };
         let mut model_params = pin!(model_params);
         // Patterns passed to `add_cpu_buft_override` are stored as raw pointers

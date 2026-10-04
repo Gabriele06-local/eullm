@@ -16,6 +16,10 @@ include = [
     "build.rs",
     "/src",
 
+    # EuLLM: the llama.cpp changes carried as patches, and what applies them.
+    "llama_patches.rs",
+    "/patches/*.patch",
+
     "/llama.cpp/common/**/*.h",
     "/llama.cpp/common/**/*.hpp",
     "/llama.cpp/common/**/*.cpp",

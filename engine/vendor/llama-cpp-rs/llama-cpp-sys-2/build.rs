@@ -8,6 +8,9 @@ use cmake::Config;
 use glob::glob;
 use walkdir::DirEntry;
 
+// EuLLM: the llama.cpp changes carried as `patches/*.patch`, see the module.
+mod llama_patches;
+
 enum WindowsVariant {
     Msvc,
     Other,
@@ -440,10 +443,14 @@ fn main() {
     debug_log!("BUILD_SHARED: {}", build_shared_libs);
 
     // Make sure that changes to the llama.cpp project trigger a rebuild.
+    // EuLLM: the public headers too. bindgen's own rerun-if-changed lines
+    // used to cover them, and with patches they name the copy in OUT_DIR.
     let rebuild_on_children_of = [
         llama_src.join("src"),
         llama_src.join("ggml/src"),
         llama_src.join("common"),
+        llama_src.join("include"),
+        llama_src.join("ggml/include"),
     ];
     for entry in walkdir::WalkDir::new(&llama_src)
         .into_iter()
@@ -463,6 +470,17 @@ fn main() {
         }
     }
 
+    // EuLLM: from here on, build from the submodule with `patches/*.patch`
+    // applied, in a copy under OUT_DIR, and read the wrapper sources beside
+    // that copy. Without patches both are where they always were.
+    let llama_submodule = llama_src;
+    let llama_patches::Sources {
+        llama_src,
+        wrapper_dir,
+        patches: llama_patches_applied,
+    } = llama_patches::prepare(Path::new(&manifest_dir), &llama_submodule, &out_dir);
+    debug_log!("llama.cpp patches: {:?}", llama_patches_applied);
+
     // Use all available cores except 2 to
     let cmake_build_parallelism_level =
         match env::var("CMAKE_BUILD_PARALLEL_LEVEL").map(|v| NonZeroUsize::from_str(&v)) {
@@ -476,7 +494,7 @@ fn main() {
 
     // Bindings
     let mut bindings_builder = bindgen::Builder::default()
-        .header("wrapper.h")
+        .header(wrapper_dir.join("wrapper.h").to_string_lossy())
         .clang_arg(format!("-I{}", llama_src.join("include").display()))
         .clang_arg(format!("-I{}", llama_src.join("ggml/include").display()))
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
@@ -502,7 +520,7 @@ fn main() {
     // Configure mtmd feature if enabled
     if cfg!(feature = "mtmd") {
         bindings_builder = bindings_builder
-            .header("wrapper_mtmd.h")
+            .header(wrapper_dir.join("wrapper_mtmd.h").to_string_lossy())
             .allowlist_function("mtmd_.*")
             .allowlist_type("mtmd_.*");
     }
@@ -638,7 +656,7 @@ fn main() {
         let mut common_wrapper_build = cc::Build::new();
         common_wrapper_build
             .cpp(true)
-            .file("wrapper_common.cpp")
+            .file(wrapper_dir.join("wrapper_common.cpp"))
             .include(&llama_src)
             .include(llama_src.join("common"))
             .include(llama_src.join("include"))
@@ -666,7 +684,18 @@ fn main() {
 
     // Build with Cmake
 
+    // EuLLM: a build directory configured from the submodule cannot build the
+    // patched copy, nor the other way round.
+    llama_patches::reset_build_dir_if_moved(&out_dir.join("build"), &llama_src);
     let mut config = Config::new(&llama_src);
+    if !llama_patches_applied.is_empty() {
+        if let Some((commit, number)) =
+            llama_patches::build_info(&llama_submodule, llama_patches_applied.len())
+        {
+            config.define("LLAMA_BUILD_COMMIT", commit);
+            config.define("LLAMA_BUILD_NUMBER", number);
+        }
+    }
 
     // Would require extra source files to pointlessly
     // be included in what's uploaded to and downloaded from

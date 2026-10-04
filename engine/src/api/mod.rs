@@ -27,6 +27,7 @@ mod route;
 // path as an HTTP request instead of a second, divergent one.
 pub(crate) mod routes;
 mod systemone;
+mod thinking;
 
 pub use auth::Identity;
 pub use route::{CandidateFacts, CatalogFacts, DEFAULT_AUTO_TIMEOUT_MS};
@@ -140,9 +141,11 @@ pub struct AppState {
     pub threads: u32,
     pub flash_attn: bool,
     pub n_batch: u32,
-    /// `--n-ubatch`: the physical micro-batch of every model this server
-    /// loads, and the compute buffer `--fit` reserves for it.
-    pub n_ubatch: u32,
+    /// `--n-ubatch` as given: the physical micro-batch of every model this
+    /// server loads, and the compute buffer `--fit` reserves for it. `None`
+    /// is llama.cpp's 512, or what an expert cache chooses for its load
+    /// (`fit::MOE_CACHE_N_UBATCH`).
+    pub n_ubatch: Option<u32>,
     /// KV cache quantization type for keys (e.g. Q8_0 — reduces VRAM).
     pub cache_type_k: crate::inference::KvCacheType,
     /// KV cache quantization type for values (e.g. Q4_0 — reduces VRAM).
@@ -165,6 +168,15 @@ pub struct AppState {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--moe-cache`, as the user gave it: every load sizes its own cache
+    /// from it (see `fit::plan_moe_cache`).
+    pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--no-mmap`: every model this server loads is read into memory
+    /// rather than mapped (see `InferenceConfig::no_mmap`).
+    pub no_mmap: bool,
+    /// `--mmap`: a load with an expert cache keeps the file mapped rather
+    /// than reading it in to pin the experts (`fit::plan_read_into_memory`).
+    pub mmap: bool,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -459,6 +471,14 @@ impl AppState {
         // loaded has its own size, layer count, and (possibly) expert
         // layout.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
+        // The expert cache, where this machine can run one.
+        let moe_cache = self.moe_cache.and_then(|request| match crate::fit::moe_cache_support() {
+            Ok(()) => Some(request),
+            Err(why) => {
+                tracing::info!("--moe-cache: {why}; loading without the cache");
+                None
+            }
+        });
         let info = crate::fit::read_gguf_info(&gguf_path);
         let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let layout = match (&info, file_size) {
@@ -482,6 +502,8 @@ impl AppState {
                 cpu_moe: self.cpu_moe,
                 n_cpu_moe: self.n_cpu_moe,
                 mmproj_offload: self.mmproj_offload,
+                moe_cache,
+                auto_n_ubatch: self.n_ubatch.is_none(),
             },
         };
 
@@ -528,15 +550,53 @@ impl AppState {
                     );
                 }
             }
-            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement) = match &plan {
-                Some(plan) => (plan.gpu_layers, plan.cpu_moe, plan.n_cpu_moe, plan.mmproj),
+            let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement, moe_cache_bytes) = match &plan {
+                Some(plan) => (
+                    plan.gpu_layers,
+                    plan.cpu_moe,
+                    plan.n_cpu_moe,
+                    plan.mmproj,
+                    plan.moe_cache_bytes,
+                ),
+                // Without sizing a size in MiB is used as given; `auto` has
+                // nothing to size against.
                 None => (
                     self.gpu_layers,
                     self.cpu_moe,
                     self.n_cpu_moe,
                     crate::fit::MmprojPlacement::from_flag(self.mmproj_offload),
+                    match moe_cache {
+                        Some(crate::fit::MoeCache::Mib(mib)) => u64::from(mib) << 20,
+                        _ => 0,
+                    },
                 ),
             };
+
+            // The micro-batch and the file mapping this load takes: the
+            // flags', unless the expert cache chose (`fit::plan_moe_cache`,
+            // `fit::plan_read_into_memory`).
+            let cache_n_ubatch = plan.as_ref().and_then(|plan| plan.n_ubatch);
+            let load_n_ubatch = cache_n_ubatch
+                .or(self.n_ubatch)
+                .unwrap_or(crate::inference::DEFAULT_N_UBATCH);
+            let load_n_batch = crate::inference::batch_for_ubatch(self.n_batch, load_n_ubatch);
+            if cache_n_ubatch.is_some() {
+                tracing::info!(
+                    "--moe-cache: reading prompts {load_n_ubatch} tokens at a time (--n-ubatch), \
+                     so that the experts in RAM are copied to the GPU once per {load_n_ubatch} \
+                     prompt tokens instead of {}",
+                    crate::inference::DEFAULT_N_UBATCH
+                );
+            }
+            let (load_no_mmap, why) = crate::fit::plan_read_into_memory(
+                self.no_mmap,
+                self.mmap,
+                plan.as_ref().map_or(0, |plan| plan.moe_cache_host_bytes),
+                crate::fit::system_ram_bytes(),
+            );
+            if let Some(why) = why {
+                tracing::info!("{why}");
+            }
 
             // ── 2. Load the new model ───────────────────────────────
             let config = InferenceConfig {
@@ -545,8 +605,8 @@ impl AppState {
                 context_size: effective_ctx,
                 threads: self.threads,
                 flash_attn: self.flash_attn,
-                n_batch: self.n_batch,
-                n_ubatch: self.n_ubatch,
+                n_batch: load_n_batch,
+                n_ubatch: load_n_ubatch,
                 cache_type_k,
                 cache_type_v,
                 // Multimodal: when the model store declares an mmproj sibling
@@ -561,6 +621,8 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                moe_cache_bytes,
+                no_mmap: load_no_mmap,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -692,7 +754,7 @@ impl AppState {
                     engine.context_size(),
                     sizing.kv_bpe_k,
                     sizing.kv_bpe_v,
-                    self.n_ubatch,
+                    load_n_ubatch,
                 ),
                 _ => 0,
             };
@@ -735,6 +797,8 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                moe_cache_bytes,
+                no_mmap: load_no_mmap,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -747,8 +811,8 @@ impl AppState {
                 kv_v_mib: info.kv_v_mib,
                 web: self.web_enabled,
                 threads: self.threads,
-                n_batch: self.n_batch,
-                n_ubatch: self.n_ubatch,
+                n_batch: load_n_batch,
+                n_ubatch: load_n_ubatch,
                 rust_debug: self.rust_debug,
             }
             .print();
@@ -960,7 +1024,9 @@ impl AppState {
             .saturating_add(self.models.read().await.unallocated_reserve())
             // A micro-batch above the default needs a larger compute buffer
             // than the flat reserve the fit charges (`--n-ubatch`).
-            .saturating_add(crate::fit::ubatch_reserve_bytes(self.n_ubatch));
+            .saturating_add(crate::fit::ubatch_reserve_bytes(
+                self.n_ubatch.unwrap_or(crate::inference::DEFAULT_N_UBATCH),
+            ));
         crate::fit::plan_offload(
             crate::fit::vram_bytes(),
             sizing.info,
@@ -2679,7 +2745,7 @@ pub struct ServeConfig {
     pub flash_attn: bool,
     pub n_batch: u32,
     /// `--n-ubatch`, for every model this server loads (see `AppState::n_ubatch`).
-    pub n_ubatch: u32,
+    pub n_ubatch: Option<u32>,
     pub cache_type_k: crate::inference::KvCacheType,
     pub cache_type_v: crate::inference::KvCacheType,
     pub batch_size: usize,
@@ -2691,6 +2757,12 @@ pub struct ServeConfig {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--moe-cache` (see `AppState::moe_cache`).
+    pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--no-mmap` (see `AppState::no_mmap`).
+    pub no_mmap: bool,
+    /// `--mmap` (see `AppState::mmap`).
+    pub mmap: bool,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -2949,7 +3021,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
                 engine.context_size(),
                 crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_k),
                 crate::inference::cache_type_bytes_per_elem(&cfg.cache_type_v),
-                cfg.n_ubatch,
+                engine.n_ubatch(),
             ),
             _ => 0,
         };
@@ -3005,6 +3077,9 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         rs_seq: cfg.rs_seq,
         mtp: cfg.mtp,
         mtp_p_min: cfg.mtp_p_min,
+        moe_cache: cfg.moe_cache,
+        no_mmap: cfg.no_mmap,
+        mmap: cfg.mmap,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3169,7 +3244,7 @@ impl AppState {
             threads: 1,
             flash_attn: false,
             n_batch: 512,
-            n_ubatch: crate::inference::DEFAULT_N_UBATCH,
+            n_ubatch: None,
             cache_type_k: crate::inference::KvCacheType::F16,
             cache_type_v: crate::inference::KvCacheType::F16,
             batch_size: 1,
@@ -3178,6 +3253,9 @@ impl AppState {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            moe_cache: None,
+            no_mmap: false,
+            mmap: false,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

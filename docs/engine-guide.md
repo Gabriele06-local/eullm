@@ -101,8 +101,27 @@ curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '
 }'
 ```
 
-Leave `think` out (or set it to `true`) and the reasoning comes back, tags
-included, so a UI can render it as a collapsible section.
+Leave `think` out and the reasoning comes back in the answer, tags included,
+so a UI can render it as a collapsible section.
+
+**`"think": true` returns the reasoning apart, as Ollama does.** On `/api/chat`
+the reasoning goes to `message.thinking` and `message.content` holds only the
+answer; on `/api/generate` it goes to `thinking`, beside `response`. Streamed,
+the reasoning arrives first, in lines whose `content` (or `response`) is empty,
+then the answer. The delimiters (`<think>`…`</think>`, Gemma 4's
+`<|channel>thought`…`<channel|>`) and the blank lines around them are dropped.
+An answer cut off by its token budget mid-thought has only `thinking`.
+`/v1/chat/completions` keeps the reasoning in the answer either way.
+
+```bash
+curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '{
+  "model": "qwen3-0.6b",
+  "messages": [{"role": "user", "content": "Say hello in Italian, one word."}],
+  "think": true,
+  "stream": false
+}'
+# "message": {"role": "assistant", "thinking": "Okay, the user wants…", "content": "Ciao!"}
+```
 
 **Asking for a model that does not exist returns `404`, not `500`.** This matters
 if your client retries automatically: a `5xx` reads as "temporary, try again", so
@@ -459,6 +478,123 @@ The batch a decode call takes, `--n-batch`, is raised to match when it is
 smaller. A dense model, or an MoE that fits whole on the GPU, copies nothing
 per pass and gains little.
 
+#### Writing faster: the expert cache (`--moe-cache`, experimental)
+
+Of the experts in RAM, a model uses some far more often than others. With
+`--moe-cache auto`, every expert stays in RAM and the VRAM the usual split
+would have given whole layers of them becomes a cache instead: llama.cpp
+copies an expert to the card the first time a token needs it and keeps the
+ones used most recently, so most tokens find their experts already there.
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto
+```
+
+`auto` sizes the cache from the VRAM left once the rest of the model, its
+context and the usual reserves are placed; `--moe-cache 6000` asks for 6,000
+MiB, cut to what is left when that is less. The log and the banner say how
+large it came out. Measured on Qwen3.8-Flash-Next IQ2_XS with an RTX 5070 Ti
+(llama.cpp's own server, same build of the cache):
+
+| Setting | Writes (tokens/s) | Reads a prompt (tokens/s) |
+|---|---:|---:|
+| The usual split, experts of the last layers on the GPU | 22.4 | 249 |
+| Every expert in RAM, 4,000 MiB cache | 33.1 | 206 |
+| Every expert in RAM, 8,000 MiB cache | 49.4 | 206 |
+
+The cache serves the decode steps (batches of up to 32 tokens). Reading a
+prompt still copies the experts to the card a pass at a time, all of them
+now rather than all but the last layers', so it is slower, by 17% there:
+`--n-ubatch` is the setting for that, and the two share the same VRAM.
+
+Combined with `--mtp` it was slower, not faster: on that model the head's
+drafts were kept 52% of the time, and each check of 3 tokens reads up to 3
+times the experts of a single step, most of them copied in. Keep `--mtp` for
+models that fit in VRAM.
+
+It needs one CUDA GPU: with more than one, or another backend, the load says
+why and runs without it. The cache is llama.cpp PR #29887, which this build
+carries ahead of a llama.cpp release; its size and its behaviour may change
+when upstream merges it.
+
+**Pinned experts.** With the cache on, the experts it copies from are
+*pinned* when the model loads: registered with the GPU driver, so that
+copying one to the card is a direct transfer at the bus's full speed instead
+of one the driver stages through a buffer of its own, a piece at a time.
+Reading a prompt copies from the same experts and gains the same way. One
+line at load says how much was pinned and how long it took, or why nothing
+was:
+
+```
+llama_moe_cache: pinned N GiB of host experts in K ranges, in S s
+```
+
+Pinned memory cannot be swapped out or handed back to the page cache while
+the model is loaded, so the experts are pinned only when that leaves a
+quarter of the RAM, and at least 8 GiB, to everything else.
+`LLAMA_MOE_CACHE_PIN=0` leaves them as they were, to compare.
+
+Some drivers refuse to pin the pages of a mapped model file: the line then
+reads `host experts not pinned: operation not supported`, as it did on the
+reference PC (RTX 5070 Ti, Linux). `--no-mmap` takes the other road: the
+model is read into memory instead of mapped, and llama.cpp puts the experts
+kept in RAM into memory the driver pins as it allocates it. The line then
+reads `host experts already in pinned memory`. Loading reads the whole file
+up front, so it takes longer, and the RAM has to hold the experts. On the
+reference PC it took Qwen3.8-Flash-Next IQ2_XS from 44.4 to 58.1 tokens/s
+writing and from 211 to 451.5 tokens/s reading a prompt, with 33 GiB of
+experts pinned and 24 of the 62 GB of RAM still available.
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto --no-mmap
+```
+
+**What `--moe-cache` does by itself.** Unless told otherwise, a load that
+gets an expert cache:
+
+- reads prompts 2,048 tokens at a time instead of llama.cpp's 512, so that
+  a long prompt copies the experts to the card a quarter as often. The
+  larger compute buffer comes out of the cache. On the model above: 964
+  tokens/s reading a 33,200-token prompt instead of 452, 54.9 writing instead
+  of 58.1. `--n-ubatch` sets it either way: 512 for the fastest writing, 4096
+  for the fastest reading (1,240 there, 47.1 writing).
+- reads the model into memory, as `--no-mmap` does, when pinning its experts
+  leaves a quarter of the RAM and at least 8 GiB to everything else. `--mmap`
+  keeps the file mapped. Where the RAM's size is not known (Windows), the file
+  stays mapped; `--no-mmap` reads it in anyway.
+
+The startup log says what it chose and why. With both, the command above
+needs neither flag:
+
+```bash
+eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-00002.gguf \
+  --ctx-size 40960 --moe-cache auto
+```
+
+**Where a decode step goes.** `LLAMA_MOE_CACHE_STATS=64` prints, every 64
+decode steps of up to 8 tokens, one line like this:
+
+```
+llama_moe_cache: 64 steps of 1.0 tokens: X ms/step = A ms to the routers of 48 layers + B ms in the cache + C ms after; M MiB/step copied, H% of the experts in VRAM; copying takes T ms/step (R GB/s)
+```
+
+- *to the routers*: from the start of the step until llama.cpp has read
+  back, layer after layer, which experts each router chose. Mostly the GPU
+  computing the layers up to there.
+- *in the cache*: choosing what to evict and starting the copies; with
+  experts not pinned, also the driver staging them. The GPU waits meanwhile.
+- *after*: the rest, from the last layer's experts to the next step.
+- *M MiB copied* and *H% in VRAM*: what the experts not in VRAM cost.
+- *copying takes*: measured on one step in 8, which waits for its copies to
+  finish so as to time them, and is left out of the times above.
+
+The statistics cost a little speed: measure tokens per second without them.
+At exit the cache's totals print too. Both variables are read by the
+patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
+and may change or go once it is settled.
+
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
 Some models are trained with a multi-token prediction (MTP) head: a small
@@ -512,6 +648,10 @@ answer:
 | `--mtp 2` | 132.6 (+21%) | 177.3 (+61%) | 58% |
 | `--mtp 3` | 121.5 (+11%) | 173.2 (+58%) | 51% |
 | `--mtp 3 --mtp-p-min 0.5` | 115.0 (+5%) | 170.6 (+55%) | 77% |
+
+Measured with llama.cpp b11100. After the move to b11370 the same model
+on the same card wrote 114.8 and 120.2 tokens/s without drafts, and 146.1
+(+27%) and 194.3 (+62%) with `--mtp 2`, keeping the same 58% of the drafts.
 
 `--mtp 2` is the best start: the most on code, a fifth more on prose. Code
 repeats names and patterns the head predicts well, so it gains most; prose
