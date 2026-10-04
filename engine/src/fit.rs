@@ -1,14 +1,20 @@
-//! Auto GPU-layer fitting for `--fit`.
+//! Sizing a load to the GPU: what `--fit` decides, on by default.
 //!
-//! Opt-in helper that decides how many model layers to offload to the GPU so
-//! the model fits in available VRAM. CUDA-first: VRAM is probed through a tiny
-//! cudart FFI call, available only on `--features cuda` builds. On every other
-//! build (or when the probe fails) VRAM is reported as unknown and the caller
-//! falls back to the user-provided `--gpu-layers`.
+//! Before every load — at launch, and before each model `serve` swaps in —
+//! this decides how many layers go on the GPU, which MoE experts stay in
+//! system RAM (`--cpu-moe`/`--n-cpu-moe`), how large an expert cache comes out
+//! (`--moe-cache`), and whether the micro-batch and memory mapping change with
+//! it, so that the model, its KV cache and the compute buffers fit in the VRAM
+//! that is actually free. `--gpu-layers` and the MoE flags are ceilings it
+//! keeps to, never values it overrides upward; `--no-fit` turns it off.
 //!
-//! The layer count is read from the GGUF header (`<arch>.block_count`) with a
-//! small, bounds-checked binary parser, and the on-disk file size is used as a
-//! proxy for total weight bytes.
+//! Free and total VRAM come from ggml's device registry ([`vram_bytes`]), on
+//! every GPU backend we ship. Where nothing can be read (no GPU, or before the
+//! backend is initialised) the user's own `--gpu-layers` is used as given.
+//!
+//! The layer count and attention dimensions are read from the GGUF header
+//! (`<arch>.block_count`, …) with a small, bounds-checked binary parser, and
+//! the on-disk file size is used as a proxy for total weight bytes.
 
 use std::io::IsTerminal;
 use std::path::Path;

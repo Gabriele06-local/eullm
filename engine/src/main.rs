@@ -162,9 +162,8 @@ struct RuntimeOpts {
     #[arg(long, allow_hyphen_values = true)]
     gpu_layers: Option<i32>,
 
-    /// Auto-fit GPU layers to available VRAM (CUDA builds only). Probes
-    /// free VRAM and the model's layer count, then offloads as many layers
-    /// as fit.
+    /// Auto-fit GPU layers to available VRAM. Probes free VRAM and the
+    /// model's layer count, then offloads as many layers as fit.
     ///
     /// **On by default** since 0.6.80: without sizing, a model larger than
     /// the free VRAM dies with an out-of-memory error at load, while with
@@ -174,9 +173,9 @@ struct RuntimeOpts {
     /// confirmation, because you asked to be involved in the decision.
     /// Automatic sizing never asks; it applies the split and logs it.
     ///
-    /// Turned off by --no-fit, and by setting --gpu-layers yourself. When
-    /// VRAM cannot be probed (any non-CUDA build) automatic sizing stays
-    /// silent and --gpu-layers is used as-is.
+    /// Turned off by --no-fit. A --gpu-layers of your own is a ceiling it
+    /// keeps to, not an off switch. When VRAM cannot be read (no GPU)
+    /// automatic sizing stays silent and --gpu-layers is used as-is.
     #[arg(long)]
     fit: bool,
 

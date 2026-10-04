@@ -146,8 +146,9 @@ out-of-memory error happens.
 
 Automatic sizing never asks questions — it applies the split and logs one
 line naming the flags that override it — because a default that interrupts
-every launch is its own kind of failure. Where free VRAM cannot be probed
-(any non-CUDA build) it stays silent and `--gpu-layers` is used as-is.
+every launch is its own kind of failure. Free VRAM is read from ggml's device
+registry on every GPU backend (CUDA, ROCm, Vulkan, Metal); where there is no
+GPU to read it stays silent and `--gpu-layers` is used as-is.
 
 The budget leaves headroom on purpose, and it is the same headroom the
 loader requires: enough of the card's total memory must stay free for the
@@ -535,15 +536,23 @@ Works on all endpoints: `/api/generate`, `/api/chat`, `/v1/chat/completions`. Bo
 EULLM's continuous batching scheduler decodes multiple requests in parallel on a single GPU pass. This is a key performance differentiator over Ollama, which processes requests one at a time.
 
 ```bash
-# Enable continuous batching with 8 parallel slots (default)
+# One request at a time, with the whole context (default: --batch-size 1)
+eullm run ./model.gguf
+
+# Continuous batching: 8 requests decoded together
 eullm run ./model.gguf --batch-size 8
 
 # More slots for high-throughput RAG workloads
 eullm run ./model.gguf --batch-size 16
 
-# Sequential mode (one request at a time, like Ollama)
+# Sequential mode: no scheduler thread (what a multimodal model runs in)
 eullm run ./model.gguf --batch-size 0
 ```
+
+The default is 1 slot: `--ctx-size` is shared by the slots, so a default of 8
+gave each request an eighth of the context, and answers stopped at 512 tokens
+with no flag to point at. Ask for concurrency when several clients send
+requests at the same time, and raise `--ctx-size` with it.
 
 With 16 concurrent requests on a consumer GPU, EULLM achieves ~2.5x throughput vs Ollama. See [benchmarks](benchmarks.md) for details.
 
@@ -565,11 +574,12 @@ More slots increase parallelism but reduce per-request throughput (shared GPU ti
 
 | Parallel slots | Per-request throughput | Aggregate throughput | Use case |
 |:-:|:-:|:-:|---|
+| 1 (default) | Highest | Lowest | One user, a chat, an agent |
 | 4 | High | High | Chat, general inference |
 | 8 | Medium | Higher | Batch extraction, RAG pipelines |
 | 16+ | Lower | Highest | High-concurrency APIs, multi-GPU |
 
-Start with `--batch-size 4` for the best per-request latency. Increase when your workload requires more concurrent slots and can tolerate slower individual responses.
+Keep the default for one user. For several, start with `--batch-size 4` and a `--ctx-size` four times the context each request needs; increase when your workload requires more concurrent slots and can tolerate slower individual responses.
 
 ## Loading a Model: Slots, Context and Names
 
