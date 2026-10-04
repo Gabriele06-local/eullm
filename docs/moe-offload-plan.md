@@ -113,7 +113,7 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
 | 2048 | 6.75 GiB | 54.9 | 963.8 |
 | 4096 | 5.25 GiB | 47.1 | 1,239.5 |
 
-At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at most 1.4 s. Copied while the previous layer computes, the reading would be bound by the computing alone: about 2,000-2,300 tokens/s by that arithmetic, Strata's figure. This is the largest gain left on reading.
+At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at most 1.5 s. Copied while the previous layer computes, the reading would be bound by the computing alone: about 1,800-2,300 tokens/s by that arithmetic, depending on how many experts a micro-batch leaves unused, against Strata's 2,320. This is the largest gain left on reading.
 
 ## 3. Upstream
 
