@@ -113,6 +113,16 @@
 #     The field comes from llama.cpp PR #29887, which the submodule carries
 #     on top of b11370 until upstream merges it; drop both with that commit
 #     if upstream renames the field.
+#   - `llama-cpp-sys-2/llama_patches.rs` and `llama-cpp-sys-2/patches/`:
+#     EuLLM's own changes to llama.cpp, as patch files the build script
+#     applies to a copy of the submodule in OUT_DIR (CMake, the wrappers,
+#     mtmd and bindgen all build from that copy; the submodule stays clean).
+#     `build.rs` calls it right after its rerun-if-changed walk, which also
+#     covers `include/` and `ggml/include/` now; the wrapper sources are read
+#     from beside the copy, and `CMakeCache.txt` from another source directory
+#     resets the build directory. On a bump, `engine/tests/llama_patches.rs`
+#     says whether every patch still applies; regenerate the ones that do not
+#     against the new pin, and drop the ones upstream has taken.
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"

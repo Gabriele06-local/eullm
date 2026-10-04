@@ -17,7 +17,9 @@ members = [
     # llama.cpp C++ source is a git submodule (b11100 at the 0.1.156
     # re-vendor, b11370 since, with llama.cpp PR #29887 on top until upstream
     # merges it; 0.1.158 pins an older llama.cpp, see
-    # engine/vendor/llama-cpp-rs/llama-cpp-2/Cargo.toml), fetched through the
+    # engine/vendor/llama-cpp-rs/llama-cpp-2/Cargo.toml). EuLLM's own changes
+    # to it are patch files, engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches,
+    # applied at build time to a copy; the submodule itself is fetched through the
     # EU-hosted mirror
     # https://github.com/eullm/llama.cpp (see .gitmodules). Read the current
     # pin from `git ls-tree HEAD engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`,
