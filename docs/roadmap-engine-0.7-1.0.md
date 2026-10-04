@@ -316,6 +316,38 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   dà una risposta positiva a un caso che perde il 38%. Mezza giornata di misura
   ha evitato settimane di implementazione contro un modello sbagliato del costo.
 
+- [ ] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(aperta il 2026-10-04)*
+  La 0.8-Z resta chiusa per lo speculative su MoE in CPU. L'MTP ([#655](https://github.com/eullm/eullm/pull/655),
+  `--mtp N`) è un'altra cosa: la bozza la scrive la testa addestrata insieme al
+  modello, e su un **denso in GPU** guadagna. Misurato su RTX 5070 Ti con
+  Qwen3.5-9B-MTP Q4_K_M dopo il bump a b11370: racconto 146,1 tok/s contro 114,8
+  (+27%), codice 194,3 contro 120,2 (+62%), 58% delle bozze tenute con `--mtp 2`.
+  Su CPU con un modello piccolo non conviene (Qwen3.5 0.8B su 4 core: 14-17 tok/s
+  contro 20): la testa costa quasi quanto risparmia.
+
+  **Sui MoE con esperti in RAM non lo scriviamo finché non lo misuriamo.** La
+  ragione della 0.8-Z (un lotto di verifica legge più esperti) vale ancora, ma
+  con `--moe-cache` un draft rifiutato non paga più tutti i suoi esperti: molti
+  sono già in VRAM. Si decide con la prova D: `llama-server` con l'MTP su
+  Qwen3.6-35B-A3B-MTP con gli esperti in RAM, e poi `bench/mtp_sweep.sh` sullo
+  stesso modello in EuLLM.
+
+  Sotto-voci, ciascuna con la misura che la decide:
+  - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
+    pausa sotto una soglia, ripresa dopo N token). Ha senso dove un draft
+    rifiutato costa: MoE con offload, temperatura alta. Si decide con
+    `bench/mtp_sweep.sh` a `TEMPERATURE=0.8` e con la prova D.
+  - **Testa MTP in Q8_0.** Nei GGUF unsloth Q4_K_M la proiezione propria della
+    testa è già Q8_0, ma attenzione e FFN dello strato MTP sono Q4_K/Q6_K.
+    Le accettazioni misurate (58-75%) escludono il crollo che colibri vede con
+    una testa int4 (0-4%); una variante con lo strato MTP in Q8_0 dice se ne
+    resta da guadagnare.
+  - **Rejection sampling di Leviathan a temperatura > 0.** Oggi una bozza è
+    tenuta se è il token che il modello campiona: senza perdita, ma a
+    temperatura alta ne scarta di accettabili. Serve che lo shim esponga le
+    probabilità della testa. Si fa solo se l'accettazione a 0.8 cala di molto
+    rispetto a 0 (`TEMPERATURE=0.8 bench/mtp_sweep.sh`).
+
 ## 0.9 — Agentic e verticale
 
 **Gate di uscita:** tool calling validato su Qwen + una seconda famiglia;
@@ -387,6 +419,35 @@ modelli virtuali base+adapter funzionanti.
   `/v1/completions`, `/v1/responses`, `logprobs`, `stream_options.include_usage`,
   usage dettagliato, error object coerente, specifica OpenAPI quando i tipi sono
   stabili. Golden test per ogni route convertita; alias e campi Ollama preservati.
+
+- [ ] **1.0-E · KV della conversazione su disco** *(P2 — da valutare)*
+  Salvare la cache KV a fine turno (`llama_state_seq_save_file`) e riaprire una
+  conversazione senza rileggere il prompt, come fa colibri. Oggi il riuso del
+  prefisso vale finché lo slot tiene quella conversazione: con molti utenti o
+  conversazioni lunghe si rilegge tutto. **Contro, e sono vincoli, non
+  dettagli:** la KV contiene la conversazione, quindi sono dati personali su
+  disco — opt-in, cifratura, cancellazione su richiesta e conservazione legate
+  all'audit trail (GDPR); una KV vale solo per lo stesso modello, gli stessi tipi
+  di cache e lo stesso template, e va invalidata quando cambiano; sui modelli
+  ibridi (Qwen3.5/3.6) lo stato ricorrente ha già i limiti di riuso noti a monte.
+
+- [ ] **1.0-F · Esperti caldi ricordati tra un avvio e l'altro** *(P2)*
+  `--moe-cache` tiene già in VRAM gli esperti che il modello usa davvero (LRU,
+  per richiesta), che è quello che la proposta chiedeva rispetto a
+  `--n-cpu-moe` per strato. Resta solo la parte persistente: un istogramma
+  degli esperti più usati, salvato su disco, per caricare la cache già calda
+  all'avvio invece di scaldarla sulle prime richieste. Da fare solo se la
+  misura mostra che le prime risposte dopo un avvio sono sensibilmente più
+  lente delle successive.
+
+- [ ] **1.0-G · MTP oltre `--batch-size 1` e nel percorso sequenziale** *(P2)*
+  Oggi lo shim di llama.cpp (`llama_rs_mtp_speculative_*`) è legato alla
+  sequenza 0: niente bozze con più slot, né per i modelli multimodali, che
+  girano nel percorso sequenziale. Allargarlo vuol dire una testa per
+  sequenza (o una gestione per-sequenza dello stato della testa) e la verifica
+  dentro il lotto del continuous batching, dove ogni sequenza tiene un numero
+  diverso di bozze. Prima si misura se conviene con più richieste insieme, dove
+  la GPU è già meno scarica.
 
 ---
 
