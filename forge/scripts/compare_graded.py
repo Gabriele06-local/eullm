@@ -51,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("graded", nargs="+", type=Path,
                     help="a directory of *.graded.jsonl, or the files themselves")
-    ap.add_argument("--baseline", required=True, help="label to compare every model against")
+    ap.add_argument("--baseline", help="label to compare every model against (without it, "
+                    "only the per-model table and --human)")
     ap.add_argument("--csv", type=Path, help="write one row per comparison here")
     ap.add_argument("--human", type=Path, help="filled review sheet (export_grade_review.py)")
     args = ap.parse_args(argv)
@@ -60,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
     for p in args.graded:
         files.extend(sorted(p.glob("*.graded.jsonl")) if p.is_dir() else [p])
     models = {g.label: g for g in map(load_graded, files)}
-    if args.baseline not in models:
+    if args.baseline and args.baseline not in models:
         print(f"[paired] no graded answers for baseline {args.baseline!r}; have: "
               f"{', '.join(sorted(models)) or 'none'}", file=sys.stderr)
         return 1
@@ -73,27 +74,29 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{label:<28} {len(g.grades):>5} {c['correct']:>8} {c['partial']:>8} "
               f"{c['wrong']:>6} {c['unparsed']:>9} {g.mean_length():>7.0f}")
 
-    base = models[args.baseline]
     rows = []
-    print(f"\nagainst {args.baseline} (only-model : only-baseline, p; lenient = partial counts)")
-    for label in sorted(models):
-        if label == args.baseline:
-            continue
-        c = compare(models[label], base)
-        v = verdict(c)
-        lw = "-" if c.longer_wins is None else f"{c.longer_wins:.2f}"
-        kinds = ", ".join(f"{k} {x}:{y}" for k, (x, y) in c.by_kind.items())
-        print(f"{label:<28} n={c.n:<5} {c.a_only:>3}:{c.base_only:<3} diff {c.diff:+4d} "
-              f"p={c.p:.3f}  lenient {c.a_only_lenient}:{c.base_only_lenient} "
-              f"p={c.p_lenient:.3f}  longer-right {lw}  -> {v}")
-        if kinds:
-            print(f"{'':<28} by kind: {kinds}")
-        rows.append([label, args.baseline, c.n, c.a_only, c.base_only, c.diff,
-                     f"{c.p:.4f}", c.a_only_lenient - c.base_only_lenient,
-                     f"{c.p_lenient:.4f}", v, lw, f"{models[label].mean_length():.0f}",
-                     f"{base.mean_length():.0f}"])
+    if args.baseline:
+        base = models[args.baseline]
+        print(f"\nagainst {args.baseline} "
+              "(only-model : only-baseline, p; lenient = partial counts)")
+        for label in sorted(models):
+            if label == args.baseline:
+                continue
+            c = compare(models[label], base)
+            v = verdict(c)
+            lw = "-" if c.longer_wins is None else f"{c.longer_wins:.2f}"
+            kinds = ", ".join(f"{k} {x}:{y}" for k, (x, y) in c.by_kind.items())
+            print(f"{label:<28} n={c.n:<5} {c.a_only:>3}:{c.base_only:<3} diff {c.diff:+4d} "
+                  f"p={c.p:.3f}  lenient {c.a_only_lenient}:{c.base_only_lenient} "
+                  f"p={c.p_lenient:.3f}  longer-right {lw}  -> {v}")
+            if kinds:
+                print(f"{'':<28} by kind: {kinds}")
+            rows.append([label, args.baseline, c.n, c.a_only, c.base_only, c.diff,
+                         f"{c.p:.4f}", c.a_only_lenient - c.base_only_lenient,
+                         f"{c.p_lenient:.4f}", v, lw, f"{models[label].mean_length():.0f}",
+                         f"{base.mean_length():.0f}"])
 
-    if args.csv:
+    if args.csv and rows:
         with args.csv.open("w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(CSV_HEADER)
