@@ -134,7 +134,7 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 
 ## 5. Next step
 
-1. A q8_0 KV cache (`--cache-type-k q8_0 --cache-type-v q8_0`) with `--n-ubatch 2048`: it halves the KV memory, about 1.9 GiB at a 40,960-token context, which `--fit` gives back to the expert cache, so that reading at 2,048 should no longer cost writing speed.
+1. ~~A q8_0 KV cache with `--n-ubatch 2048`~~ Measured: little to gain on this model. Only one layer in four has attention, so its KV cache is about 1 GiB at a 40,960-token context and `--fit` already charges it that way; q8_0 gave the expert cache 0.25 GiB more (7.00 GiB at 2,048), for 55.8 tokens/s writing and 935.7 reading. At 4,096, 53.2 and 1,195.1. `--n-ubatch 2048` without it stays the balance: about 55 writing, about 960 reading.
 2. llama.cpp's MTP with the experts pinned (llama-server, `--load-mode none`): a check of three tokens copies more experts, which cost 2.5 steps at 9 GB/s and costs far less at 24. If drafting pays now, loading the MTP head from its own file in EuLLM is a smaller job than phase 3.
 3. `--no-mmap` on by itself with `--moe-cache` when the RAM holds the experts with room to spare, since that is when it pays.
 4. Phase 6: copy the next layer's experts while a prompt's micro-batch computes.
