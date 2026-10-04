@@ -147,7 +147,8 @@ The practical consequence is a two-track plan. Single-GCD work on `small-g` and
 `dev-g` costs 0.125 node-hours per hour and is where iteration belongs; it will
 never consume the allocation. Full-node `standard-g` campaigns are what actually
 spends it, and they have to be queued deliberately rather than as an
-afterthought.
+afterthought. The work packages, budget and month-by-month calendar are in
+[`allocation-plan.md`](allocation-plan.md).
 
 ## Build recipe (unverified)
 
