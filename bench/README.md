@@ -137,6 +137,17 @@ writing speeds, a checksum of each answer, and the server's `moe prefetch:`
 line; then whether the four answers match, which they must, or why the
 comparison says nothing (the prefetch stayed off, a server gave no answer).
 
+## `interleave_check.py` — roadmap 0.7-D
+
+`interleave_check.py --url URL --model NAME` streams an answer and, a few
+tokens in, sends a long prompt of its own (8,000 tokens, `--prompt-tokens`)
+with a one-token answer. It prints how long that prompt took to read, the
+longest pause in the streamed answer meanwhile, and the answer's speed
+before and during. With `--batch-size 2` or more EuLLM reads the prompt in
+chunks between the answer's tokens and the answer keeps coming, a little
+slower; a server that reads a prompt whole stops it for the whole reading.
+Standard library only.
+
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
 Validates the KV-cache prefix reuse scheduler against the checklist in
