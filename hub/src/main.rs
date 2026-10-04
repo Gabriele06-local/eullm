@@ -69,9 +69,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("EULLM Hub listening on {addr}");
 
     let listener = TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
 
     Ok(())
+}
+
+/// Resolves on Ctrl+C or SIGTERM, and the server then stops taking requests
+/// and lets the ones in flight finish. In a container the hub is PID 1, for
+/// which the kernel has no default action on SIGTERM: without this handler
+/// `docker stop` waited out its ten seconds and then killed the process.
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to register SIGTERM handler");
+        tokio::select! {
+            _ = ctrl_c => { tracing::info!("Received SIGINT, shutting down..."); }
+            _ = sigterm.recv() => { tracing::info!("Received SIGTERM, shutting down..."); }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await.ok();
+        tracing::info!("Received Ctrl+C, shutting down...");
+    }
 }
 
 // -- Model catalog --
