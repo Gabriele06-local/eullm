@@ -563,10 +563,26 @@ def _checkpoint_step(path: Path) -> int:
 
 
 def latest_checkpoint(output_dir: Path) -> Optional[Path]:
+    """The newest checkpoint that finished being written, or None.
+
+    A checkpoint is written in two calls -- the adapter, then the optimizer
+    state -- so a walltime kill between them leaves a checkpoint-N/ with the
+    weights and no training_state.pt. Returning that one costs the whole rest
+    of the chain: load_checkpoint reads the state, dies, and the next link
+    picks the same directory again, while the complete checkpoints that would
+    have loaded sit right there unused. So the state file is the test, and a
+    skipped one is said out loud rather than passed over in silence.
+    """
     if not output_dir.is_dir():
         return None
     candidates = sorted(output_dir.glob("checkpoint-*"), key=_checkpoint_step)
-    return candidates[-1] if candidates else None
+    for path in reversed(candidates):
+        if (path / "training_state.pt").is_file():
+            return path
+        print(f"[resume] {path.name} is missing its training_state.pt, "
+              "a write was cut short: skipping to the one before it",
+              file=sys.stderr)
+    return None
 
 
 def prune_checkpoints(output_dir: Path, keep: int) -> list:
