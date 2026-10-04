@@ -64,6 +64,32 @@ def test_unnumbered_directories_never_win(tmp_path):
     assert distill.latest_checkpoint(tmp_path).name == "checkpoint-500"
 
 
+def test_a_checkpoint_a_kill_caught_mid_write_is_skipped(tmp_path, capsys):
+    """The adapter is written first, the optimizer state second.
+
+    A walltime kill between the two leaves a checkpoint-N/ with the weights
+    and no training_state.pt, and load_checkpoint reads that file. Returning
+    it costs the rest of the chain: the link dies, the next link picks the same
+    directory, and the complete checkpoints that would have loaded are never
+    tried. The comment above prune_checkpoints already said the run's way back
+    is the one before it.
+    """
+    make_checkpoints(tmp_path, [2, 4, 6])
+    cut_short = tmp_path / "checkpoint-400"
+    cut_short.mkdir()
+    (cut_short / "adapter_model.safetensors").write_bytes(b"pesi")
+
+    assert distill.latest_checkpoint(tmp_path).name == "checkpoint-6"
+    assert "checkpoint-400" in capsys.readouterr().err
+
+
+def test_only_half_written_checkpoints_resumes_nothing_at_all(tmp_path):
+    make_checkpoints(tmp_path, [])
+    for step in (7, 8):
+        (tmp_path / f"checkpoint-{step}").mkdir()
+    assert distill.latest_checkpoint(tmp_path) is None
+
+
 def test_no_checkpoints_is_none_not_an_error(tmp_path):
     assert distill.latest_checkpoint(tmp_path) is None
     assert distill.latest_checkpoint(tmp_path / "absent") is None
