@@ -51,7 +51,13 @@ _ABSTAIN = re.compile(
     # "non risulta alcuna disposizione", which is how the answer is usually
     # put, with it.
     r"|non (?:contiene|contengono|include|comprende|compare|riporta|riportano)"
-    r"|non (?:risulta|risultano) (?:alcun[ao]|nessun[ao]|nulla)"
+    # ...with the missing thing as its object: "la norma non include i
+    # contratti a termine" describes an article, and an inesistente answer that
+    # invents one and says that is not abstaining.
+    r"\s+(?:\w+\s+){0,2}?(?:l['’]\s*)?(?:(?:articol[oi]|norm[ae]|disposizion[ei]"
+    r"|testi|testo|riferiment[oi]|fonte)\b|art\.)"
+    r"|non (?:risulta|risultano) (?:alcun[ao]?|nessun[ao]?)\s+(?:articol[oi]|norm[ae]"
+    r"|disposizion[ei]|riferiment[oi]|testo)\b|non risulta nulla nei testi"
     r"|non (?:si )?trova(?:no)? (?:nei|tra i) testi"
     r"|non (?:posso|sono in grado di) (?:rispondere|indicare)",
 )

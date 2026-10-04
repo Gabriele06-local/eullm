@@ -129,6 +129,12 @@ def test_the_abstention_is_paid_in_either_number(answer, tipo):
 @pytest.mark.parametrize("answer", [
     "Il testo contiene l'articolo richiesto.",
     "L'articolo 5 contiene la prescrizione di sessanta giorni.",
+    # An inesistente answer that invents the article and says what it leaves
+    # out is describing one, not saying it is absent.
+    "L'art. 2999 disciplina il trasporto; la norma non include i contratti a termine.",
+    "L'art. 3000 prevede che il venditore consegni la cosa; non comprende le spese di trasporto.",
+    "L'art. 1500 riguarda la locazione e non risulta alcuna eccezione per gli immobili urbani.",
+    "L'articolo stabilisce l'obbligo di custodia, che non riporta limiti di valore.",
 ])
 def test_saying_it_is_there_is_not_an_abstention(answer):
     assert not abstains(answer)
