@@ -73,6 +73,15 @@ Register the expert ranges of the mmap with CUDA. `ggml_backend_cuda_register_ho
 
 **Measured** (same PC and model): 33.02 GiB of experts in pinned memory; writes 44.4 → 58.1 tokens/s (+31%), a prompt read 211 → 451.5 tokens/s (2.1×). `free` shows the pinned experts as shared memory (33 GB), with 24 GB of the 62 still available.
 
+The step table with the experts pinned (micro-batch 512, 8 GiB cache):
+
+| Window | ms per step | Up to the routers (48 layers) | In the cache | After | MiB copied | Experts in VRAM | Copying |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| first, cache cold | 20.3 | 17.9 | 0.5 | 1.8 | 85.3 | 87.0% | 3.8 ms at 24.0 GB/s |
+| the six after | 17.0–18.8 | 15.4–16.7 | 0.2–0.5 | 1.4–1.9 | 48.6–78.4 | 88.1–92.6% | 1.9–3.8 ms at 23.5–23.9 GB/s |
+
+The copies now run at the bus's speed, and asynchronously: the host only queues them (0.3 ms "in the cache" instead of 5-8), and the GPU waits for them on its stream, so their 2-4 ms moved into "up to the routers". Without them that is 13.5-14 ms, as before: the GPU computing the 48 layers plus the waits at the read-backs. CUDA graphs stay on with the cache (one per split, captured once), so it is not kernel launches.
+
 ### Phase 3 — The CPU computes the misses, in parallel with the GPU (the core; weeks)
 
 Built on the PR's hooks, so that it stays one change on top of it.
@@ -96,6 +105,16 @@ Fill the cache at startup from a profile of the experts used most, and keep that
 
 Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the cache's VRAM as the staging area during a prompt. That is Strata §3.5, and its 2,320 tokens/s against our 206-822.
 
+**Measured with the experts pinned** (`--no-mmap`, 33,200-token prompt): a larger micro-batch copies the experts fewer times, and takes VRAM from the cache, which `--fit` sizes from what is left:
+
+| `--n-ubatch` | Expert cache | Writes (tokens/s) | Reads a prompt (tokens/s) |
+|---:|---:|---:|---:|
+| 512 | 8.00 GiB | 58.1 | 451.5 |
+| 2048 | 6.75 GiB | 54.9 | 963.8 |
+| 4096 | 5.25 GiB | 47.1 | 1,239.5 |
+
+At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at most 1.4 s. Copied while the previous layer computes, the reading would be bound by the computing alone: about 2,000-2,300 tokens/s by that arithmetic, Strata's figure. This is the largest gain left on reading.
+
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
@@ -115,8 +134,8 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
 
 ## 5. Next step
 
-1. One run with `--no-mmap` and `LLAMA_MOE_CACHE_STATS=64`: the step table at the new copy rate.
-2. Reading prompts with the experts pinned: `--n-ubatch 2048` and `4096`, which copy the experts once per 2,048 or 4,096 tokens instead of 512. Before pinning, 4,096 took the usual split from 256 to 822 tokens/s.
+1. A q8_0 KV cache (`--cache-type-k q8_0 --cache-type-v q8_0`) with `--n-ubatch 2048`: it halves the KV memory, about 1.9 GiB at a 40,960-token context, which `--fit` gives back to the expert cache, so that reading at 2,048 should no longer cost writing speed.
+2. llama.cpp's MTP with the experts pinned (llama-server, `--load-mode none`): a check of three tokens copies more experts, which cost 2.5 steps at 9 GB/s and costs far less at 24. If drafting pays now, loading the MTP head from its own file in EuLLM is a smaller job than phase 3.
 3. `--no-mmap` on by itself with `--moe-cache` when the RAM holds the experts with room to spare, since that is when it pays.
-4. The 1-2 ms per token EuLLM spends around the decode.
-5. The GPU's busy time per step, to split "up to the routers" into computing and waiting: phase 4 if the waiting is large, phase 3 otherwise.
+4. Phase 6: copy the next layer's experts while a prompt's micro-batch computes.
+5. The GPU's busy time per step, to split the 13.5-14 ms before the routers into computing and waiting: phase 4 if the waiting is large.
