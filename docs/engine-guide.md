@@ -101,8 +101,27 @@ curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '
 }'
 ```
 
-Leave `think` out (or set it to `true`) and the reasoning comes back, tags
-included, so a UI can render it as a collapsible section.
+Leave `think` out and the reasoning comes back in the answer, tags included,
+so a UI can render it as a collapsible section.
+
+**`"think": true` returns the reasoning apart, as Ollama does.** On `/api/chat`
+the reasoning goes to `message.thinking` and `message.content` holds only the
+answer; on `/api/generate` it goes to `thinking`, beside `response`. Streamed,
+the reasoning arrives first, in lines whose `content` (or `response`) is empty,
+then the answer. The delimiters (`<think>`…`</think>`, Gemma 4's
+`<|channel>thought`…`<channel|>`) and the blank lines around them are dropped.
+An answer cut off by its token budget mid-thought has only `thinking`.
+`/v1/chat/completions` keeps the reasoning in the answer either way.
+
+```bash
+curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '{
+  "model": "qwen3-0.6b",
+  "messages": [{"role": "user", "content": "Say hello in Italian, one word."}],
+  "think": true,
+  "stream": false
+}'
+# "message": {"role": "assistant", "thinking": "Okay, the user wants…", "content": "Ciao!"}
+```
 
 **Asking for a model that does not exist returns `404`, not `500`.** This matters
 if your client retries automatically: a `5xx` reads as "temporary, try again", so

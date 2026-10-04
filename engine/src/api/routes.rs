@@ -28,6 +28,7 @@ use crate::inference::embedding::{DEFAULT_EMBEDDING_CTX, Embedded, EmbeddingMode
 
 use super::AppState;
 use super::resident::{Lease, SlotSnapshot};
+use super::thinking::{Part, ThinkingSplitter};
 use crate::audit::{AuditEntry, AuditLogger};
 use crate::inference::{GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent};
 use crate::models::EU_CATALOG;
@@ -2207,6 +2208,7 @@ async fn generate_with(
 
     let sp = parse_generate_params(&body);
     let raw = body.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
+    let split_thinking = super::thinking::wants_thinking(&body);
     let grammar = if raw {
         // GBNF grammar sampling is incompatible with raw mode — the grammar
         // sampler crashes (GGML_ASSERT) when the prompt contains pre-tokenized
@@ -2245,6 +2247,7 @@ async fn generate_with(
                 audit,
                 snap.lease,
                 snap.load_duration,
+                split_thinking,
             ))
         } else {
             let Collected {
@@ -2268,10 +2271,11 @@ async fn generate_with(
                 duration_ms,
             );
 
-            Ok(Json(audit.extended(json!({
+            let (response, thinking) = generate_answer(text, split_thinking);
+            let mut answer = json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
-                "response": text,
+                "response": response,
                 "done": true,
                 "done_reason": stop_reason.as_api_str(),
                 "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
@@ -2280,8 +2284,11 @@ async fn generate_with(
                 "prompt_eval_duration": 0,
                 "eval_count": tokens_generated,
                 "eval_duration": duration_ms * 1_000_000
-            })))
-            .into_response())
+            });
+            if let Some(thinking) = thinking {
+                answer["thinking"] = Value::String(thinking);
+            }
+            Ok(Json(audit.extended(answer)).into_response())
         }
     } else {
         // ── Sequential fallback ────────────────────────────────────
@@ -2296,6 +2303,7 @@ async fn generate_with(
                 audit,
                 snap.lease,
                 snap.load_duration,
+                split_thinking,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -2324,10 +2332,11 @@ async fn generate_with(
                 result.duration_ms,
             );
 
-            Ok(Json(audit.extended(json!({
+            let (response, thinking) = generate_answer(result.text, split_thinking);
+            let mut answer = json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
-                "response": result.text,
+                "response": response,
                 "done": true,
                 "done_reason": result.stop_reason.as_api_str(),
                 "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
@@ -2336,8 +2345,11 @@ async fn generate_with(
                 "prompt_eval_duration": 0,
                 "eval_count": result.tokens_generated,
                 "eval_duration": result.duration_ms * 1_000_000
-            })))
-            .into_response())
+            });
+            if let Some(thinking) = thinking {
+                answer["thinking"] = Value::String(thinking);
+            }
+            Ok(Json(audit.extended(answer)).into_response())
         }
     }
 }
@@ -2368,6 +2380,7 @@ async fn chat_with(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
+    let split_thinking = super::thinking::wants_thinking(&body);
 
     // The unload counterpart, as on `/api/generate`.
     if messages.is_empty() && keep_alive == super::KeepAlive::Immediate {
@@ -2485,6 +2498,7 @@ async fn chat_with(
                 audit,
                 snap.lease,
                 snap.load_duration,
+                split_thinking,
             ));
         }
         let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
@@ -2510,7 +2524,7 @@ async fn chat_with(
         return Ok(Json(audit.extended(json!({
             "model": model,
             "created_at": chrono::Utc::now().to_rfc3339(),
-            "message": { "role": "assistant", "content": text },
+            "message": chat_message(text, split_thinking),
             "done": true,
             "done_reason": stop_reason.as_api_str(),
             "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
@@ -2560,6 +2574,7 @@ async fn chat_with(
                 audit,
                 snap.lease,
                 snap.load_duration,
+                split_thinking,
             ))
         } else {
             let Collected {
@@ -2586,10 +2601,7 @@ async fn chat_with(
             Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
-                "message": {
-                    "role": "assistant",
-                    "content": text
-                },
+                "message": chat_message(text, split_thinking),
                 "done": true,
                 "done_reason": stop_reason.as_api_str(),
                 "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
@@ -2613,6 +2625,7 @@ async fn chat_with(
                 audit,
                 snap.lease,
                 snap.load_duration,
+                split_thinking,
             ))
         } else {
             let result = tokio::task::spawn_blocking({
@@ -2644,10 +2657,7 @@ async fn chat_with(
             Ok(Json(audit.extended(json!({
                 "model": model,
                 "created_at": chrono::Utc::now().to_rfc3339(),
-                "message": {
-                    "role": "assistant",
-                    "content": result.text
-                },
+                "message": chat_message(result.text, split_thinking),
                 "done": true,
                 "done_reason": result.stop_reason.as_api_str(),
                 "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
@@ -3511,6 +3521,8 @@ fn stream_from_channel_sse(
 /// This is what Ollama clients (RAG Enterprise, Open WebUI, etc.) expect.
 ///
 /// The stream holds `lease` until it ends, as `stream_from_channel_sse` does.
+/// `split_thinking`: the request asked for the reasoning apart (`think`, see
+/// [`super::thinking`]), so it streams as `thinking` beside the answer.
 fn ndjson_stream_response(
     mut rx: mpsc::Receiver<StreamEvent>,
     model: String,
@@ -3518,20 +3530,36 @@ fn ndjson_stream_response(
     audit: AuditCtx,
     lease: Lease,
     load_duration: std::time::Duration,
+    split_thinking: bool,
 ) -> axum::response::Response {
     let stream = async_stream::stream! {
         let _lease = lease;
         let completion_id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
+        let mut splitter = split_thinking.then(ThinkingSplitter::new);
 
         while let Some(event) = rx.recv().await {
             match event {
                 StreamEvent::Token(piece) => {
-                    let data = format_token_event(&piece, &model, &completion_id, format);
-                    let mut line = data.to_string();
-                    line.push('\n');
-                    yield Ok::<_, std::convert::Infallible>(line);
+                    let parts = match splitter.as_mut() {
+                        Some(splitter) => splitter.push(&piece),
+                        None => vec![Part::Content(piece)],
+                    };
+                    for part in parts {
+                        let data = format_part_event(&part, &model, &completion_id, format);
+                        let mut line = data.to_string();
+                        line.push('\n');
+                        yield Ok::<_, std::convert::Infallible>(line);
+                    }
                 }
                 StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
+                    // What the splitter still held: the end of the answer, or
+                    // of reasoning the token budget cut short.
+                    for part in splitter.take().map(ThinkingSplitter::finish).unwrap_or_default() {
+                        let data = format_part_event(&part, &model, &completion_id, format);
+                        let mut line = data.to_string();
+                        line.push('\n');
+                        yield Ok(line);
+                    }
                     audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
 
                     let data = audit.extended(format_done_event(
@@ -3575,6 +3603,52 @@ pub(crate) fn sequential_to_channel(
         engine.generate_streaming(&request, tx);
     });
     rx
+}
+
+/// One streamed line of an Ollama endpoint: a piece of the answer, or of its
+/// reasoning when the request asked for that apart. Reasoning goes where
+/// Ollama puts it, with the answer's own field empty: `message.thinking` on
+/// `/api/chat`, `thinking` on `/api/generate`.
+fn format_part_event(part: &Part, model: &str, completion_id: &str, format: StreamFormat) -> Value {
+    match part {
+        Part::Content(piece) => format_token_event(piece, model, completion_id, format),
+        Part::Thinking(piece) => {
+            let mut event = format_token_event("", model, completion_id, format);
+            match format {
+                StreamFormat::OllamaChat => event["message"]["thinking"] = json!(piece),
+                // `/v1` never splits, so this is `/api/generate`.
+                StreamFormat::OllamaGenerate | StreamFormat::OpenAI => {
+                    event["thinking"] = json!(piece)
+                }
+            }
+            event
+        }
+    }
+}
+
+/// `/api/chat`'s `message`: the answer, and its reasoning in `thinking` when
+/// the request asked for that apart (`think`, see [`super::thinking`]).
+fn chat_message(text: String, split_thinking: bool) -> Value {
+    if !split_thinking {
+        return json!({ "role": "assistant", "content": text });
+    }
+    let (thinking, content) = super::thinking::split(&text);
+    let mut message = json!({ "role": "assistant", "content": content });
+    if let Some(thinking) = thinking {
+        message["thinking"] = Value::String(thinking);
+    }
+    message
+}
+
+/// `/api/generate`'s `response`, and its reasoning apart when the request
+/// asked for that (`think`, see [`super::thinking`]).
+fn generate_answer(text: String, split_thinking: bool) -> (String, Option<String>) {
+    if split_thinking {
+        let (thinking, response) = super::thinking::split(&text);
+        (response, thinking)
+    } else {
+        (text, None)
+    }
 }
 
 fn format_token_event(
