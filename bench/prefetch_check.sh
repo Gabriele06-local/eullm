@@ -8,8 +8,8 @@
 # MODEL is an MoE whose experts do not all fit in VRAM (the reference PC's
 # Qwen3.8-Flash-Next IQ2_XS, say), EULLM_BINARY a CUDA build carrying the
 # patch. The script starts `eullm serve` with LLAMA_MOE_PREFETCH=0, then =1,
-# both with `--ctx-size CTX --moe-cache auto --n-ubatch N_UBATCH` (40960 and
-# 4096 by default; flags after MODEL are added), and on each:
+# both with `--ctx-size CTX --moe-cache MOE_CACHE --n-ubatch N_UBATCH` (40960,
+# auto and 4096 by default; flags after MODEL are added), and on each:
 #
 # 1. asks one long question twice, greedy and without the prompt cache
 #    (`cache_prompt: false`), about a document of PROMPT_TOKENS tokens
@@ -22,7 +22,9 @@
 # and what the server said about the prefetch on stderr (`on, 2 slots of ...`
 # or `off, <why>`); then whether the answers match. LLAMA_MOE_PREFETCH_SLOTS
 # and LLAMA_MOE_PREFETCH_MIN_TOKENS, if set, reach the second server. Each
-# server's log and answers stay in $OUT.
+# server's log and answers stay in $OUT. A prefetch that stays off for want
+# of VRAM says how much it needed: MOE_CACHE=<MiB> below what --fit chose
+# makes the room.
 set -u
 export LC_ALL=C
 
@@ -35,6 +37,7 @@ SPEED_CHECK=${SPEED_CHECK:-$HERE/speed_check.py}
 OUT=${OUT:-$HOME/work/prefetch-check}
 CTX=${CTX:-40960}
 N_UBATCH=${N_UBATCH:-4096}
+MOE_CACHE=${MOE_CACHE:-auto}
 PROMPT_TOKENS=${PROMPT_TOKENS:-33200}
 
 if ! python3 "$SPEED_CHECK" --help 2>/dev/null | grep -q -- --temperature; then
@@ -73,7 +76,7 @@ printf '%-12s %12s %12s %18s  %s\n' setting read_tok/s write_tok/s answers serve
 for p in 0 1; do
     log="$OUT/serve-prefetch$p.log"
     LLAMA_MOE_PREFETCH=$p "$BIN" serve --port "$PORT" --default-model "$MODEL" \
-        --ctx-size "$CTX" --moe-cache auto --n-ubatch "$N_UBATCH" "$@" >"$log" 2>&1 &
+        --ctx-size "$CTX" --moe-cache "$MOE_CACHE" --n-ubatch "$N_UBATCH" "$@" >"$log" 2>&1 &
     pid=$!
     for _ in $(seq 1 600); do
         curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null && break

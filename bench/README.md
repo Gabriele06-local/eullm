@@ -129,8 +129,8 @@ the drafts the model kept, which every answer reports:
 
 `prefetch_check.sh EULLM MODEL.gguf [FLAGS]` starts `eullm serve` on an MoE
 whose experts do not all fit in VRAM, with `LLAMA_MOE_PREFETCH=0` and then
-`=1` (`--ctx-size 40960 --moe-cache auto --n-ubatch 4096` unless `CTX` and
-`N_UBATCH` say otherwise). Each server answers the same long question twice,
+`=1` (`--ctx-size 40960 --moe-cache auto --n-ubatch 4096` unless `CTX`,
+`MOE_CACHE` and `N_UBATCH` say otherwise). Each server answers the same long question twice,
 greedy and with `cache_prompt: false`, and `speed_check.py` measures it over
 a 33,200-token document (`PROMPT_TOKENS`). One line per setting: reading and
 writing speeds, a checksum of each answer, and the server's `moe prefetch:`
