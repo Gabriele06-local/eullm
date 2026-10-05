@@ -574,8 +574,11 @@ class Job:
 # Running out of device memory after the estimate let it start is the same
 # boundary, found the hard way: recorded with the error, not retried.
 FT_DOES_NOT_FIT = ("is estimated at", "out of memory")
+# An engine built before `finetune` existed blocks the point too: it waits
+# for a binary that has the command, it does not fail.
 FT_NOT_RUNNABLE = ("is not an F32 model", "neither a .gguf file",
-                   "is not a readable GGUF file", "holds no text", "cannot read")
+                   "is not a readable GGUF file", "holds no text", "cannot read",
+                   "unrecognized subcommand")
 
 
 def finetune_command(p: dict, ctx: Context, output: str, report: str) -> list:

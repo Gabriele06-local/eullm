@@ -80,7 +80,7 @@ interrupted points back; the next job takes them up.
 |---|---|
 | done, `outcome: measured` | measured |
 | done, `outcome: does-not-fit` | `--fit-strict` refused the load, or `eullm finetune` estimated more memory than the GCD has free (or ran out of it): the memory boundary, recorded |
-| blocked | the model is not in the store (not in `f32/`, or not F32, for a finetune point), or a set was not prefetched — `unblock` after fixing |
+| blocked | the model is not in the store (not in `f32/`, or not F32, for a finetune point), a set was not prefetched, or the engine predates `finetune` — `unblock` after fixing |
 | failed | anything else, after one retry; the traceback is in `results/<campaign>/failed/` |
 
 ## Results

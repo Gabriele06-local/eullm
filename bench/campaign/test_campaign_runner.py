@@ -304,3 +304,26 @@ def test_finetune_points_train_block_and_record_the_boundary(tmp_path, engine, c
     assert float(row["ft_loss_after"]) == pytest.approx(1.3)
     assert float(row["ft_tok_s"]) == 4000.5
     assert row["ft_trainable_params"] == "440467456"
+
+
+def test_an_engine_without_finetune_blocks_the_points(tmp_path, capsys):
+    old = tmp_path / "eullm"
+    old.write_text("#!/bin/sh\n[ \"$1\" = --version ] && { echo 'eullm 0.7.20'; exit 0; }\n"
+                   "echo \"error: unrecognized subcommand '$1'\" >&2\nexit 2\n")
+    old.chmod(0o755)
+    qdir = tmp_path / "q"
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps({"campaign": "c-old", "groups": [
+        {"name": "ft", "est_s": 60,
+         "set": {"kind": "finetune", "data": "t.jsonl", "model": "m-f32.gguf"}}]}))
+    assert campaign.main(["plan", str(spec_path), "--queue", str(qdir),
+                          "--engine", str(old)]) == 0
+    assert "has no `finetune` command" in capsys.readouterr().out
+    (qdir / "f32").mkdir()
+    (qdir / "f32" / "m-f32.gguf").write_bytes(b"GGUF")
+    (qdir / "sets").mkdir()
+    (qdir / "sets" / "t.jsonl").write_text(json.dumps({"text": "x"}) + "\n")
+
+    campaign.Runner(run_args(str(qdir), str(old), port_base=free_port_base())).loop()
+    counts = Queue(str(qdir)).counts()
+    assert counts["blocked"] == 1 and counts["failed"] == 0 and counts["done"] == 0
