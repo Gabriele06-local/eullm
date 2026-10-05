@@ -44,7 +44,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.caselaw import attach_meta, load_openga, load_rulings, ruling_view  # noqa: E402
-from eullm_forge.caselaw.schede import CardRejected, messages, parse_card  # noqa: E402
+from eullm_forge.caselaw.schede import (  # noqa: E402
+    CHECKS_VERSION,
+    CardRejected,
+    messages,
+    parse_card,
+)
 
 
 def ask(url: str, msgs: list[dict], max_tokens: int, temperature: float,
@@ -69,13 +74,18 @@ def siblings(out: Path) -> list[Path]:
 
 
 def done_ids(*paths: Path) -> set[str]:
+    """Ids carded, or refused under the current checks (older refusals are asked again)."""
     out: set[str] = set()
     for p in paths:
         if p.is_file():
             with p.open(encoding="utf-8") as f:
                 for line in f:
-                    if line.strip():
-                        out.add(json.loads(line)["id"])
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if "reason" in row and row.get("v", 1) < CHECKS_VERSION:
+                        continue
+                    out.add(row["id"])
     return out
 
 
@@ -95,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--parallel", type=int, default=8, help="requests in flight per server")
     ap.add_argument("--ctx", type=int, default=16384, help="context per request (tokens)")
     ap.add_argument("--max-chars", type=int, default=24000, help="ruling text shown (chars)")
-    ap.add_argument("--max-tokens", type=int, default=1500, help="card length limit (tokens)")
+    # 1500 cut about 3% of the cards short of their closing brace (bad_json)
+    ap.add_argument("--max-tokens", type=int, default=2500, help="card length limit (tokens)")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--teacher", default="", help="name recorded in every card")
     ap.add_argument("--limit", type=int, default=0, help="card at most this many (0: all)")
@@ -167,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
                     stats["rejected"] += 1
                     stats["why:" + err.reason] += 1
                     if err.reason != "request":     # a failed request is asked again next run
-                        rej.write(json.dumps({"id": r.id, "reason": err.reason}) + "\n")
+                        rej.write(json.dumps({"id": r.id, "reason": err.reason,
+                                              "v": CHECKS_VERSION}) + "\n")
                         rej.flush()
                     return
                 stats["cards"] += 1

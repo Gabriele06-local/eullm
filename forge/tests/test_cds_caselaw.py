@@ -82,7 +82,7 @@ def test_a_card_is_parsed_and_the_case_cannot_leak_into_it():
                                "per il motivo dedotto."]}, "placeholder"),
         ({**GOOD, "materia": "RSSMRA80A01H501U"}, "structured_pii"),
         ({**GOOD, "domande_esame": GOOD["domande_esame"][:1]}, "count"),
-        ({**GOOD, "norme": ["la regola generale"]}, "bad_norm"),
+        ({**GOOD, "principi": []}, "count"),
     ]:
         with pytest.raises(CardRejected) as e:
             parse_card(json.dumps(bad, ensure_ascii=False))
@@ -196,7 +196,7 @@ def test_cards_are_written_refused_and_not_asked_twice(corpus, teacher, tmp_path
     assert c["teacher"] == "qwen3-30b-q8" and c["principi"] == GOOD["principi"]
     rejects = [json.loads(line) for line in
                (out.parent / "schede.rejects.jsonl").read_text().splitlines()]
-    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder"}]
+    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 2}]
     assert seen[0]["response_format"] == {"type": "json_object"} and seen[0]["temperature"] == 0
     n = len(seen)
     assert mod.main(args) == 0 and len(seen) == n            # nothing asked again
@@ -266,3 +266,32 @@ def test_a_second_chain_skips_what_the_first_one_carded(corpus, teacher, tmp_pat
     assert mod.main(base + ["--out", str(other)]) == 0
     assert len(seen) == n + 1                                  # only the one not done
     assert first not in other.read_text()
+
+
+def test_odd_norms_are_dropped_and_extra_items_cut_not_the_card_refused():
+    card = parse_card(json.dumps({**GOOD, "norme": [
+        "art. 120 c.p.a.", "Direttiva 2014/24/UE", "R.D. n. 1265/1934", "la regola generale",
+        "d.l. n. 34/2020"], "principi": GOOD["principi"] * 6}, ensure_ascii=False))
+    assert card["norme"] == ["art. 120 c.p.a.", "Direttiva 2014/24/UE", "R.D. n. 1265/1934",
+                             "d.l. n. 34/2020"]
+    assert len(card["principi"]) == 4
+    assert prefix(card, {"esito_openga": "ACCOGLIE"}).endswith("- accoglie - art. 120 c.p.a.; "
+                                                               "Direttiva 2014/24/UE; "
+                                                               "R.D. n. 1265/1934]")
+
+
+def test_refusals_under_older_checks_are_asked_again_once(corpus, teacher, tmp_path):
+    chunks, og = corpus
+    url, seen = teacher
+    ids = tmp_path / "ids.txt"
+    ids.write_text("cds/2019000000\ncds/2021000004\n")
+    out = tmp_path / "cds" / "schede.jsonl"
+    out.parent.mkdir(parents=True)
+    (out.parent / "schede.rejects.jsonl").write_text(
+        '{"id": "cds/2019000000", "reason": "bad_norm"}\n'
+        '{"id": "cds/2021000004", "reason": "placeholder", "v": 2}\n')
+    mod = _load("cds_schede")
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids),
+                     "--out", str(out), "--url", url]) == 0
+    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == ["cds/2019000000"]
+    assert len(seen) == 1

@@ -52,8 +52,17 @@ TASK = (
     "dice in una frase che cosa una risposta deve contenere per essere corretta.\n"
 )
 
+# What a cited provision looks like. Matched, not required: a norm in another
+# shape (an EU directive, a royal decree, "TUEL") is dropped from the card,
+# not the card refused -- the first version refused 458 of the first 3,100
+# cards for one odd citation each.
 _NORM = re.compile(
-    r"\bart[t]?\.|\bd\.?\s*lgs|\bl(?:egge|\.)\s*n?\.?\s*\d|\bd\.?p\.?r|c\.p\.a|cost", re.I)
+    r"\bart[t]?\.|\bd\.?\s*lgs|\bd\.?\s*l\.|\bl(?:egge|\.)\s*(?:r\.|n)?\.?\s*\d|\bl\.\s*r\.|"
+    r"\bd\.?p\.?r|\br\.?\s*d\.|\bd\.?p\.?c\.?m|c\.p\.a|\bcost|\bdirettiva|\bregolamento|"
+    r"\bc\.c\.|\bc\.p\.|\bt\.u\.|\btuel\b|\d+/\d{2,4}", re.I)
+# Bump when the checks change: refusals recorded under an older version are
+# asked again once (cds_schede.py), the rest stay refused.
+CHECKS_VERSION = 2
 _PLACEHOLDER = re.compile(r"\[[A-Z_]+(?:_\d+)?\]")
 
 
@@ -75,11 +84,12 @@ def messages(text: str, *, section: str = "", year: int | None = None) -> list[d
 
 
 def _strings(obj, key: str, lo: int, hi: int, min_len: int, max_len: int) -> list[str]:
+    """The strings of a list field: too few refuses the card, too many are cut to ``hi``."""
     vals = obj.get(key)
     if not isinstance(vals, list) or not all(isinstance(v, str) for v in vals):
         raise CardRejected("bad_field", key)
-    vals = [v.strip() for v in vals if v.strip()]
-    if not lo <= len(vals) <= hi:
+    vals = [v.strip() for v in vals if v.strip()][:hi]
+    if len(vals) < lo:
         raise CardRejected("count", f"{key}={len(vals)}")
     if any(not min_len <= len(v) <= max_len for v in vals):
         raise CardRejected("length", key)
@@ -110,17 +120,16 @@ def parse_card(raw: str) -> dict:
 
     card = {
         "principi": _strings(obj, "principi", 1, 4, 40, 800),
-        "norme": _strings(obj, "norme", 0, 8, 4, 200),
+        "norme": [n for n in _strings(obj, "norme", 0, 8, 4, 200) if _NORM.search(n)],
         "domande_ricerca": _strings(obj, "domande_ricerca", 3, 5, 15, 400),
     }
-    if card["norme"] and not all(_NORM.search(n) for n in card["norme"]):
-        raise CardRejected("bad_norm")
     esito = str(obj.get("esito") or "").strip().lower()
     card["esito"] = esito if esito in OUTCOMES else "altro"
     card["materia"] = str(obj.get("materia") or "").strip()[:200]
     exam = obj.get("domande_esame")
-    if not isinstance(exam, list) or not 2 <= len(exam) <= 3:
+    if not isinstance(exam, list) or len(exam) < 2:
         raise CardRejected("count", "domande_esame")
+    exam = exam[:3]
     card["domande_esame"] = []
     for q in exam:
         if not isinstance(q, dict) or not all(isinstance(q.get(k), str) and q[k].strip()
@@ -147,5 +156,7 @@ def prefix(card: dict, ruling_meta: dict) -> str:
         f"n. {ruling_meta.get('numero')}" if ruling_meta.get("numero") else "",
         str(ruling_meta.get("data") or ruling_meta.get("year") or "")) if p)
     norms = "; ".join(card.get("norme", [])[:3])
-    return f"[{head} - {card.get('materia', '')} - {card.get('esito', '')}" + \
+    # OpenGA's outcome is the court's record; the teacher's reading of it is not.
+    esito = (ruling_meta.get("esito_openga") or card.get("esito", "")).lower()
+    return f"[{head} - {card.get('materia', '')} - {esito}" + \
         (f" - {norms}]" if norms else "]")
