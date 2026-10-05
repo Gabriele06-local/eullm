@@ -375,12 +375,28 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   2 sul codice, stanno sopra il rumore, e di poco. Lo schema è quello del
   denso: una bozza per la prosa, due per il codice.
 
-  **Il passo dopo è la stessa misura in EuLLM:** `bench/mtp_sweep.sh` sullo
-  stesso modello, con `--moe-cache 8000 --ctx-size 8192` per il confronto
-  diretto con la prova D, e con `--moe-cache auto`, cioè quello che ottiene un
-  utente (`--fit` riserva il contesto delle bozze, quindi con `--mtp` la cache
-  esce un po' più piccola). Finché non c'è, la guida resta quella di
-  `docs/engine-guide.md`: `--mtp` sui modelli che stanno in VRAM.
+  **In EuLLM, stesso modello e stessa scheda** (`bench/mtp_sweep.sh`,
+  contesto 8192, temperatura 0), le bozze tenute sono quelle di `llama-server`
+  (82% con 1, 69% con 2) e il guadagno è dello stesso ordine:
+
+  | `--mtp` | cache 8000 MiB, micro-batch 512: racconto | codice | `--moe-cache auto` (8,50 GiB): racconto | codice |
+  |---|---:|---:|---:|---:|
+  | 0 | 119,8 | 93,0 | 122,9 | 98,4 |
+  | 1 | 124,7 (+4%) | 103,1 (+11%) | 132,0 (+7%) | 113,7 (+16%) |
+  | 2 | 127,0 (+6%) | 107,0 (+15%) | 127,1 (+3%) | 114,4 (+16%) |
+
+  Sul codice circa un sesto in più, sopra il rumore; sul racconto dal 3 al 7%,
+  dentro il rumore. Con `auto`, `--mtp 1` prende quanto 2. La cache è la
+  stessa con e senza `--mtp` (8,50 GiB in tutti e tre gli avvii): il contesto
+  delle bozze, un solo strato, è troppo piccolo per cambiarla. Da capire a
+  parte: senza bozze EuLLM scrive il codice più piano di `llama-server` (93-98
+  tok/s contro 112,6) e il racconto uguale (120-123 contro 123,6); un avvio per
+  riga, e i due server potrebbero aver scritto testi diversi.
+
+  **Decisione:** sui MoE con esperti in RAM l'MTP conviene per il codice, e si
+  dichiara per quello che dà: circa +15% sul codice e poco sulla prosa, contro
+  +62% e +27% su un denso in VRAM. `docs/engine-guide.md` lo dice. Resta da
+  misurare la temperatura 0.8, quella di default (sotto-voce sulla guardia).
 
   Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
   RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
@@ -392,8 +408,8 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
     bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
     contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
     164,5 con 1 e 119,1 senza). Sul MoE la prova D tiene l'83% delle bozze
-    con 1 e il 71% con 2, lontano da una soglia anche lì; ma è a temperatura
-    0, e a 0.8 sul MoE non è ancora misurato.
+    con 1 e il 71% con 2 (EuLLM 82% e 69%), lontano da una soglia anche lì;
+    ma è a temperatura 0, e a 0.8 sul MoE non è ancora misurato.
   - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
     proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
     MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla
