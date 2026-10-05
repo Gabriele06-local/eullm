@@ -1,0 +1,105 @@
+# EuLLM Engine — NVIDIA GPU image (CUDA), multi-stage build.
+#
+# Built from the repository root, like engine/Dockerfile, with llama.cpp's
+# submodule checked out:
+#
+#   git submodule update --init --recursive
+#   docker build -f engine/Dockerfile.cuda -t eullm/engine:cuda .
+#   docker compose --profile gpu build engine-gpu
+#
+# Running it needs the NVIDIA Container Toolkit on the host
+# (`docker run --gpus all ...`) and a driver for CUDA 13 (r580 or newer).
+# For an older driver (r525 or newer), the last CUDA 12, which knows every
+# GPU the image is compiled for (Blackwell needs 12.8 or newer):
+#   --build-arg CUDA_VERSION=12.9.2
+# For A100/H100 instead of RTX 3000/4000/5000:
+#   --build-arg CUDA_ARCHS="80;90"
+
+ARG CUDA_VERSION=13.4.2
+ARG UBUNTU_VERSION=24.04
+
+# ── Stage 1: Build ──────────────────────────────────────────────
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        cmake \
+        build-essential \
+        libclang-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# The CUDA images carry no Rust. Stable through rustup: Cargo.toml declares
+# edition 2024, which needs cargo 1.85 or newer.
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain stable
+
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY catalog/ catalog/
+COPY engine/ engine/
+COPY hub/ hub/
+
+# The GPUs the kernels are compiled for, as the release's consumer build:
+# RTX 3000 (86), 4000 (89) and 5000 (120). A100/H100: "80;90".
+ARG CUDA_ARCHS="86;89;120"
+ENV CMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHS} \
+    CUDA_PATH=/usr/local/cuda \
+    CUDACXX=/usr/local/cuda/bin/nvcc \
+    CMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc
+
+# cuBLAS and the CUDA runtime are linked statically (llama-cpp-sys-2's
+# build.rs), so the binary needs only the driver's libcuda.so.1, which the
+# NVIDIA Container Toolkit mounts at run time; the build links the toolkit's
+# stub of it. `-no-pie` on the final link only, as in the release workflow:
+# Rust's default linker makes a PIE, and nvcc's device-link object is not
+# built -fPIC ("relocation R_X86_64_32 cannot be used against local symbol").
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    LIBRARY_PATH=/usr/local/cuda/lib64/stubs \
+    cargo rustc --release --locked -p eullm-engine --bin eullm \
+        --features "cuda,multimodal" -- -C link-arg=-no-pie \
+    && cp target/release/eullm /usr/local/bin/eullm
+
+# ── Stage 2: Runtime ────────────────────────────────────────────
+# Plain Ubuntu, not a CUDA runtime image: nothing of CUDA is needed beside
+# the driver, and an nvidia/cuda image would also make the host's driver
+# prove it supports this exact CUDA minor (NVIDIA_REQUIRE_CUDA), when CUDA 13's
+# minor-version compatibility runs the binary on any CUDA 13 driver.
+FROM ubuntu:${UBUNTU_VERSION}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libgomp1 \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# What the NVIDIA Container Toolkit reads to hand the container the GPUs and
+# the compute part of the driver.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+# The same user, by number, as the CPU image: the two share the `models`
+# and `audit` volumes in the compose file.
+RUN groupadd -r -g 10001 eullm \
+    && useradd -r -u 10001 -g eullm -s /usr/sbin/nologin eullm \
+    && mkdir -p /models /data/audit \
+    && chown eullm:eullm /models /data/audit
+USER eullm
+
+COPY --from=builder /usr/local/bin/eullm /usr/local/bin/eullm
+
+VOLUME ["/models", "/data/audit"]
+ENV EULLM_MODELS_DIR=/models
+ENV EULLM_AUDIT_DIR=/data/audit
+
+EXPOSE 11434 11435
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -sf http://localhost:11434/api/version || exit 1
+
+ENTRYPOINT ["eullm"]
+CMD ["serve"]

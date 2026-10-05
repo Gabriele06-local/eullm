@@ -23,7 +23,7 @@ cargo build --release --features metal    # macOS Apple Silicon
 
 #### Build requirements
 
-- Rust 1.75+
+- Rust 1.85+ (the crates are edition 2024)
 - C/C++ compiler (gcc/clang) — needed by llama.cpp
 - CMake 3.14+
 - libclang (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora) — needed by `bindgen` for FFI bindings
@@ -33,19 +33,32 @@ cargo build --release --features metal    # macOS Apple Silicon
 
 ### Docker
 
+From the repository root, with llama.cpp's submodule checked out
+(`git submodule update --init --recursive`):
+
 ```bash
-# CPU only
-docker build -t eullm-engine engine/
-docker run -p 11434:11434 -v eullm-models:/models eullm-engine
+# docker compose: the API on 11434 and the chat UI on 11435, this machine only
+docker compose up -d engine                      # CPU
+docker compose --profile gpu up -d engine-gpu    # NVIDIA GPU
 
-# With NVIDIA GPU
-docker build -t eullm-engine --build-arg FEATURES=cuda engine/
-docker run --gpus all -p 11434:11434 -v eullm-models:/models eullm-engine
+# Or the images alone
+docker build -f engine/Dockerfile -t eullm/engine .
+docker run -d -p 127.0.0.1:11434:11434 -v eullm-models:/models \
+  -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine
 
-# Or via docker compose (from repo root)
-docker compose up engine              # CPU
-docker compose --profile gpu up engine-gpu   # GPU
+docker build -f engine/Dockerfile.cuda -t eullm/engine:cuda .
+docker run -d --gpus all -p 127.0.0.1:11434:11434 -v eullm-models:/models \
+  -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine:cuda
 ```
+
+The container runs `eullm serve` (add `--ui` after the image name for the
+chat UI, as compose does) as uid 10001, with its models in `/models` and its
+audit trail in `/data/audit`. `EULLM_ALLOWED_IPS` admits the Docker addresses
+a published port's callers arrive from; to serve other machines, publish on
+all interfaces and set `EULLM_API_KEYS`. The CUDA image needs the NVIDIA
+Container Toolkit and a driver for CUDA 13 (r580 or newer); its header gives
+the build arguments for CUDA 12 and for datacenter GPUs. Details:
+[Getting Started](getting-started.md#path-a-docker-recommended).
 
 ## CLI Commands
 
@@ -146,8 +159,9 @@ out-of-memory error happens.
 
 Automatic sizing never asks questions — it applies the split and logs one
 line naming the flags that override it — because a default that interrupts
-every launch is its own kind of failure. Where free VRAM cannot be probed
-(any non-CUDA build) it stays silent and `--gpu-layers` is used as-is.
+every launch is its own kind of failure. Free VRAM is read from ggml's device
+registry on every GPU backend (CUDA, ROCm, Vulkan, Metal); where there is no
+GPU to read it stays silent and `--gpu-layers` is used as-is.
 
 The budget leaves headroom on purpose, and it is the same headroom the
 loader requires: enough of the card's total memory must stay free for the
@@ -535,17 +549,37 @@ Works on all endpoints: `/api/generate`, `/api/chat`, `/v1/chat/completions`. Bo
 EULLM's continuous batching scheduler decodes multiple requests in parallel on a single GPU pass. This is a key performance differentiator over Ollama, which processes requests one at a time.
 
 ```bash
-# Enable continuous batching with 8 parallel slots (default)
+# One request at a time, with the whole context (default: --batch-size 1)
+eullm run ./model.gguf
+
+# Continuous batching: 8 requests decoded together
 eullm run ./model.gguf --batch-size 8
 
 # More slots for high-throughput RAG workloads
 eullm run ./model.gguf --batch-size 16
 
-# Sequential mode (one request at a time, like Ollama)
+# Sequential mode: no scheduler thread (what a multimodal model runs in)
 eullm run ./model.gguf --batch-size 0
 ```
 
+The default is 1 slot: `--ctx-size` is shared by the slots, so a default of 8
+gave each request an eighth of the context, and answers stopped at 512 tokens
+with no flag to point at. Ask for concurrency when several clients send
+requests at the same time, and raise `--ctx-size` with it.
+
 With 16 concurrent requests on a consumer GPU, EULLM achieves ~2.5x throughput vs Ollama. See [benchmarks](benchmarks.md) for details.
+
+**A long prompt does not stop the others.** With more than one slot, a new
+request's prompt is read a chunk at a time between the decode steps of the
+answers already being written: every answering request gets its next token,
+then the prompt advances by one micro-batch (`--n-ubatch`), and so on until
+it is read. A 30,000-token RAG prompt used to be read whole the moment its
+request was taken, and every other answer on the server stopped until it
+was. Alone on the server a prompt is read a whole batch (`--n-batch`) at a
+time, as before, and with one slot (the default) nothing changes. Either way
+llama.cpp computes it one micro-batch at a time from the same positions, so
+the answer is the one a prompt read whole gets. Prompts wait in arrival
+order; one is read at a time.
 
 ### Context window and batch slots
 
@@ -565,11 +599,12 @@ More slots increase parallelism but reduce per-request throughput (shared GPU ti
 
 | Parallel slots | Per-request throughput | Aggregate throughput | Use case |
 |:-:|:-:|:-:|---|
+| 1 (default) | Highest | Lowest | One user, a chat, an agent |
 | 4 | High | High | Chat, general inference |
 | 8 | Medium | Higher | Batch extraction, RAG pipelines |
 | 16+ | Lower | Highest | High-concurrency APIs, multi-GPU |
 
-Start with `--batch-size 4` for the best per-request latency. Increase when your workload requires more concurrent slots and can tolerate slower individual responses.
+Keep the default for one user. For several, start with `--batch-size 4` and a `--ctx-size` four times the context each request needs; increase when your workload requires more concurrent slots and can tolerate slower individual responses.
 
 ## Loading a Model: Slots, Context and Names
 
@@ -997,7 +1032,7 @@ and guard show EuLLM's message instead of failing on the body:
 | 400 | `model_not_loaded` | No `model`, or a System One name such as `jev-latest`, and no decision model loaded |
 | 404 | `not_found` | `model` names a model the server does not have |
 | 401 / 403 / 429 | `unauthorized` / `forbidden` / `too_many_requests` | Refused by the API key, IP allowlist or origin checks, or over the key's quota |
-| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, not `Content-Type: application/json` |
+| 405 / 413 / 415 | `method_not_allowed` / `payload_too_large` / `unsupported_media_type` | Not a `POST`, a body over the limit, a body labelled as something JSON is not (`multipart/form-data`, …); one with no `Content-Type`, `text/plain` or curl's `application/x-www-form-urlencoded` is read as JSON |
 | 500 | `internal_error` | The model failed to load, or llama.cpp failed |
 
 The other endpoints keep the error bodies Ollama and OpenAI clients read.
@@ -1427,6 +1462,8 @@ What differs from jev-style's own server:
 
 The Engine exposes two sets of endpoints: the native EULLM API (Ollama-compatible) and an OpenAI-compatible API. CORS is enabled for browser-based tools.
 
+Request bodies are JSON. As Ollama does, the Engine reads a body as JSON when its `Content-Type` is `application/json`, missing, `text/plain` or `application/x-www-form-urlencoded` — the last is what `curl -d` sends, so Ollama's curl examples work as they stand. A body labelled as anything else (`multipart/form-data`, `application/octet-stream`) gets a 415.
+
 ### EULLM API (Ollama-compatible)
 
 #### `GET /api/version`
@@ -1502,11 +1539,21 @@ curl -X POST http://localhost:11434/api/generate \
   "total_duration": 1500000000,
   "load_duration": 0,
   "prompt_eval_count": 15,
-  "prompt_eval_duration": 0,
+  "prompt_eval_duration": 90000000,
   "eval_count": 128,
-  "eval_duration": 1200000000
+  "eval_duration": 1400000000
 }
 ```
+
+The durations are Ollama's, in nanoseconds: `prompt_eval_duration` is the time
+spent reading the prompt (images included), `eval_duration` the time spent
+writing the answer, and `total_duration` the whole request, including
+`load_duration` when the request had to load its model. With `--mtp`, the
+answer also says how many drafts the MTP head proposed and the model kept,
+under llama-server's names: `"draft_n"` and `"draft_n_accepted"`. On
+`/v1/chat/completions` the same figures come in llama-server's `timings`
+object (`prompt_n`, `prompt_ms`, `predicted_n`, `predicted_ms`, and the two
+draft counts), which OpenAI clients ignore.
 
 **Parameters:**
 
@@ -1917,6 +1964,7 @@ Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/
 | `decision` | Object, `systemone` only | `state_sha256`, `readout`, `mode`, `calibration`, `temperature`, `confidence_method` (`normalized_max_probability`; absent, and `normalized_entropy`, on lines written up to 0.7.20), `client_disconnected` (only when true: the answers were computed after the client had gone, and never sent), `policy_removed` (only when the [decision policy](#a-server-side-decision-policy-eullm_decision_policy) removed options: per question, the options the model never read), and per answer: `id`, `type`, `labels`, `logprobs` or `scores`, `raw_probabilities`, `probabilities`, `coverage`, `answer`, `confidence` |
 | `routing` | Object, `route` only | How [`"model": "auto"`](#model-auto-the-decision-model-chooses-the-model) routed one request: `requested`, `model` (chosen), `reason`, `fallback`, `candidates` (offered, in order), `excluded` (with `why`), `decision_model`, `decision_ms`, `dry_run` (only for `POST /api/route`), `error`. The line's `id` is the route's id; its `model` is the decision model, and its `decision` the decision record as above |
 | `route` | Object, routed answers only | `id` (the `route` line's), `requested` (`auto`), and `fallback` (`load_failed: …`, only when the chosen model did not load) |
+| `draft_n`, `draft_n_accepted` | u32, `--mtp` only | The MTP drafts the model proposed for this answer, and the ones it kept. Absent when it drafted none |
 
 **Example audit entry:**
 

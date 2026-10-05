@@ -7,10 +7,14 @@
 //! - **Sequential** (`InferenceEngine`): one request at a time.
 //! - **Continuous batching** (`SchedulerHandle`): multiple concurrent requests.
 //!
-//! Supports **dynamic model swapping**: when a request specifies a model that
-//! is not loaded, the server unloads the current model and loads the new one.
-//! Requests the old model was still answering are cut off with an error, as
-//! they always were; the residents are kept in `resident::ResidentModels`.
+//! Supports **models loaded on request**: when a request names a model that
+//! is not loaded, the server loads it, and makes room first. With one model
+//! at a time (`--max-loaded-models 1`, the default) that is a swap: the loaded
+//! model goes, and requests it was still answering are cut off with an error,
+//! as they always were. With several, the model goes only when the new one
+//! needs its place or its memory, the least recently used first, and a busy
+//! one is waited for rather than cut off. The residents are kept in
+//! `resident::ResidentModels`.
 
 mod auth;
 mod decision_policy;
@@ -487,13 +491,32 @@ impl AppState {
             }
             _ => None,
         };
+        let kv_bpe_k = crate::inference::cache_type_bytes_per_elem(&cache_type_k);
+        let kv_bpe_v = crate::inference::cache_type_bytes_per_elem(&cache_type_v);
+        // The MTP head drafts only on the scheduler with one slot, which a
+        // model with a projector never gets (see `batch_size` below); its
+        // context comes after the load, so sizing must leave it room.
+        let drafts = self.mtp > 0
+            && mmproj_path.is_none()
+            && override_batch_size.unwrap_or(self.batch_size) == 1;
+        let mtp_reserve = if drafts {
+            crate::fit::mtp_reserve_bytes(
+                info.as_ref(),
+                effective_ctx,
+                kv_bpe_k,
+                kv_bpe_v,
+                self.n_ubatch.unwrap_or(crate::inference::DEFAULT_N_UBATCH),
+            )
+        } else {
+            0
+        };
         let sizing = Sizing {
             info: info.as_ref(),
             layout: layout.as_ref(),
             file_size,
             ctx_size: effective_ctx,
-            kv_bpe_k: crate::inference::cache_type_bytes_per_elem(&cache_type_k),
-            kv_bpe_v: crate::inference::cache_type_bytes_per_elem(&cache_type_v),
+            kv_bpe_k,
+            kv_bpe_v,
             // The projector is loaded with the model, always, so sizing has
             // to count it — see `fit::place_mmproj` for where it goes and why.
             mmproj_bytes: crate::fit::mmproj_footprint_bytes(mmproj_path.as_deref()),
@@ -505,6 +528,7 @@ impl AppState {
                 moe_cache,
                 auto_n_ubatch: self.n_ubatch.is_none(),
             },
+            mtp_reserve,
         };
 
         let mut make_more_room = false;
@@ -1026,7 +1050,8 @@ impl AppState {
             // than the flat reserve the fit charges (`--n-ubatch`).
             .saturating_add(crate::fit::ubatch_reserve_bytes(
                 self.n_ubatch.unwrap_or(crate::inference::DEFAULT_N_UBATCH),
-            ));
+            ))
+            .saturating_add(sizing.mtp_reserve);
         crate::fit::plan_offload(
             crate::fit::vram_bytes(),
             sizing.info,
@@ -1855,6 +1880,9 @@ struct Sizing<'a> {
     kv_bpe_v: f64,
     mmproj_bytes: u64,
     flags: crate::fit::OffloadFlags,
+    /// What `--mtp`'s draft context will take once the model has loaded
+    /// (`fit::mtp_reserve_bytes`); `0` when the load will draft nothing.
+    mtp_reserve: u64,
 }
 
 /// Free a generation model taken out of the residents, so that its memory
@@ -3549,6 +3577,52 @@ fn cors_layer(state: &Arc<AppState>) -> CorsLayer {
         ])
 }
 
+/// Read a request's body as JSON whatever its `Content-Type` says, as Ollama
+/// does. Ollama's own examples are `curl … -d '{…}'`, which labels the body
+/// `application/x-www-form-urlencoded`; a script's `fetch` with a string body
+/// sends `text/plain`, and some clients send no type at all. axum's `Json`
+/// refused all three with 415, so an Ollama example copied as it stands
+/// failed here.
+///
+/// Only those three are relabelled: a body that says it is something else,
+/// `multipart/form-data` or `application/octet-stream`, is still refused. Nor
+/// is this an opening for a web page: those three are the types a page may
+/// send without a CORS preflight, which is why `enforce_origin` refuses every
+/// unsafe request from an origin not allowed, before any handler reads a
+/// body. The content type was never that control.
+async fn read_body_as_json(
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if body_read_as_json(req.method(), req.headers()) {
+        req.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+    }
+    next.run(req).await
+}
+
+/// Whether [`read_body_as_json`] relabels this request: one that can carry a
+/// body, whose type is none, `application/x-www-form-urlencoded` or
+/// `text/plain`, parameters such as `charset` aside.
+fn body_read_as_json(method: &axum::http::Method, headers: &axum::http::HeaderMap) -> bool {
+    use axum::http::Method;
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return false;
+    }
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return true;
+    };
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let media_type = value.split(';').next().unwrap_or_default().trim();
+    media_type.is_empty()
+        || media_type.eq_ignore_ascii_case("application/x-www-form-urlencoded")
+        || media_type.eq_ignore_ascii_case("text/plain")
+}
+
 /// Build the EULLM API router (Ollama + OpenAI compat) with CORS enabled
 /// for Open WebUI and other frontends.
 ///
@@ -3564,6 +3638,7 @@ fn api_router(state: Arc<AppState>) -> Router {
     Router::new()
         .nest("/api", routes::api_routes())
         .nest("/v1", routes::openai_routes())
+        .layer(axum::middleware::from_fn(read_body_as_json))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
@@ -3597,6 +3672,7 @@ fn ui_router(state: Arc<AppState>) -> Router {
         .nest("/api", routes::api_routes())
         .nest("/v1", routes::openai_routes())
         .merge(crate::ui::router())
+        .layer(axum::middleware::from_fn(read_body_as_json))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(cors)
         .layer(axum::middleware::from_fn_with_state(
@@ -4007,6 +4083,96 @@ mod http_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    /// Ollama reads a body as JSON whatever its type says, and its examples
+    /// rely on it: `curl … -d '{…}'` labels the body
+    /// `application/x-www-form-urlencoded`. Each type a client sends JSON
+    /// under without saying so reaches the handler, which names the model it
+    /// does not have; a body that says it is something else is still refused,
+    /// and so is a page on another origin, whatever its type.
+    #[tokio::test]
+    async fn a_json_body_is_read_whatever_its_content_type_says() {
+        let tmp = std::env::temp_dir().join(format!("eullm-content-type-{}", uuid::Uuid::new_v4()));
+        let store = store_with_one_model(&tmp, "a-pulled-model");
+        let base = spawn(store).await;
+        let client = reqwest::Client::new();
+        let body = r#"{"model": "this-model-does-not-exist", "input": "hi"}"#;
+
+        for path in ["/api/embed", "/v1/embeddings"] {
+            for content_type in [
+                None,
+                Some("application/x-www-form-urlencoded"),
+                Some("text/plain;charset=UTF-8"),
+            ] {
+                let mut request = client.post(format!("{base}{path}")).body(body);
+                if let Some(content_type) = content_type {
+                    request = request.header("content-type", content_type);
+                }
+                let r = request.send().await.expect("request");
+                let status = r.status();
+                let text = r.text().await.unwrap_or_default();
+                assert!(
+                    status.is_client_error() && status != 415,
+                    "{path}, {content_type:?}: {status} {text}"
+                );
+                assert!(
+                    text.contains("this-model-does-not-exist"),
+                    "{path}, {content_type:?}: the handler must have read the body: {text}"
+                );
+            }
+            let r = client
+                .post(format!("{base}{path}"))
+                .header("content-type", "multipart/form-data; boundary=x")
+                .body(body)
+                .send()
+                .await
+                .expect("request");
+            assert_eq!(r.status(), 415, "{path}");
+        }
+
+        let r = client
+            .post(format!("{base}/api/embed"))
+            .header("origin", "https://elsewhere.example")
+            .header("content-type", "text/plain")
+            .body(body)
+            .send()
+            .await
+            .expect("request");
+        assert_eq!(r.status(), 403);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn only_a_body_of_no_type_a_form_or_text_is_read_as_json() {
+        use axum::http::{HeaderMap, HeaderValue, Method, header::CONTENT_TYPE};
+        let typed = |value: &'static str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(CONTENT_TYPE, HeaderValue::from_static(value));
+            headers
+        };
+        assert!(body_read_as_json(&Method::POST, &HeaderMap::new()));
+        assert!(body_read_as_json(&Method::DELETE, &HeaderMap::new()));
+        assert!(body_read_as_json(
+            &Method::POST,
+            &typed("Application/X-WWW-Form-Urlencoded")
+        ));
+        assert!(body_read_as_json(
+            &Method::POST,
+            &typed("text/plain; charset=utf-8")
+        ));
+        // Already JSON, or something else: left as it is.
+        assert!(!body_read_as_json(
+            &Method::POST,
+            &typed("application/json")
+        ));
+        assert!(!body_read_as_json(
+            &Method::POST,
+            &typed("application/octet-stream")
+        ));
+        assert!(!body_read_as_json(&Method::POST, &typed("text/html")));
+        // No body to read.
+        assert!(!body_read_as_json(&Method::GET, &HeaderMap::new()));
+    }
+
     /// The `error` object of a `/v1/systemone` error body: the shape its
     /// clients parse, `{"error": {"code", "message", "question"?}}`.
     fn systemone_error(body: &str) -> serde_json::Value {
@@ -4381,13 +4547,21 @@ mod http_tests {
         assert_eq!(status, 413, "{body}");
         assert_eq!(systemone_error(&body)["code"], "payload_too_large");
 
+        // A body labelled as something JSON is not: refused, in the body
+        // System One clients parse. (No label at all is read as JSON, as
+        // everywhere else.)
         let r = reqwest::Client::new()
             .post(&url)
+            .header("content-type", "multipart/form-data; boundary=x")
             .body(a_feedback().to_string())
             .send()
             .await
             .expect("request");
         assert_eq!(r.status(), 415);
+        assert_eq!(
+            systemone_error(&r.text().await.unwrap())["code"],
+            "unsupported_media_type"
+        );
 
         // A second feedback is a second line.
         let (status, _) = post_json(&url, a_feedback()).await;

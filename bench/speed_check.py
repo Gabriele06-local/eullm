@@ -20,7 +20,9 @@ written for one model — so that two of them can be compared on one machine:
 
 The token counts are the server's own, from the response's `usage`; the times
 are this client's, so they include the HTTP round trip — negligible against
-seconds of work, and the same for every server. Thinking is turned off both
+seconds of work, and the same for every server. A server that drafts (EuLLM
+with `--mtp`, llama-server with a draft model) says how many drafts its model
+kept in llama-server's `timings`, and that share is printed after the speed. Thinking is turned off both
 ways a server may expect it: `"think": false` (EuLLM) and
 `"reasoning_effort": "none"` (OpenAI style); a server ignores the one it does
 not know. Standard library only.
@@ -92,14 +94,16 @@ def chat(base, model, content, max_tokens, args):
         "model": model,
         "messages": [{"role": "user", "content": content}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        "temperature": args.temperature,
         "stream": False,
         "think": False,
         "reasoning_effort": "none",
     }
     answer, seconds = post(base + "/chat/completions", body, args.api_key, args.timeout)
     usage = answer.get("usage") or {}
-    return usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0, seconds
+    timings = answer.get("timings") or {}
+    drafts = (timings.get("draft_n") or 0, timings.get("draft_n_accepted") or 0)
+    return usage.get("prompt_tokens") or 0, usage.get("completion_tokens") or 0, seconds, drafts
 
 
 def main(argv=None):
@@ -118,6 +122,12 @@ def main(argv=None):
         default=STORY,
         help="the request whose answer is timed (default: a short story)",
     )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0,
+        help="sampling temperature of the timed answers (default 0: the same answer every run)",
+    )
     parser.add_argument("--timeout", type=float, default=1800)
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
@@ -125,15 +135,17 @@ def main(argv=None):
     print(f"{base}  model {model}")
 
     runs = [chat(base, model, args.write_prompt, 256, args) for _ in range(2)]
-    _, written, seconds = runs[-1]
+    _, written, seconds, (drafted, kept) = runs[-1]
     first = runs[0][1] / runs[0][2] if runs[0][2] else 0
     print(
         f"writes answers: {written / seconds:6.1f} tokens/s  "
         f"({written} tokens in {seconds:.1f} s; the first run, warming up: {first:.1f})"
     )
+    if drafted:
+        print(f"drafts kept:    {100 * kept / drafted:5.0f}%  ({kept} of {drafted})")
 
     text = document(args.prompt_tokens, random.randrange(10**9))
-    read, _, seconds = chat(base, model, text + "\n\nReply with one word: done.", 1, args)
+    read, _, seconds, _ = chat(base, model, text + "\n\nReply with one word: done.", 1, args)
     print(f"reads a prompt: {read / seconds:6.1f} tokens/s  ({read} tokens in {seconds:.1f} s)")
 
 

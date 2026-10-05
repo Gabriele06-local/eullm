@@ -13,6 +13,7 @@
 //! This gives near-linear throughput scaling with concurrent requests (up to
 //! `max_batch_size`) while keeping latency stable.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::pin::pin;
 use std::sync::Arc;
@@ -30,7 +31,7 @@ use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
 
 use super::output::{PieceOutcome, process_piece};
-use super::{GenerateRequest, InferenceConfig, StopReason, StreamEvent};
+use super::{AnswerStats, GenerateRequest, InferenceConfig, StopReason, StreamEvent};
 
 /// Below this many tokens per slot, a reasoning model routinely runs out of
 /// room mid-answer. Not a hard limit — just the threshold at which staying
@@ -147,6 +148,26 @@ struct ActiveSequence {
     /// model kept (see `mtp_step`); both 0 without `--mtp`.
     mtp_drafted: u32,
     mtp_accepted: u32,
+    /// How long reading the prompt took, from `start`; the answer's own time
+    /// is what follows it. Set when the prefill succeeds.
+    prompt_time: std::time::Duration,
+}
+
+/// A prompt read a chunk at a time between decode steps, when there is more
+/// than one slot (see `run_scheduler_loop`, step 7). Its sequence joins
+/// `active`, with the answer's first token, once the whole prompt is read.
+struct PendingPrefill {
+    seq: ActiveSequence,
+    /// The next token of `seq.prompt_tokens` to decode; starts past the
+    /// prefix reused from the slot.
+    cursor: usize,
+    /// Whether a chunk that fails may still fall back from the reused prefix
+    /// to a checkpoint or to the whole prompt: once, as for a prompt read
+    /// whole (`fall_back_from_reuse`).
+    may_fall_back: bool,
+    /// From `prefill_setup`: the prompt's length and the answer's cap.
+    n_tokens: u32,
+    effective_max: u32,
 }
 
 /// An idle sequence slot together with the exact token history currently
@@ -810,8 +831,9 @@ fn start_mtp<'m>(
     let draft_ctx = model
         .new_context_with_ctx_other(backend, params, target)
         .map_err(|e| format!("could not create the MTP draft context: {e}"))?;
-    // What the head's own context takes beside the target's — not yet
-    // charged by `--fit`, so a load that barely fits shows it here.
+    // What the head's own context takes beside the target's: `--fit`
+    // reserves an estimate of it (`fit::mtp_reserve_bytes`), and this is the
+    // figure to check that estimate against.
     tracing::info!("MTP draft context memory:");
     draft_ctx.memory_breakdown_print();
     let draft = MtpSpeculativeParams {
@@ -867,6 +889,111 @@ fn finish_wiped(ctx: &mut LlamaContext, seq_id: i32, idle_slots: &mut Vec<Cached
         text: String::new(),
         last_used: std::time::Instant::now(),
     });
+}
+
+/// After a prefill from a reused prefix failed: the slot's memory is wiped,
+/// and the longest checkpoint of this prompt's lineage restored if there is
+/// one (see `PromptCheckpoint`). Returns where reading the prompt starts
+/// again: the checkpoint's length, or 0.
+fn fall_back_from_reuse(
+    ctx: &mut LlamaContext,
+    checkpoints: &[PromptCheckpoint],
+    seq_id: i32,
+    tokens: &[LlamaToken],
+    error: &str,
+) -> usize {
+    tracing::warn!("Seq {seq_id}: reused prefill failed ({error})");
+    let _ = ctx.clear_kv_cache_seq(Some(seq_id as u32), None, None);
+    let mut effective_reuse_len = 0;
+
+    // Before giving up to a full re-prefill from position 0, check whether a
+    // checkpoint covers a longer prefix of this request than the rejected
+    // in-place rollback did. This is exactly the scenario checkpoints exist
+    // for: the live slot's resident history diverged too early for the
+    // (hybrid/recurrent-incapable) in-place trim, but an earlier full-state
+    // snapshot of the same lineage might still cover most of the prompt.
+    // Restoring is best-effort for the *restore call itself*: if
+    // `state_seq_set_data_ext` returns false the snapshot is ignored and the
+    // prompt is read again from 0. (There is no further retry after that: a
+    // decode error then fails the request.) `best_checkpoint` only ever
+    // returns a STRICT prefix, so a successful restore always leaves at least
+    // one token to decode and therefore a real logits row to sample from.
+    if let Some(checkpoint) = best_checkpoint(checkpoints, tokens) {
+        let restore_len = checkpoint.tokens.len();
+        // SAFETY: `checkpoint.state` was produced by this same scheduler's
+        // `take_checkpoint` on this same context/model earlier in its lifetime.
+        let restored = unsafe {
+            ctx.state_seq_set_data_ext(
+                &checkpoint.state,
+                seq_id,
+                llama_cpp_2::LlamaStateSeqFlags::empty(),
+            )
+        };
+        if restored {
+            tracing::info!(
+                "Seq {seq_id}: restoring from a {restore_len}-token checkpoint instead of a full re-prefill",
+            );
+            effective_reuse_len = restore_len;
+        }
+    }
+
+    tracing::warn!("Seq {seq_id}: retrying prefill with reuse_len={effective_reuse_len}");
+    effective_reuse_len
+}
+
+/// The answer's first token, sampled from the logits of the prompt's last
+/// token once the whole prompt is read, and handed to the sequence like
+/// every later one (`emit_token`). Returns the sequence if it goes on.
+fn begin_generation(
+    model: &LlamaModel,
+    ctx: &mut LlamaContext,
+    mut seq: ActiveSequence,
+    idle_slots: &mut Vec<CachedSlot>,
+    checkpoints: &mut Vec<PromptCheckpoint>,
+    sched_config: &SchedulerConfig,
+) -> Option<ActiveSequence> {
+    // Output index -1 (= last output): only the final prompt token had
+    // logits enabled, so there is exactly one output entry.
+    if sched_config.debug_logit_check {
+        warn_if_logits_corrupt(ctx, -1, seq.seq_id);
+    }
+    let token = seq.sampler.sample(ctx, -1);
+
+    // Always-on O(1) guard, before the token is accepted into the sampler's
+    // history: a NaN here means the whole forward pass produced nothing
+    // usable, and continuing would stream garbage that reads as a real answer.
+    if sampled_token_is_corrupt(ctx, -1, token) {
+        tracing::error!(
+            "Seq {}: sampled token {} has a NaN/Inf logit — \
+             aborting generation instead of emitting garbage. \
+             Run with --rust-debug for the full logit scan.",
+            seq.seq_id,
+            token.0,
+        );
+        let _ = seq.tx.try_send(StreamEvent::Error(corrupt_logits_error()));
+        // The KV cache for this sequence is suspect — whatever produced NaN
+        // is in it. Wipe rather than offer it for prefix reuse.
+        finish_wiped(ctx, seq.seq_id, idle_slots);
+        return None;
+    }
+    seq.sampler.accept(token);
+
+    match emit_token(
+        model,
+        ctx,
+        &mut seq,
+        token,
+        idle_slots,
+        checkpoints,
+        sched_config,
+        false,
+    ) {
+        Emitted::Finished => None,
+        Emitted::Continue => {
+            seq.last_token = Some(token);
+            Some(seq)
+        }
+    }
 }
 
 /// Hand a sampled token, already accepted by the sequence's sampler, to its
@@ -974,6 +1101,13 @@ fn drafts_kept(drafts: &[LlamaToken], picks: &[LlamaToken]) -> usize {
         .count()
 }
 
+/// Test-only: every MTP draft replaced by a token the model never picks, so
+/// a test can show that an answer whose every draft is taken back is the
+/// answer with real drafts (`api::real_model_tests`).
+#[cfg(test)]
+pub(crate) static FORCE_WRONG_DRAFTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// One step of speculative decoding for the single active sequence: the
 /// MTP head drafts up to `n_max` tokens after `seq.last_token`, one decode
 /// reads that token and every draft, and the sequence's own sampler picks a
@@ -1015,6 +1149,12 @@ fn mtp_step(
         .max_tokens
         .saturating_sub(seq.tokens_generated.saturating_add(1)) as usize;
     drafts.truncate(room_ctx.min(room_tokens));
+    #[cfg(test)]
+    if FORCE_WRONG_DRAFTS.load(std::sync::atomic::Ordering::Relaxed) {
+        // The vocabulary's last token, a reserved one no answer picks.
+        let never = LlamaToken(model.n_vocab() - 1);
+        drafts.iter_mut().for_each(|draft| *draft = never);
+    }
     // Drafting decoded `last` and the drafts into the draft context; the
     // verify decode below hands it those positions again, read by the
     // target. llama-server drops them first, as here.
@@ -1391,6 +1531,12 @@ fn run_scheduler_loop(
     };
 
     let mut active: Vec<ActiveSequence> = Vec::with_capacity(sched_config.max_batch_size);
+    // Prompts waiting to be read, or being read, a chunk at a time between
+    // decode steps (step 7): with more than one slot. With one, and so with
+    // the MTP head, a prompt is read whole when its request is taken, as
+    // nothing else is answering meanwhile.
+    let chunked = sched_config.max_batch_size > 1 && mtp_state.is_none();
+    let mut prefilling: VecDeque<PendingPrefill> = VecDeque::new();
     // Pool of idle sequence slots in range [0, max_batch_size), each carrying
     // the token history currently resident in its KV cache so a later
     // request can reuse a matching prefix instead of a full re-prefill.
@@ -1440,7 +1586,7 @@ fn run_scheduler_loop(
                 "Shutdown requested — draining {} active sequences",
                 active.len()
             );
-            for seq in &active {
+            for seq in active.iter().chain(prefilling.iter().map(|p| &p.seq)) {
                 let _ = seq
                     .tx
                     .try_send(StreamEvent::Error("Server shutting down".into()));
@@ -1458,7 +1604,7 @@ fn run_scheduler_loop(
         }
 
         // ── 1. Drain new requests from the queue ────────────────────────
-        while active.len() < sched_config.max_batch_size {
+        while active.len() + prefilling.len() < sched_config.max_batch_size {
             match req_rx.try_recv() {
                 Ok(scheduled) => {
                     let prompt_text = scheduled.request.prompt.clone();
@@ -1575,6 +1721,7 @@ fn run_scheduler_loop(
                         raw_generated_pieces: Vec::new(),
                         mtp_drafted: 0,
                         mtp_accepted: 0,
+                        prompt_time: std::time::Duration::ZERO,
                     };
 
                     // Prefill the unreused suffix of the prompt into the context.
@@ -1589,6 +1736,64 @@ fn run_scheduler_loop(
                     // cause isn't always visible here), the worst case is
                     // paying for the old, proven full-reprefill behavior —
                     // never a hard failure of the user's request.
+                    // With several slots the prompt is read a chunk at a time
+                    // in step 7, between the decode steps of the sequences
+                    // already answering, so a long prompt holds none of them up;
+                    // here it is only checked and its slot prepared. With one
+                    // slot, and so with the MTP head, it is read whole, here.
+                    if chunked {
+                        let mut effective_reuse_len = reuse_len;
+                        let mut fell_back = false;
+                        let mut setup = prefill_setup(
+                            &mut ctx,
+                            &scheduled.request,
+                            &seq,
+                            per_seq_ctx,
+                            &tokens,
+                            effective_reuse_len,
+                            None,
+                        );
+                        if let Err(ref e) = setup
+                            && effective_reuse_len > 0
+                        {
+                            effective_reuse_len = fall_back_from_reuse(
+                                &mut ctx,
+                                &checkpoints,
+                                seq.seq_id,
+                                &tokens,
+                                e,
+                            );
+                            fell_back = true;
+                            setup = prefill_setup(
+                                &mut ctx,
+                                &scheduled.request,
+                                &seq,
+                                per_seq_ctx,
+                                &tokens,
+                                effective_reuse_len,
+                                None,
+                            );
+                        }
+                        match setup {
+                            Ok((n_tokens, effective_max)) => {
+                                prefilling.push_back(PendingPrefill {
+                                    seq,
+                                    cursor: effective_reuse_len,
+                                    may_fall_back: effective_reuse_len > 0 && !fell_back,
+                                    n_tokens,
+                                    effective_max,
+                                });
+                            }
+                            Err(e) => {
+                                let _ = seq
+                                    .tx
+                                    .try_send(StreamEvent::Error(format!("Prefill failed: {e}")));
+                                finish_wiped(&mut ctx, seq.seq_id, &mut idle_slots);
+                            }
+                        }
+                        continue;
+                    }
+
                     let mut effective_reuse_len = reuse_len;
                     let mut prefill_result = prefill_sequence(
                         &mut ctx,
@@ -1603,55 +1808,8 @@ fn run_scheduler_loop(
                     if let Err(ref e) = prefill_result
                         && effective_reuse_len > 0
                     {
-                        tracing::warn!("Seq {}: reused prefill failed ({e})", seq.seq_id);
-                        let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                        effective_reuse_len = 0;
-
-                        // Before giving up to a full re-prefill from position
-                        // 0, check whether a checkpoint covers a longer
-                        // prefix of this request than the rejected in-place
-                        // rollback did. This is exactly the scenario
-                        // checkpoints exist for: the live slot's resident
-                        // history diverged too early for the (hybrid/
-                        // recurrent-incapable) in-place trim above, but an
-                        // earlier full-state snapshot of the same lineage
-                        // might still cover most of the prompt. Restoring is
-                        // best-effort for the *restore call itself*: if
-                        // `state_seq_set_data_ext` returns false the snapshot
-                        // is ignored and `effective_reuse_len` stays 0, so the
-                        // single `prefill_sequence` call below re-prefills the
-                        // whole prompt. (Note there is no further retry after
-                        // that one call: a decode error there fails the
-                        // request — the `Err` arm handles it.) `best_checkpoint`
-                        // only ever returns a STRICT prefix, so a successful
-                        // restore always leaves at least one token for that
-                        // call to decode and therefore a real logits row to
-                        // sample from.
-                        if let Some(checkpoint) = best_checkpoint(&checkpoints, &tokens) {
-                            let restore_len = checkpoint.tokens.len();
-                            // SAFETY: `checkpoint.state` was produced by this
-                            // same scheduler's `take_checkpoint` on this same
-                            // context/model earlier in its lifetime.
-                            let restored = unsafe {
-                                ctx.state_seq_set_data_ext(
-                                    &checkpoint.state,
-                                    seq.seq_id,
-                                    llama_cpp_2::LlamaStateSeqFlags::empty(),
-                                )
-                            };
-                            if restored {
-                                tracing::info!(
-                                    "Seq {}: restoring from a {restore_len}-token checkpoint instead of a full re-prefill",
-                                    seq.seq_id,
-                                );
-                                effective_reuse_len = restore_len;
-                            }
-                        }
-
-                        tracing::warn!(
-                            "Seq {}: retrying prefill with reuse_len={effective_reuse_len}",
-                            seq.seq_id,
-                        );
+                        effective_reuse_len =
+                            fall_back_from_reuse(&mut ctx, &checkpoints, seq.seq_id, &tokens, e);
                         prefill_result = prefill_sequence(
                             &mut ctx,
                             &config,
@@ -1671,157 +1829,17 @@ fn run_scheduler_loop(
                             seq.n_past = n_past;
                             seq.max_tokens = effective_max;
                             seq.prefilled = true;
+                            seq.prompt_time = seq.start.elapsed();
 
-                            // Sample the first generated token directly from prefill logits.
-                            // Use output index -1 (= last output). Only the final prompt
-                            // token had logits enabled, so there is exactly one output entry.
-                            if sched_config.debug_logit_check {
-                                warn_if_logits_corrupt(&ctx, -1, seq.seq_id);
-                            }
-                            let token = seq.sampler.sample(&ctx, -1);
-
-                            // Always-on O(1) guard, before the token is
-                            // accepted into the sampler's history: a NaN here
-                            // means the whole forward pass produced nothing
-                            // usable, and continuing would stream garbage that
-                            // reads as a real answer.
-                            if sampled_token_is_corrupt(&ctx, -1, token) {
-                                tracing::error!(
-                                    "Seq {}: sampled token {} has a NaN/Inf logit — \
-                                     aborting generation instead of emitting garbage. \
-                                     Run with --rust-debug for the full logit scan.",
-                                    seq.seq_id,
-                                    token.0,
-                                );
-                                let _ = seq.tx.try_send(StreamEvent::Error(corrupt_logits_error()));
-                                // The KV cache for this sequence is suspect —
-                                // whatever produced NaN is in it. Wipe rather
-                                // than offer it for prefix reuse.
-                                let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                                idle_slots.push(CachedSlot {
-                                    seq_id: seq.seq_id,
-                                    text: String::new(),
-                                    tokens: Vec::new(),
-                                    last_used: std::time::Instant::now(),
-                                });
-                                continue;
-                            }
-                            seq.sampler.accept(token);
-
-                            if model.is_eog_token(token) {
-                                send_done(&seq, StopReason::Stop);
-                                // Clean completion — the KV cache holds exactly
-                                // the prompt (this EOG token was never decoded),
-                                // so it's safe to keep and offer for reuse.
-                                finish_sequence_clean(
-                                    &ctx,
-                                    &seq,
-                                    &mut idle_slots,
-                                    &mut checkpoints,
-                                    &sched_config,
-                                );
-                            } else {
-                                seq.tokens_generated += 1;
-                                seq.generated_tokens.push(token);
-
-                                match model.token_to_piece(token, &mut seq.decoder, true, None) {
-                                    Ok(piece) => {
-                                        // Mirrors generated_tokens: every decoded piece, unfiltered
-                                        // by stop-sequence truncation (see field doc comment).
-                                        seq.raw_generated_pieces.push(piece.clone());
-                                        match process_piece(
-                                            &mut seq.pending,
-                                            &seq.stop_sequences,
-                                            &seq.filter_sequences,
-                                            &piece,
-                                        ) {
-                                            PieceOutcome::Stop(out) => {
-                                                if !out.is_empty() {
-                                                    let _ =
-                                                        seq.tx.try_send(StreamEvent::Token(out));
-                                                }
-                                                send_done(&seq, StopReason::Stop);
-                                                // Clean completion.
-                                                finish_sequence_clean(
-                                                    &ctx,
-                                                    &seq,
-                                                    &mut idle_slots,
-                                                    &mut checkpoints,
-                                                    &sched_config,
-                                                );
-                                            }
-                                            PieceOutcome::Emit(out) => {
-                                                if seq.tokens_generated >= seq.max_tokens {
-                                                    // Truncation: flush whatever was held back too.
-                                                    let tail = std::mem::take(&mut seq.pending);
-                                                    let final_out = out + &tail;
-                                                    if !final_out.is_empty() {
-                                                        let _ = seq.tx.try_send(
-                                                            StreamEvent::Token(final_out),
-                                                        );
-                                                    }
-                                                    send_done(&seq, StopReason::Length);
-                                                    // Clean completion.
-                                                    finish_sequence_clean(
-                                                        &ctx,
-                                                        &seq,
-                                                        &mut idle_slots,
-                                                        &mut checkpoints,
-                                                        &sched_config,
-                                                    );
-                                                } else {
-                                                    match try_send_piece(&seq.tx, out, seq.seq_id) {
-                                                        SendOutcome::Disconnected => {
-                                                            // Cache state is not confirmed-safe (mid
-                                                            // first-token piece): full wipe.
-                                                            let _ = ctx.clear_kv_cache_seq(
-                                                                Some(seq.seq_id as u32),
-                                                                None,
-                                                                None,
-                                                            );
-                                                            idle_slots.push(CachedSlot {
-                                                                seq_id: seq.seq_id,
-                                                                tokens: Vec::new(),
-                                                                text: String::new(),
-                                                                last_used: std::time::Instant::now(
-                                                                ),
-                                                            });
-                                                        }
-                                                        outcome => {
-                                                            // On backpressure the text goes back to
-                                                            // the front of the hold-back buffer so a
-                                                            // later iteration flushes it in order.
-                                                            if let SendOutcome::Backpressure(text) =
-                                                                outcome
-                                                            {
-                                                                seq.pending.insert_str(0, &text);
-                                                            }
-                                                            seq.last_token = Some(token);
-                                                            active.push(seq);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Err(_) => {
-                                        let _ = seq.tx.try_send(StreamEvent::Error(
-                                            "decode failed mid-generation — the answer is incomplete".to_string(),
-                                        ));
-                                        // Decode error — cache state suspect: full wipe.
-                                        let _ = ctx.clear_kv_cache_seq(
-                                            Some(seq.seq_id as u32),
-                                            None,
-                                            None,
-                                        );
-                                        idle_slots.push(CachedSlot {
-                                            seq_id: seq.seq_id,
-                                            tokens: Vec::new(),
-                                            text: String::new(),
-                                            last_used: std::time::Instant::now(),
-                                        });
-                                    }
-                                }
+                            if let Some(seq) = begin_generation(
+                                model,
+                                &mut ctx,
+                                seq,
+                                &mut idle_slots,
+                                &mut checkpoints,
+                                &sched_config,
+                            ) {
+                                active.push(seq);
                             }
 
                             tracing::debug!(
@@ -1836,13 +1854,7 @@ fn run_scheduler_loop(
                             // this slot's cache before failing — wipe it and
                             // return an empty-history slot, matching the
                             // other error paths' conservative default.
-                            let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                            idle_slots.push(CachedSlot {
-                                seq_id: seq.seq_id,
-                                tokens: Vec::new(),
-                                text: String::new(),
-                                last_used: std::time::Instant::now(),
-                            });
+                            finish_wiped(&mut ctx, seq.seq_id, &mut idle_slots);
                         }
                     }
                 }
@@ -1850,7 +1862,7 @@ fn run_scheduler_loop(
                 Err(crossbeam_channel::TryRecvError::Disconnected) => {
                     tracing::info!("Request channel closed — scheduler shutting down.");
                     // Finish active sequences gracefully.
-                    for seq in &active {
+                    for seq in active.iter().chain(prefilling.iter().map(|p| &p.seq)) {
                         let _ = seq
                             .tx
                             .try_send(StreamEvent::Error("Server shutting down".into()));
@@ -1861,7 +1873,7 @@ fn run_scheduler_loop(
         }
 
         // ── 2. If nothing active, wait for new work ─────────────────────
-        if active.is_empty() {
+        if active.is_empty() && prefilling.is_empty() {
             let lock = notify_mutex.lock().unwrap();
             // Wait with a timeout so we can check for channel disconnect.
             let _ = notify.wait_timeout(lock, std::time::Duration::from_millis(100));
@@ -2058,6 +2070,86 @@ fn run_scheduler_loop(
         for &i in to_remove.iter().rev() {
             active.swap_remove(i);
         }
+
+        // ── 7. Read the next chunk of a waiting prompt ──────────────────
+        //
+        // Decode first: every answering sequence has had its token (steps
+        // 3-6), then the oldest waiting prompt advances by one chunk. While
+        // others answer the chunk is one micro-batch, so each of their tokens
+        // waits for one micro-batch of prompt at most instead of the whole
+        // prompt; alone, it is the whole batch, as a prompt read whole. Either
+        // way llama.cpp computes it a micro-batch at a time, from the same
+        // start, so the prompt is read the same way as `prefill_sequence`
+        // reads it.
+        if let Some(mut pending) = prefilling.pop_front() {
+            let seq_id = pending.seq.seq_id;
+            let n_prompt = pending.seq.prompt_tokens.len();
+            if pending.seq.tx.is_closed() {
+                // The client went away while its prompt was waiting or being
+                // read: what the slot holds of it is of no use to anyone.
+                finish_wiped(&mut ctx, seq_id, &mut idle_slots);
+                continue;
+            }
+            let chunk_size = if active.is_empty() {
+                config.n_batch
+            } else {
+                ctx.n_ubatch()
+            } as usize;
+            let chunk_end = (pending.cursor + chunk_size).min(n_prompt);
+            match prefill_chunk(
+                &mut ctx,
+                seq_id,
+                &pending.seq.prompt_tokens,
+                pending.cursor,
+                chunk_end,
+                None,
+            ) {
+                Ok(()) if chunk_end < n_prompt => {
+                    pending.cursor = chunk_end;
+                    prefilling.push_front(pending);
+                }
+                Ok(()) => {
+                    let mut seq = pending.seq;
+                    seq.tokens_prompt = pending.n_tokens;
+                    seq.n_past = n_prompt as i32;
+                    seq.max_tokens = pending.effective_max;
+                    seq.prefilled = true;
+                    seq.prompt_time = seq.start.elapsed();
+                    if let Some(seq) = begin_generation(
+                        model,
+                        &mut ctx,
+                        seq,
+                        &mut idle_slots,
+                        &mut checkpoints,
+                        &sched_config,
+                    ) {
+                        active.push(seq);
+                    }
+                    tracing::debug!(
+                        "Sequence {seq_id} prefilled ({} prompt tokens)",
+                        pending.n_tokens
+                    );
+                }
+                Err(e) if pending.may_fall_back => {
+                    pending.cursor = fall_back_from_reuse(
+                        &mut ctx,
+                        &checkpoints,
+                        seq_id,
+                        &pending.seq.prompt_tokens,
+                        &e,
+                    );
+                    pending.may_fall_back = false;
+                    prefilling.push_front(pending);
+                }
+                Err(e) => {
+                    let _ = pending
+                        .seq
+                        .tx
+                        .try_send(StreamEvent::Error(format!("Prefill failed: {e}")));
+                    finish_wiped(&mut ctx, seq_id, &mut idle_slots);
+                }
+            }
+        }
     }
 }
 
@@ -2081,6 +2173,60 @@ fn prefill_sequence(
     reuse_len: usize,
     mut mtp: Option<&mut MtpState<'_>>,
 ) -> Result<(u32, i32, u32), String> {
+    let (n_tokens, effective_max_tokens) = prefill_setup(
+        ctx,
+        request,
+        seq,
+        per_seq_ctx,
+        tokens,
+        reuse_len,
+        mtp.as_deref_mut(),
+    )?;
+
+    // Prefill in chunks of n_batch tokens. llama.cpp asserts if a single
+    // decode call processes more tokens than n_batch, which causes SIGABRT.
+    // Long RAG prompts easily exceed the default 2048 n_batch.
+    let chunk_size = config.n_batch as usize;
+
+    tracing::debug!(
+        "Prefilling seq {} with {} tokens (reused {}) in chunks of {} (context_size={})",
+        seq.seq_id,
+        tokens.len(),
+        reuse_len,
+        chunk_size,
+        config.context_size,
+    );
+
+    for chunk_start in (reuse_len..tokens.len()).step_by(chunk_size) {
+        let chunk_end = (chunk_start + chunk_size).min(tokens.len());
+        prefill_chunk(
+            ctx,
+            seq.seq_id,
+            tokens,
+            chunk_start,
+            chunk_end,
+            mtp.as_deref_mut(),
+        )?;
+    }
+
+    Ok((n_tokens, tokens.len() as i32, effective_max_tokens))
+}
+
+/// What `prefill_sequence` does before decoding the prompt, and the chunked
+/// prefill of `run_scheduler_loop` (step 7) does when the request is taken:
+/// check the prompt against the context, cap the answer to what is left of
+/// it, and drop what the slot holds past the reused prefix.
+///
+/// Returns `(prompt_tokens, effective_max_tokens)`.
+fn prefill_setup(
+    ctx: &mut LlamaContext,
+    request: &GenerateRequest,
+    seq: &ActiveSequence,
+    per_seq_ctx: u32,
+    tokens: &[LlamaToken],
+    reuse_len: usize,
+    mtp: Option<&mut MtpState<'_>>,
+) -> Result<(u32, u32), String> {
     let n_tokens = tokens.len() as u32;
 
     // Effective context: per-request num_ctx (clamped to per-sequence limit)
@@ -2152,25 +2298,10 @@ fn prefill_sequence(
         ));
     }
 
-    // Prefill in chunks of n_batch tokens. llama.cpp asserts if a single
-    // decode call processes more tokens than n_batch, which causes SIGABRT.
-    // Long RAG prompts easily exceed the default 2048 n_batch.
-    let chunk_size = config.n_batch as usize;
-    let last_idx = tokens.len() - 1;
-
-    tracing::debug!(
-        "Prefilling seq {} with {} tokens (reused {}) in chunks of {} (context_size={})",
-        seq.seq_id,
-        tokens.len(),
-        reuse_len,
-        chunk_size,
-        config.context_size,
-    );
-
     // The MTP head reads every decode of the target: this prompt's chunks
     // here, each speculative step in `mtp_step`. Its own memory keeps what
     // the target keeps of this sequence, up to `reuse_len`.
-    if let Some(mtp) = mtp.as_mut() {
+    if let Some(mtp) = mtp {
         let _ =
             mtp.draft_ctx
                 .clear_kv_cache_seq(Some(seq.seq_id as u32), Some(reuse_len as u32), None);
@@ -2179,33 +2310,40 @@ fn prefill_sequence(
         }
     }
 
-    for chunk_start in (reuse_len..tokens.len()).step_by(chunk_size) {
-        let chunk_end = (chunk_start + chunk_size).min(tokens.len());
-        let chunk = &tokens[chunk_start..chunk_end];
-        let mut batch = LlamaBatch::new(chunk.len().max(1), 1);
+    Ok((n_tokens, effective_max_tokens))
+}
 
-        for (j, token) in chunk.iter().enumerate() {
-            let abs_pos = chunk_start + j;
-            let is_last = abs_pos == last_idx;
-            batch
-                .add(*token, abs_pos as i32, &[seq.seq_id], is_last)
-                .map_err(|e| format!("Failed to add prompt token: {e}"))?;
-        }
+/// Decodes `tokens[chunk_start..chunk_end]` of a prompt into sequence
+/// `seq_id`, with logits only for the prompt's last token, which is where
+/// the answer's first token is sampled from.
+fn prefill_chunk(
+    ctx: &mut LlamaContext,
+    seq_id: i32,
+    tokens: &[LlamaToken],
+    chunk_start: usize,
+    chunk_end: usize,
+    mtp: Option<&mut MtpState<'_>>,
+) -> Result<(), String> {
+    let last_idx = tokens.len() - 1;
+    let chunk = &tokens[chunk_start..chunk_end];
+    let mut batch = LlamaBatch::new(chunk.len().max(1), 1);
 
-        ctx.decode(&mut batch).map_err(|e| {
-            format!("Prompt decode failed at chunk {chunk_start}..{chunk_end}: {e}")
-        })?;
-        if let Some(mtp) = mtp.as_mut()
-            && let Err(e) = mtp.drafter.process(&batch)
-        {
-            tracing::warn!(
-                "Seq {}: the MTP head could not read the prompt ({e})",
-                seq.seq_id
-            );
-        }
+    for (j, token) in chunk.iter().enumerate() {
+        let abs_pos = chunk_start + j;
+        let is_last = abs_pos == last_idx;
+        batch
+            .add(*token, abs_pos as i32, &[seq_id], is_last)
+            .map_err(|e| format!("Failed to add prompt token: {e}"))?;
     }
 
-    Ok((n_tokens, tokens.len() as i32, effective_max_tokens))
+    ctx.decode(&mut batch)
+        .map_err(|e| format!("Prompt decode failed at chunk {chunk_start}..{chunk_end}: {e}"))?;
+    if let Some(mtp) = mtp
+        && let Err(e) = mtp.drafter.process(&batch)
+    {
+        tracing::warn!("Seq {seq_id}: the MTP head could not read the prompt ({e})");
+    }
+    Ok(())
 }
 
 /// Bytes per element for a KV cache type (approximate for quantized types).
@@ -2377,12 +2515,18 @@ fn try_send_piece(tx: &mpsc::Sender<StreamEvent>, out: String, seq_id: i32) -> S
 /// `tokens_generated >= max_tokens` would misreport an EOS that happens to
 /// land exactly on the last allowed token.
 fn send_done(seq: &ActiveSequence, stop_reason: StopReason) {
-    let duration_ms = seq.start.elapsed().as_millis() as u64;
+    let elapsed = seq.start.elapsed();
     let _ = seq.tx.try_send(StreamEvent::Done {
         tokens_generated: seq.tokens_generated,
         tokens_prompt: seq.tokens_prompt,
-        duration_ms,
+        duration_ms: elapsed.as_millis() as u64,
         stop_reason,
+        stats: AnswerStats {
+            prompt_time: seq.prompt_time,
+            eval_time: elapsed.saturating_sub(seq.prompt_time),
+            draft_n: seq.mtp_drafted,
+            draft_n_accepted: seq.mtp_accepted,
+        },
     });
 }
 

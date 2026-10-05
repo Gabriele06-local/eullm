@@ -21,7 +21,7 @@ tags:
 
 **Un modello da 4 miliardi di parametri che risponde a domande sul diritto italiano leggendo i testi di legge che gli vengono forniti.** Gira in locale: il file Q4_K_M pesa 2,5 GB e funziona con llama.cpp, Ollama e l'[EULLM Engine](https://github.com/eullm/eullm).
 
-Sulle 429 domande degli esami riservati, mai viste in addestramento, risponde correttamente all'**85,1%**, contro il 77,6% del modello di partenza con lo stesso retrieval. Per la massima qualità c'è [legal-it-8b](https://huggingface.co/eullm/legal-it-8b) (89,0%), che richiede circa il doppio della memoria.
+Sulle 429 domande degli esami riservati, mai viste in addestramento, risponde correttamente all'**85,1%**, contro il 77,6% del modello di partenza con lo stesso retrieval. Per la massima qualità c'è [legal-it-8b](https://huggingface.co/EuLLM/legal-it-8b) (89,0%), che richiede circa il doppio della memoria.
 
 > **Avvertenza.** legal-it-4b è uno strumento di consultazione dei testi normativi, non un parere legale. Può sbagliare, anche con sicurezza. Ogni risposta va verificata sul testo ufficiale (Normattiva, Gazzetta Ufficiale) e, per qualsiasi decisione, con un professionista.
 
@@ -74,7 +74,7 @@ Poi si invia il prompt sopra come unico messaggio utente all'endpoint `/v1/chat/
 ### Ollama
 
 ```bash
-ollama run hf.co/eullm/legal-it-4b:Q4_K_M
+ollama run hf.co/EuLLM/legal-it-4b:Q4_K_M
 ```
 
 ## Risultati
@@ -85,7 +85,7 @@ Le domande sono costruite automaticamente dal testo degli articoli: che cosa pre
 
 | Modello | Corrette, su 429 | Senza giudice, su 219 |
 |---|---|---|
-| [legal-it-8b](https://huggingface.co/eullm/legal-it-8b) | 382 (89,0%) | 202 (92,2%) |
+| [legal-it-8b](https://huggingface.co/EuLLM/legal-it-8b) | 382 (89,0%) | 202 (92,2%) |
 | **legal-it-4b** | **365 (85,1%)** | **200 (91,3%)** |
 | Qwen3-4B-Instruct-2507, di partenza | 333 (77,6%) | 183 (83,6%) |
 
@@ -149,7 +149,7 @@ Apache 2.0, come il modello di partenza Qwen3-4B-Instruct-2507. I testi normativ
 
 **legal-it-4b** is a 4B model, fine-tuned from Qwen3-4B-Instruct-2507, that answers questions on Italian law **from the legal texts placed in its prompt** (retrieval-augmented, open book). The Q4_K_M GGUF is 2.5 GB.
 
-- **Held-out results:** on 429 held-out questions it answers 85.1% correctly, against 77.6% for its base model with the same retrieval; the paired difference is significant under every criterion. [legal-it-8b](https://huggingface.co/eullm/legal-it-8b) reaches 89.0%.
+- **Held-out results:** on 429 held-out questions it answers 85.1% correctly, against 77.6% for its base model with the same retrieval; the paired difference is significant under every criterion. [legal-it-8b](https://huggingface.co/EuLLM/legal-it-8b) reaches 89.0%.
 - **Quantization:** Q4_K_M scores the same as bf16 (426 vs 422 of 472, p = 0.50).
 - **Training:** open-book SFT on 18,972 pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).
 - **Intended use:** with the retrieval described above (BM25 + Qwen3-Embedding-0.6B + Qwen3-Reranker-0.6B).

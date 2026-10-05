@@ -163,9 +163,8 @@ struct RuntimeOpts {
     #[arg(long, allow_hyphen_values = true)]
     gpu_layers: Option<i32>,
 
-    /// Auto-fit GPU layers to available VRAM (CUDA builds only). Probes
-    /// free VRAM and the model's layer count, then offloads as many layers
-    /// as fit.
+    /// Auto-fit GPU layers to available VRAM. Probes free VRAM and the
+    /// model's layer count, then offloads as many layers as fit.
     ///
     /// **On by default** since 0.6.80: without sizing, a model larger than
     /// the free VRAM dies with an out-of-memory error at load, while with
@@ -175,9 +174,9 @@ struct RuntimeOpts {
     /// confirmation, because you asked to be involved in the decision.
     /// Automatic sizing never asks; it applies the split and logs it.
     ///
-    /// Turned off by --no-fit, and by setting --gpu-layers yourself. When
-    /// VRAM cannot be probed (any non-CUDA build) automatic sizing stays
-    /// silent and --gpu-layers is used as-is.
+    /// Turned off by --no-fit. A --gpu-layers of your own is a ceiling it
+    /// keeps to, not an off switch. When VRAM cannot be read (no GPU)
+    /// automatic sizing stays silent and --gpu-layers is used as-is.
     #[arg(long)]
     fit: bool,
 
@@ -2833,12 +2832,27 @@ async fn cmd_run(
                     companion_reserve_bytes.saturating_add(fit::ubatch_reserve_bytes(n_ubatch)),
                 );
             }
+            // The MTP head's context, built once the model has loaded (see
+            // `fit::mtp_reserve_bytes`): only where it will draft, on the
+            // scheduler's one slot, which a model with a projector never gets.
+            let mtp_reserve = if mtp > 0 && batch_size == 1 && mmproj_for_config.is_none() {
+                fit::mtp_reserve_bytes(
+                    fit::read_gguf_info(&gguf_path).as_ref(),
+                    ctx_size,
+                    kv_bpe_k,
+                    kv_bpe_v,
+                    n_ubatch,
+                )
+            } else {
+                0
+            };
             // Everything already spoken for before the text model is sized:
-            // reserved embedding and decision companions, and the projector
-            // unless it is going to RAM.
+            // reserved embedding and decision companions, the projector
+            // unless it is going to RAM, and the MTP head's context.
             let sizing_reserve = companion_reserve_bytes
                 .saturating_add(mmproj_placement.reserve(mmproj_bytes))
-                .saturating_add(fit::ubatch_reserve_bytes(n_ubatch));
+                .saturating_add(fit::ubatch_reserve_bytes(n_ubatch))
+                .saturating_add(mtp_reserve);
             // An expert cache, asked for and with room for one, places the
             // experts itself: all in RAM, the VRAM they leave to the cache.
             // Otherwise the usual MoE sizing below decides, as before.
@@ -4453,6 +4467,7 @@ async fn interactive_chat(
                     tokens_prompt,
                     duration_ms,
                     stop_reason,
+                    ..
                 } => {
                     // Strip any trailing stop sequence that was printed as part of the stream.
                     // Use trim_end() before matching: some models append \n after the
@@ -4925,11 +4940,14 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
                 duration_ms,
                 // The one-shot multimodal probe prints no stop reason.
                 stop_reason: _,
+                stats,
             } => {
                 let _ = writeln!(stdout);
                 let _ = writeln!(
                     stdout,
-                    "[done — {tokens_generated} tokens, prompt {tokens_prompt}, {duration_ms} ms]"
+                    "[done — {tokens_generated} tokens, prompt {tokens_prompt} read in {} ms, \
+                     {duration_ms} ms]",
+                    stats.prompt_time.as_millis()
                 );
             }
             inference::StreamEvent::Error(e) => {

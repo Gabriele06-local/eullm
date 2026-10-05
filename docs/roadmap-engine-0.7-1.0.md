@@ -65,7 +65,7 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   loop; l'endpoint `DELETE /api/requests/{id}` è rinviato a 0.9 (richiede il
   registry dei request_id, valore marginale finché il receiver-drop copre i casi reali).
 
-- [ ] **0.7-D · Mixed chunked prefill** *(P0)*
+- [x] **0.7-D · Mixed chunked prefill** *(P0 — implementato il 2026-10-04)*
   Oggi `prefill_sequence` decodifica tutti i chunk di un prompt lungo prima di
   restituire il controllo: le sequenze in streaming subiscono pause (head-of-line
   blocking). Rilevante solo con concorrenza (`eullm serve`); a `batch_size=1` il
@@ -80,6 +80,31 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   partenza del cursore. La cancellazione diventa verificabile anche tra i chunk di
   prefill (sinergia con 0.7-C). Testare prompt da 1, `n_batch` e `n_batch+1` token.
   Output identico a parità di seed rispetto al prefill monolitico.
+
+  **Fatto così** (`scheduler.rs`, step 7). Con più di uno slot una richiesta
+  nuova non viene più letta all'arrivo: `prefill_setup` fa i controlli e
+  prepara lo slot (con lo stesso ripiego su checkpoint o su prefill da zero
+  se il reuse fallisce), e il prompt entra in una coda (`PendingPrefill`, con
+  il cursore che parte dal prefisso riusato). A ogni giro: prima un token per
+  ogni sequenza che sta rispondendo (decode-first), poi un chunk del prompt più
+  vecchio in coda, di `n_ubatch` token se qualcuno sta rispondendo, di
+  `n_batch` se è solo. Due chiamate a `llama_decode` separate invece di un
+  solo batch misto: un chunk che fallisce resta del suo prompt (ripiego o
+  errore a quella richiesta sola) invece di far cadere tutte le sequenze del
+  batch, e i chunk partono dalle stesse posizioni dei micro-batch del prefill
+  intero, quindi l'output è identico. Con uno slot (default, e quindi con
+  `--mtp`) il prompt si legge intero come prima. La cancellazione si vede tra
+  un chunk e l'altro. Test su modello vero (`real_model_tests.rs`): risposta
+  identica al prefill intero a 1, `n_batch`, `n_batch+1` e 200 token, anche da
+  un prefisso riusato; un prompt di 3.500 token letto a chunk di 16 lascia
+  passare ≥100 token di una risposta in corso (letto intero: 16, il test
+  fallisce). Il batch misto in un'unica chiamata resta un'ottimizzazione
+  possibile, da misurare.
+
+  **Provato su GPU** il 4 ottobre (RTX 5070 Ti, qwen3-8b, `--batch-size 2`,
+  `bench/interleave_check.py`): mentre il server legge un prompt di 8.144 token
+  in 1,52 s, la risposta in streaming continua, con la pausa più lunga di
+  108 ms (letto intero, si fermerebbe per tutta la lettura).
 
 - [x] **0.7-E · Auto-composizione `--fit` + `--n-cpu-moe`** *(implementato
   0.6.70-rc14)*
@@ -316,6 +341,53 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   dà una risposta positiva a un caso che perde il 38%. Mezza giornata di misura
   ha evitato settimane di implementazione contro un modello sbagliato del costo.
 
+- [ ] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(aperta il 2026-10-04)*
+  La 0.8-Z resta chiusa per lo speculative su MoE in CPU. L'MTP ([#655](https://github.com/eullm/eullm/pull/655),
+  `--mtp N`) è un'altra cosa: la bozza la scrive la testa addestrata insieme al
+  modello, e su un **denso in GPU** guadagna. Misurato su RTX 5070 Ti con
+  Qwen3.5-9B-MTP Q4_K_M dopo il bump a b11370: racconto 146,1 tok/s contro 114,8
+  (+27%), codice 194,3 contro 120,2 (+62%), 58% delle bozze tenute con `--mtp 2`.
+  Su CPU con un modello piccolo non conviene (Qwen3.5 0.8B su 4 core: 14-17 tok/s
+  contro 20): la testa costa quasi quanto risparmia.
+
+  **Sui MoE con esperti in RAM non lo scriviamo finché non lo misuriamo.** La
+  ragione della 0.8-Z (un lotto di verifica legge più esperti) vale ancora, ma
+  con `--moe-cache` un draft rifiutato non paga più tutti i suoi esperti: molti
+  sono già in VRAM. Si decide con la prova D: `llama-server` con l'MTP su
+  Qwen3.6-35B-A3B-MTP con gli esperti in RAM, e poi `bench/mtp_sweep.sh` sullo
+  stesso modello in EuLLM. Lo script c'è: `bench/mtp_test_d.sh` (0, 1 e 2
+  bozze, esperti in RAM bloccati con `--load-mode none` e cache in VRAM).
+
+  Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
+  RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
+  - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
+    pausa sotto una soglia, ripresa dopo N token). Ha senso dove un draft
+    rifiutato costa: MoE con offload, temperatura alta. **Su un denso in GPU
+    non serve:** a temperatura 0.8 le bozze tenute sono 72% con `--mtp 1`, 56%
+    con 2, 46% con 3, mai vicine a una soglia di pausa. Conta invece quante
+    bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
+    contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
+    164,5 con 1 e 119,1 senza). Per i MoE si decide con la prova D, che non è
+    ancora partita: manca il GGUF di Qwen3.6-35B-A3B-MTP.
+  - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
+    proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
+    MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla
+    stessa sorgente Q8_0, diverse solo nello strato MTP: bozze tenute 75/62/50%
+    con 1/2/3 bozze nel file come unsloth, 73/62/48% con tutto lo strato in
+    Q8_0, e velocità uguali entro il rumore (`--mtp 2`: 153,6/186,0 contro
+    151,0/191,0 tok/s su racconto e codice), per 86 MiB in più.
+  - **Rejection sampling di Leviathan a temperatura > 0: chiusa, non
+    conviene.** Oggi una bozza è tenuta se è il token che il modello campiona:
+    senza perdita, ma a temperatura alta ne scarta di accettabili. Si faceva
+    solo se l'accettazione a 0.8 calava di molto rispetto a 0: con `--mtp 2`
+    è 56% a 0.8 contro 58% a 0 sullo stesso file, quindi c'è poco da
+    recuperare per uno shim che dovrebbe esporre le probabilità della testa.
+
+  Il rumore tra un avvio del server e l'altro, da tenere presente leggendo
+  queste cifre: lo stesso modello senza bozze ha scritto 111,4 e 120,5 tok/s
+  in due avvii (i due file di `mtp_head_q8.sh` sono identici fuori dallo
+  strato MTP, che con `--mtp 0` non lavora).
+
 ## 0.9 — Agentic e verticale
 
 **Gate di uscita:** tool calling validato su Qwen + una seconda famiglia;
@@ -387,6 +459,35 @@ modelli virtuali base+adapter funzionanti.
   `/v1/completions`, `/v1/responses`, `logprobs`, `stream_options.include_usage`,
   usage dettagliato, error object coerente, specifica OpenAPI quando i tipi sono
   stabili. Golden test per ogni route convertita; alias e campi Ollama preservati.
+
+- [ ] **1.0-E · KV della conversazione su disco** *(P2 — da valutare)*
+  Salvare la cache KV a fine turno (`llama_state_seq_save_file`) e riaprire una
+  conversazione senza rileggere il prompt, come fa colibri. Oggi il riuso del
+  prefisso vale finché lo slot tiene quella conversazione: con molti utenti o
+  conversazioni lunghe si rilegge tutto. **Contro, e sono vincoli, non
+  dettagli:** la KV contiene la conversazione, quindi sono dati personali su
+  disco — opt-in, cifratura, cancellazione su richiesta e conservazione legate
+  all'audit trail (GDPR); una KV vale solo per lo stesso modello, gli stessi tipi
+  di cache e lo stesso template, e va invalidata quando cambiano; sui modelli
+  ibridi (Qwen3.5/3.6) lo stato ricorrente ha già i limiti di riuso noti a monte.
+
+- [ ] **1.0-F · Esperti caldi ricordati tra un avvio e l'altro** *(P2)*
+  `--moe-cache` tiene già in VRAM gli esperti che il modello usa davvero (LRU,
+  per richiesta), che è quello che la proposta chiedeva rispetto a
+  `--n-cpu-moe` per strato. Resta solo la parte persistente: un istogramma
+  degli esperti più usati, salvato su disco, per caricare la cache già calda
+  all'avvio invece di scaldarla sulle prime richieste. Da fare solo se la
+  misura mostra che le prime risposte dopo un avvio sono sensibilmente più
+  lente delle successive.
+
+- [ ] **1.0-G · MTP oltre `--batch-size 1` e nel percorso sequenziale** *(P2)*
+  Oggi lo shim di llama.cpp (`llama_rs_mtp_speculative_*`) è legato alla
+  sequenza 0: niente bozze con più slot, né per i modelli multimodali, che
+  girano nel percorso sequenziale. Allargarlo vuol dire una testa per
+  sequenza (o una gestione per-sequenza dello stato della testa) e la verifica
+  dentro il lotto del continuous batching, dove ogni sequenza tiene un numero
+  diverso di bozze. Prima si misura se conviene con più richieste insieme, dove
+  la GPU è già meno scarica.
 
 ---
 

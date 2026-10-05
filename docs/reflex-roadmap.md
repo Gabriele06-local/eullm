@@ -1,8 +1,9 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0 done; MVP 1 measured on MuSiQue, its Italian set next; MVP 2
-to 4 under way, MCP already working through jev-style's server · 1 October
-2026
+**Status:** MVP 0 done; MVP 1 measured on MuSiQue and on an Italian legal
+set, where Reflex is the clearly better gate; MVP 2 done; MVP 3 done and
+measured: fast and exact, but the Jev-Style models do not route well; MVP 4's
+code merged, its first model (the Italian RAG gate) now unblocked · 5 October 2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -210,13 +211,13 @@ is the candidate there, not yet measured.
     for decisions, asked the same questions through the code readout. It
     does no better — see the results below: MuSiQue's limit is the task,
     not the 2B's size.
-  - [🔧 now] An Italian set: `rg_openbook.py` writes it from Forge's
+  - [✅ measured] An Italian set: `rg_openbook.py` writes it from Forge's
     open-book pairs — each question asked by topic about an article of
     Italian law, with the articles retrieval finds, its own among them or
     left out, the two contexts Forge trains the legal model on. Written
     where the pairs are; while the cluster is down, `--by-heading` asks by
-    each article's rubrica from the legislation records alone. Its run is
-    next.
+    each article's rubrica from the legislation records alone. Run on
+    4 October: see the Italian results below.
 
 ### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
 
@@ -255,7 +256,36 @@ when it may stop at most about one sufficient case in ten:
   company's documents take one. The Italian set is what says how the gate
   does on those.
 
-## MVP 2 — adapters, not a runtime  [🔧 now]
+### RAG gate, Italian legal set — RTX 5070 Ti, Jev-Style 2B
+
+4 October 2026. `rg_openbook.py --by-heading` on the legislation records of
+the reference PC: 161 questions, each asked by an article's rubrica, with
+the three articles retrieval finds, its own among them or left out — 322
+cases, thresholds fitted on 160, every number below on the other 162.
+
+| Method | AUROC | Within a question | Own decision: stopped insufficient / sufficient | Fitted threshold: stopped insufficient / sufficient | ECE | p50 |
+|---|---|---|---|---|---|---|
+| Embeddings, best similarity | 0.788 | 0.901 | — | 81.5% / 39.5% | — | 6 ms |
+| Reflex, choice among three | 0.896 | 0.951 | 56.8% / 6.2% | 80.2% / 16.0% | 0.081 | 96 ms |
+| Reflex, yes/no | 0.904 | 0.951 | 76.5% / 13.6% | 79.0% / 16.0% | 0.060 | 93 ms |
+
+- **Reflex is the clearly better gate here.** Stopping about four
+  insufficient contexts in five, it stops 16% of the sufficient ones; the
+  embeddings, to stop as many, stop 39.5%. On one-hop questions about a
+  statute the gap is wider than on MuSiQue's multi-hop ones.
+- **Its own decision is usable without a threshold.** The yes/no stops
+  76.5% of the insufficient contexts and 13.6% of the sufficient ones as it
+  comes, where on MuSiQue it stopped two thirds of the sufficient ones. The
+  probabilities are calibrated well enough to tune on (ECE 0.06–0.08).
+- **The price is the reading:** about 1,450 tokens a decision, the
+  articles being long, so 93–96 ms on the GPU against 6 ms for a
+  similarity, which the RAG system has computed anyway.
+- 162 test cases: enough to tell 0.90 from 0.79, not to rank the two Reflex
+  methods. The kill criterion is not met: at the same share of insufficient
+  contexts stopped, the embeddings stop two and a half times as many
+  sufficient ones.
+
+## MVP 2 — adapters, not a runtime  [✅ done]
 
 - [✅ done] **MCP through jev-style's server.** jev-style (Apache-2.0)
   ships an MCP server that talks to any `/v1/systemone`. Tried against
@@ -265,38 +295,49 @@ when it may stop at most about one sufficient case in ten:
   ([#610](https://github.com/eullm/eullm/pull/610)). Claude Code, Claude Desktop and Cursor can now call `decide`,
   `noul`, `choice` and `score` on a local EuLLM; the set-up is in
   [`engine.md`](engine.md#jev-style-with-eullm-mcp-server-cli-python-client).
-- [🔧 now] **EuLLM's own MCP server, for what jev-style's lacks**
-  (`adapters/reflex-mcp`): `select_tools`, the two-stage selection MVP 0
+- [✅ done] **EuLLM's own MCP server, for what jev-style's lacks**
+  (`adapters/reflex-mcp`, [#633](https://github.com/eullm/eullm/pull/633)): `select_tools`, the two-stage selection MVP 0
   measured — the embeddings keep a shortlist, Reflex judges it, "none"
   included — and `rag_gate`, MVP 1's gate with a threshold calibrated on the
   user's own cases. It talks to a local EuLLM unless told otherwise.
-- [🔧 now] Examples for LangGraph and n8n (`examples/decision-langgraph`,
-  `examples/decision-n8n`): the orchestrator orchestrates, Reflex decides,
+- [✅ done] Examples for LangGraph and n8n (`examples/decision-langgraph`,
+  `examples/decision-n8n`, [#634](https://github.com/eullm/eullm/pull/634)): the orchestrator orchestrates, Reflex decides,
   a chat model on EuLLM writes.
-- [🔧 now] A server-side policy, `EULLM_DECISION_POLICY`, an `EULLM_*`
+- [✅ done] A server-side policy, `EULLM_DECISION_POLICY`
+  ([#623](https://github.com/eullm/eullm/pull/623)), an `EULLM_*`
   setting like every perimeter setting of the engine (see
   `engine/CLAUDE.md`): options the operator denies are removed before the
   model sees them, whatever a client asks, and the audit trail says so.
 
-## MVP 3 — several chat models resident, then `model: "auto"`  [🆕 next]
+## MVP 3 — several chat models resident, then `model: "auto"`  [✅ done]
 
 - [✅ done] The implementation plan, [`reflex-mvp3-plan.md`](reflex-mvp3-plan.md):
   how the engine's one generation slot becomes several, how they are sized,
   evicted and locked, where Reflex picks the model, the benchmark that
   decides whether it should, and fourteen commits in order, each behind the
-  flag with its tests and its GPU checks. Reading the code for it found six
-  defects in today's engine, fixed first: `keep_alive: 0` with a prompt
+  flag with its tests and its GPU checks. Reading the code for it found seven
+  defects in the engine (F1-F7 in the plan), fixed first, among them: `keep_alive: 0` with a prompt
   unloads the model before it answers; the idle deadline is counted from the
   start of a request, so a long generation can be unloaded mid-stream; a
   swap aborts the requests still running on the old model, though the docs
   say they finish; a sequential model's weights can outlive its unload and
   its idle context is not counted as taken; there is no `/api/ps`.
-- **The engine keeps one chat model loaded today**, next to the embedding
-  and decision slots; asking for another model swaps it, which takes
-  seconds. Choosing per request between two local chat models needs both
-  resident: a second chat slot, VRAM sizing for both, a scheduler per model.
-  Built behind a flag, with its own tests, validated on GPU before merge —
-  the one part of this roadmap that changes the engine's memory management.
+- [✅ done] **Several chat models resident** (`--max-loaded-models`,
+  [#624](https://github.com/eullm/eullm/pull/624)), next to the embedding
+  and decision slots: each sized against the VRAM the others leave, a
+  scheduler per model, the least recently used one unloaded when a new one
+  needs its place, `/api/ps` listing them. With the default of 1 the engine
+  swaps as it always did. `tools/residency_check.sh` passed 7 of 7 on the
+  RTX 5070 Ti on 1 October, before the routing commits.
+- [🔧 now] Its last GPU checks, 4 October with `tools/residency_check.sh`:
+  6 of 7 pass. V3 does: qwen3-32b loads alone, split between GPU and RAM,
+  after unloading the two it could not sit beside; a third model waits for
+  one of two streaming answers to end; a load beside a resident model keeps
+  its time to first token (6.4 ms against 5.9). The embedder beside two
+  models (V5) did not run: at the 20,480-token context the check gave them,
+  qwen3-4b and qwen3-8b do not fit together on 16 GB, so loading one
+  unloaded the other before the embedder came in. The check now picks the
+  largest context at which the two sit side by side; to run again.
 - **Large-VRAM testing on EuroHPC**, where two big models fit side by side:
   - **LUMI-G** — AMD MI250X, 64 GB per GCD, eight GCDs per node. The
     development allocation EHPC-DEV-2026D09-278 funds exactly this kind of
@@ -306,24 +347,76 @@ when it may stop at most about one sufficient case in ten:
     allocation EHPC-AIF-2026PG01-1147 exists to train `legal-it-4b` and ends
     on 2 November 2026: engine tests there only if its budget leaves room.
     See [`leonardo-allocation-plan.md`](leonardo-allocation-plan.md).
-- Then `model: "auto"` on the OpenAI and Ollama endpoints: Reflex picks the
-  resident model that answers, with no change in the application. Measured
-  in large-model calls avoided, latency, and quality against always using
-  the large one.
+- [✅ done] **`model: "auto"`** on the OpenAI and Ollama endpoints
+  (`--auto-model`, [#644](https://github.com/eullm/eullm/pull/644)): Reflex
+  picks the resident model that answers, with no change in the application,
+  says which in the answer and the audit trail, and falls back when the
+  choice cannot load. A short `tools/auto_check.sh` passed 9 of 9 on the
+  RTX 5070 Ti: answers identical to asking the model by name, the router
+  deciding in 15-19 ms, VRAM stable.
+- [✅ measured] The full measurement, 4 October (`tools/auto_check.sh`,
+  RTX 5070 Ti, 50 test items a set): AutoBench on two model pairs with the
+  Jev-Style 0.8B and 2B as routers, at 1, 4 and 16 concurrent requests, a
+  one-hour soak, and the router on the CPU.
+  - **The plumbing holds.** Every answer through `auto` is the one the
+    chosen model gives alone, on every endpoint, streamed or not, at every
+    concurrency. The router decides in 14 ms (0.8B) and 17 ms (2B) at the
+    median, the plan's gate is 60; 224 and 270 ms at 16 at once, the
+    decisions queueing on one worker. On a CPU a Qwen3-0.6B decision model
+    takes 239 ms.
+  - **The routing does not earn its place with these models.** Pair A
+    (qwen3-4b, qwen3-8b) is no routing problem: the 4B is as good as the 8B
+    or better on three sets of four. On pair B (qwen3-1.7b, qwen3-14b),
+    where the 14B is 18 to 30 points better, the routers tell the questions
+    the 1.7B can answer from the rest barely better than chance (AUROC
+    0.44–0.72 for the 0.8B, 0.18–0.68 for the 2B, best on MMLU). Their own
+    decisions either send almost everything to the 14B or lose points
+    (the 0.8B: 96% of ARC-Challenge to the 1.7B, 16 points down); with a
+    threshold fitted on the dev half they avoid 0–14% of the large calls.
+    The kill criterion is met on ARC-Easy and, for the 0.8B, on
+    ARC-Challenge, where a length threshold or the embeddings' neighbours
+    do as well. Not on GSM8K or MMLU, but there Reflex itself avoids few
+    calls. The Jev-Style models were trained for other decisions; whether
+    a router trained on this very question does better is MVP 4's to
+    answer, with AutoBench's own labels (which questions each model got
+    right) as its training set.
+  - At 4 and 16 concurrent requests the time to the first token climbs to
+    seconds, and at 16 between 5 and 41 of 50 requests are refused
+    ("queue full"): the check's server runs one slot a model, whose queue
+    holds eight. A backend for concurrent users runs `--batch-size`.
+  - **The soak failed on one count, the test's own sizing:** 4,770 requests
+    of each kind in the hour, none refused, every audit line there — but the
+    VRAM read between 3.6 and 12.9 GB after the first minute. The server's
+    log says why: beside the embedder the soak reserves, qwen3-4b and
+    qwen3-8b at an 8,192-token context do not fit together on 16 GB, so the
+    server took them in turns for the whole hour, each swap waiting for the
+    other model's requests to end. That is the engine doing what it should
+    with a pair that does not fit; it is not the stable server the soak is
+    there to watch. The soak now takes the largest context at which the
+    warm-up keeps both models beside the embedder, keeps the VRAM series
+    and the server's count of models unloaded, and runs alone with
+    `CHECKS=4`. To run again.
 
 ## MVP 4 — decision models trained on your decisions  [🔧 now]
 
-- [🔧 now] Opt-in, local capture of traces: `EULLM_DECISION_TRACES` keeps
+- [✅ done] Opt-in, local capture of traces
+  ([#623](https://github.com/eullm/eullm/pull/623)): `EULLM_DECISION_TRACES` keeps
   each decision with its state, personal data redacted, and
   `POST /v1/systemone/feedback` records the right answer, the outcome or the
   correction against the decision it belongs to.
-- [🔧 now] Forge trains a small decision model from them, in EuLLM's own
+- [✅ done] Forge trains a small decision model from them, in EuLLM's own
   codes readout, with corrections, rules or a large model as the teacher
-  (`forge/eullm_forge/decisions`).
-- [🔧 now] A qualification test before any decision model is swapped in
-  (`bench/reflexbench/qualify.py`): calibration, noise between evaluation
+  (`forge/eullm_forge/decisions`,
+  [#626](https://github.com/eullm/eullm/pull/626)).
+- [✅ done] A qualification test before any decision model is swapped in
+  (`bench/reflexbench/qualify.py`, #626): calibration, noise between evaluation
   modes, accuracy on the domain's set, latency, and a pass or a fail.
   "Interchangeable" is earned by passing it, not by a configuration line.
+- [🆕 next] The first decision model of our own: the RAG gate, trained on
+  MVP 1's Italian set (`docs/forge.md`) and qualified with
+  `qualify.py`. The set has run (MVP 1 above): the Jev-Style 2B is the bar,
+  AUROC 0.90 and 16% of sufficient contexts stopped at four in five
+  insufficient ones caught.
 
 ## Beyond MVP 4  [🆕 next]
 

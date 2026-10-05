@@ -2,7 +2,7 @@
 """Publish a GGUF and its model card to a Hugging Face model repository.
 
     python forge/scripts/publish_hf.py \\
-        --repo eullm/legal-it-8b \\
+        --repo EuLLM/legal-it-8b \\
         --gguf $GG/legal-it-8b-grpo-ministral-v04/legal-it-8b-grpo-ministral-v04-q4_k_m.gguf \\
         --name legal-it-8b-Q4_K_M.gguf \\
         --card forge/model_cards/legal-it-8b/README.md
@@ -18,6 +18,11 @@ sending anything, because a 5 GB upload is a slow way to find a mistake:
   `ollama run hf.co/<repo>:Q4_K_M` looks for;
 * the card has its YAML header and names the published file's repository,
   so a card copied from the other model is caught.
+
+The organisation is ``EuLLM``, capitals and all: the site answers to
+``eullm`` too, but creating a repository under it was refused (403) on
+2026-10-04. ``--card-only`` sends the README alone, for a card corrected
+after the file is up.
 
 It prints the file's SHA-256, which is also what Hugging Face shows as the
 file's LFS id and what the engine catalog (catalog/v1/catalog.json) records.
@@ -81,6 +86,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--public", action="store_true",
                     help="create the repository public (default: private)")
     ap.add_argument("--dry-run", action="store_true", help="check and hash, send nothing")
+    ap.add_argument("--card-only", action="store_true",
+                    help="send only the card, to a repository that already holds the file")
     args = ap.parse_args(argv)
 
     found = problems(args.repo, args.gguf, args.name, args.card)
@@ -88,6 +95,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[publish] {p}", file=sys.stderr)
     if found:
         return 2
+    if args.card_only:
+        if args.dry_run:
+            print("[publish] dry run: nothing sent")
+            return 0
+        from huggingface_hub import HfApi
+
+        HfApi().upload_file(path_or_fileobj=str(args.card), path_in_repo="README.md",
+                            repo_id=args.repo, commit_message="Model card")
+        print(f"[publish] ok: card of https://huggingface.co/{args.repo} updated")
+        return 0
     digest = sha256(args.gguf)
     size = args.gguf.stat().st_size
     print(f"[publish] {args.name}: {size:,} bytes, sha256 {digest}", flush=True)

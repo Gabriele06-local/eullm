@@ -53,6 +53,13 @@ pub struct AuditEntry {
     /// chosen model's place. Absent on every other line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route: Option<RouteRef>,
+    /// The MTP drafts the model proposed for this generation and the ones it
+    /// kept (`--mtp`), under the API's names for them. Absent without
+    /// drafts, and on lines written before they were counted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_n: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_n_accepted: Option<u32>,
 }
 
 impl AuditEntry {
@@ -70,6 +77,8 @@ impl AuditEntry {
             decision: None,
             routing: None,
             route: None,
+            draft_n: None,
+            draft_n_accepted: None,
         }
     }
 }
@@ -339,6 +348,8 @@ impl AuditLogger {
             input_tokens = entry.input_tokens,
             output_tokens = entry.output_tokens,
             duration_ms = entry.duration_ms,
+            draft_n = entry.draft_n,
+            draft_n_accepted = entry.draft_n_accepted,
             "Audit: inference logged"
         );
 

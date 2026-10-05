@@ -102,6 +102,56 @@ costs — `/v1/systemone` in two layouts against BM25 and embeddings; and
 `ragbench.py`, whether the passages a RAG system retrieved suffice to
 answer. See [`reflexbench/README.md`](reflexbench/README.md).
 
+## MTP: `mtp_sweep.sh`, `mtp_head_q8.sh`, `mtp_test_d.sh`
+
+What decides where `--mtp` pays (roadmap 0.8-Z2), each printing one line per
+setting — writing speed on a story and on a piece of code, and the share of
+the drafts the model kept, which every answer reports:
+
+- `mtp_sweep.sh EULLM MODEL.gguf [FLAGS]` — every `--mtp` setting of one
+  model in EuLLM. `TEMPERATURE=0.8` measures the drafts kept at the usual
+  sampling temperature: if that falls far below the greedy share, accepting
+  drafts by their probabilities (Leviathan's rejection sampling) is worth
+  writing; if not, it is not.
+- `mtp_head_q8.sh EULLM SOURCE.gguf [FLAGS]` — the same model quantized twice
+  to Q4_K_M from a Q8_0 or BF16 source, as unsloth's Q4_K_M (only the head's
+  own tensors at Q8_0) and with the whole MTP layer at Q8_0, then
+  `mtp_sweep.sh` on both: whether a Q8_0 MTP layer keeps more drafts for its
+  few extra MiB. Needs `llama-quantize` (`LLAMA_QUANTIZE`).
+- `mtp_test_d.sh LLAMA_SERVER MODEL.gguf [FLAGS]` — test D: llama.cpp's own
+  MTP on an MoE with every expert in RAM, pinned (`--load-mode none`) and
+  cached in VRAM (`--moe-cache-mib`), with 0, 1 and 2 drafts. Needs a
+  `llama-server` built from the llama.cpp EuLLM pins, which carries the
+  expert cache. If drafting gains there, it is worth measuring in EuLLM
+  (`mtp_sweep.sh` with `--moe-cache auto`).
+
+## `prefetch_check.sh` — phase 6 of `docs/moe-offload-plan.md`
+
+`prefetch_check.sh EULLM MODEL.gguf [FLAGS]` starts `eullm serve` on an MoE
+whose experts do not all fit in VRAM, with `LLAMA_MOE_PREFETCH=0` and then
+`=1` (`--ctx-size 40960 --moe-cache auto --n-ubatch 4096` unless `CTX`,
+`MOE_CACHE` and `N_UBATCH` say otherwise). Each server answers the same long question twice,
+greedy and with `cache_prompt: false`, and `speed_check.py` measures it over
+a 33,200-token document (`PROMPT_TOKENS`). One line per setting: reading and
+writing speeds, a checksum of each answer, and the server's `moe prefetch:`
+line; then whether the four answers match, which they must, or why the
+comparison says nothing (the prefetch stayed off, a server gave no answer).
+`ORDER="1 0"` starts the server with the prefetch first, which tells an
+effect of the prefetch on writing from one of running second.
+
+## `interleave_check.py` — roadmap 0.7-D
+
+`interleave_check.py --url URL --model NAME` streams an answer and, a few
+tokens in, sends a long prompt of its own (8,000 tokens, `--prompt-tokens`)
+with a one-token answer. It prints how long that prompt took to read, the
+longest pause in the streamed answer meanwhile, and the answer's speed
+before and during. With `--batch-size 2` or more EuLLM reads the prompt in
+chunks between the answer's tokens and the answer keeps coming, a little
+slower; a server that reads a prompt whole stops it for the whole reading.
+`--ctx-size` is split among the slots, so give each room for the prompt
+(`--batch-size 2 --ctx-size 32768` for the default 8,000 tokens). Standard
+library only.
+
 ## `reuse_validation.py` — roadmap 0.7-A real-hardware checklist
 
 Validates the KV-cache prefix reuse scheduler against the checklist in
