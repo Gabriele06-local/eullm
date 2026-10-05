@@ -28,7 +28,8 @@
 #   residency        tools/residency_check.sh with BIG=qwen3-32b (V3, V5)
 #   auto             tools/auto_check.sh, the full run (V7-V9)
 #   soak             tools/auto_check.sh's hour of mixed traffic alone (V8)
-#   rag              the Italian RAG gate set, built and measured (MVP 1)
+#   rag              the Italian RAG gate set, built and measured (MVP 1) with
+#                    RAG_DECISION as the decision model (the 2B by default)
 #   docker-gpu       the CUDA image built and asked one question; skipped
 #                    without Docker's NVIDIA runtime or with port 11434 taken
 #
@@ -57,6 +58,7 @@ DECISION_SMALL=${DECISION_SMALL:-$STORE/jev-style-0.8b-decision-v3-gguf-q4_k_m/J
 DECISION_LARGE=${DECISION_LARGE:-$STORE/jev-style-2b-decision-v3-gguf-q4_k_m/Jev-Style-2B-Decision-v3-Q4_K_M.gguf}
 CORPUS=${CORPUS:-$HOME/work/corpus*/legislazione_*.chunks.jsonl}
 INTERLEAVE_MODEL=${INTERLEAVE_MODEL:-qwen3-8b}
+RAG_DECISION=${RAG_DECISION:-jev-style-2b-decision-v3-gguf-q4_k_m}
 PULLS=${PULLS-"qwen3-32b qwen3-14b qwen3-8b qwen3-4b qwen3-1.7b qwen3-0.6b"}
 STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
 PREFETCH_SLOTS=${PREFETCH_SLOTS:-"4 6 8 4:r"}
@@ -153,12 +155,12 @@ step() {
         python3 "$REPO/bench/reflexbench/rg_openbook.py" --by-heading --limit 1000 \
             --norms $CORPUS --out "$NIGHT/rag-legal-it.jsonl" || return 1
         EULLM_AUDIT_DIR=$NIGHT/rag-audit serve_on 11540 "$NIGHT/rag-serve.log" \
-            "$BIN" serve --port 11540 --decision-model jev-style-2b-decision-v3-gguf-q4_k_m \
+            "$BIN" serve --port 11540 --decision-model "$RAG_DECISION" \
             --embedding-model qwen3-embedding-0.6b-gguf-q8_0 || return 1
         python3 "$REPO/bench/reflexbench/ragbench.py" --url http://127.0.0.1:11540 --sets '' \
             --data "$NIGHT/rag-legal-it.jsonl" --embed-model qwen3-embedding-0.6b-gguf-q8_0 \
             --embed-query-prefix 'Instruct: Given a question, retrieve passages that answer it\nQuery:' \
-            --out "$NIGHT/rag-it-2b.json" --details "$NIGHT/rag-it-2b.jsonl"
+            --out "$NIGHT/rag-it-${RAG_DECISION%%-gguf*}.json" --details "$NIGHT/rag-it-${RAG_DECISION%%-gguf*}.jsonl"
         ;;
     docker-gpu)
         command -v docker >/dev/null || { echo "SKIPPED: no docker"; return 3; }
