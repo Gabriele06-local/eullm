@@ -341,7 +341,7 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   dà una risposta positiva a un caso che perde il 38%. Mezza giornata di misura
   ha evitato settimane di implementazione contro un modello sbagliato del costo.
 
-- [ ] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(aperta il 2026-10-04)*
+- [x] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(chiusa il 2026-10-05: misurata sul denso e sul MoE)*
   La 0.8-Z resta chiusa per lo speculative su MoE in CPU. L'MTP ([#655](https://github.com/eullm/eullm/pull/655),
   `--mtp N`) è un'altra cosa: la bozza la scrive la testa addestrata insieme al
   modello, e su un **denso in GPU** guadagna. Misurato su RTX 5070 Ti con
@@ -388,28 +388,44 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   Sul codice circa un sesto in più, sopra il rumore; sul racconto dal 3 al 7%,
   dentro il rumore. Con `auto`, `--mtp 1` prende quanto 2. La cache è la
   stessa con e senza `--mtp` (8,50 GiB in tutti e tre gli avvii): il contesto
-  delle bozze, un solo strato, è troppo piccolo per cambiarla. Da capire a
-  parte: senza bozze EuLLM scrive il codice più piano di `llama-server` (93-98
-  tok/s contro 112,6) e il racconto uguale (120-123 contro 123,6); un avvio per
-  riga, e i due server potrebbero aver scritto testi diversi.
+  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Aperto, da
+  misurare a parte:** senza bozze EuLLM scrive il codice più piano di
+  `llama-server` (93-98 tok/s contro 112,6) e il racconto uguale (120-123
+  contro 123,6). Non è il ragionamento, spento su tutti e due (`llama-server`
+  legge `reasoning_effort: none` come `enable_thinking = false`); ma è un
+  avvio per riga, e i due server possono aver scritto testi diversi.
+
+  A temperatura 0.8, quella di default (EuLLM, `--moe-cache auto`, stessi
+  flag):
+
+  | `--mtp` | racconto (tok/s) | codice (tok/s) | bozze tenute |
+  |---|---:|---:|---:|
+  | 0 | 107,7 | 91,7 | — |
+  | 1 | 109,3 (+1%) | 99,9 (+9%) | 72% |
+  | 2 | 115,5 (+7%) | 110,9 (+21%) | 66% |
+
+  Qui due bozze rendono più di una su tutti e due i testi. Anche senza bozze
+  il MoE scrive più piano che a temperatura 0 (107,7 contro 122,9 sul
+  racconto), e sul denso non succede (113,7 contro 114,8): probabilmente un
+  testo campionato è più vario e trova meno esperti nella cache.
 
   **Decisione:** sui MoE con esperti in RAM l'MTP conviene per il codice, e si
-  dichiara per quello che dà: circa +15% sul codice e poco sulla prosa, contro
-  +62% e +27% su un denso in VRAM. `docs/engine-guide.md` lo dice. Resta da
-  misurare la temperatura 0.8, quella di default (sotto-voce sulla guardia).
+  dichiara per quello che dà: con `--mtp 2` dal 16 al 21% sul codice e poco
+  sulla prosa, contro +62% e +27% su un denso in VRAM. `--mtp 2` resta il
+  punto di partenza anche qui. `docs/engine-guide.md` lo dice.
 
   Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
   RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
-  - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
-    pausa sotto una soglia, ripresa dopo N token). Ha senso dove un draft
-    rifiutato costa: MoE con offload, temperatura alta. **Su un denso in GPU
-    non serve:** a temperatura 0.8 le bozze tenute sono 72% con `--mtp 1`, 56%
-    con 2, 46% con 3, mai vicine a una soglia di pausa. Conta invece quante
-    bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
-    contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
-    164,5 con 1 e 119,1 senza). Sul MoE la prova D tiene l'83% delle bozze
-    con 1 e il 71% con 2 (EuLLM 82% e 69%), lontano da una soglia anche lì;
-    ma è a temperatura 0, e a 0.8 sul MoE non è ancora misurato.
+  - **Guardia adattiva sull'accettazione: chiusa, non serve** (come colibri:
+    finestra di proposte, pausa sotto una soglia, ripresa dopo N token). Ha
+    senso dove un draft rifiutato costa: MoE con offload, temperatura alta.
+    **Su un denso in GPU non serve:** a temperatura 0.8 le bozze tenute sono
+    72% con `--mtp 1`, 56% con 2, 46% con 3, mai vicine a una soglia di pausa.
+    Conta invece quante bozze chiedere: a 0.8 il racconto va più veloce con
+    `--mtp 1` (148,8 tok/s, contro 140,0 con 2 e 113,7 senza), il codice con
+    `--mtp 2` (169,6, contro 164,5 con 1 e 119,1 senza). **Sul MoE con esperti
+    in RAM nemmeno:** EuLLM tiene l'82% e il 69% delle bozze con 1 e 2 a
+    temperatura 0, il 72% e il 66% a 0.8.
   - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
     proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
     MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla

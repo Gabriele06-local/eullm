@@ -513,19 +513,24 @@ drafts were kept 52% of the time, and each check of 3 tokens reads up to 3
 times the experts of a single step, most of them copied in. A head that is
 right more often gains, but little. On unsloth's Qwen3.6-35B-A3B-MTP
 (UD-Q4_K_M) with every expert in RAM, `--moe-cache auto` (8.5 GiB on the same
-card) and `--ctx-size 8192`, tokens per second writing a 256-token answer:
+card) and `--ctx-size 8192`, tokens per second writing a 256-token answer, at
+temperature 0 and at 0.8, the default:
 
 | Setting | A story | A piece of code | Drafts kept |
 | --- | ---: | ---: | ---: |
-| no drafts | 122.9 | 98.4 | — |
+| no drafts, temperature 0 | 122.9 | 98.4 | — |
 | `--mtp 1` | 132.0 (+7%) | 113.7 (+16%) | 82% |
 | `--mtp 2` | 127.1 (+3%) | 114.4 (+16%) | 69% |
+| no drafts, temperature 0.8 | 107.7 | 91.7 | — |
+| `--mtp 1` | 109.3 (+1%) | 99.9 (+9%) | 72% |
+| `--mtp 2` | 115.5 (+7%) | 110.9 (+21%) | 66% |
 
-About a sixth more on code and little on prose, where a dense model in VRAM
-gains 62% and 27% (see `--mtp` below): each check still reads the experts of
-every token it checks. One draft gets as much as two. Two starts of the same
-server have differed by 8%, so the gains on prose are within the noise.
-`bench/mtp_sweep.sh` says whether it pays on your model.
+A sixth to a fifth more on code with `--mtp 2`, and little on prose, where a
+dense model in VRAM gains 62% and 27% at temperature 0 (see `--mtp` below):
+each check still reads the experts of every token it checks. `--mtp 2` is the
+start here too: at temperature 0 one draft does as well, at 0.8 two do better.
+Two starts of the same server have differed by 8%, so the gains on prose are
+within the noise. `bench/mtp_sweep.sh` says whether it pays on your model.
 
 It needs one CUDA GPU: with more than one, or another backend, the load says
 why and runs without it. The cache is llama.cpp PR #29887, which this build
