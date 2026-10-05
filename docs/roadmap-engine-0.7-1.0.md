@@ -350,13 +350,37 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   Su CPU con un modello piccolo non conviene (Qwen3.5 0.8B su 4 core: 14-17 tok/s
   contro 20): la testa costa quasi quanto risparmia.
 
-  **Sui MoE con esperti in RAM non lo scriviamo finché non lo misuriamo.** La
-  ragione della 0.8-Z (un lotto di verifica legge più esperti) vale ancora, ma
-  con `--moe-cache` un draft rifiutato non paga più tutti i suoi esperti: molti
-  sono già in VRAM. Si decide con la prova D: `llama-server` con l'MTP su
-  Qwen3.6-35B-A3B-MTP con gli esperti in RAM, e poi `bench/mtp_sweep.sh` sullo
-  stesso modello in EuLLM. Lo script c'è: `bench/mtp_test_d.sh` (0, 1 e 2
-  bozze, esperti in RAM bloccati con `--load-mode none` e cache in VRAM).
+  **Sui MoE con esperti in RAM il guadagno è piccolo anche quando la testa
+  indovina molto.** La ragione della 0.8-Z (un lotto di verifica legge più
+  esperti) vale ancora; `--moe-cache` la attenua, perché molti esperti di un
+  draft rifiutato sono già in VRAM. Su Qwen3.8-Flash-Next, con le bozze tenute
+  il 52% delle volte, l'MTP rallentava (`docs/engine-guide.md`, sezione
+  `--moe-cache`). La prova D, il 5 ottobre con `bench/mtp_test_d.sh`:
+  `llama-server` del pin su RTX 5070 Ti, Qwen3.6-35B-A3B-MTP UD-Q4_K_M con tutti
+  gli esperti in RAM bloccata (`--cpu-moe --load-mode none`), 8000 MiB di cache
+  in VRAM, contesto 8192, temperatura 0:
+
+  | bozze | racconto (tok/s) | codice (tok/s) | bozze tenute |
+  |---|---:|---:|---:|
+  | 0 | 123,6 | 112,6 | — |
+  | 1 | 136,1 (+10%) | 117,9 (+5%) | 83% |
+  | 2 | 121,6 (−2%) | 126,6 (+12%) | 71% |
+
+  La testa indovina più che sul denso (75% e 58% con 1 e 2 bozze su
+  Qwen3.5-9B-MTP), eppure con 2 bozze il denso guadagnava +27% sul racconto e
+  +62% sul codice, il MoE −2% e +12%. Il costo sta nella verifica, che legge
+  gli esperti di due o tre token insieme e prende dalla RAM quelli che la
+  cache non ha. Con un solo avvio per riga, e un rumore tra avvii che sul denso
+  è arrivato all'8% (sotto), solo le due righe migliori, 1 bozza sul racconto e
+  2 sul codice, stanno sopra il rumore, e di poco. Lo schema è quello del
+  denso: una bozza per la prosa, due per il codice.
+
+  **Il passo dopo è la stessa misura in EuLLM:** `bench/mtp_sweep.sh` sullo
+  stesso modello, con `--moe-cache 8000 --ctx-size 8192` per il confronto
+  diretto con la prova D, e con `--moe-cache auto`, cioè quello che ottiene un
+  utente (`--fit` riserva il contesto delle bozze, quindi con `--mtp` la cache
+  esce un po' più piccola). Finché non c'è, la guida resta quella di
+  `docs/engine-guide.md`: `--mtp` sui modelli che stanno in VRAM.
 
   Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
   RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
@@ -367,8 +391,9 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
     con 2, 46% con 3, mai vicine a una soglia di pausa. Conta invece quante
     bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
     contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
-    164,5 con 1 e 119,1 senza). Per i MoE si decide con la prova D, che non è
-    ancora partita: manca il GGUF di Qwen3.6-35B-A3B-MTP.
+    164,5 con 1 e 119,1 senza). Sul MoE la prova D tiene l'83% delle bozze
+    con 1 e il 71% con 2, lontano da una soglia anche lì; ma è a temperatura
+    0, e a 0.8 sul MoE non è ancora misurato.
   - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
     proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
     MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla
