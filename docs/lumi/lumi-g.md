@@ -58,10 +58,9 @@ node-hours seen in Puhuri — LUMI bills a node as its 4 MI250X modules — plus
 90,000 TB-hours of storage and a token 1,000 CPU core-hours that funds nothing
 in practice. Consumed at that date: 0.0%.
 
-**The window is still not known.** The application asked for a 01-10-2026
-start, access was opened earlier, and `lumi-allocations` prints balances
-without dates. It is the one number the budget arithmetic below depends on and
-the one nobody has yet supplied.
+**The window is 12-09-2026 → 12-03-2027** (confirmed by the PI on
+05-10-2026). The application asked for a 01-10-2026 start; access opened with
+the first login instead, and `lumi-allocations` prints balances without dates.
 
 ### What the project committed to measuring
 
@@ -416,10 +415,12 @@ needs allocation time to close.
 
 ## Open questions
 
-- **The allocation window.** Everything about pacing depends on it.
+- ~~The allocation window~~ — 12-09-2026 → 12-03-2027; pacing in
+  [`allocation-plan.md`](allocation-plan.md).
 - **Where the CUDA half of the comparison comes from**, now that Leonardo was
-  not awarded. `../cineca/leonardo.md` already holds real A100 numbers from
-  04-09-2026 (1 GPU single request ~31-34 tok/s; 1 GPU at batch 16, 54.7 tok/s;
+  not awarded (Leonardo and JUPITER requested again in October, pending).
+  `../cineca/leonardo.md` already holds real A100 numbers from 04-09-2026
+  (1 GPU single request ~31-34 tok/s; 1 GPU at batch 16, 54.7 tok/s;
   4 GPUs at batch 16, 102.1 tok/s; 128.1 tok/s with q8_0 KV; 1→4 GPU scaling of
   1.87×). They were measured by hand rather than by a common harness, and the
   AI-Factory allocation that produced them closes 02/11/2026.
