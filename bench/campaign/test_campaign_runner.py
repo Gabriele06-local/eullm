@@ -249,3 +249,58 @@ def test_when_free_follows_alignment_and_overruns(tmp_path, engine):
     r.running = {"late": late}
     r.free = {0, 2, 3, 4, 5, 6, 7}
     assert abs(r.when_free(2, now) - (now + 1000)) < 1
+
+
+def test_finetune_points_train_block_and_record_the_boundary(tmp_path, engine, capsys):
+    qdir = tmp_path / "q"
+    spec = {"campaign": "c-ft", "groups": [
+        {"name": "ft", "priority": 1, "est_s": 60,
+         "set": {"kind": "finetune", "data": "text.jsonl", "epochs": 2, "ft_ctx": 256},
+         "axes": {"model": ["tiny-f32.gguf", "huge-f32.gguf", "notf32-q4.gguf",
+                            "absent-f32.gguf"]}},
+        {"name": "keep", "priority": 0, "est_s": 60,
+         "set": {"kind": "finetune", "data": "text.jsonl", "model": "tiny-f32.gguf",
+                 "optimizer": "sgd", "keep_output": True}},
+    ]}
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec))
+    assert campaign.main(["plan", str(spec_path), "--queue", str(qdir)]) == 0
+    assert "absent-f32.gguf" in capsys.readouterr().out  # named as still to convert
+    (qdir / "f32").mkdir()
+    for name in ("tiny-f32.gguf", "huge-f32.gguf", "notf32-q4.gguf"):
+        (qdir / "f32" / name).write_bytes(b"GGUF")
+    (qdir / "sets").mkdir()
+    (qdir / "sets" / "text.jsonl").write_text(json.dumps({"text": "Question: 2+2?"}) + "\n")
+
+    runner = campaign.Runner(run_args(str(qdir), engine, port_base=free_port_base()))
+    runner.loop()
+
+    # A quantized or absent model waits for one that can be trained.
+    assert Queue(str(qdir)).counts() == {"todo": 0, "running": 0, "done": 3, "failed": 0,
+                                         "blocked": 2}
+    out = capsys.readouterr().out
+    results = {(r["params"]["model"], r["params"]["optimizer"]): r
+               for r in (json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+                         if line.startswith("BENCH_RESULT "))}
+    assert len(results) == 3
+    trained = results[("tiny-f32.gguf", "adamw")]
+    assert trained["outcome"] == "measured" and trained["kind"] == "finetune"
+    ft = trained["finetune"]
+    assert ft["schema"] == "eullm.finetune/1" and ft["n_ctx"] == 256
+    assert ft["model"] == str(qdir / "f32" / "tiny-f32.gguf")
+    assert ft["data"] == str(qdir / "sets" / "text.jsonl")
+    assert len(ft["per_epoch"]) == 2
+    assert results[("huge-f32.gguf", "adamw")]["outcome"] == "does-not-fit"
+
+    # The trained model is deleted unless the point keeps it.
+    kept = results[("tiny-f32.gguf", "sgd")]["point"]
+    assert [p.name for p in (qdir / "results").rglob("*.gguf")] == [f"{kept}.gguf"]
+
+    assert campaign.main(["collect", "--queue", str(qdir)]) == 0
+    rows = {r["point"]: r for r in csv.DictReader(open(qdir / "results" / "summary.csv"))}
+    row = rows[trained["point"]]
+    assert row["kind"] == "finetune" and row["ft_ctx"] == "256" and row["optimizer"] == "adamw"
+    assert float(row["ft_loss_before"]) == 1.9
+    assert float(row["ft_loss_after"]) == pytest.approx(1.3)
+    assert float(row["ft_tok_s"]) == 4000.5
+    assert row["ft_trainable_params"] == "440467456"

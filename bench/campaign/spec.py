@@ -28,7 +28,7 @@ import hashlib
 import itertools
 import json
 
-KINDS = ("throughput", "workload")
+KINDS = ("throughput", "workload", "finetune")
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -69,10 +69,24 @@ DEFAULTS = {
     "interval_s": 60,
 }
 
+# Fields of a `finetune` point only (`eullm finetune`'s flags), added to the
+# point when its kind is finetune so the other kinds' ids do not move.
+FINETUNE_DEFAULTS = {
+    "data": None,  # a file in <queue>/sets/, written by `campaign.py prefetch`
+    "ft_ctx": 512,  # training window, a multiple of 256
+    "epochs": 1,
+    "lr": 1e-6,  # one window per step: see `eullm finetune --help`
+    "optimizer": "adamw",
+    "train_tensors": [],
+    "limit_tokens": 0,
+    "val_split": 0.05,
+    "keep_output": False,  # the trained GGUF is a by-product of a measurement
+}
+
 # Scheduling hints: not part of what a point measures.
 HINTS = ("priority", "est_s")
 
-DEFAULT_EST_S = {"throughput": 900, "workload": 3600}
+DEFAULT_EST_S = {"throughput": 900, "workload": 3600, "finetune": 3600}
 
 
 class SpecError(ValueError):
@@ -82,6 +96,8 @@ class SpecError(ValueError):
 def normalize(raw: dict) -> dict:
     """A point with every field present and consistent, or SpecError."""
     p = dict(DEFAULTS)
+    if raw.get("kind") == "finetune":
+        p.update(FINETUNE_DEFAULTS)
     p.update(raw)
     if p["kind"] not in KINDS:
         raise SpecError(f"kind must be one of {KINDS}, got {p['kind']!r}")
@@ -117,6 +133,18 @@ def normalize(raw: dict) -> dict:
     p["kv"] = f"{kv[0]}/{kv[1]}"
     if p["concurrency"] is None:
         p["concurrency"] = p["batch"] * p["replicas"]
+    if p["kind"] == "finetune":
+        if not p["data"]:
+            raise SpecError("a finetune point needs data")
+        if p["gcds"] != 1 or p["replicas"] != 1:
+            raise SpecError("a finetune point trains on one device: gcds 1")
+        if p["ft_ctx"] <= 0 or p["ft_ctx"] % 256:
+            raise SpecError(f"ft_ctx must be a multiple of 256, got {p['ft_ctx']}")
+        if p["optimizer"] not in ("adamw", "sgd"):
+            raise SpecError(f"optimizer must be adamw or sgd, got {p['optimizer']!r}")
+        if not p["lr"] > 0:
+            raise SpecError("lr must be above zero")
+        p["train_tensors"] = [str(t) for t in p["train_tensors"]]
     if p["kind"] == "workload":
         if not p["sets"]:
             raise SpecError("a workload point needs sets")

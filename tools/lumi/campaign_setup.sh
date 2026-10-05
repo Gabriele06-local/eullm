@@ -8,10 +8,12 @@
 #   bash tools/lumi/campaign_setup.sh [SPEC.json ...]
 #
 # Default specs: tools/lumi/campaigns/c01-node-baseline.json (catalog models,
-# starts at once) and c02-quant-large-moe.json (~1.2 TB from Hugging Face).
+# starts at once), c02-quant-large-moe.json (~1.2 TB from Hugging Face) and
+# c05-finetune.json (`eullm finetune` on F32 models this script converts).
 #
-#   SKIP_PULLS=1      plan without pulling (their points block until pulled;
-#                     `campaign.py unblock` after pulling puts them back)
+#   SKIP_PULLS=1      plan without pulling or converting (their points block
+#                     until the models are there; `campaign.py unblock` after
+#                     pulling puts them back)
 #   ROUND=v0.7.21     a new round: every point of the specs measured again
 
 set -uo pipefail
@@ -23,7 +25,8 @@ if [ $# -gt 0 ]; then
     SPECS=("$@")
 else
     SPECS=("$EULLM_REPO/tools/lumi/campaigns/c01-node-baseline.json"
-           "$EULLM_REPO/tools/lumi/campaigns/c02-quant-large-moe.json")
+           "$EULLM_REPO/tools/lumi/campaigns/c02-quant-large-moe.json"
+           "$EULLM_REPO/tools/lumi/campaigns/c05-finetune.json")
 fi
 mkdir -p "$CAMPAIGN_DIR" "$EULLM_MODELS_DIR"
 echo "queue  $CAMPAIGN_DIR"
@@ -45,9 +48,18 @@ if [ "${SKIP_PULLS:-0}" != "1" ]; then
     fi
 fi
 
+if [ "${SKIP_PULLS:-0}" != "1" ]; then
+    echo
+    echo "=== F32 models the finetune points train ==="
+    bash "$EULLM_REPO/tools/lumi/make_f32_models.sh" "${SPECS[@]}" ||
+        echo "[!!] some F32 models are missing: their finetune points will block"
+fi
+
 echo
-echo "=== workload sets (GSM8K, ARC-Easy, ARC-Challenge), frozen for offline nodes ==="
-$CAMPAIGN prefetch --queue "$CAMPAIGN_DIR" || echo "[!!] prefetch failed: workload points will block"
+echo "=== workload sets (GSM8K, ARC-Easy, ARC-Challenge) and finetune text (GSM8K train)," \
+     "frozen for offline nodes ==="
+$CAMPAIGN prefetch --queue "$CAMPAIGN_DIR" ||
+    echo "[!!] prefetch failed: workload and finetune points will block"
 
 echo
 echo "=== plan ==="

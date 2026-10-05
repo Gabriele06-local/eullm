@@ -283,7 +283,7 @@ class Context:
     """What the runner gives a point: where it runs and what it may use."""
 
     def __init__(self, engine, backend, binding, physical, port_base, workdir,
-                 sampler=None, stop=None, model_seen=None, sets_dir=None):
+                 sampler=None, stop=None, model_seen=None, sets_dir=None, f32_dir=None):
         self.engine, self.backend, self.binding = engine, backend, binding
         self.physical = list(physical)  # physical ids, in order
         self.port_base, self.workdir = port_base, workdir
@@ -291,6 +291,7 @@ class Context:
         self.stop = stop or threading.Event()
         self.model_seen = model_seen if model_seen is not None else set()
         self.sets_dir = sets_dir
+        self.f32_dir = f32_dir  # F32 GGUFs for finetune points
         self.servers = []  # set by run(), so the runner can stop them from outside
 
 
@@ -555,12 +556,109 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
     }, (start, end)
 
 
+class Job:
+    """A child process the runner may have to stop: `eullm finetune`."""
+
+    def __init__(self, proc):
+        self.proc = proc
+
+    def kill(self) -> None:
+        if self.proc.poll() is None:
+            try:
+                os.killpg(self.proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+# How `eullm finetune` says why it would not run, and what each means here.
+# Running out of device memory after the estimate let it start is the same
+# boundary, found the hard way: recorded with the error, not retried.
+FT_DOES_NOT_FIT = ("is estimated at", "out of memory")
+FT_NOT_RUNNABLE = ("is not an F32 model", "neither a .gguf file",
+                   "is not a readable GGUF file", "holds no text", "cannot read")
+
+
+def finetune_command(p: dict, ctx: Context, output: str, report: str) -> list:
+    model = p["model"]
+    if not os.path.isabs(model):
+        model = os.path.join(ctx.f32_dir or "", model)
+    data = p["data"]
+    if not os.path.isabs(data):
+        data = os.path.join(ctx.sets_dir or "", data)
+    cmd = [
+        ctx.engine, "finetune", model,
+        "--data", data,
+        "--ctx", str(p["ft_ctx"]),
+        "--epochs", str(p["epochs"]),
+        "--lr", repr(float(p["lr"])),
+        "--optimizer", p["optimizer"],
+        "--val-split", repr(float(p["val_split"])),
+        "--limit-tokens", str(p["limit_tokens"]),
+        "--device", "0",
+        "--no-progress",
+        "--output", output,
+        "--report", report,
+    ]
+    if p["train_tensors"]:
+        cmd += ["--train-tensors", ",".join(p["train_tensors"])]
+    return cmd + list(p.get("extra_args", []))
+
+
+def run_finetune(p: dict, ctx: Context, workdir: str) -> tuple:
+    """`eullm finetune` on one device, its report as the measurement. The
+    trained GGUF is deleted unless the point keeps it: the point measures
+    training, it does not produce a model."""
+    output = os.path.join(workdir, f"{p['id']}.gguf")
+    report = os.path.join(workdir, f"{p['id']}.finetune.json")
+    log_path = os.path.join(workdir, f"{p['id']}.finetune.log")
+    env = dict(os.environ)
+    env[VISIBLE_ENV[ctx.backend]] = ",".join(ctx.physical)
+    if ctx.backend == "rocm":
+        env.pop("HIP_VISIBLE_DEVICES", None)
+        env.pop("GPU_DEVICE_ORDINAL", None)
+    cores = cores_for(ctx.binding, ctx.physical)
+    cmd = (["taskset", "-c", cores] if cores else []) + finetune_command(p, ctx, output, report)
+    start = time.time()
+    with open(log_path, "ab") as log:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=env,
+                                start_new_session=True)
+    ctx.servers = [Job(proc)]
+    while proc.poll() is None:
+        if ctx.stop.wait(2):
+            Job(proc).kill()
+            proc.wait(timeout=30)
+            raise Interrupted("stopped during finetune")
+    end = time.time()
+    try:
+        with open(log_path, errors="replace") as f:
+            tail = "".join(f.readlines()[-30:])
+    except OSError:
+        tail = ""
+    try:
+        if proc.returncode != 0:
+            if any(m in tail for m in FT_DOES_NOT_FIT):
+                raise DoesNotFit(tail.strip().splitlines()[-1][:300])
+            if any(m in tail for m in FT_NOT_RUNNABLE):
+                raise ModelMissing(tail.strip().splitlines()[-1][:300])
+            raise PointError(f"eullm finetune exited {proc.returncode}:\n{tail}")
+        with open(report) as f:
+            measured = json.load(f)
+    finally:
+        if not p.get("keep_output") and os.path.exists(output):
+            os.remove(output)
+    return measured, (start, end)
+
+
 WARMUP_BODY = {"prompt": "Ciao.", "stream": True, "think": False, "num_predict": 8,
                "options": {"num_predict": 8}}
 
 
 def run(p: dict, ctx: Context, answers_path=None) -> dict:
     """Measure `p` on `ctx.physical`; the result, or an exception."""
+    if p["kind"] == "finetune":
+        measured, window = run_finetune(p, ctx, ctx.workdir)
+        stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
+        return {"finetune": measured, "device_stats": stats}
     servers = start_servers(p, ctx)
     ctx.servers = servers
     try:
