@@ -37,6 +37,25 @@ log() { printf '\033[34m[..]\033[0m  %s\n' "$*"; }
 [ -d "$ROCM_PATH/lib" ] || err "no ROCm at $ROCM_PATH — check 'module avail rocm' and set ROCM_PATH"
 log "ROCm: $("$ROCM_PATH/bin/hipconfig" --version 2>/dev/null || echo unknown) at $ROCM_PATH"
 
+# bindgen, which generates the llama.cpp bindings, loads libclang while it
+# builds, and a LUMI login node has none where it looks ("Unable to find
+# libclang", 05-10-2026). ROCm ships one with its LLVM.
+if [ -z "${LIBCLANG_PATH:-}" ]; then
+    for d in "$ROCM_PATH/llvm/lib" "$ROCM_PATH/lib/llvm/lib"; do
+        for f in "$d"/libclang.so* "$d"/libclang-*.so*; do
+            if [ -e "$f" ]; then
+                export LIBCLANG_PATH="$d"
+                break 2
+            fi
+        done
+    done
+fi
+if [ -n "${LIBCLANG_PATH:-}" ]; then
+    log "libclang: $LIBCLANG_PATH"
+else
+    log "no libclang under $ROCM_PATH: bindgen will look in the system paths (set LIBCLANG_PATH if it fails)"
+fi
+
 command -v cmake >/dev/null || err "cmake not found — 'module load CMake' or equivalent"
 CMAKE_VER=$(cmake --version | head -1 | awk '{print $3}')
 # ggml-hip calls enable_language(HIP), which CMake gained in 3.21.
