@@ -1,232 +1,253 @@
 # Allocation plan — EHPC-DEV-2026D09-278 (LUMI-G)
 
 > 4,500 node-hours (18,000 GPU-hours) on LUMI-G, `project_465003366`,
-> six months. EuroHPC Development Access for the **Engine**, not for Forge.
-> What the machine is, how the ROCm build works and what was measured on
-> 12-09-2026: [`lumi-g.md`](lumi-g.md). The sibling plan for the Leonardo
-> AI-Factory allocation, whose arithmetic this one repeats:
+> **12-09-2026 → 12-03-2027**. EuroHPC Development Access for the **Engine**,
+> not for Forge. What the machine is, how the ROCm build works and what was
+> measured on 12-09-2026: [`lumi-g.md`](lumi-g.md). The sibling plan for the
+> Leonardo AI-Factory allocation, whose arithmetic this one repeats:
 > [`../leonardo-allocation-plan.md`](../leonardo-allocation-plan.md).
 >
-> Written 05-10-2026. Last measured consumption: **0.0%** (12-09-2026).
+> Updated 05-10-2026. Last measured consumption: **0.0%** (12-09-2026) —
+> `tools/lumi/status.sh` recounts it from `sacct`.
 
 ## The number that governs everything
 
-Six months of calendar against 4,500 node-hours is **one full node busy
-continuously, every day, until the end**. From 05-10-2026:
+Six months against 4,500 node-hours is one whole node busy every day. The
+first of those months went by with almost nothing spent, so from 05-10-2026:
 
-| if the window ends | days left | node-hours/day | full nodes busy 24/7 |
-|---|---:|---:|---:|
-| 28-02-2027 (started with early-September access) | 146 | 30.8 | 1.3 |
-| 31-03-2027 (started 01-10, as requested) | 177 | 25.4 | 1.1 |
+| | |
+|---|---:|
+| calendar elapsed | 12.6% (23 of 181 days) |
+| straight-line target to date | ~570 node-h |
+| spent | ~0 |
+| days left | 158 |
+| needed from now | **28.5 node-h/day = 1.2 nodes around the clock** |
 
-The end date is still the one unknown, and it moves the pace by a fifth. The
-Puhuri project page shows it; `lumi-allocations` does not.
+**One node is no longer enough.** Queue waits come off whatever is running,
+so the campaign runs on **two nodes in parallel** until the deficit is
+recovered (`status.sh` shows when), then one.
 
-Two consequences follow, and both are already known from Leonardo.
+Unused budget is the outcome that has to be explained afterwards; used budget
+explains itself if every hour left a measurement behind. That is the design
+rule for everything below: the node is never idle, and nothing runs on it
+that does not produce a result file with its provenance.
 
-**Single-GCD work cannot spend this allocation.** `small-g` and `dev-g` bill
-0.5 GPU-hours per GCD-hour, which is 0.125 node-hours. One GCD kept busy
-every hour until 31-03-2027 is ~530 node-hours — 12% of the budget. That is
-where iteration belongs, and it is cheap precisely because it does not
-count. **The other 88% has to be full-node work**, on `standard-g` (whole
-nodes, 48 h walltime) or on `small-g` asking for all 8 GCDs (same price,
-3-day walltime, up to 4 nodes).
+Two facts about LUMI shape how:
 
-**The queue must never be empty.** Every hour without a full-node job queued
-is budget that expires, and an allocation returned mostly unused is visible
-in the Final Report. A full-node job should be queued or running at all
-times from now on, the way Leonardo's recovery made it a rule
-([`../cineca/allocation-recovery.md`](../cineca/allocation-recovery.md)).
+- **Single-GCD work cannot spend this allocation.** `small-g` and `dev-g`
+  bill 0.125 node-hours per GCD-hour: one GCD busy until March is ~470
+  node-hours, a tenth of the budget. The rest has to be whole nodes on
+  `standard-g` (48 h walltime).
+- **A whole node bills all eight GCDs** whatever runs on it. A job measuring
+  one configuration at a time — what every script before the campaign runner
+  did — pays for seven idle GCDs.
 
-Note on `small-g` billing: the charge is the largest of GCDs, cores/8 and
-memory/64 GB. A one-GCD job asking for 16 cores or 128 GB pays for two.
+`small-g` billing: the charge is the largest of GCDs, cores/8 and memory/64
+GB. A one-GCD job asking for 16 cores or 128 GB pays for two.
+
+## How the node is kept busy
+
+[`bench/campaign/`](../../bench/campaign/README.md) — tested against a
+stand-in engine in CI, run on LUMI by `tools/lumi/sbatch_campaign.slurm`:
+
+- **A queue of points on scratch**, expanded from campaign specs
+  (`tools/lumi/campaigns/`). Several jobs drain it at once — two nodes now —
+  and a job that hits the walltime puts its unfinished points back.
+- **Every GCD always has a point.** Single-GCD points run eight at a time;
+  wider points take aligned groups (a pair on one MI250X module, half the
+  node, all of it); the next point starts the moment devices free up. A wide
+  point that is waiting reserves its devices and narrower ones only take them
+  meanwhile if they will be done in time.
+- **Workload points stretch to fill.** Sustained-load points run between a
+  minimum and a maximum duration and take exactly the time that is free,
+  which is what keeps the end of each 48-hour job from being billed idle.
+- **Every server is pinned** to the seven cores LUMI documents as closest to
+  its GCD, and every result records the cores, the other points on the node
+  at the time, and `neighbours-control` measures the same points alone — so
+  packing is itself measured rather than assumed harmless.
+- **Each job leaves its own usage evidence**: `<job>.summary.json`, the share
+  of the job each GCD had work, and `<job>.node.jsonl`, the raw HBM and
+  utilisation samples. That is the page of the Final Report that says the
+  hours were used.
+
+Workload points are not filler. They send the public, pinned GSM8K, ARC-Easy
+and ARC-Challenge sets at a fixed concurrency for hours, grade the first
+pass, compare every later pass with it (greedy decoding, prompt cache off: an
+answer that changes under load is a bug), and record throughput, latency and
+HBM per minute. That is objective (6), stability under sustained load, plus
+the accuracy each memory and speed configuration costs — the other half of
+objective (1) that a throughput number alone does not give.
 
 ## What we committed to
 
 The accepted proposal asks five questions and names the metrics it will be
 read against (time-to-first-token, prompt-processing and generation
 throughput, HBM use, model-loading time, scaling efficiency, stability under
-sustained load; dense and MoE; one device to a full node). Each question
-becomes a work package. Engine work comes first and costs no allocation.
+sustained load; dense and MoE; one device to a full node).
 
-| WP | question | what has to exist | what spends hours |
+| WP | question | campaign | engine work it waits on |
 |---|---|---|---|
-| 0 | — | one benchmark harness, one result schema, both sites | nothing (dev-g only) |
-| 1 | model size × quant × context → memory, throughput | WP0 | the measurement matrix |
-| 2 | continuous batching as concurrency grows | WP0 | concurrency sweeps, profiling |
-| 3 | multi-GPU without disproportionate overhead | split controls, placement policy | arrangements × before/after |
-| 4 | CUDA vs ROCm | a CUDA source (see below) | identical runs, both sites |
-| 5 | loading and on-prem transfer | load-time metrics | cold/warm loads, big MoE |
-| 6 | stability under sustained load | load generator | 48 h full-node soaks |
-| 7 | multi-node (proposal: "may be evaluated") | RPC backend build | bounded exploration |
+| 1 | size × quant × context → memory, throughput | c01 dense/moe/long-context, c02 quant | — |
+| 2 | batching as concurrency grows | c01 batch axes; chunked prefill before/after | merge `feat/engine-roadmap` |
+| 3 | multi-GPU without disproportionate overhead | c01 ref/scale, c02 235B split vs 2×4 | `--split-mode` incl. tensor |
+| 4 | CUDA vs ROCm | the same specs on Leonardo / JUPITER | — (runner is site-neutral) |
+| 5 | loading and on-prem transfer | cold/warm load in every result; c02 large MoE | `--moe-cache` on HIP |
+| 6 | stability under sustained load | soak groups, 2-24 h | `/metrics` (nice to have) |
+| 7 | multi-node ("may be evaluated") | c04, bounded | RPC backend build |
+
+## Campaigns and the budget
+
+`campaign.py plan` prints what each spec costs at most:
+
+| spec | points | node-h | needs |
+|---|---:|---:|---|
+| `c01-node-baseline` | 205 | ~115 | catalog models only: **runs today** |
+| `c02-quant-large-moe` | 75 | ~130 | ~1.2 TB pulled from Hugging Face first |
+
+Measured honestly, the matrix the proposal describes is cheap: ~250
+node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
+**again for every engine change** — which is the development cycle the
+proposal describes ("frequent releases and daily code iterations… experiments
+will track exact Git revisions"). A **round** is the same specs planned under
+a new label (`ROUND=<engine version> campaign_setup.sh`): every point measured
+again, so each engine change has a before and an after on identical
+workloads.
+
+| item | node-h |
+|---|---:|
+| round 1: c01 + c02 on the released 0.7.20 build | ~250 |
+| rounds on engine milestones, ~1 every 9 days (~14 × ~250) | ~3,500 |
+| c03: row and tensor split, replicas × split, once the engine exposes them | ~300 |
+| c04: multi-node exploration, 2-4 nodes, bounded | ~300 |
+| iteration on small-g/dev-g, reserve | ~150 |
+| **total** | **4,500** |
+
+A round needs a reason: a release, a merged branch that touches inference, a
+llama.cpp bump, a build flag (RCCL, HIP graphs) — or, once, a deliberate
+same-binary repeat to measure day-to-day and node-to-node spread. The soak
+`max_duration_s` is the other lever if rounds run short of the pace.
 
 ## Engine work, before the hours (no allocation needed)
 
 The four gaps [`lumi-g.md`](lumi-g.md) found by reading the code are still
-open on `main` at 0.7.20, and the first three gate everything else.
+open on `main` at 0.7.20, and each one ends a round with a before/after.
 
-0. **Merge `feat/engine-roadmap` first.** It is 22 commits ahead of `main`
-   and carries two things the harness needs: measured prompt and answer
-   times in every response (`5febfeb` — on `main`, `prompt_eval_duration` is
-   hard-coded to 0 and `eval_duration` includes the prefill), and chunked
-   prefill between decode steps (`04d08ca`, roadmap 0.7-D), which is itself
-   a before/after experiment for objective (2).
+0. **Merge `feat/engine-roadmap`.** It is 22 commits ahead of `main` and
+   carries measured prompt and answer times in every response (`5febfeb` — on
+   `main`, `prompt_eval_duration` is hard-coded to 0, so the runner's
+   server-side prefill rate is null until this lands) and chunked prefill
+   between decode steps (`04d08ca`, roadmap 0.7-D), an objective (2) result.
 1. **The banner must report the live backend, not the compiled one.** A
    `rocm` binary that finds no device still prints `GPU backend: ROCm` and
-   then bills node-hours at CPU speed (`banner.rs`, `inference/mod.rs`).
-   Count the devices `ggml_backend_dev_count()` actually returns and refuse
-   to serve on a cluster when a GPU build finds none. Cheapest insurance on
-   the list.
+   then bills node-hours at CPU speed. The runner's `--fit-strict` default
+   catches the out-of-memory side of this; nothing catches a missing device.
 2. **`--split-mode`, `--tensor-split`, `--main-gpu`, device selection in
-   `RuntimeOpts`.** The vendored bindings expose all of it
-   (`with_split_mode`, `with_main_gpu`, `with_devices`), including
-   llama.cpp's **experimental `Tensor` split** — real tensor parallelism,
-   and the one arrangement that could make a *single* request faster across
-   GCDs. The 12-09 conclusion that splitting cannot add throughput was
-   measured on layer split only; `Row` and `Tensor` have never run on LUMI.
-   Objective (3) cannot be studied through a runtime that only lets
-   llama.cpp layer-split silently.
-3. **The harness (WP0).** Every LUMI script already prints one
-   `BENCH_RESULT {json}` line; none records the engine's git revision or
-   version, TTFT, prefill tok/s, peak HBM or load time. What is needed is one
-   versioned schema all of them emit, with: model-load time (cold and warm),
-   per-device HBM sampled during the timed window, the 1→2→4→8 device sweep,
-   and the provenance that makes a number reproducible — engine revision,
-   llama.cpp build, ROCm/CUDA version, compile flags, Slurm job id. The same
-   script must run unchanged on CUDA: **no engine sbatch exists for Leonardo
-   yet** (the A100 numbers of 04-09 were taken by hand), so
-   `tools/leonardo/sbatch_bench.slurm` is part of this item. A `/metrics`
-   endpoint (roadmap 0.7-B) belongs here too: a 48 h soak needs the engine to
-   report its own queue depth and latencies over time, not just at the end.
+   `RuntimeOpts`.** The vendored bindings expose all of it, including
+   llama.cpp's **experimental `Tensor` split** — real tensor parallelism, the
+   one arrangement that could make a *single* request faster across GCDs. The
+   12-09 conclusion that splitting adds no throughput was measured on layer
+   split only. This is c03.
+3. **The harness (WP0)** — done in `bench/campaign`: one schema
+   (`eullm.bench/1`), TTFT, prefill and decode rates, cold/warm load, HBM per
+   device, repeats with their spread, and provenance (engine version and
+   binary hash, repository revision, ROCm version, cores, neighbours). It
+   runs on CUDA unchanged (`--backend cuda --bind none`); what is missing is
+   the `sbatch` wrapper for Leonardo and JUPITER, a copy of
+   `sbatch_campaign.slurm` with their partitions. A `/metrics` endpoint
+   (roadmap 0.7-B) would let a soak see queue depth over time, not just at
+   the end.
 4. **A placement policy: the smallest split that fits, then replicas.** The
-   12-09 measurement gives the rule — replicas scaled 4.07× on four GCDs,
-   layer split 0.98× — and today it lives in a Slurm script. Extending
-   `--fit` from one summed VRAM figure with one flat reserve to a per-device
-   plan ("fewest devices that fit, as many replicas as remain", llama.cpp's
-   multi-device `common_fit_params` is already wrapped in the bindings), with
-   the engine serving N device-pinned replicas behind one endpoint, is the
-   engine change objective (3) should end with. It is roadmap 1.0-B (worker
-   pool with explicit GPU assignment) arriving early, for a measured reason.
-5. **NUMA binding per GCD.** LUMI's GCDs and CPU NUMA domains are not
-   numbered alike; host threads for a replica should sit on the domain
-   closest to its GCD. Measure first (WP3), make it default only if it pays.
-6. **An RCCL build as an experiment binary**, `GGML_HIP_RCCL=ON`, never the
-   default: the product reasoning in `build.rs` stands, the project measures
-   whether it should. Same for `GGML_HIP_GRAPHS`.
+   12-09 numbers give the rule (replicas 4.07× on four GCDs, layer split
+   0.98×); c01 and c02 measure it on more models. Turning it into `--fit` on
+   a per-device plan, with the engine serving N pinned replicas behind one
+   endpoint, is roadmap 1.0-B arriving early, for a measured reason.
+5. **NUMA binding** — the runner already pins every server; a round with
+   `--bind none` is the before/after that says whether the engine should do
+   it itself.
+6. **An RCCL build**, `GGML_HIP_RCCL=ON`, and `GGML_HIP_GRAPHS`: experiment
+   binaries, each one a round, never the default.
 7. **`--moe-cache` on HIP.** It refuses any non-CUDA device and more than one
-   GPU (`fit.rs`), and its pinned-host-memory patch is CUDA-only. Porting it
-   is objective (5) on MoE: the same expert cache that lets a 5070 Ti run a
-   model larger than its VRAM, measured on hardware where the answer can be
-   checked against the model fully resident.
+   GPU, and its pinned-memory patch is CUDA-only. Objective (5) on MoE.
 
-Items 0-3 are October. Items 4-6 are December, after WP1-3 have said where
-the time goes. Item 7 is January.
+Items 0-2 are October. Items 4-6 December. Item 7 January.
 
 ## The CUDA half
 
-Leonardo was rejected for this project, so objective (4) needs NVIDIA
-numbers from elsewhere. In order of preference:
+Leonardo was not awarded for this project. In order:
 
-1. **Leonardo AI-Factory, before 02-11-2026.** That allocation exists to
-   produce legal-it-4b/8b; measuring how those GGUFs serve on an A100 with the
-   engine they ship in is evaluation of its own output, and that allocation
-   needs its queue filled anyway. Run the WP0 harness there on the legal-it
-   GGUFs plus the reference models, then the identical files on LUMI. **This
-   is why the harness is the first deliverable: it has four weeks.**
-2. **The numbers already held**, A100 measured by hand on 04-09-2026
-   ([`../cineca/leonardo.md`](../cineca/leonardo.md)) — usable, but they
-   predate two llama.cpp bumps and the common schema.
-3. **A EuroHPC Benchmark Access request on an NVIDIA system** (MareNostrum 5
-   ACC, JUPITER) in November, with the LUMI data as the justification — which
-   is exactly what the proposal said these results were for.
-4. **The RTX 5070 Ti workstation** — not a peer of the MI250X, but it is the
-   "smaller on-premises system" of objective (5), and every WP5 result
-   should end with a run there.
+1. **Leonardo (again) and JUPITER**, requested by the PI in early October,
+   decision pending. The campaign runner and the specs run there as they are;
+   only the `sbatch` wrapper changes.
+2. **Leonardo AI-Factory, before 02-11-2026.** Measuring how the legal-it
+   GGUFs that allocation produced serve on an A100 is evaluation of its own
+   output, and its queue needs filling too.
+3. **The A100 numbers already held** ([`../cineca/leonardo.md`](../cineca/leonardo.md)),
+   measured by hand on 04-09-2026 before two llama.cpp bumps.
+4. **The RTX 5070 Ti** — the "smaller on-premises system" of objective (5).
 
 ## Models
 
-Permissive licences only, as everywhere in the project: Qwen (Apache-2.0),
-DeepSeek (MIT), GPT-OSS (Apache-2.0), Mistral's Apache-2.0 releases. No
-Llama. Exact tags come from the catalog at run time; the shape of the set is:
+Permissive licences only, as everywhere in the project, checked against the
+Hub on 05-10-2026: Qwen and gpt-oss Apache-2.0, DeepSeek-V3.1 MIT. No Llama.
 
-- **dense, one GCD**: 4B, 8B, 14B, 32B (Q4_K_M, Q8_0, BF16 where it fits)
-- **dense, two GCDs**: 32B BF16 (~64 GB) — the smallest real split case
-- **MoE, one GCD**: Qwen3-30B-A3B, GPT-OSS-20B
-- **MoE, several GCDs**: GPT-OSS-120B (2), Qwen3-235B-A22B (Q4 ~3, Q8 ~5),
-  Qwen3-Coder-480B-A35B (Q4 ~5-6)
-- **MoE, the whole node**: DeepSeek-V3.x 671B Q4 (~400 GB of 512 GB HBM).
-  The model that only a full node runs at all, and the clearest single
-  demonstration of objective (3) on MoE.
-- **our own**: legal-it-4b and -8b — the on-prem target of objective (5), and
-  the files the CUDA half is measured on.
+- **c01, catalog** (Q4_K_M): Qwen3 4B/8B/14B/32B, Mistral-Small-24B,
+  Qwen3.6-27B, Qwen3.6-35B-A3B; plus the 12-09 reference model,
+  `qwen3.8-27b-ud-q8_k_xl`, so its rows repeat exactly.
+- **c02, from Hugging Face**: Qwen3 8B/14B/32B Q8_0 against c01's Q4_K_M;
+  Qwen3-30B-A3B Q4_K_M and Q8_0; gpt-oss-20b and -120b (MXFP4, 11 and 59
+  GiB); Qwen3-235B-A22B Q4_K_M (132 GiB: 4 GCDs, so one split or two
+  replicas of it) and Q8_0 (233 GiB); Qwen3-Coder-480B-A35B Q4_K_M (270 GiB);
+  DeepSeek-V3.1 Q4_K_M (378 GiB — only a whole node runs it at all).
 
-Large GGUFs go to `/scratch/project_465003366` from a login node (compute
-nodes have no network). Roughly 2-3 TB in total, inside the 4 TB asked for;
-`/flash` only temporarily for the load-time comparison, since it bills 3×.
+About 1.3 TB on `/scratch` in total, inside the 4 TB asked for. Compute nodes
+have no network: `campaign_setup.sh` pulls on a login node and leaves the
+missing ones blocked, never failed.
 
-## Budget
-
-| item | node-hours | where |
-|---|---:|---|
-| iteration: builds, smoke, single-GCD profiling | 250 | dev-g, small-g |
-| WP1+2 matrix, 1-8 GCDs, 3 repeats per point | 900 | standard-g |
-| WP3 arrangements: layer/row/tensor split, replicas, RCCL, NUMA, before/after | 700 | standard-g |
-| large MoE (235B / 480B / 671B), load + throughput + concurrency | 500 | standard-g |
-| WP5 loading: cold/warm, Lustre vs flash, mmap vs read, MoE cache | 300 | standard-g |
-| WP6 soaks: 48 h full node, monthly, plus the holiday window | 700 | standard-g |
-| nightly regression on every engine/llama.cpp change, ~2 h/night | 300 | standard-g |
-| WP7 multi-node exploration, 2-4 nodes, bounded | 300 | standard-g |
-| final campaign with the release engine | 400 | standard-g |
-| reserve | 150 | |
-| **total** | **4,500** | |
-
-Repeats are not padding: a point measured once cannot carry a confidence
-interval, and 12-09 showed a 0.2% spread is achievable, which is what makes a
-2% effect reportable. Packing eight independent single-GCD points on one node,
-one per GCD, is the efficient way to run the matrix — after one run that
-checks neighbours do not perturb each other.
+The workload sets are GSM8K, ARC-Easy and ARC-Challenge (4,867 graded
+questions). MMLU is not: its pinned source,
+`people.eecs.berkeley.edu/~hendrycks/data.tar`, answers 404 as of
+05-10-2026 — which also breaks `sbatch_autobench.slurm`'s default `SETS`.
 
 ## Calendar
 
-Paced for a 31-03-2027 end; if Puhuri says 28-02, March's work moves into
-February and every month's target rises by a fifth.
+Paced on 28.5 node-hours a day to 12-03-2027.
 
 | month | engine | on the machine | target node-h |
 |---|---|---|---:|
-| Oct | merge `feat/engine-roadmap`, live banner, split controls, harness v1 + Leonardo twin, LUMI `status.sh` (pace and idle-queue alarm) | now, with the existing scripts: repeat the replica rows, 1/2/4/8 sweep with per-device utilisation; then the first row/tensor split runs; stage the big MoE; **CUDA half on Leonardo before 02-11** | 500 |
-| Nov | anomalies: KV quant that gains nothing on gfx90a, batching that pays 3.6× here and 1.7× on A100 | WP1+2 matrix; chunked prefill before/after; first 48 h soak; nightly regression starts; Benchmark Access request | 850 |
-| Dec | placement policy, served replicas, NUMA binding, RCCL binary | WP3 before/after; **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs | 850 |
-| Jan | load path: staging, parallel per-device load; `--moe-cache` on HIP | WP5; large-MoE campaign; multi-node exploration | 850 |
-| Feb | release candidate | re-run the matrix on it; soak | 800 |
-| Mar | release | final campaign; data to Zenodo; Final Report draft | 650 |
+| Oct | merge `feat/engine-roadmap`, live banner, split controls, Leonardo/JUPITER wrapper | **c01 now on two nodes**; c02 as its models arrive; round 2 on the merged roadmap branch | 750 |
+| Nov | anomalies: KV quant that gains nothing on gfx90a, batching that pays 3.6× here and 1.7× on A100 | c03 split modes; rounds on each release; the CUDA half if granted | 850 |
+| Dec | placement policy, served replicas, RCCL and HIP-graphs binaries | before/after rounds; **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs | 880 |
+| Jan | `--moe-cache` on HIP, load path | rounds; c04 multi-node | 880 |
+| Feb | release candidate | rounds on it | 800 |
+| Mar | release | final round to 12-03; data to Zenodo; Final Report draft | 340 |
 
 ## Lines not to cross
 
-- **This is a development allocation for the engine.** Soaks drive the
-  engine with public benchmark prompts and throw the answers away. Using the
-  hours to generate Forge training data, or to train anything, would turn it
-  into production for a different project — the kind of thing a Final Report
-  cannot explain.
-- **No work invented to burn hours.** Everything in the budget table answers
-  one of the five questions or makes an answer reproducible. If a line stops
-  doing that, it comes out and the hours go to repeats or soaks.
+- **This is a development allocation for the engine.** The workload is
+  public benchmark sets, graded; nothing it produces feeds Forge, and nothing
+  is trained here.
+- **Every hour leaves a result.** A round without an engine change, a point
+  that measures nothing new — those are the hours that are hard to explain.
+  More rounds tied to more engine changes are not.
 
 ## Final Report
 
 The portal already has the slot (page 11 of the consolidated forms: *Final
-Report Upload*). Three things to settle while writing, not after:
+Report Upload*). To settle while writing, not after:
 
 - **Licence.** The application says Apache-2.0 in three places; the repository
-  is AGPL-3.0-or-later since August 2026. Both are open source and neither
-  affects the award, but the report must describe the repository as it is.
-- **Where the CUDA numbers came from**, per the section above, stated plainly.
+  is AGPL-3.0-or-later since August 2026. Both open source; the report must
+  describe the repository as it is.
+- **Where the CUDA numbers came from**, per the section above.
 - **The deadline and template**: confirm with EuroHPC; the AI-Factory rule is
-  three months after the end, and it is reasonable to assume the same.
+  three months after the end (12-06-2027 here), and it is reasonable to
+  assume the same.
 
 ## Decisions needed
 
-1. **The window end date** (Puhuri). Everything above is paced on a guess.
-2. **The CUDA half on Leonardo** before 02-11: agree that measuring the
-   legal-it GGUFs with the engine is in scope there.
-3. **Benchmark Access on an NVIDIA system** in November: worth the
-   application, or is the Leonardo data enough?
+1. **Two nodes in parallel** until the deficit is recovered — the default of
+   `submit_campaign.sh`.
+2. **The CUDA half on Leonardo AI-Factory** before 02-11, or wait for the
+   Leonardo/JUPITER decision.
+3. **MMLU**: find a pinned mirror for ReflexBench, or leave it out (the
+   campaigns already do).

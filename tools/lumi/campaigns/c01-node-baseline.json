@@ -1,0 +1,62 @@
+{
+  "campaign": "c01-node-baseline",
+  "notes": [
+    "Catalog models (eullm pull <id>) plus the 12-09 reference model, so it can start at once.",
+    "Objectives (1) memory/throughput by size, KV type, context; (2) batching under concurrency;",
+    "(3) layer split vs replicas on 2/4/8 GCDs; stability under sustained load, with graded answers.",
+    "--fit-strict everywhere: a configuration that does not fit is recorded as does-not-fit,",
+    "never measured half on the CPU."
+  ],
+  "defaults": {"kind": "throughput", "repeats": 3, "extra_args": ["--fit-strict"]},
+  "groups": [
+    {"name": "ref-one-gcd", "priority": 100, "est_s": 900,
+     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "gcds": 1, "exclusive": true, "slot_ctx": 4096},
+     "axes": {"batch": [1, 16]}},
+    {"name": "ref-split", "priority": 100, "est_s": 1200,
+     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "exclusive": true, "batch": 16, "slot_ctx": 4096},
+     "axes": {"gcds": [2, 4, 8], "kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "ref-replicas", "priority": 100, "est_s": 1200,
+     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "exclusive": true, "replica_gcds": 1,
+             "slot_ctx": 4096},
+     "axes": {"gcds": [2, 4, 8], "batch": [4, 16]}},
+
+    {"name": "neighbours-control", "priority": 90, "est_s": 900,
+     "set": {"gcds": 1, "exclusive": true, "slot_ctx": 4096},
+     "axes": {"model": ["qwen3-8b", "qwen3-32b"], "batch": [1, 16]}},
+
+    {"name": "dense-one-gcd", "priority": 60, "est_s": 900,
+     "set": {"gcds": 1, "slot_ctx": 4096},
+     "axes": {"model": ["qwen3-4b", "qwen3-8b", "qwen3-14b", "mistral-small-24b", "qwen3.6-27b",
+                        "qwen3-32b"],
+              "batch": [1, 4, 16, 32], "kv": ["f16/f16", "q8_0/q8_0", "q4_0/q4_0"]}},
+    {"name": "moe-one-gcd", "priority": 60, "est_s": 900,
+     "set": {"gcds": 1, "slot_ctx": 4096},
+     "axes": {"model": ["qwen3.6-35b-a3b"],
+              "batch": [1, 4, 16, 32], "kv": ["f16/f16", "q8_0/q8_0", "q4_0/q4_0"]}},
+    {"name": "long-context", "priority": 50, "est_s": 1800,
+     "set": {"gcds": 1, "slot_ctx": 32768},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
+              "batch": [1, 4], "prompt_tokens": [0, 8000, 16000, 30000],
+              "kv": ["f16/f16", "q8_0/q8_0"]}},
+
+    {"name": "scale-split", "priority": 40, "est_s": 1200,
+     "set": {"batch": 16, "slot_ctx": 4096},
+     "axes": {"model": ["qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"], "gcds": [2, 4, 8]}},
+    {"name": "scale-replicas", "priority": 40, "est_s": 1200,
+     "set": {"batch": 16, "slot_ctx": 4096, "replica_gcds": 1},
+     "axes": {"model": ["qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"], "gcds": [2, 4, 8]}},
+
+    {"name": "soak-one-gcd", "priority": 10,
+     "set": {"kind": "workload", "gcds": 1, "batch": 32, "slot_ctx": 4096, "concurrency": 32,
+             "sets": ["gsm8k", "arc-easy", "arc-challenge"],
+             "min_duration_s": 7200, "max_duration_s": 43200, "interval_s": 60},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "mistral-small-24b", "qwen3.6-27b", "qwen3-32b",
+                        "qwen3.6-35b-a3b"],
+              "kv": ["f16/f16", "q8_0/q8_0", "q4_0/q4_0"]}},
+    {"name": "soak-node", "priority": 5,
+     "set": {"kind": "workload", "gcds": 8, "replica_gcds": 1, "batch": 32, "slot_ctx": 4096,
+             "concurrency": 256, "sets": ["gsm8k", "arc-easy", "arc-challenge"],
+             "min_duration_s": 21600, "max_duration_s": 86400, "interval_s": 60},
+     "axes": {"model": ["qwen3-8b", "qwen3-32b", "qwen3.6-35b-a3b"]}}
+  ]
+}
