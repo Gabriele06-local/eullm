@@ -55,6 +55,21 @@ if [ -n "${LIBCLANG_PATH:-}" ]; then
 else
     log "no libclang under $ROCM_PATH: bindgen will look in the system paths (set LIBCLANG_PATH if it fails)"
 fi
+# Found that way, libclang then misses its own builtin headers ("'stdbool.h'
+# file not found" from ggml.h, 05-10-2026): they live in the resource
+# directory of the clang it belongs to, which is passed to it here, along
+# with that clang for bindgen's own include-path detection.
+for c in "$ROCM_PATH/llvm/bin/clang" "$ROCM_PATH/lib/llvm/bin/clang"; do
+    if [ -x "$c" ]; then
+        export CLANG_PATH="${CLANG_PATH:-$c}"
+        RESOURCE_DIR=$("$c" -print-resource-dir 2>/dev/null || true)
+        if [ -f "$RESOURCE_DIR/include/stdbool.h" ]; then
+            export BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-isystem $RESOURCE_DIR/include"
+            log "bindgen: clang's builtin headers from $RESOURCE_DIR/include"
+        fi
+        break
+    fi
+done
 
 command -v cmake >/dev/null || err "cmake not found — 'module load CMake' or equivalent"
 CMAKE_VER=$(cmake --version | head -1 | awk '{print $3}')
