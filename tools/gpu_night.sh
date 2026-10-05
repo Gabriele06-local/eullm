@@ -5,7 +5,9 @@
 #   nohup tools/gpu_night.sh > ~/work/gpu-night.out 2>&1 &
 #
 # It keeps the machine from sleeping while it runs (systemd-inhibit), waits
-# until no bench/prefetch_check.sh is running, then runs each step of STEPS
+# until no bench/prefetch_check.sh is running, stops any server of $BIN or of
+# the pinned llama-server still up (it would share the GPU with every
+# measurement), then runs each step of STEPS
 # under a time limit of its own, and goes on whatever a step's outcome. A
 # step not started by STOP_AT (06:45) is left for another night. After every
 # step $NIGHT/summary.md is written again: each step's outcome and minutes,
@@ -207,6 +209,21 @@ fi
 
 note() { echo "$(date '+%H:%M:%S') $*"; }
 
+# The servers a step leaves behind (a killed script cannot always stop its
+# own), and any started by hand: on 5 October one held 11.7 GB of VRAM when
+# the night began, and no phase 6 server could start beside it. Waits until
+# they are gone, a minute at most: freeing tens of GB of pinned memory takes
+# a while, and the next step sizes its models against the VRAM left.
+stop_servers() {
+    pkill -f -- "$BIN serve" 2>/dev/null
+    pkill -f -- "$LLAMA_PIN/bin/llama-server" 2>/dev/null
+    local _
+    for _ in $(seq 1 60); do
+        pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null || return 0
+        sleep 1
+    done
+}
+
 [[ -x $BIN ]] || { echo "no EuLLM binary at $BIN (set BIN)" >&2; exit 1; }
 mkdir -p "$NIGHT"
 stop=$(date -d "$STOP_AT" +%s)
@@ -277,6 +294,10 @@ write_summary() {
         echo "$("$BIN" --version 2>/dev/null), branch $(git -C "$REPO" rev-parse --abbrev-ref HEAD) at $(git -C "$REPO" rev-parse --short HEAD)"
         nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null
         echo
+        if [[ -s $NIGHT/gpu-apps-at-start.txt ]]; then
+            echo "**Other programs held VRAM when the run began, and shared the GPU with every step (listed below).**"
+            echo
+        fi
         echo "| step | outcome | minutes |"
         echo "|---|---|---:|"
         cat "$NIGHT/steps.tsv" 2>/dev/null | awk -F'\t' '{printf "| %s | %s | %s |\n", $1, $2, $3}'
@@ -320,10 +341,7 @@ run() {
     note "$name: at most $limit minutes"
     timeout --kill-after=120 "${limit}m" bash "$SELF" "step:$name" >"$NIGHT/$name.log" 2>&1
     rc=$?
-    # A server a step left behind (a killed script cannot always stop its own).
-    pkill -f -- "$BIN serve" 2>/dev/null
-    pkill -f -- "$LLAMA_PIN/bin/llama-server" 2>/dev/null
-    sleep 5
+    stop_servers
     case $rc in
     0) outcome=OK ;;
     3) outcome=SKIPPED ;;
@@ -360,6 +378,11 @@ while ((quiet < 2)); do
     fi
     ((quiet < 2)) && sleep 60
 done
+
+if pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null; then
+    note "stopping the servers of $BIN and llama-server still running: they would share the GPU"
+    stop_servers
+fi
 
 if command -v nvidia-smi >/dev/null; then
     nvidia-smi --query-gpu=timestamp,temperature.gpu,clocks.sm,power.draw,utilization.gpu,memory.used \
