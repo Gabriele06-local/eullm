@@ -1,22 +1,26 @@
 {
   "campaign": "c01-node-baseline",
   "notes": [
-    "Catalog models (eullm pull <id>) plus the 12-09 reference model, so it can start at once.",
+    "Catalog models (eullm pull <id>) plus the 12-09 reference model, the same file:",
+    "unsloth/Qwen3.8-27B-GGUF UD-Q8_K_XL, 29.3 GiB, Apache-2.0. Gone from LUMI by 05-10-2026,",
+    "so it is pulled again; the engine names it qwen3.8-27b-gguf-ud-q8_k_xl now (12-09 rows say",
+    "qwen3.8-27b-ud-q8_k_xl).",
     "Objectives (1) memory/throughput by size, KV type, context; (2) batching under concurrency;",
     "(3) layer split vs replicas on 2/4/8 GCDs; stability under sustained load, with graded answers.",
     "--fit-strict everywhere: a configuration that does not fit is recorded as does-not-fit,",
     "never measured half on the CPU."
   ],
+  "pull": ["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"],
   "defaults": {"kind": "throughput", "repeats": 3, "extra_args": ["--fit-strict"]},
   "groups": [
     {"name": "ref-one-gcd", "priority": 100, "est_s": 900,
-     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "gcds": 1, "exclusive": true, "slot_ctx": 4096},
+     "set": {"model": "qwen3.8-27b-gguf-ud-q8_k_xl", "gcds": 1, "exclusive": true, "slot_ctx": 4096},
      "axes": {"batch": [1, 16]}},
     {"name": "ref-split", "priority": 100, "est_s": 1200,
-     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "exclusive": true, "batch": 16, "slot_ctx": 4096},
+     "set": {"model": "qwen3.8-27b-gguf-ud-q8_k_xl", "exclusive": true, "batch": 16, "slot_ctx": 4096},
      "axes": {"gcds": [2, 4, 8], "kv": ["f16/f16", "q8_0/q8_0"]}},
     {"name": "ref-replicas", "priority": 100, "est_s": 1200,
-     "set": {"model": "qwen3.8-27b-ud-q8_k_xl", "exclusive": true, "replica_gcds": 1,
+     "set": {"model": "qwen3.8-27b-gguf-ud-q8_k_xl", "exclusive": true, "replica_gcds": 1,
              "slot_ctx": 4096},
      "axes": {"gcds": [2, 4, 8], "batch": [4, 16]}},
 
