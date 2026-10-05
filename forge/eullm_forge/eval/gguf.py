@@ -63,13 +63,14 @@ class LlamaServer:
 
     def __init__(self, gguf: str | Path, *, binary: str | None = None, parallel: int = 4,
                  ctx_per_slot: int = 16384, log_path: str | Path | None = None,
-                 start_timeout: float = 900.0):
+                 start_timeout: float = 900.0, devices: str | None = None):
         self.gguf = Path(gguf)
         self.binary = binary or default_server_binary()
         self.parallel = parallel
         self.ctx_per_slot = ctx_per_slot
         self.log_path = Path(log_path) if log_path else self.gguf.with_suffix(".server.log")
         self.start_timeout = start_timeout
+        self.devices = devices          # CUDA_VISIBLE_DEVICES for this server only
         self.port = 0
         self.proc: subprocess.Popen | None = None
 
@@ -97,7 +98,10 @@ class LlamaServer:
         self.port = _free_port()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         log = self.log_path.open("w")
-        self.proc = subprocess.Popen(self.command(), stdout=log, stderr=subprocess.STDOUT)
+        env = None
+        if self.devices is not None:
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.devices}
+        self.proc = subprocess.Popen(self.command(), stdout=log, stderr=subprocess.STDOUT, env=env)
         log.close()
         deadline = time.monotonic() + self.start_timeout
         while True:
