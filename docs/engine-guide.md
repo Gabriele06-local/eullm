@@ -598,9 +598,12 @@ and may change or go once it is settled.
 **Copying the experts ahead while reading a prompt (experimental, off by
 default).** Reading a prompt copies each layer's experts to the card and
 then computes them, one after the other, with the GPU idle during the copy.
-`LLAMA_MOE_PREFETCH=1` copies the next expert tensor on a second stream of
-the GPU while the current one computes, into two slots of VRAM the size of
-the largest expert tensor (about 470 MiB in all on the model above). It
+`LLAMA_MOE_PREFETCH=1` copies the next expert tensors on a second stream of
+the GPU while the current one computes, into four slots of VRAM the size of
+the largest expert tensor (1 GiB in all on the model above;
+`LLAMA_MOE_PREFETCH_SLOTS`, 2 to 8). On the reference PC it read a
+33,200-token prompt at 1,743 tokens/s instead of 1,228 (+42%), to the same
+answer token for token; two slots gained 10%, three 18%. It
 applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
 on one NVIDIA GPU (a CUDA build), with the model read into memory rather
 than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
@@ -608,9 +611,9 @@ allows. The slots come out of the VRAM `--fit` leaves free, and only if a
 twentieth of the card, at least 512 MiB, stays free beside them; if not, it
 stays off and says how much it needed, and lowering `--moe-cache` by the
 difference makes room. One line on stderr says it is on, with the slots'
-size, or why it is off. Not yet measured: compare the same greedy answer and
-the reading speed with `LLAMA_MOE_PREFETCH=0` and `=1` before relying on it
-(`docs/moe-offload-plan.md`, phase 6).
+size, or why it is off. `bench/prefetch_check.sh` compares the answer and
+the speeds with and without it on any MoE (`docs/moe-offload-plan.md`,
+phase 6, has the measurements).
 
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 

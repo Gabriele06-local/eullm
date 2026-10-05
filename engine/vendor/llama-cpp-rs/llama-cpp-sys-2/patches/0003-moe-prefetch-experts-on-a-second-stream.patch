@@ -10,7 +10,7 @@ every layer.
 
 With LLAMA_MOE_PREFETCH=1, a MUL_MAT_ID of at least
 LLAMA_MOE_PREFETCH_MIN_TOKENS tokens (512) reads its experts from one of
-LLAMA_MOE_PREFETCH_SLOTS slots in VRAM (2 to 4, default 2, each the size of
+LLAMA_MOE_PREFETCH_SLOTS slots in VRAM (2 to 8, default 4, each the size of
 the largest expert tensor) instead of from the compute buffer. A second
 instance of the GPU backend, a stream of its own, fills the slots a whole
 tensor at a time while the splits before them compute. Two events per
@@ -34,10 +34,10 @@ stderr and gives the slots back, and the scheduler copies as before.
 EuLLM patch on llama.cpp 6b7b03a (b11370 + PR #29887).
 
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index d8c9852..bdf418a 100644
+index d8c9852..a665da2 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -932,6 +932,54 @@ struct ggml_backend_sched_moe_cache_entry {
+@@ -932,6 +932,56 @@ struct ggml_backend_sched_moe_cache_entry {
      bool shared; // ids_copy belongs to a previous entry of the split
  };
  
@@ -54,15 +54,17 @@ index d8c9852..bdf418a 100644
 +// tensor at a time, while the splits before it compute. No host wait for the router
 +// is left on that path. Each slot has two events: `copied`, which the split that reads
 +// the slot waits for on the GPU, and `freed`, recorded once that split is queued,
-+// which the next copy into the slot waits for. LLAMA_MOE_PREFETCH_SLOTS (2 to 4,
-+// default 2) is how many tensors can be in flight; a slot holds the largest of them.
++// which the next copy into the slot waits for. LLAMA_MOE_PREFETCH_SLOTS (2 to 8,
++// default 4) is how many tensors can be in flight; a slot holds the largest of them.
++// Measured in EuLLM on a 33,200-token prompt, the experts of three tensors a layer in
++// RAM: two slots read it 11% faster than the scheduler alone, three 18%, four 42%.
 +//
 +// One CUDA GPU, one copy of the graph (no pipeline parallelism), and the experts in
 +// the GPU's pinned host buffer, where a model loaded without mmap has them: from
 +// pageable memory a copy would hold the host until its slot is free. The slots are
 +// made only if they leave a twentieth of the VRAM, and at least 512 MiB, to what a
 +// compute allocates as it goes.
-+#define GGML_SCHED_PREFETCH_MAX_SLOTS 4
++#define GGML_SCHED_PREFETCH_MAX_SLOTS 8
 +
 +struct ggml_backend_sched_prefetch_input {
 +    int split_id;
@@ -92,7 +94,7 @@ index d8c9852..bdf418a 100644
  struct ggml_backend_sched {
      bool is_reset; // true if the scheduler has been reset since the last graph split
      bool is_alloc;
-@@ -985,6 +1033,8 @@ struct ggml_backend_sched {
+@@ -985,6 +1035,8 @@ struct ggml_backend_sched {
      void * callback_moe_cache_user_data;
      ggml_backend_t moe_cache_backend;
  
@@ -101,7 +103,7 @@ index d8c9852..bdf418a 100644
      char * context_buffer;
      size_t context_buffer_size;
  
-@@ -1019,6 +1069,219 @@ static void ggml_backend_sched_split_inputs_grow(struct ggml_backend_sched_split
+@@ -1019,6 +1071,219 @@ static void ggml_backend_sched_split_inputs_grow(struct ggml_backend_sched_split
      split->inputs_capacity = new_cap;
  }
  
@@ -144,7 +146,7 @@ index d8c9852..bdf418a 100644
 +    const char * min_tokens = getenv("LLAMA_MOE_PREFETCH_MIN_TOKENS");
 +    pf->min_tokens = min_tokens != NULL ? std::max(1, atoi(min_tokens)) : 512;
 +    const char * slots = getenv("LLAMA_MOE_PREFETCH_SLOTS");
-+    pf->n_slots = slots != NULL ? std::min(std::max(atoi(slots), 2), GGML_SCHED_PREFETCH_MAX_SLOTS) : 2;
++    pf->n_slots = slots != NULL ? std::min(std::max(atoi(slots), 2), GGML_SCHED_PREFETCH_MAX_SLOTS) : 4;
 +    pf->backend_id = -1;
 +    sched->prefetch = pf;
 +}
@@ -321,7 +323,7 @@ index d8c9852..bdf418a 100644
  static void ggml_backend_sched_graph_inputs_grow(ggml_backend_sched_t sched) {
      int new_cap = GGML_SCHED_MAX_SPLIT_INPUTS;
      if (sched->graph_inputs_capacity > 0) {
-@@ -1266,6 +1529,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1266,6 +1531,11 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
      sched->n_graph_inputs = 0;
      sched->n_moe_cache_entries = 0;
      sched->is_reset = false;
@@ -333,7 +335,7 @@ index d8c9852..bdf418a 100644
  
      struct ggml_init_params params = {
          /* .mem_size =   */ sched->context_buffer_size,
-@@ -1608,12 +1876,24 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -1608,12 +1878,24 @@ void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgra
                                  tensor_id_copy(src_id, cur_backend_id, c) = tensor_copy;
                                  SET_CAUSE(tensor_copy, "4.cpy");
                              }
@@ -358,7 +360,7 @@ index d8c9852..bdf418a 100644
                      }
                      if (cache_active) {
                          // the cache slots of the experts are written to ids_copy before the split runs
-@@ -1885,7 +2165,11 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
+@@ -1885,7 +2167,11 @@ static bool ggml_backend_sched_alloc_splits(ggml_backend_sched_t sched) {
          if (sched->debug_realloc > 0) {
              // we are interested only in situations where the graph was reallocated even though its size remained the same [GGML_SCHED_DEBUG_REALLOC]
              // example: https://github.com/ggml-org/llama.cpp/pull/17143
@@ -371,7 +373,7 @@ index d8c9852..bdf418a 100644
  
              if (unexpected || sched->debug_realloc > 1) {
                  GGML_ABORT("%s: unexpected graph reallocation (graph size = %d, nodes = %d, leafs = %d), debug_realloc = %d\n", __func__,
-@@ -1924,6 +2208,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1924,6 +2210,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
  
      int prev_backend_id = -1;
  
@@ -384,7 +386,7 @@ index d8c9852..bdf418a 100644
      if (sched->callback_moe_cache_begin != NULL) {
          sched->callback_moe_cache_begin(sched->callback_moe_cache_user_data);
      }
-@@ -1943,6 +2233,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1943,6 +2235,16 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              }
          }
  
@@ -401,7 +403,7 @@ index d8c9852..bdf418a 100644
          // copy the input tensors to the split backend
          for (int input_id = 0; input_id < split->n_inputs; input_id++) {
              ggml_backend_t input_backend = ggml_backend_sched_get_tensor_backend(sched, split->inputs[input_id]);
-@@ -1950,6 +2250,20 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -1950,6 +2252,20 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
              struct ggml_backend_sched_moe_cache_entry * cache_entry = ggml_backend_sched_moe_cache_entry_find(sched, split_id, input, NULL);
  
@@ -422,7 +424,7 @@ index d8c9852..bdf418a 100644
              if (input->flags & GGML_TENSOR_FLAG_INPUT) {
                  // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
                  if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
-@@ -2102,6 +2416,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -2102,6 +2418,10 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              }
          }
  
@@ -433,7 +435,7 @@ index d8c9852..bdf418a 100644
          if (!sched->callback_eval) {
              enum ggml_status ec = ggml_backend_graph_compute_async(split_backend, &split->graph);
              if (ec != GGML_STATUS_SUCCESS) {
-@@ -2146,6 +2464,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -2146,6 +2466,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
              ggml_backend_event_record(sched->events[split_backend_id][sched->cur_copy], split_backend);
          }
  
@@ -446,7 +448,7 @@ index d8c9852..bdf418a 100644
          prev_backend_id = split_backend_id;
      }
  
-@@ -2219,6 +2543,8 @@ ggml_backend_sched_t ggml_backend_sched_new(
+@@ -2219,6 +2545,8 @@ ggml_backend_sched_t ggml_backend_sched_new(
      sched->galloc = ggml_gallocr_new_n(sched->bufts, n_backends);
      sched->op_offload = op_offload;
  
@@ -455,7 +457,7 @@ index d8c9852..bdf418a 100644
      ggml_backend_sched_reset(sched);
  
      return sched;
-@@ -2228,6 +2554,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
+@@ -2228,6 +2556,7 @@ void ggml_backend_sched_free(ggml_backend_sched_t sched) {
      if (sched == NULL) {
          return;
      }
@@ -463,7 +465,7 @@ index d8c9852..bdf418a 100644
      for (int b = 0; b < sched->n_backends; b++) {
          for (int c = 0; c < sched->n_copies; c++) {
              ggml_backend_event_free(sched->events[b][c]);
-@@ -2307,9 +2634,15 @@ bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgra
+@@ -2307,9 +2636,15 @@ bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgra
  
      ggml_backend_sched_split_graph(sched, graph);
  
@@ -479,7 +481,7 @@ index d8c9852..bdf418a 100644
  
      sched->is_alloc = true;
  
-@@ -2342,6 +2675,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
+@@ -2342,6 +2677,9 @@ void ggml_backend_sched_synchronize(ggml_backend_sched_t sched) {
      for (int i = 0; i < sched->n_backends; i++) {
          ggml_backend_synchronize(sched->backends[i]);
      }
