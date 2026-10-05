@@ -103,6 +103,7 @@ sustained load; dense and MoE; one device to a full node).
 |---|---:|---:|---|
 | `c01-node-baseline` | 205 | ~115 | catalog models only: **runs today** |
 | `c02-quant-large-moe` | 75 | ~130 | ~1.2 TB pulled from Hugging Face first |
+| `c05-finetune` | 42 | ~5 | three F32 models converted on a login node (`make_f32_models.sh`) |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -221,11 +222,33 @@ Paced on 28.5 node-hours a day to 12-03-2027.
 | Feb | release candidate | rounds on it | 800 |
 | Mar | release | final round to 12-03; data to Zenodo; Final Report draft | 340 |
 
+## The engine's trainer (`c05-finetune`)
+
+`eullm finetune` is new engine code: llama.cpp's trainer (ggml-opt), which
+the engine did not expose, behind one command that trains an F32 GGUF on a
+text file and writes a GGUF the engine serves. `c05` measures it on one GCD
+the way the other campaigns measure inference: tokens per second, HBM, and
+the does-not-fit boundary by model size (Qwen3 0.6B/1.7B/4B Base), optimizer
+(AdamW, SGD), training window (512-2048) and which tensors train (all, or
+attention only); then whether the held-out loss falls as it should over
+three epochs at three learning rates. The text is GSM8K's training split
+(public, MIT); the trained models are deleted when the point ends.
+
+It is **not one of the proposal's five questions as written**: those are
+about inference. It is software engineering and reproducible benchmarking of
+the runtime, which is what the proposal limits this project to, on public
+data, with no model as an output — so it is defensible, but it has to be
+said, not discovered. Hence: small (~5 node-hours a pass, against ~250 for
+c01+c02), declared in the Final Report under its own heading, and, before it
+grows, one line to LUMI user support asking whether a trainer benchmark on
+public data sits inside a development allocation.
+
 ## Lines not to cross
 
 - **This is a development allocation for the engine.** The workload is
-  public benchmark sets, graded; nothing it produces feeds Forge, and nothing
-  is trained here.
+  public benchmark sets, graded, and public text for the trainer's own
+  benchmark (`c05`); nothing it produces feeds Forge, no model leaves it
+  (`c05` deletes what it trains), and no Forge training runs here.
 - **Every hour leaves a result.** A round without an engine change, a point
   that measures nothing new — those are the hours that are hard to explain.
   More rounds tied to more engine changes are not.
@@ -239,6 +262,8 @@ Report Upload*). To settle while writing, not after:
   is AGPL-3.0-or-later since August 2026. Both open source; the report must
   describe the repository as it is.
 - **Where the CUDA numbers came from**, per the section above.
+- **The trainer track (`c05`)**, as engine work: what was measured, on what
+  data, and that the models it trained were discarded.
 - **The deadline and template**: confirm with EuroHPC; the AI-Factory rule is
   three months after the end (12-06-2027 here), and it is reasonable to
   assume the same.

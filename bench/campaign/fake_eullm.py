@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""A stand-in for the eullm binary, for the tests: `--version`, `list`, and
+"""A stand-in for the eullm binary, for the tests: `--version`, `list`,
 `serve --port N`, whose server answers /api/version, /api/generate and
-/api/chat the way the engine does (streamed NDJSON, Ollama's fields).
+/api/chat the way the engine does (streamed NDJSON, Ollama's fields), and
+`finetune MODEL --output O --report R`, which writes both the way the engine
+does: models starting with "huge" are refused as too large for the free
+memory, those starting with "notf32" as quantized, and a model file that does
+not exist as no model.
 
 Models it knows: every id except those starting with "missing", which get a
 404 like an id the store does not have, and those starting with "huge",
@@ -85,6 +89,57 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
 
+def flag(argv, name, default=None):
+    return argv[argv.index(name) + 1] if name in argv else default
+
+
+def finetune(argv):
+    model = argv[0]
+    name = os.path.basename(model)
+    if not os.path.exists(model):
+        print(f"Error: {model} is neither a .gguf file nor a model in the store", file=sys.stderr)
+        return 1
+    if name.startswith("huge"):
+        print("Error: the run is estimated at 812.0 GiB and 61.2 GiB is free. Shorten --ctx, "
+              "train fewer tensors (--train-tensors), use --optimizer sgd, or pass --force to "
+              "try anyway.", file=sys.stderr)
+        return 1
+    if name.startswith("notf32"):
+        print(f"Error: {model} is not an F32 model: 197 of 311 tensors are not F32",
+              file=sys.stderr)
+        return 1
+    epochs = int(flag(argv, "--epochs", "2"))
+    n_ctx = int(flag(argv, "--ctx", "512"))
+    lr = float(flag(argv, "--lr", "1e-6"))
+
+    def pass_(loss, tokens):
+        return {"tokens": tokens, "loss": loss, "loss_unc": 0.01, "perplexity": 2.718 ** loss,
+                "accuracy": 0.5, "accuracy_unc": 0.01, "seconds": tokens / 4000}
+
+    per_epoch = []
+    for e in range(epochs):
+        time.sleep(DELAY * 10)
+        per_epoch.append({"epoch": e, "lr": lr, "train": pass_(2.0 - 0.3 * e, 8 * n_ctx),
+                          "train_tok_s": 4000.0 + e,
+                          "validation": pass_(1.9 - 0.3 * (e + 1), n_ctx)})
+    report = {
+        "schema": "eullm.finetune/1", "engine": "0.0.0-fake", "backend": "cpu",
+        "model": model, "data": flag(argv, "--data"), "output": flag(argv, "--output"),
+        "arch": "qwen3", "params": 596049920, "trainable_params": 440467456,
+        "trainable_tensors": 310,
+        "train_tensors": [t for t in (flag(argv, "--train-tensors") or "").split(",") if t],
+        "optimizer": flag(argv, "--optimizer", "adamw"), "lr": lr, "epochs": epochs,
+        "n_ctx": n_ctx, "baseline": pass_(1.9, n_ctx), "per_epoch": per_epoch,
+        "dry_run": False,
+    }
+    with open(flag(argv, "--output"), "wb") as f:
+        f.write(b"GGUF")
+    with open(flag(argv, "--report"), "w") as f:
+        json.dump(report, f)
+    print("FINETUNE_RESULT " + json.dumps(report))
+    return 0
+
+
 def main(argv):
     if "--version" in argv:
         print("eullm 0.0.0-fake (test)")
@@ -92,6 +147,8 @@ def main(argv):
     if argv and argv[0] == "list":
         print("qwen3-8b\nqwen3-4b")
         return 0
+    if argv and argv[0] == "finetune":
+        return finetune(argv[1:])
     if argv and argv[0] == "serve":
         port = int(argv[argv.index("--port") + 1])
         ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

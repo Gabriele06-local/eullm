@@ -34,6 +34,7 @@ mod log;
 pub mod model;
 #[cfg(feature = "mtmd")]
 pub mod mtmd;
+pub mod opt;
 pub mod sampling;
 #[cfg(feature = "common")]
 pub mod speculative;

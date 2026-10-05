@@ -1,0 +1,43 @@
+{
+  "campaign": "c05-finetune",
+  "notes": [
+    "The engine's own trainer (`eullm finetune`, llama.cpp's ggml-opt) measured like the rest of",
+    "the runtime, on one MI250X GCD: software engineering and benchmarking of an engine feature,",
+    "declared as such in the Final Report (docs/lumi/allocation-plan.md, 'Lines not to cross').",
+    "Throughput, memory and the does-not-fit boundary by model size,",
+    "optimizer, training window and which tensors train; then whether the loss goes down as it",
+    "should over full epochs. Public data only: GSM8K's training split (OpenAI, MIT), never the",
+    "test split the workload points grade on. The trained models are deleted: what is measured is",
+    "the trainer, not a model.",
+    "The trainer needs F32 weights: tools/lumi/make_f32_models.sh converts the `f32` map below on",
+    "a login node into <campaign>/f32/. Qwen3 base models, Apache-2.0; BF16 sizes from the Hub",
+    "API, 05-10-2026: 0.6B 1.19 GB, 1.7B 3.44 GB, 4B 8.04 GB (twice that in F32).",
+    "AdamW keeps 8 bytes a trained parameter on top of 4 for the gradient, SGD none: the 4B with",
+    "every tensor training and AdamW is expected not to fit 64 GB, and is recorded as such.",
+    "ft-boundary passes --force: the estimate does not decide, the GCD does (running out of HBM",
+    "is recorded as does-not-fit), so each point also says how far off the estimate was (its",
+    "memory_estimate against the HBM peak; on a CPU, Qwen3-0.6B at 256: 8.4 GiB est., 8.7 used).",
+    "Learning rates: one window is one step, so lower than usual. On Qwen3-0.6B-Base, CPU,",
+    "--ctx 256, nine steps: held-out loss 1.21 -> 0.94 at 1e-6, -> 1.32 at 1e-5 (05-10-2026)."
+  ],
+  "f32": {
+    "qwen3-0.6b-base-f32.gguf": "Qwen/Qwen3-0.6B-Base",
+    "qwen3-1.7b-base-f32.gguf": "Qwen/Qwen3-1.7B-Base",
+    "qwen3-4b-base-f32.gguf": "Qwen/Qwen3-4B-Base"
+  },
+  "defaults": {"kind": "finetune", "data": "finetune-gsm8k-train.jsonl"},
+  "groups": [
+    {"name": "ft-boundary", "priority": 50, "est_s": 2400,
+     "set": {"epochs": 1, "limit_tokens": 200000, "lr": 1e-6, "extra_args": ["--force"]},
+     "axes": {"model": ["qwen3-0.6b-base-f32.gguf", "qwen3-1.7b-base-f32.gguf",
+                        "qwen3-4b-base-f32.gguf"],
+              "optimizer": ["adamw", "sgd"],
+              "ft_ctx": [512, 1024, 2048],
+              "train_tensors": [[], ["blk.*.attn_*"]]}},
+
+    {"name": "ft-convergence", "priority": 40, "est_s": 10800,
+     "set": {"epochs": 3, "limit_tokens": 0, "ft_ctx": 1024, "optimizer": "adamw"},
+     "axes": {"model": ["qwen3-0.6b-base-f32.gguf", "qwen3-1.7b-base-f32.gguf"],
+              "lr": [3e-7, 1e-6, 3e-6]}}
+  ]
+}

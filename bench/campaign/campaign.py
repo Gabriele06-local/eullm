@@ -3,7 +3,8 @@
 
     campaign.py plan     SPEC.json... --queue DIR      expand specs into the queue
     campaign.py pulls    SPEC.json... [--engine BIN]   models to pull for them (login node)
-    campaign.py prefetch --queue DIR [--sets ...]      fetch the workload sets (login node)
+    campaign.py f32s     SPEC.json... --queue DIR      F32 models finetune points still need
+    campaign.py prefetch --queue DIR [--sets ...]      fetch the sets and finetune text (login)
     campaign.py run      --queue DIR [--devices 0-7]   drain the queue on this node
     campaign.py status   --queue DIR                   what is waiting, running, done
     campaign.py unblock  --queue DIR                   retry points blocked on a model
@@ -27,6 +28,11 @@ the same object on one `BENCH_RESULT {...}` line, schema "eullm.bench/1",
 with the provenance a number needs to be reproduced: engine version and
 binary hash, this repository's revision, devices, core binding, and how many
 other points shared the node at the time.
+
+A `finetune` point runs `eullm finetune` on one device instead of a server:
+an F32 GGUF from <queue>/f32/ trained on public text from <queue>/sets/, its
+report (loss before and after, training tokens per second, memory) the
+measurement. The trained model is deleted unless the point keeps it.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import glob
 import hashlib
 import json
 import os
+import re
 import signal
 import socket
 import subprocess
@@ -59,7 +66,16 @@ SCHEMA = "eullm.bench/1"
 REPO = os.path.dirname(os.path.dirname(HERE))
 # MMLU is not here: its pinned source (people.eecs.berkeley.edu/~hendrycks/
 # data.tar) answers 404 as of 05-10-2026.
-DEFAULT_SETS = ("gsm8k", "arc-easy", "arc-challenge")
+DEFAULT_SETS = ("gsm8k", "arc-easy", "arc-challenge", "finetune-gsm8k-train")
+# Text for `finetune` points to train on: public, pinned like the sets above,
+# and never a split a workload point grades on (GSM8K's test split is one).
+FINETUNE_SETS = {
+    "finetune-gsm8k-train": (
+        "https://raw.githubusercontent.com/openai/grade-school-math/"
+        "3101c7d5072418e28b9008a6636bde82a006892c/grade_school_math/data/train.jsonl",
+        "17f347dc51477c50d4efb83959dbb7c56297aba886e5544ee2aaed3024813465",
+    ),
+}
 # What a workload point needs on top of its duration: servers up, model read
 # (a 400 GB GGUF off Lustre takes minutes), the requests in flight finished.
 LOAD_ALLOWANCE_S = 1200
@@ -271,7 +287,7 @@ class Runner:
             self.args.engine, self.args.backend, self.args.bind if cores else "none",
             physical, self.args.port_base + 10 * min(reserved), self.logs,
             sampler=self.sampler, stop=self.stop, model_seen=self.model_seen,
-            sets_dir=self.sets_dir,
+            sets_dir=self.sets_dir, f32_dir=os.path.join(self.args.queue, "f32"),
         )
         run = Running(dict(p, duration_s=duration), use, reserved, duration, ctx,
                       self.expected_end(p, duration, time.time()))
@@ -479,14 +495,33 @@ def load_specs(paths) -> list:
 
 
 def pull_refs(specs) -> list:
-    """(model id, what to pull it as) for every model the specs use: a
+    """(model id, what to pull it as) for every model the specs serve: a
     `pull` entry of the spec when one maps to the id, else the id itself (a
-    catalog model)."""
+    catalog model). Finetune points are not here: they train F32 files (see
+    `f32_refs`), which no store holds."""
     refs, models = {}, set()
     for _, spec in specs:
         refs.update({hf_ref_to_id(r): r for r in spec.get("pull", [])})
-        models |= {p["model"] for p in expand(spec)}
+        models |= {p["model"] for p in expand(spec) if p["kind"] != "finetune"}
     return [(m, refs.get(m, m)) for m in sorted(models)]
+
+
+def f32_refs(specs) -> list:
+    """(file, Hugging Face repo) for every model a finetune point trains: a
+    file under <queue>/f32/, converted from the repo the spec's `f32` map
+    names for it (None when it names none)."""
+    files = {}
+    for _, spec in specs:
+        repos = spec.get("f32", {})
+        for p in expand(spec):
+            if p["kind"] == "finetune" and not os.path.isabs(p["model"]):
+                files[p["model"]] = repos.get(p["model"])
+    return sorted(files.items())
+
+
+def missing_f32(queue, specs) -> list:
+    return [(f, repo) for f, repo in f32_refs(specs)
+            if not os.path.exists(os.path.join(queue, "f32", f))]
 
 
 def node_hours(points, node_devices=8) -> float:
@@ -527,6 +562,13 @@ def cmd_plan(args):
                   "points will block:")
             for _, ref in missing:
                 print(f"  {args.engine} pull {ref}")
+    missing = missing_f32(args.queue, specs)
+    if missing:
+        print(f"\nF32 models for the finetune points, not in {args.queue}/f32 yet — "
+              "tools/lumi/make_f32_models.sh converts them on a login node, or their points "
+              "will block:")
+        for f, repo in missing:
+            print(f"  {f}  ← {repo or '(no repo in the spec f32 map)'}")
     return 0
 
 
@@ -540,9 +582,46 @@ def cmd_pulls(args):
     return 0
 
 
+def cmd_f32s(args):
+    """The F32 models the specs' finetune points train, one `file repo` per
+    line: only those not yet under <queue>/f32 (make_f32_models.sh reads it)."""
+    for f, repo in missing_f32(args.queue, load_specs(args.specs)):
+        print(f, repo or "-")
+    return 0
+
+
+def gsm8k_train_text(data: bytes) -> list:
+    """GSM8K's training split as documents for `eullm finetune`: the question,
+    the worked solution, the number. The calculator annotations
+    (`<<48/2=24>>`) are dropped: the model is to write the arithmetic out."""
+    docs = []
+    for line in data.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        steps, _, final = row["answer"].rpartition("####")
+        steps = re.sub(r"<<[^>]*>>", "", steps).strip()
+        docs.append(f"Question: {row['question'].strip()}\n{steps}\nAnswer: {final.strip()}")
+    return docs
+
+
+def prefetch_finetune(name, out_dir) -> str:
+    import ab_data
+    from rb_data import fetch
+
+    url, sha256 = FINETUNE_SETS[name]
+    docs = gsm8k_train_text(ab_data.checked(fetch(url), sha256, url))
+    path = os.path.join(out_dir, f"{name}.jsonl")
+    with open(path + ".tmp", "w") as f:
+        for text in docs:
+            f.write(json.dumps({"text": text}) + "\n")
+    os.replace(path + ".tmp", path)
+    return f"{name}: {len(docs)} documents → {path}"
+
+
 def cmd_prefetch(args):
-    """Fetch the ReflexBench sets and freeze them as JSONL beside the queue:
-    compute nodes have no network."""
+    """Fetch the ReflexBench sets and the finetune text, and freeze them as
+    JSONL beside the queue: compute nodes have no network."""
     sys.path.insert(0, point.REFLEXBENCH)
     import ab_data
 
@@ -553,6 +632,9 @@ def cmd_prefetch(args):
         # One unreachable source must not cost the others: each set is
         # fetched on its own and what failed is reported at the end.
         try:
+            if name in FINETUNE_SETS:
+                print(prefetch_finetune(name, out_dir))
+                continue
             data = ab_data.load(name)
         except Exception as e:
             failed.append(f"{name}: {type(e).__name__}: {e}")
@@ -615,7 +697,8 @@ COLUMNS = (
     "devices", "neighbours_at_start", "load_cache", "load_wall_s", "agg_tok_s_mean",
     "agg_tok_s_cv_pct", "ttft_ms_p50", "decode_tok_s", "prefill_tok_s", "duration_s",
     "requests", "accuracy", "consistency", "drift_pct", "vram_peak_mib_max", "use_mean",
-    "engine", "bench_rev",
+    "engine", "bench_rev", "ft_ctx", "optimizer", "train_tensors", "ft_loss_before",
+    "ft_loss_after", "ft_tok_s", "ft_trainable_params",
 )
 
 
@@ -645,6 +728,16 @@ def row_of(r: dict) -> dict:
                    accuracy=" ".join(f"{k}={v.get('accuracy')}"
                                      for k, v in sorted(w.get("accuracy", {}).items())),
                    consistency=(w.get("consistency") or {}).get("rate"))
+    ft = r.get("finetune")
+    if ft:
+        epochs = ft.get("per_epoch") or []
+        last = (epochs[-1].get("validation") or {}) if epochs else {}
+        speeds = [e.get("train_tok_s") for e in epochs if e.get("train_tok_s")]
+        row.update(ft_loss_before=(ft.get("baseline") or {}).get("loss"),
+                   ft_loss_after=last.get("loss"),
+                   ft_tok_s=round(sum(speeds) / len(speeds), 1) if speeds else None,
+                   ft_trainable_params=ft.get("trainable_params"),
+                   train_tensors=",".join(p.get("train_tensors") or []))
     devs = r.get("device_stats")
     if isinstance(devs, dict):
         peaks = [d.get("vram_peak_mib") for d in devs.values() if d.get("vram_peak_mib")]
@@ -718,6 +811,9 @@ def main(argv=None):
     p.add_argument("--engine", default=os.environ.get("EULLM_BIN"),
                    help="list only what `eullm list` does not have")
 
+    p = with_queue(sub.add_parser("f32s"))
+    p.add_argument("specs", nargs="+")
+
     p = with_queue(sub.add_parser("prefetch"))
     p.add_argument("--sets", default=",".join(DEFAULT_SETS))
 
@@ -750,9 +846,9 @@ def main(argv=None):
     p.add_argument("--json", action="store_true")
 
     args = ap.parse_args(argv)
-    commands = {"plan": cmd_plan, "pulls": cmd_pulls, "prefetch": cmd_prefetch, "run": cmd_run,
-                "status": cmd_status, "unblock": cmd_unblock, "collect": cmd_collect,
-                "budget": cmd_budget}
+    commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,
+                "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock,
+                "collect": cmd_collect, "budget": cmd_budget}
     if args.cmd not in commands:
         ap.print_help()
         return 2

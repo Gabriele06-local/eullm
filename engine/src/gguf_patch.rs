@@ -387,6 +387,55 @@ pub(crate) fn add_metadata(
 
 // ── I/O helpers ──────────────────────────────────────────────────────────
 
+/// Overwrite the `uint32` value of metadata key `key` in place, leaving every
+/// other byte of the file as it was; the value it held before, or `None` when
+/// the file has no such key.
+///
+/// For a value whose size cannot change, which is the only edit that needs no
+/// rewrite of the file: `eullm finetune` uses it to put back the context
+/// length llama.cpp's trainer overwrote with the one it trained at, on a file
+/// that can be tens of gigabytes.
+///
+/// # Errors
+///
+/// Not a GGUF, a header that does not parse, or the key holding a type other
+/// than `uint32`.
+pub fn set_u32_in_place(path: &Path, key: &str, value: u32) -> io::Result<Option<u32>> {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if read_u32(&mut f)? != GGUF_MAGIC {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a GGUF file",
+        ));
+    }
+    let _version = read_u32(&mut f)?;
+    let _tensor_count = read_u64(&mut f)?;
+    let kv_count = read_u64(&mut f)?;
+    for _ in 0..kv_count {
+        let k = read_gguf_string(&mut f)?;
+        let vtype = read_u32(&mut f)?;
+        if k == key {
+            if vtype != TYPE_UINT32 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{key} is GGUF type {vtype}, not uint32"),
+                ));
+            }
+            let at = f.stream_position()?;
+            let old = read_u32(&mut f)?;
+            f.seek(SeekFrom::Start(at))?;
+            f.write_all(&value.to_le_bytes())?;
+            f.flush()?;
+            return Ok(Some(old));
+        }
+        skip_gguf_value(&mut f, vtype)?;
+    }
+    Ok(None)
+}
+
 fn read_u32(r: &mut impl Read) -> io::Result<u32> {
     let mut buf = [0u8; 4];
     r.read_exact(&mut buf)?;
@@ -837,5 +886,47 @@ mod tests {
         c.get_mut().extend_from_slice(&[0u8; 12]);
         assert!(skip_gguf_value(&mut c, TYPE_ARRAY).is_ok());
         assert_eq!(c.position(), 4 + 8 + 12);
+    }
+
+    /// A GGUF of metadata only: an architecture string and a context length.
+    fn gguf_with_context_length(value: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        b.extend_from_slice(&3u32.to_le_bytes());
+        b.extend_from_slice(&0u64.to_le_bytes());
+        b.extend_from_slice(&2u64.to_le_bytes());
+        for (k, v) in [("general.architecture", "llama")] {
+            b.extend_from_slice(&(k.len() as u64).to_le_bytes());
+            b.extend_from_slice(k.as_bytes());
+            b.extend_from_slice(&TYPE_STRING.to_le_bytes());
+            b.extend_from_slice(&(v.len() as u64).to_le_bytes());
+            b.extend_from_slice(v.as_bytes());
+        }
+        let k = "llama.context_length";
+        b.extend_from_slice(&(k.len() as u64).to_le_bytes());
+        b.extend_from_slice(k.as_bytes());
+        b.extend_from_slice(&TYPE_UINT32.to_le_bytes());
+        b.extend_from_slice(&value.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn set_u32_in_place_changes_only_those_four_bytes() {
+        let (path, _) = temp_pair("ctxlen");
+        let before = gguf_with_context_length(512);
+        std::fs::write(&path, &before).unwrap();
+        assert_eq!(
+            set_u32_in_place(&path, "llama.context_length", 32768).unwrap(),
+            Some(512)
+        );
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after, gguf_with_context_length(32768));
+        assert_eq!(after.len(), before.len());
+        assert_eq!(
+            set_u32_in_place(&path, "llama.block_count", 1).unwrap(),
+            None
+        );
+        assert!(set_u32_in_place(&path, "general.architecture", 1).is_err());
+        std::fs::remove_file(&path).ok();
     }
 }

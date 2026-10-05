@@ -61,10 +61,67 @@ def test_normalize_fills_ctx_concurrency_and_mode():
     {"kind": "workload", "model": "m"},
     {"model": "m", "kind": "nope"},
     {"gcds": 1},
+    {"kind": "finetune", "model": "m.gguf"},
+    {"kind": "finetune", "model": "m.gguf", "data": "d", "gcds": 2},
+    {"kind": "finetune", "model": "m.gguf", "data": "d", "ft_ctx": 300},
+    {"kind": "finetune", "model": "m.gguf", "data": "d", "optimizer": "lion"},
+    {"kind": "finetune", "model": "m.gguf", "data": "d", "lr": 0},
 ])
 def test_normalize_rejects(bad):
     with pytest.raises(SpecError):
         normalize(bad)
+
+
+def test_finetune_fields_belong_to_finetune_points_only():
+    ft = normalize({"kind": "finetune", "model": "m.gguf", "data": "d.jsonl",
+                    "train_tensors": ["blk.*.attn_*"]})
+    assert ft["ft_ctx"] == 512 and ft["optimizer"] == "adamw" and ft["keep_output"] is False
+    # The other kinds keep the fields, and so the ids, they had before.
+    assert "ft_ctx" not in normalize({"model": "m"})
+
+
+def test_finetune_command_resolves_the_queue_dirs():
+    import point
+
+    p = normalize({"kind": "finetune", "model": "m-f32.gguf", "data": "d.jsonl",
+                   "train_tensors": ["blk.*.attn_*", "output.weight"], "lr": 1e-4})
+    ctx = point.Context("/bin/eullm", "rocm", "none", ["3"], 0, "/w",
+                        sets_dir="/q/sets", f32_dir="/q/f32")
+    cmd = point.finetune_command(p, ctx, "/w/o.gguf", "/w/r.json")
+    assert cmd[:3] == ["/bin/eullm", "finetune", "/q/f32/m-f32.gguf"]
+    assert cmd[cmd.index("--data") + 1] == "/q/sets/d.jsonl"
+    assert cmd[cmd.index("--lr") + 1] == "0.0001"
+    assert cmd[cmd.index("--device") + 1] == "0"  # the one device left visible
+    assert cmd[cmd.index("--train-tensors") + 1] == "blk.*.attn_*,output.weight"
+    assert "--no-progress" in cmd
+
+
+def test_gsm8k_train_text_drops_the_calculator_annotations():
+    import json
+
+    import campaign
+
+    row = {"question": "Natalia sold 48 clips in April and half as many in May. How many? ",
+           "answer": "In May: 48/2 = <<48/2=24>>24.\nIn all: 48+24 = <<48+24=72>>72.\n#### 72"}
+    [doc] = campaign.gsm8k_train_text((json.dumps(row) + "\n\n").encode())
+    assert doc == ("Question: Natalia sold 48 clips in April and half as many in May. How many?\n"
+                   "In May: 48/2 = 24.\nIn all: 48+24 = 72.\nAnswer: 72")
+
+
+def test_finetune_models_are_f32_files_not_pulls(tmp_path):
+    import campaign
+
+    spec = {"campaign": "c", "f32": {"a-f32.gguf": "Org/A"}, "groups": [
+        {"name": "serve", "set": {"model": "qwen3-8b"}},
+        {"name": "ft", "set": {"kind": "finetune", "data": "d.jsonl"},
+         "axes": {"model": ["a-f32.gguf", "b-f32.gguf"]}},
+    ]}
+    specs = [("s.json", spec)]
+    assert campaign.pull_refs(specs) == [("qwen3-8b", "qwen3-8b")]
+    assert campaign.f32_refs(specs) == [("a-f32.gguf", "Org/A"), ("b-f32.gguf", None)]
+    (tmp_path / "f32").mkdir()
+    (tmp_path / "f32" / "a-f32.gguf").write_bytes(b"GGUF")
+    assert campaign.missing_f32(str(tmp_path), specs) == [("b-f32.gguf", None)]
 
 
 def test_order_is_priority_then_width():
@@ -235,5 +292,14 @@ def test_shipped_campaigns_expand():
         points = expand(spec)
         assert points, path
         pulled = {campaign.hf_ref_to_id(r) for r in spec.get("pull", [])}
-        unknown = {p["model"] for p in points} - catalog - pulled - already_on_lumi
+        served = {p["model"] for p in points if p["kind"] != "finetune"}
+        unknown = served - catalog - pulled - already_on_lumi
         assert not unknown, f"{path}: models with no source: {sorted(unknown)}"
+        # A model a finetune point trains is converted from the repo the
+        # spec's f32 map names, and its data is a set prefetch writes.
+        for f, repo in campaign.f32_refs([(path, spec)]):
+            assert repo and repo.count("/") == 1, f"{path}: {f} has no repo to convert"
+        for p in points:
+            if p["kind"] == "finetune":
+                name = p["data"].rsplit(".jsonl", 1)[0]
+                assert name in campaign.FINETUNE_SETS, f"{path}: {p['data']} is not prefetched"

@@ -874,6 +874,79 @@ specifically for the hybrid/recurrent case above. Verified end to end
 an identical continuation to the original, uninterrupted state) before
 shipping.
 
+## Fine-tuning on your own text (`eullm finetune`)
+
+`eullm finetune` trains a model's weights on a text file, on the CPU or GPU
+the engine runs on, and writes a new GGUF that `eullm serve` loads like any
+other. It is llama.cpp's own trainer (ggml-opt) behind one command, so it
+works wherever the engine does — CUDA, ROCm, Metal, Vulkan, CPU — with no
+Python and no PyTorch. It is not Forge: Forge prunes, distils and trains
+LoRA adapters on a cluster; this adjusts a small model's weights in place,
+on one device.
+
+The model has to be F32: llama.cpp's trainer computes gradients for F32
+weights only. Convert one from Hugging Face with the converter of the
+engine's own llama.cpp:
+
+```bash
+python engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp/convert_hf_to_gguf.py \
+    ./Qwen3-0.6B-Base --outtype f32 --outfile qwen3-0.6b-base-f32.gguf
+
+eullm finetune qwen3-0.6b-base-f32.gguf --data corpus.jsonl --dry-run   # memory only
+eullm finetune qwen3-0.6b-base-f32.gguf --data corpus.jsonl --epochs 2 \
+    --output qwen3-0.6b-mine-f32.gguf
+```
+
+`--data` is a plain-text file, or JSONL with a `text` field on each line
+(the format of Forge's corpora); every document ends with the model's
+end-of-sequence token. The text is cut into windows of `--ctx` tokens (a
+multiple of 256), half a window apart unless `--stride` says otherwise, and
+the last `--val-split` of it (5%) is kept aside: loss, perplexity and
+next-token accuracy on it are measured before training and after each
+epoch, so you see whether the model is learning or only memorising.
+
+```text
+  model        qwen3 · 28 layers · 596.0 M parameters, 440.5 M to train (all but the token embeddings)
+  memory       ~8.4 GiB estimated (weights 2.2 GiB, gradients 1.6 GiB, optimizer 3.3 GiB, activations 756.0 MiB, logits 445.1 MiB, KV 56.0 MiB) · 14.9 GiB free
+  data         7473 documents · 2000 tokens: 9 windows to train, 3 to validate
+  before       loss 1.2051 ± 0.1142  ppl      3.34  acc 69.79% ± 1.66%  (768 tokens, 39.4 s, 19 tok/s)
+  train        loss 0.8155 ± 0.0530  ppl      2.26  acc 80.34% ± 0.83%  (2304 tokens, 178.7 s, 13 tok/s)
+  validation   loss 0.9386 ± 0.0457  ppl      2.56  acc 75.91% ± 1.54%  (768 tokens, 7.7 s, 100 tok/s)
+```
+
+**Memory.** Before it loads anything the command estimates what the run
+needs and refuses one that will not fit the free VRAM (or the free RAM, on a
+CPU); `--force` runs it anyway, `--dry-run` stops after the estimate. Every
+trained parameter costs a 4-byte gradient on top of its 4-byte weight, and
+AdamW (the default) keeps two more values per parameter, 8 bytes; `--optimizer
+sgd` keeps none. Activations grow with the square of `--ctx`, since attention
+is computed without flash attention while training. On Qwen3-0.6B the
+estimate was 8.4 GiB at `--ctx 256` and the process used 8.7. To fit a
+larger model, train fewer tensors — `--train-tensors 'blk.*.attn_*'` trains
+the attention blocks only (patterns match GGUF tensor names, `*` is any run
+of characters) — use SGD, or shorten the window.
+
+**Learning rate.** Each window is one optimizer step: a batch of a few
+hundred tokens, far smaller than the batches a pretrained model was trained
+with. The default, 1e-6, is low for that reason. On Qwen3-0.6B-Base at
+`--ctx 256`, nine steps at 1e-6 took held-out loss from 1.21 to 0.94, and
+the same nine at 1e-5 raised it to 1.32. A tiny model, or one trained from
+scratch, wants far more (the tests train a 260K-parameter model at 1e-4).
+`--lr-min` with `--decay-epochs` halves the rate from `--lr` down to that
+floor over those epochs, as llama.cpp's own finetune example does.
+
+**What comes out** is an F32 GGUF that declares the context length the model
+had (the trainer sets it to the training window; the command puts it back).
+Quantize it for deployment like any other model. `--report FILE` writes the
+whole run as JSON, and the last line printed is `FINETUNE_RESULT {...}`, the
+same object, for scripts.
+
+**Limits, all llama.cpp's.** The token embeddings are never trained (an open
+FIXME upstream), and neither is an output layer that shares them, as on
+Qwen3-0.6B. Training runs on one device (`--device`), with every layer on it.
+There is no LoRA: the weights themselves change, which is why the model has
+to fit with its gradients.
+
 ## What the engine does
 
 ### EULLM Engine

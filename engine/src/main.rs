@@ -2,6 +2,7 @@ mod api;
 mod audit;
 mod banner;
 mod chat_template;
+mod finetune;
 mod fit;
 mod gguf_patch;
 mod inference;
@@ -734,6 +735,19 @@ enum Commands {
         #[arg(long)]
         ollama_dir: Option<String>,
     },
+    /// Train a model's weights on a text, on this machine's CPU or GPU
+    ///
+    /// llama.cpp's own trainer, so its limits: an F32 GGUF, flash attention
+    /// off, the whole window in one micro-batch. Validation loss is measured
+    /// before and after each epoch; the result is a new F32 GGUF.
+    ///
+    /// Examples:
+    ///   eullm finetune ./model-f32.gguf --data corpus.txt --epochs 2
+    ///   eullm finetune ./model-f32.gguf --data train.jsonl --optimizer sgd --dry-run
+    Finetune {
+        #[command(flatten)]
+        opts: finetune::FinetuneOpts,
+    },
     /// Verticalize a model: compress, specialize, and brand it
     ///
     /// Examples:
@@ -1230,6 +1244,19 @@ async fn main() {
         Commands::Unload { port, model } => cmd_unload(port, model.as_deref()).await,
         Commands::ImportOllama { model, ollama_dir } => {
             cmd_import_ollama(&store, &model, ollama_dir.as_deref())
+        }
+        Commands::Finetune { opts } => {
+            let Some(path) = resolve_model_path(&opts.model, &store) else {
+                eprintln!(
+                    "Error: {} is neither a .gguf file nor a model in the store",
+                    opts.model
+                );
+                std::process::exit(1);
+            };
+            if let Err(e) = finetune::cmd(&opts, &path) {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Forge {
             source,
