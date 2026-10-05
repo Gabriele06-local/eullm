@@ -18,7 +18,10 @@
     "is recorded as does-not-fit), so each point also says how far off the estimate was (its",
     "memory_estimate against the HBM peak; on a CPU, Qwen3-0.6B at 256: 8.4 GiB est., 8.7 used).",
     "Learning rates: one window is one step, so lower than usual. On Qwen3-0.6B-Base, CPU,",
-    "--ctx 256, nine steps: held-out loss 1.21 -> 0.94 at 1e-6, -> 1.32 at 1e-5 (05-10-2026)."
+    "--ctx 256, nine steps: held-out loss 1.21 -> 0.94 at 1e-6, -> 1.32 at 1e-5 (05-10-2026);",
+    "the same run on an MI250X GCD gave the same numbers to the fourth decimal (ROCm backward",
+    "checked). 73 steps at --ctx 512 and 1e-6 raised it, 0.85 -> 0.94: the sweep reaches down",
+    "to 3e-8, and keeps 3e-6 so the curve is bracketed."
   ],
   "f32": {
     "qwen3-0.6b-base-f32.gguf": "Qwen/Qwen3-0.6B-Base",
@@ -38,6 +41,6 @@
     {"name": "ft-convergence", "priority": 40, "est_s": 10800,
      "set": {"epochs": 3, "limit_tokens": 0, "ft_ctx": 1024, "optimizer": "adamw"},
      "axes": {"model": ["qwen3-0.6b-base-f32.gguf", "qwen3-1.7b-base-f32.gguf"],
-              "lr": [3e-7, 1e-6, 3e-6]}}
+              "lr": [3e-8, 1e-7, 3e-7, 1e-6, 3e-6]}}
   ]
 }
