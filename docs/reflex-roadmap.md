@@ -384,13 +384,18 @@ cases, thresholds fitted on 160, every number below on the other 162.
     seconds, and at 16 between 5 and 41 of 50 requests are refused
     ("queue full"): the check's server runs one slot a model, whose queue
     holds eight. A backend for concurrent users runs `--batch-size`.
-  - **The soak failed on one count:** 4,770 requests of each kind in the
-    hour, none refused, every audit line there — but the VRAM read between
-    3.6 and 12.9 GB after the first minute. 12.9 GB is everything loaded,
-    3.6 GB the two chat models gone: models were unloaded and loaded again
-    mid-soak, or the reading caught one doing so. The check kept only the
-    extremes; it now keeps the whole series and the server's own count of
-    models unloaded, and runs alone with `CHECKS=4`. To run again.
+  - **The soak failed on one count, the test's own sizing:** 4,770 requests
+    of each kind in the hour, none refused, every audit line there — but the
+    VRAM read between 3.6 and 12.9 GB after the first minute. The server's
+    log says why: beside the embedder the soak reserves, qwen3-4b and
+    qwen3-8b at an 8,192-token context do not fit together on 16 GB, so the
+    server took them in turns for the whole hour, each swap waiting for the
+    other model's requests to end. That is the engine doing what it should
+    with a pair that does not fit; it is not the stable server the soak is
+    there to watch. The soak now takes the largest context at which the
+    warm-up keeps both models beside the embedder, keeps the VRAM series
+    and the server's count of models unloaded, and runs alone with
+    `CHECKS=4`. To run again.
 
 ## MVP 4 — decision models trained on your decisions  [🔧 now]
 

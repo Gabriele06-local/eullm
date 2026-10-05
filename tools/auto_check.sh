@@ -47,14 +47,15 @@
 # pair from sitting side by side on a 16 GB card. LIMIT=100 items per set, SETS=gsm8k,arc-easy,
 # arc-challenge,mmlu. DURATION=3600. CPU_SMALL=qwen3-1.7b.
 # CHECKS="1 2 3 4 5": the checks run (1 and 2 share a server, so one runs the
-# other); CHECKS=4 is the soak alone.
+# other); CHECKS=4 is the soak alone. SOAK_CTX="8192 6144 4096 2048": the
+# contexts the soak tries, the first at which the pair sits side by side.
 # PORT=11500, OUT=/tmp/auto-check. Needs curl and python3.
 set -u
 # Numbers with a decimal point whatever the locale.
 export LC_ALL=C
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-    sed -n '2,51p' "$0"
+    sed -n '2,52p' "$0"
     exit 2
 fi
 BIN=$(realpath "$1")
@@ -306,10 +307,25 @@ done
 fi
 
 # 4. Soak: mixed traffic at concurrency 8, VRAM sampled every 5 s.
+# The pair has to sit side by side beside the reserved embedder, or the hour
+# measures the swaps: on 4 October, at --ctx-size 8192 on 16 GB, the two
+# chat models took turns for the whole of it. The largest context of
+# SOAK_CTX at which the warm-up keeps both.
 if want 4; then
-routed "$OUT/4.log" "$SMALL" "$LARGE" "${DECISIONS[0]}" --ctx-size "$CTX" \
-    ${EMBED:+--embedding-model "$EMBED"} || exit 1
-warmed "$OUT/4.log"
+soak_ctx=
+for ctx in ${SOAK_CTX:-$CTX 6144 4096 2048}; do
+    routed "$OUT/4.log" "$SMALL" "$LARGE" "${DECISIONS[0]}" --ctx-size "$ctx" \
+        ${EMBED:+--embedding-model "$EMBED"} || exit 1
+    warmed "$OUT/4.log"
+    if [ "$(side_by_side "$OUT/4.log")" = yes ]; then
+        soak_ctx=$ctx
+        break
+    fi
+    down
+done
+if [ -z "$soak_ctx" ]; then
+    result FAIL "4 soak: $SMALL and $LARGE do not sit side by side beside ${EMBED:-nothing} at any context of ${SOAK_CTX:-$CTX 6144 4096 2048}: $(side_by_side "$OUT/4.log")"
+else
 # The server's own count of models unloaded, before and after: VRAM that moves
 # while models come and go is churn, VRAM that grows with none is a leak.
 churn() {
@@ -430,7 +446,8 @@ summary = ", ".join(f"{n} {k}" for k, n in done.items()) + vram
 print(("FAIL " + "; ".join(problems) + f" ({summary})") if problems else f"PASS {summary}")
 PY
 )
-result "${soak%% *}" "4 soak, $DURATION s at concurrency 8: ${soak#* }"
+result "${soak%% *}" "4 soak, $DURATION s at concurrency 8, --ctx-size $soak_ctx: ${soak#* }"
+fi
 fi
 
 # 5. Router latency on a CPU.
