@@ -295,3 +295,65 @@ def test_refusals_under_older_checks_are_asked_again_once(corpus, teacher, tmp_p
                      "--out", str(out), "--url", url]) == 0
     assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == ["cds/2019000000"]
     assert len(seen) == 1
+
+
+def test_sparse_bm25_ranks_like_bm25_and_returns_rulings_once():
+    from eullm_forge.caselaw.index import RulingIndex, SparseBM25, Unit
+
+    units = [Unit("cds/1", "aggiudicazione termine impugnazione profilo committente"),
+             Unit("cds/1", "spese di giudizio compensate"),
+             Unit("cds/2", "paesaggio strutture balneari vincolo"),
+             Unit("cds/3", "termine impugnazione bando di gara")]
+    bm = SparseBM25([u.text for u in units])
+    assert bm.ranking("impugnazione aggiudicazione", 10)[0] == 0
+    assert bm.ranking("parola assente", 10) == []
+    index = RulingIndex(units, bm25=bm)
+    # both words in both rulings: the shorter unit first, cds/1 once despite two units
+    assert index.search("termine impugnazione", k=10) == ["cds/3", "cds/1"]
+    assert index.search("strutture balneari", k=1) == ["cds/2"]
+
+
+def test_units_carry_the_card_prefix_and_cards_become_units(corpus):
+    from eullm_forge.caselaw import attach_meta, load_openga
+    from eullm_forge.caselaw.index import build_units
+
+    chunks_path, og = corpus
+    rulings = load_rulings([chunks_path])
+    attach_meta(rulings, load_openga([og]))
+    chunks = [json.loads(line) for line in chunks_path.read_text().splitlines()
+              if json.loads(line).get("kind") == "cds"]
+    cards = {"cds/2019000000": {**GOOD, "esito_openga": "RESPINGE"}}
+    plain = build_units(rulings, chunks)
+    pre = build_units(rulings, chunks, cards=cards, prefix_chunks=True, card_units=True)
+    assert len(pre) == len(plain) + 1
+    first = next(u for u in pre if u.ruling == "cds/2019000000")
+    assert first.text.startswith("[Cons. Stato, Sezione Quarta, n. 2019000000")
+    assert "respinge" in first.text.split("\n", 1)[0]
+    assert pre[-1].ruling == "cds/2019000000" and "termine per impugnare" in pre[-1].text
+
+
+def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, tmp_path, capsys):
+    chunks, og = corpus
+    questions = tmp_path / "dev-cards.jsonl"
+    questions.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in [
+        {"id": "cds/2019000000", "domande_ricerca": ["fatto0_3 fatto0_17 motivo0_9"],
+         "domande_esame": [{"domanda": "motivo0_100 motivo0_101", "risposta": "x",
+                            "rubrica": "y"}]},
+        {"id": "cds/2021000004", "domande_ricerca": ["fatto4_8 motivo4_150"],
+         "domande_esame": []}]))
+    dev = tmp_path / "dev.txt"
+    dev.write_text("cds/2019000000\ncds/2021000004\n")
+    cards = tmp_path / "schede.jsonl"
+    cards.write_text(json.dumps({"id": "cds/2019000000", **GOOD}, ensure_ascii=False) + "\n")
+    out = tmp_path / "ret.csv"
+    mod = _load("cds_retrieval")
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--cards", str(cards),
+                     "--questions", str(questions), "--dev-ids", str(dev),
+                     "--setting", "chunks", "prefix+cards", "--csv", str(out)]) == 0
+    rows = list(csv.DictReader(out.open()))
+    assert {(r["setting"], r["kind"]) for r in rows} == {
+        ("chunks", "ricerca"), ("chunks", "esame"),
+        ("prefix+cards", "ricerca"), ("prefix+cards", "esame")}
+    assert all(float(r["recall3"]) == 1.0 for r in rows)
+    printed = capsys.readouterr().out
+    assert "fatto0_3" not in printed and "recall@3 1.000" in printed
