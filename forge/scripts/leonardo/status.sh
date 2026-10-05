@@ -27,6 +27,12 @@
 
 set -uo pipefail
 
+# $WORK is Leonardo's. Run on another machine, the line below used to stop
+# the script with "WORK: unbound variable" and nothing else (5 October).
+if [ -z "${EULLM_RUNS:-}" ] && [ -z "${WORK:-}" ]; then
+    echo "status.sh runs on Leonardo, where \$WORK is set: ssh <user>@login.leonardo.cineca.it first" >&2
+    exit 2
+fi
 RUNS="${EULLM_RUNS:-$WORK/eullm_runs}"
 SINCE="${1:-$(date -d '-24 hours' +%Y-%m-%dT%H:%M)}"
 PROBLEMS=0
