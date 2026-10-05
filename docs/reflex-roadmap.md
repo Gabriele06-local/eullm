@@ -1,8 +1,9 @@
 # Reflex — roadmap for EuLLM's decision primitive
 
-**Status:** MVP 0 done; MVP 1 measured on MuSiQue, its Italian set next;
-MVP 2 done; MVP 3 done, its GPU validation half run; MVP 4's code merged, its
-first model not trained yet · 4 October 2026
+**Status:** MVP 0 done; MVP 1 measured on MuSiQue and on an Italian legal
+set, where Reflex is the clearly better gate; MVP 2 done; MVP 3 done and
+measured: fast and exact, but the Jev-Style models do not route well; MVP 4's
+code merged, its first model (the Italian RAG gate) now unblocked · 5 October 2026
 **Built on:** `POST /v1/systemone`, shipped in v0.7.20
 
 Operational document: every item has a tag —
@@ -210,13 +211,13 @@ is the candidate there, not yet measured.
     for decisions, asked the same questions through the code readout. It
     does no better — see the results below: MuSiQue's limit is the task,
     not the 2B's size.
-  - [🔧 now] An Italian set: `rg_openbook.py` writes it from Forge's
+  - [✅ measured] An Italian set: `rg_openbook.py` writes it from Forge's
     open-book pairs — each question asked by topic about an article of
     Italian law, with the articles retrieval finds, its own among them or
     left out, the two contexts Forge trains the legal model on. Written
     where the pairs are; while the cluster is down, `--by-heading` asks by
-    each article's rubrica from the legislation records alone. Its run is
-    next.
+    each article's rubrica from the legislation records alone. Run on
+    4 October: see the Italian results below.
 
 ### RAG gate, first results — RTX 5070 Ti, Jev-Style 2B
 
@@ -254,6 +255,35 @@ when it may stop at most about one sufficient case in ten:
 - MuSiQue's questions take two to four hops; most questions put to a
   company's documents take one. The Italian set is what says how the gate
   does on those.
+
+### RAG gate, Italian legal set — RTX 5070 Ti, Jev-Style 2B
+
+4 October 2026. `rg_openbook.py --by-heading` on the legislation records of
+the reference PC: 161 questions, each asked by an article's rubrica, with
+the three articles retrieval finds, its own among them or left out — 322
+cases, thresholds fitted on 160, every number below on the other 162.
+
+| Method | AUROC | Within a question | Own decision: stopped insufficient / sufficient | Fitted threshold: stopped insufficient / sufficient | ECE | p50 |
+|---|---|---|---|---|---|---|
+| Embeddings, best similarity | 0.788 | 0.901 | — | 81.5% / 39.5% | — | 6 ms |
+| Reflex, choice among three | 0.896 | 0.951 | 56.8% / 6.2% | 80.2% / 16.0% | 0.081 | 96 ms |
+| Reflex, yes/no | 0.904 | 0.951 | 76.5% / 13.6% | 79.0% / 16.0% | 0.060 | 93 ms |
+
+- **Reflex is the clearly better gate here.** Stopping about four
+  insufficient contexts in five, it stops 16% of the sufficient ones; the
+  embeddings, to stop as many, stop 39.5%. On one-hop questions about a
+  statute the gap is wider than on MuSiQue's multi-hop ones.
+- **Its own decision is usable without a threshold.** The yes/no stops
+  76.5% of the insufficient contexts and 13.6% of the sufficient ones as it
+  comes, where on MuSiQue it stopped two thirds of the sufficient ones. The
+  probabilities are calibrated well enough to tune on (ECE 0.06–0.08).
+- **The price is the reading:** about 1,450 tokens a decision, the
+  articles being long, so 93–96 ms on the GPU against 6 ms for a
+  similarity, which the RAG system has computed anyway.
+- 162 test cases: enough to tell 0.90 from 0.79, not to rank the two Reflex
+  methods. The kill criterion is not met: at the same share of insufficient
+  contexts stopped, the embeddings stop two and a half times as many
+  sufficient ones.
 
 ## MVP 2 — adapters, not a runtime  [✅ done]
 
@@ -299,8 +329,15 @@ when it may stop at most about one sufficient case in ten:
   needs its place, `/api/ps` listing them. With the default of 1 the engine
   swaps as it always did. `tools/residency_check.sh` passed 7 of 7 on the
   RTX 5070 Ti on 1 October, before the routing commits.
-- [🔧 now] Its last GPU checks: the embedder beside two streaming models
-  (V5 in the plan) and a 32B alone (V3), with `tools/residency_check.sh`.
+- [🔧 now] Its last GPU checks, 4 October with `tools/residency_check.sh`:
+  6 of 7 pass. V3 does: qwen3-32b loads alone, split between GPU and RAM,
+  after unloading the two it could not sit beside; a third model waits for
+  one of two streaming answers to end; a load beside a resident model keeps
+  its time to first token (6.4 ms against 5.9). The embedder beside two
+  models (V5) did not run: at the 20,480-token context the check gave them,
+  qwen3-4b and qwen3-8b do not fit together on 16 GB, so loading one
+  unloaded the other before the embedder came in. The check now picks the
+  largest context at which the two sit side by side; to run again.
 - **Large-VRAM testing on EuroHPC**, where two big models fit side by side:
   - **LUMI-G** — AMD MI250X, 64 GB per GCD, eight GCDs per node. The
     development allocation EHPC-DEV-2026D09-278 funds exactly this kind of
@@ -317,11 +354,43 @@ when it may stop at most about one sufficient case in ten:
   choice cannot load. A short `tools/auto_check.sh` passed 9 of 9 on the
   RTX 5070 Ti: answers identical to asking the model by name, the router
   deciding in 15-19 ms, VRAM stable.
-- [🔧 now] The full measurement: AutoBench on two model pairs with the
+- [✅ measured] The full measurement, 4 October (`tools/auto_check.sh`,
+  RTX 5070 Ti, 50 test items a set): AutoBench on two model pairs with the
   Jev-Style 0.8B and 2B as routers, at 1, 4 and 16 concurrent requests, a
-  one-hour soak, and the router on the CPU — large-model calls avoided,
-  latency and quality against always using the large one, judged by the
-  plan's kill criterion (§3).
+  one-hour soak, and the router on the CPU.
+  - **The plumbing holds.** Every answer through `auto` is the one the
+    chosen model gives alone, on every endpoint, streamed or not, at every
+    concurrency. The router decides in 14 ms (0.8B) and 17 ms (2B) at the
+    median, the plan's gate is 60; 224 and 270 ms at 16 at once, the
+    decisions queueing on one worker. On a CPU a Qwen3-0.6B decision model
+    takes 239 ms.
+  - **The routing does not earn its place with these models.** Pair A
+    (qwen3-4b, qwen3-8b) is no routing problem: the 4B is as good as the 8B
+    or better on three sets of four. On pair B (qwen3-1.7b, qwen3-14b),
+    where the 14B is 18 to 30 points better, the routers tell the questions
+    the 1.7B can answer from the rest barely better than chance (AUROC
+    0.44–0.72 for the 0.8B, 0.18–0.68 for the 2B, best on MMLU). Their own
+    decisions either send almost everything to the 14B or lose points
+    (the 0.8B: 96% of ARC-Challenge to the 1.7B, 16 points down); with a
+    threshold fitted on the dev half they avoid 0–14% of the large calls.
+    The kill criterion is met on ARC-Easy and, for the 0.8B, on
+    ARC-Challenge, where a length threshold or the embeddings' neighbours
+    do as well. Not on GSM8K or MMLU, but there Reflex itself avoids few
+    calls. The Jev-Style models were trained for other decisions; whether
+    a router trained on this very question does better is MVP 4's to
+    answer, with AutoBench's own labels (which questions each model got
+    right) as its training set.
+  - At 4 and 16 concurrent requests the time to the first token climbs to
+    seconds, and at 16 between 5 and 41 of 50 requests are refused
+    ("queue full"): the check's server runs one slot a model, whose queue
+    holds eight. A backend for concurrent users runs `--batch-size`.
+  - **The soak failed on one count:** 4,770 requests of each kind in the
+    hour, none refused, every audit line there — but the VRAM read between
+    3.6 and 12.9 GB after the first minute. 12.9 GB is everything loaded,
+    3.6 GB the two chat models gone: models were unloaded and loaded again
+    mid-soak, or the reading caught one doing so. The check kept only the
+    extremes; it now keeps the whole series and the server's own count of
+    models unloaded, and runs alone with `CHECKS=4`. To run again.
 
 ## MVP 4 — decision models trained on your decisions  [🔧 now]
 
@@ -340,7 +409,9 @@ when it may stop at most about one sufficient case in ten:
   "Interchangeable" is earned by passing it, not by a configuration line.
 - [🆕 next] The first decision model of our own: the RAG gate, trained on
   MVP 1's Italian set (`docs/forge.md`) and qualified with
-  `qualify.py`. It waits on that set's run.
+  `qualify.py`. The set has run (MVP 1 above): the Jev-Style 2B is the bar,
+  AUROC 0.90 and 16% of sufficient contexts stopped at four in five
+  insufficient ones caught.
 
 ## Beyond MVP 4  [🆕 next]
 

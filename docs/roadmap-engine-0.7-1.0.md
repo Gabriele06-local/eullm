@@ -101,6 +101,11 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   fallisce). Il batch misto in un'unica chiamata resta un'ottimizzazione
   possibile, da misurare.
 
+  **Provato su GPU** il 4 ottobre (RTX 5070 Ti, qwen3-8b, `--batch-size 2`,
+  `bench/interleave_check.py`): mentre il server legge un prompt di 8.144 token
+  in 1,52 s, la risposta in streaming continua, con la pausa più lunga di
+  108 ms (letto intero, si fermerebbe per tutta la lettura).
+
 - [x] **0.7-E · Auto-composizione `--fit` + `--n-cpu-moe`** *(implementato
   0.6.70-rc14)*
   Prima la scelta di N era manuale (trial-and-error documentato nel README).
@@ -353,22 +358,35 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   stesso modello in EuLLM. Lo script c'è: `bench/mtp_test_d.sh` (0, 1 e 2
   bozze, esperti in RAM bloccati con `--load-mode none` e cache in VRAM).
 
-  Sotto-voci, ciascuna con la misura che la decide:
+  Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
+  RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
   - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
     pausa sotto una soglia, ripresa dopo N token). Ha senso dove un draft
-    rifiutato costa: MoE con offload, temperatura alta. Si decide con
-    `bench/mtp_sweep.sh` a `TEMPERATURE=0.8` e con la prova D.
-  - **Testa MTP in Q8_0.** Nei GGUF unsloth Q4_K_M la proiezione propria della
-    testa è già Q8_0, ma attenzione e FFN dello strato MTP sono Q4_K/Q6_K.
-    Le accettazioni misurate (58-75%) escludono il crollo che colibri vede con
-    una testa int4 (0-4%); una variante con lo strato MTP in Q8_0 dice se ne
-    resta da guadagnare: `bench/mtp_head_q8.sh` la prepara (due Q4_K_M dalla
-    stessa sorgente Q8_0, che differiscono solo nello strato MTP) e le misura.
-  - **Rejection sampling di Leviathan a temperatura > 0.** Oggi una bozza è
-    tenuta se è il token che il modello campiona: senza perdita, ma a
-    temperatura alta ne scarta di accettabili. Serve che lo shim esponga le
-    probabilità della testa. Si fa solo se l'accettazione a 0.8 cala di molto
-    rispetto a 0 (`TEMPERATURE=0.8 bench/mtp_sweep.sh`).
+    rifiutato costa: MoE con offload, temperatura alta. **Su un denso in GPU
+    non serve:** a temperatura 0.8 le bozze tenute sono 72% con `--mtp 1`, 56%
+    con 2, 46% con 3, mai vicine a una soglia di pausa. Conta invece quante
+    bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
+    contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
+    164,5 con 1 e 119,1 senza). Per i MoE si decide con la prova D, che non è
+    ancora partita: manca il GGUF di Qwen3.6-35B-A3B-MTP.
+  - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
+    proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
+    MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla
+    stessa sorgente Q8_0, diverse solo nello strato MTP: bozze tenute 75/62/50%
+    con 1/2/3 bozze nel file come unsloth, 73/62/48% con tutto lo strato in
+    Q8_0, e velocità uguali entro il rumore (`--mtp 2`: 153,6/186,0 contro
+    151,0/191,0 tok/s su racconto e codice), per 86 MiB in più.
+  - **Rejection sampling di Leviathan a temperatura > 0: chiusa, non
+    conviene.** Oggi una bozza è tenuta se è il token che il modello campiona:
+    senza perdita, ma a temperatura alta ne scarta di accettabili. Si faceva
+    solo se l'accettazione a 0.8 calava di molto rispetto a 0: con `--mtp 2`
+    è 56% a 0.8 contro 58% a 0 sullo stesso file, quindi c'è poco da
+    recuperare per uno shim che dovrebbe esporre le probabilità della testa.
+
+  Il rumore tra un avvio del server e l'altro, da tenere presente leggendo
+  queste cifre: lo stesso modello senza bozze ha scritto 111,4 e 120,5 tok/s
+  in due avvii (i due file di `mtp_head_q8.sh` sono identici fuori dallo
+  strato MTP, che con `--mtp 0` non lavora).
 
 ## 0.9 — Agentic e verticale
 
