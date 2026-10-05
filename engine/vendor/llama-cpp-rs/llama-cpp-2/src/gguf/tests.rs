@@ -27,6 +27,14 @@ fn no_tensors_in_vocab_file() {
 }
 
 #[test]
+fn tensor_accessors_refuse_out_of_range() {
+    let ctx = GgufContext::from_file(Path::new(FIXTURE)).unwrap();
+    assert_eq!(ctx.tensor_name(0), None);
+    assert_eq!(ctx.tensor_type(-1), None);
+    assert_eq!(ctx.tensor_size(0), None);
+}
+
+#[test]
 fn find_known_key() {
     let ctx = GgufContext::from_file(Path::new(FIXTURE)).unwrap();
     let idx = ctx.find_key("general.architecture");

@@ -758,6 +758,42 @@ impl LlamaModel {
         unsafe { llama_cpp_sys_2::llama_model_n_params(self.model.as_ptr()) }
     }
 
+    /// Write the model's current weights and metadata to a GGUF file — after
+    /// training, the trained weights.
+    ///
+    /// llama.cpp's saver reports no error, so this removes whatever is at
+    /// `path` first and checks that a file is there afterwards. It writes
+    /// the metadata as the model holds it *now*: training
+    /// (`crate::opt::Trainer`) sets the context length to the one trained at,
+    /// and callers that want the original back have to patch the file.
+    ///
+    /// # Errors
+    ///
+    /// A path that is not UTF-8 or contains a NUL, one whose old file cannot
+    /// be removed, or no file afterwards.
+    pub fn save_to_file(&self, path: impl AsRef<Path>) -> Result<(), std::io::Error> {
+        let path = path.as_ref();
+        let c_path = path
+            .to_str()
+            .and_then(|s| CString::new(s).ok())
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not valid UTF-8")
+            })?;
+        match std::fs::remove_file(path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        unsafe { llama_cpp_sys_2::llama_model_save_to_file(self.model.as_ptr(), c_path.as_ptr()) };
+        if path.is_file() {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("llama.cpp wrote no file at {}", path.display()),
+            ))
+        }
+    }
+
     /// Returns whether the model is a recurrent network (Mamba, RWKV, etc)
     pub fn is_recurrent(&self) -> bool {
         unsafe { llama_cpp_sys_2::llama_model_is_recurrent(self.model.as_ptr()) }

@@ -102,6 +102,37 @@ impl GgufContext {
     pub fn n_tensors(&self) -> i64 {
         unsafe { llama_cpp_sys_2::gguf_get_n_tensors(self.ctx.as_ptr()) }
     }
+
+    /// Name of the tensor at `idx`, or `None` for an index out of range or a
+    /// name that is not UTF-8.
+    pub fn tensor_name(&self, idx: i64) -> Option<&str> {
+        if idx < 0 || idx >= self.n_tensors() {
+            return None;
+        }
+        let ptr = unsafe { llama_cpp_sys_2::gguf_get_tensor_name(self.ctx.as_ptr(), idx) };
+        if ptr.is_null() {
+            return None;
+        }
+        unsafe { CStr::from_ptr(ptr).to_str().ok() }
+    }
+
+    /// Storage type of the tensor at `idx` (a `ggml_type`), or `None` for an
+    /// index out of range.
+    pub fn tensor_type(&self, idx: i64) -> Option<llama_cpp_sys_2::ggml_type> {
+        if idx < 0 || idx >= self.n_tensors() {
+            return None;
+        }
+        Some(unsafe { llama_cpp_sys_2::gguf_get_tensor_type(self.ctx.as_ptr(), idx) })
+    }
+
+    /// Size in bytes of the tensor at `idx` as stored in the file, or `None`
+    /// for an index out of range.
+    pub fn tensor_size(&self, idx: i64) -> Option<usize> {
+        if idx < 0 || idx >= self.n_tensors() {
+            return None;
+        }
+        Some(unsafe { llama_cpp_sys_2::gguf_get_tensor_size(self.ctx.as_ptr(), idx) })
+    }
 }
 
 impl Drop for GgufContext {
