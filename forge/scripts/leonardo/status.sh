@@ -17,6 +17,9 @@
 #     (DependencyNeverSatisfied, a hold);
 #   * a watcher whose file exists but is empty. One that simply waits long
 #     is shown, not flagged: the package watcher waits a whole training run;
+#   * $WORK more than 90% full. On 2026-10-05 it reached 109% of its 1 TB
+#     quota unnoticed, and a 27B conversion failed writing its first tensor;
+#     every job that writes a checkpoint would have been next;
 #   * no GPU job running or queued at all. On 2026-10-04 the allocation spent
 #     1.8 node-hours in a day with ~530 left for 29 days, and it was the user
 #     who noticed. Idle GPUs are flagged, unspent hours are not: the rule is
@@ -130,6 +133,17 @@ for name in $(squeue --me -h -o "%j" | grep '^wait-' | sort -u); do
     fi
 done
 [ "$found" -eq 1 ] || echo "   none queued"
+
+echo
+echo "== disk =="
+# df, not cindata: cindata's figure lags by hours, df is the filesystem now.
+pct="$(df -P "${WORK:-$RUNS}" 2>/dev/null | awk 'NR == 2 {sub("%", "", $5); print $5}')"
+if [ -n "$pct" ]; then
+    echo "   \$WORK ${pct}% full"
+    if [ "$pct" -ge 90 ]; then
+        flag "\$WORK is ${pct}% full: free space before a job fails writing (du -sh \$WORK/*)"
+    fi
+fi
 
 echo
 echo "== GPU work =="
