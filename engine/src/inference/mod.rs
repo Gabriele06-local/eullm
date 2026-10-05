@@ -659,8 +659,21 @@ pub fn parse_cache_type(s: &str) -> Result<KvCacheType, String> {
 /// back to all physical cores, falling back to the logical count when the
 /// platform will not tell us. Matching the reference implementation is also
 /// what makes a like-for-like benchmark against it meaningful.
+///
+/// Never more than the CPUs this process may run on, though. `/proc/cpuinfo`
+/// lists the whole machine; `available_parallelism()` follows the affinity
+/// mask and the cgroup quota. Under Slurm's `-c 7` on a 64-core LUMI-G node,
+/// or `taskset`, or `docker --cpuset-cpus`, the physical count asked for 64
+/// threads on 7 CPUs (`threads: 64` in an `eullm finetune` report,
+/// 05-10-2026) — the over-subscription measured above, nine times over.
 pub fn default_thread_count() -> u32 {
-    physical_core_count().unwrap_or_else(logical_core_count)
+    thread_default(physical_core_count(), logical_core_count())
+}
+
+/// The physical cores, or `allowed` when they are unknown, and never more
+/// than the `allowed` CPUs.
+fn thread_default(physical: Option<u32>, allowed: u32) -> u32 {
+    physical.unwrap_or(allowed).min(allowed).max(1)
 }
 
 /// Logical CPUs — the last-resort answer, and the previous default.
@@ -3347,6 +3360,16 @@ core id\t\t: 0
         let cpuinfo = "processor\t: 0\nBogoMIPS\t: 108.00\n\nprocessor\t: 1\n";
         assert_eq!(parse_physical_cores(cpuinfo), None);
         assert_eq!(parse_physical_cores(""), None);
+    }
+
+    #[test]
+    fn the_default_never_exceeds_the_cpus_the_process_may_use() {
+        // A 64-core node with the job bound to 7 CPUs.
+        assert_eq!(thread_default(Some(64), 7), 7);
+        // A 6-core/12-thread machine, unrestricted: the physical cores.
+        assert_eq!(thread_default(Some(6), 12), 6);
+        assert_eq!(thread_default(None, 8), 8);
+        assert_eq!(thread_default(Some(0), 0), 1);
     }
 
     #[test]
