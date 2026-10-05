@@ -193,7 +193,10 @@ Hub on 05-10-2026: Qwen and gpt-oss Apache-2.0, DeepSeek-V3.1 MIT. No Llama.
 
 - **c01, catalog** (Q4_K_M): Qwen3 4B/8B/14B/32B, Mistral-Small-24B,
   Qwen3.6-27B, Qwen3.6-35B-A3B; plus the 12-09 reference model,
-  `qwen3.8-27b-ud-q8_k_xl`, so its rows repeat exactly.
+  `unsloth/Qwen3.8-27B-GGUF` UD-Q8_K_XL (29.3 GiB), so its rows repeat
+  exactly. It was gone from LUMI by 05-10 and is pulled again; the engine now
+  names it `qwen3.8-27b-gguf-ud-q8_k_xl`, the 12-09 rows
+  `qwen3.8-27b-ud-q8_k_xl` — the same file.
 - **c02, from Hugging Face**: Qwen3 8B/14B/32B Q8_0 against c01's Q4_K_M;
   Qwen3-30B-A3B Q4_K_M and Q8_0; gpt-oss-20b and -120b (MXFP4, 11 and 59
   GiB); Qwen3-235B-A22B Q4_K_M (132 GiB: 4 GCDs, so one split or two

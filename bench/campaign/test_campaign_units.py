@@ -284,8 +284,6 @@ def test_shipped_campaigns_expand():
         catalog = {m["id"] for m in json.load(f)["models"]}
     paths = sorted(glob.glob(os.path.join(root, "tools", "lumi", "campaigns", "*.json")))
     assert paths
-    # Pulled on LUMI on 12-09-2026 for the first measurements (docs/lumi/lumi-g.md).
-    already_on_lumi = {"qwen3.8-27b-ud-q8_k_xl"}
     for path in paths:
         with open(path) as f:
             spec = json.load(f)
@@ -293,7 +291,7 @@ def test_shipped_campaigns_expand():
         assert points, path
         pulled = {campaign.hf_ref_to_id(r) for r in spec.get("pull", [])}
         served = {p["model"] for p in points if p["kind"] != "finetune"}
-        unknown = served - catalog - pulled - already_on_lumi
+        unknown = served - catalog - pulled
         assert not unknown, f"{path}: models with no source: {sorted(unknown)}"
         # A model a finetune point trains is converted from the repo the
         # spec's f32 map names, and its data is a set prefetch writes.
