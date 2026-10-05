@@ -32,7 +32,7 @@ def _exe(path: Path, body: str) -> None:
 
 def run_status(tmp_path: Path, queue: list[tuple[str, str, str]],
                ended: list[tuple[str, str, str, str]],
-               gpu_queue: list[str] | None = None) -> str:
+               gpu_queue: list[str] | None = None, disk_pct: int = 50) -> str:
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
     q_reason = "\\n".join("|".join(j) for j in queue)
@@ -57,6 +57,10 @@ case "$*" in
   *JobID*) printf '{rows}\\n' ;;
   *) printf '{short}\\n' ;;
 esac
+""")
+    _exe(bin_ / "df", f"""#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'
+printf 'lustre 1000 {disk_pct * 10} 0 {disk_pct}%% /work\\n'
 """)
     env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}",
            "EULLM_RUNS": str(tmp_path / "runs")}
@@ -215,3 +219,13 @@ def test_an_idle_gpu_queue_is_flagged_and_a_queued_chain_is_not(tmp_path, runs):
     out = run_status(tmp_path, queue=[("eullm-grpo-r2-v04", "PENDING", "Dependency")],
                      ended=[], gpu_queue=["59332673"])
     assert "idle" not in out and "nothing wrong found" in out
+
+
+def test_a_full_disk_is_flagged(tmp_path, runs):
+    """2026-10-05: $WORK at 109% of its quota, found by a conversion failing."""
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[],
+                     disk_pct=94)
+    assert "[!!] $WORK is 94% full" in out
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[],
+                     disk_pct=78)
+    assert "78% full" in out and "nothing wrong found" in out
