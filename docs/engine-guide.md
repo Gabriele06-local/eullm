@@ -595,6 +595,26 @@ At exit the cache's totals print too. Both variables are read by the
 patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
 and may change or go once it is settled.
 
+**Copying the experts ahead while reading a prompt (experimental, off by
+default).** Reading a prompt copies each layer's experts to the card and
+then computes them, one after the other, with the GPU idle during the copy.
+`LLAMA_MOE_PREFETCH=1` copies the next expert tensors on a second stream of
+the GPU while the current one computes, into four slots of VRAM the size of
+the largest expert tensor (1 GiB in all on the model above;
+`LLAMA_MOE_PREFETCH_SLOTS`, 2 to 8). On the reference PC it read a
+33,200-token prompt at 1,743 tokens/s instead of 1,228 (+42%), to the same
+answer token for token; two slots gained 10%, three 18%. It
+applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
+on one NVIDIA GPU (a CUDA build), with the model read into memory rather
+than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
+allows. The slots come out of the VRAM `--fit` leaves free, and only if a
+twentieth of the card, at least 512 MiB, stays free beside them; if not, it
+stays off and says how much it needed, and lowering `--moe-cache` by the
+difference makes room. One line on stderr says it is on, with the slots'
+size, or why it is off. `bench/prefetch_check.sh` compares the answer and
+the speeds with and without it on any MoE (`docs/moe-offload-plan.md`,
+phase 6, has the measurements).
+
 ## Speculative decoding with the model's MTP head (`--mtp N`)
 
 Some models are trained with a multi-token prediction (MTP) head: a small
@@ -672,10 +692,20 @@ step-by-step to a chunked algorithm — and where two tokens are nearly tied
 the pick can differ, as with prompt-cache reuse (see `cache_prompt`). On
 that model, answers with real drafts and with drafts that were all wrong
 (every decode taken back) came out identical, character for character, and
-both left the plain answer at the same character. A hybrid model's
+both left the plain answer at the same character. A test checks the first
+half on every model with MTP layers it is given:
+`EULLM_MTP_TEST_MODEL=… cargo test -p eullm-engine -- --ignored real_model_mtp`
+fails if a draft the model rejected, or a token decoded after one, ever
+reaches the answer. A hybrid model's
 recurrent-state rollback window is raised to N for the drafts it may take
 back (`--rs-seq`); the startup banner shows the drafts asked for, and each
-answer's end logs how many drafts the model kept.
+answer says how many drafts the head proposed and the model kept: `draft_n`
+and `draft_n_accepted` beside Ollama's durations, in llama-server's `timings`
+on `/v1/chat/completions`, and on the answer's audit line. `speed_check.py`
+prints the share kept after the speed, and `bench/mtp_sweep.sh` reads it from
+there; `TEMPERATURE=0.8 bench/mtp_sweep.sh …` measures it at the default
+sampling temperature, where a draft is kept only when it is the token the
+model samples.
 
 ## KV-cache reuse
 

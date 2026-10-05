@@ -17,32 +17,52 @@ Nothing to install on your system except Docker. No risk of breaking drivers or 
 
 ### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) 24+
-- [Docker Compose](https://docs.docker.com/compose/install/) v2+
-- (Optional) [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for GPU support
+- [Docker](https://docs.docker.com/get-docker/) 24+ with [Compose](https://docs.docker.com/compose/install/) v2 (`docker compose`)
+- (Optional) the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) and an NVIDIA driver r580 or newer, for the GPU engine and the Forge
 
 ### 1. Clone and start
 
+The images are built from the repository, and llama.cpp is a git submodule
+of it: clone with `--recursive` (in a clone you already have,
+`git submodule update --init --recursive`).
+
 ```bash
-git clone https://github.com/eullm/eullm.git
+git clone --recursive https://github.com/eullm/eullm.git
 cd eullm
 
-# Start the Engine (CPU)
-docker compose up engine
+# Build and start the Engine (CPU). The first build compiles it, in a few minutes.
+docker compose up -d engine
 ```
 
-The API is live at `http://localhost:11434`.
+The API is at `http://localhost:11434` and the chat UI at
+`http://localhost:11435/`, from this machine only — see
+[Serving other machines](#serving-other-machines). Download a model and ask
+it something:
+
+```bash
+docker compose exec engine eullm pull qwen3-0.6b
+
+curl http://localhost:11434/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"model": "qwen3-0.6b", "messages": [{"role": "user", "content": "Ciao!"}], "stream": false}'
+```
 
 ### 2. With NVIDIA GPU
 
 ```bash
-docker compose --profile gpu up engine-gpu
+docker compose --profile gpu up -d engine-gpu
 ```
+
+The first build compiles the CUDA kernels for RTX 3000, 4000 and 5000 GPUs
+and takes much longer than the CPU one. For A100/H100, or a driver older
+than r580 (CUDA 12), uncomment the `args:` of `engine-gpu` in
+`docker-compose.yml`; the comments in `engine/Dockerfile.cuda` give the
+values. Run either engine, not both: they share the ports.
 
 ### 3. Start Engine + Hub together
 
 ```bash
-docker compose up engine hub
+docker compose up -d engine hub
 ```
 
 Hub API available at `http://localhost:3000`.
@@ -60,21 +80,46 @@ docker compose run --rm forge forge Qwen/Qwen3-14B --profile legal-it --estimate
 docker compose run --rm forge profiles
 ```
 
+What the Forge writes to relative paths (`./output`, `./datasets`) lands in
+the `forge-output` volume, its working directory. The image carries
+llama.cpp's GGUF converter and `llama-quantize`, from the same llama.cpp the
+engine is built with, so the export stage runs inside it.
+
 ### 5. Build individual images
+
+From the repository root, every one of them:
 
 ```bash
 # Engine (CPU)
-docker build -t eullm-engine engine/
+docker build -f engine/Dockerfile -t eullm/engine .
 
 # Engine (NVIDIA GPU)
-docker build -t eullm-engine --build-arg FEATURES=cuda engine/
+docker build -f engine/Dockerfile.cuda -t eullm/engine:cuda .
 
-# Forge
-docker build -t eullm-forge forge/
+# Forge (NVIDIA GPU; PyTorch for CUDA 13 — for an older driver add
+# --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu126)
+docker build -f forge/Dockerfile -t eullm/forge .
 
 # Hub
-docker build -t eullm-hub hub/
+docker build -f hub/Dockerfile -t eullm/hub .
 ```
+
+Started with `docker run` instead of compose, the engine needs the address
+it is reached from in its allowlist, as compose sets it:
+
+```bash
+docker run -d -p 127.0.0.1:11434:11434 -v eullm-models:/models \
+  -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine
+```
+
+### Serving other machines
+
+Compose publishes the engine on this machine's loopback only. To serve
+other machines, drop the `127.0.0.1:` from its `ports:` and set API keys
+(`EULLM_API_KEYS` or `EULLM_API_KEYS_FILE`, in the `environment:` block of
+`docker-compose.yml`): once the port is public the IP allowlist can no longer
+tell callers apart, and a bearer token is the control that survives Docker's
+address translation. See [SECURITY.md](../SECURITY.md).
 
 ### Docker volumes
 
@@ -84,6 +129,11 @@ docker build -t eullm-hub hub/
 | `audit` | Engine audit trail logs |
 | `forge-output` | Forge pipeline output |
 | `hf-cache` | HuggingFace model cache |
+
+Every image runs as the same unprivileged user, uid 10001, which owns the
+volumes. A directory of your own mounted in their place (`-v ~/models:/models`)
+must be writable by it: `sudo chown -R 10001:10001 ~/models`, or run the
+container as yourself with `--user "$(id -u):$(id -g)"`.
 
 Skip to [Talk to the model](#5-talk-to-the-model) to start using the API.
 
@@ -96,7 +146,7 @@ Skip to [Talk to the model](#5-talk-to-the-model) to start using the API.
 | Tool | Version | Check |
 |---|---|---|
 | **Git** | any | `git --version` |
-| **Rust** | 1.75+ | `rustc --version` |
+| **Rust** | 1.85+ (edition 2024) | `rustc --version` |
 | **C/C++ compiler** | gcc 11+ or clang 14+ | `gcc --version` |
 | **CMake** | 3.14+ | `cmake --version` |
 | **libclang** | 11+ | `dpkg -l libclang-dev` (Linux) |

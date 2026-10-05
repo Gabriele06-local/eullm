@@ -2902,20 +2902,25 @@ mod tests {
     /// no flash attention (`DecisionModel::exact`) to take the cache's own
     /// rounding out.
     ///
-    /// What is left is the model's arithmetic. On F32 weights the modes
-    /// agree to ~2e-6 on the CPU (stories260K, measured), which is what the
-    /// default tolerance is for. A CUDA build defaults to 2e-2 instead:
-    /// ggml-cuda runs every cuBLAS handle in TF32 mode, so "F32" products
-    /// keep a 10-bit mantissa, and the same test measured 6.4e-3 on an RTX
-    /// 5070 Ti — still far below what a question reading another's tokens
-    /// would cost. On quantized weights they do not agree, and cannot: a
-    /// different batch sums the same products in another order, and the
-    /// 8-bit activation quantization of a Q8_0 model turns that last-digit
-    /// difference into a different rounding one layer later — measured on
-    /// Qwen3-0.6B: 1e-2 (F16) and up to 0.67 nats (Q8_0) on the same
-    /// questions. Run it on an F32 model (the 1.2 MB `stories260K.gguf`
-    /// llama.cpp's CI uses is enough); a quantized one needs
-    /// `EULLM_DECISION_TEST_TOLERANCE` and proves less.
+    /// What is left is the model's arithmetic, and it treats the two modes
+    /// differently. `SharedPrefix` gives `Separate`'s numbers bit for bit on
+    /// the CPU, whatever the weights — measured on stories260K (F32) and
+    /// Qwen3-0.6B (F16 and Q8_0) — and is held to exactly that there.
+    /// `Batched` decodes the questions together, a different batch that sums
+    /// the same products in another order: on F32 weights that moves the
+    /// last digits only, ~2e-6 on the CPU (stories260K), which is what the
+    /// default tolerance is for, but the 8-bit activation quantization of a
+    /// Q8_0 model turns it into a different rounding one layer later —
+    /// 7e-3 (F16) and 0.39 nats (Q8_0) on Qwen3-0.6B's questions after the
+    /// first. That is noise, not a question reading another's tokens, and
+    /// why the batched check needs an F32 model (the 1.2 MB
+    /// `stories260K.gguf` llama.cpp's CI uses is enough); a quantized one
+    /// needs `EULLM_DECISION_TEST_TOLERANCE` and proves less.
+    ///
+    /// A CUDA build holds both modes to 2e-2 instead: ggml-cuda runs every
+    /// cuBLAS handle in TF32 mode, so "F32" products keep a 10-bit mantissa,
+    /// and the same test measured 6.4e-3 on an RTX 5070 Ti — still far below
+    /// what a question reading another's tokens would cost.
     ///
     /// ```text
     /// EULLM_DECISION_TEST_MODEL=/path/to/stories260K.gguf \
@@ -2972,11 +2977,17 @@ mod tests {
                 "{}: largest log-probability difference {worst:.2e} (tolerance {tolerance:.0e})",
                 mode.as_str()
             );
-            assert!(
-                worst < tolerance,
-                "{} and separate disagree by {worst}",
-                mode.as_str()
-            );
+            if mode == EvalMode::SharedPrefix && !crate::inference::has_gpu_backend() {
+                assert_eq!(worst, 0.0, "shared_prefix and separate differ on the CPU");
+            } else {
+                assert!(
+                    worst < tolerance,
+                    "{} and separate disagree by {worst}: on quantized weights that is \
+                     rounding noise (see above) — run on an F32 model, or set \
+                     EULLM_DECISION_TEST_TOLERANCE",
+                    mode.as_str()
+                );
+            }
             assert_eq!(result.stats.mode, mode);
             assert!(result.stats.shared_prefix_tokens > 0);
             assert!(result.stats.evaluated_tokens < separate.stats.evaluated_tokens);

@@ -8,15 +8,32 @@
 #
 # GPU (NVIDIA):
 #   docker compose --profile gpu up engine-gpu
+#
+# Forge (NVIDIA GPU):
+#   docker compose run --rm forge --help
+#
+# Every image builds from the repository root, with llama.cpp's submodule
+# checked out first: `git submodule update --init --recursive`.
 
 services:
   # ── Engine (CPU) ────────────────────────────────────────────
   engine:
     build:
-      context: ./engine
+      context: .
+      dockerfile: engine/Dockerfile
     image: eullm/engine:latest
+    # The chat UI too (`serve` alone is headless): on 11435, next to the API.
+    command: ["serve", "--ui"]
+    # The API and the chat UI, on this machine only: its callers reach the
+    # container from Docker's own addresses, which the allowlist below admits.
+    # To serve other machines, drop the `127.0.0.1:` and set API keys
+    # (EULLM_API_KEYS, below). Once the port is public the allowlist no longer
+    # tells callers apart — depending on how the host routes published ports,
+    # a caller arrives with its own address or with the bridge gateway's — and
+    # a bearer token is the control that survives the address translation.
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
+      - "127.0.0.1:11435:11435"
     volumes:
       - models:/models
       - audit:/data/audit
@@ -38,16 +55,27 @@ services:
       #
       # EULLM_ALLOWED_ORIGINS: "https://chat.example.eu"
       EULLM_AUDIT_DIR: /data/audit
+      # Docker's private address ranges: the gateway the published ports
+      # arrive from, and the other containers of this project.
+      EULLM_ALLOWED_IPS: "172.16.0.0/12,192.168.0.0/16"
 
   # ── Engine (NVIDIA GPU) ────────────────────────────────────
   engine-gpu:
     build:
-      context: ./engine
-      args:
-        FEATURES: cuda
+      context: .
+      dockerfile: engine/Dockerfile.cuda
+      # args:
+      #   CUDA_ARCHS: "80;90"      # A100/H100 instead of RTX 3000/4000/5000
+      #   CUDA_VERSION: "12.9.2"   # a driver older than r580 (CUDA 12)
     image: eullm/engine:latest-cuda
+    command: ["serve", "--ui"]
+    # As the CPU engine's above: this machine only, until API keys are set.
     ports:
-      - "11434:11434"
+      - "127.0.0.1:11434:11434"
+      - "127.0.0.1:11435:11435"
+    environment:
+      EULLM_AUDIT_DIR: /data/audit
+      EULLM_ALLOWED_IPS: "172.16.0.0/12,192.168.0.0/16"
     volumes:
       - models:/models
       - audit:/data/audit
@@ -65,7 +93,8 @@ services:
   # ── Hub ─────────────────────────────────────────────────────
   hub:
     build:
-      context: ./hub
+      context: .
+      dockerfile: hub/Dockerfile
     image: eullm/hub:latest
     ports:
       - "3000:3000"
@@ -75,11 +104,20 @@ services:
 
   # ── Forge ───────────────────────────────────────────────────
   # Forge is a CLI tool, not a long-running service.
-  # Run it with: docker compose run forge forge Qwen/Qwen3-14B --profile legal-it
+  # Run it with:
+  #   docker compose --profile forge run --rm forge forge Qwen/Qwen3-14B --profile legal-it
+  # What it writes to relative paths (./output, ./datasets) lands in the
+  # forge-output volume, its working directory.
   forge:
     build:
-      context: ./forge
+      context: .
+      dockerfile: forge/Dockerfile
+      # args:
+      #   TORCH_INDEX: https://download.pytorch.org/whl/cu126   # driver older than r580
     image: eullm/forge:latest
+    # PyTorch's data loader workers hand batches over in shared memory, and
+    # Docker's default /dev/shm is 64 MB.
+    shm_size: "8gb"
     volumes:
       - models:/models
       - forge-output:/output

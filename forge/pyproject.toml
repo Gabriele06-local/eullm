@@ -65,6 +65,9 @@ include = ["eullm_forge*"]
 [tool.setuptools.package-data]
 # Ship the eval-harness seed sets inside the wheel (non-editable installs).
 "eullm_forge.eval" = ["data/*.jsonl"]
+# And the verticalization profiles: without them a non-editable install (the
+# Docker image's) listed no profile and `forge --profile` found none.
+"eullm_forge.profiles" = ["*.yaml"]
 
 [project.scripts]
 eullm-forge = "eullm_forge.cli:main"

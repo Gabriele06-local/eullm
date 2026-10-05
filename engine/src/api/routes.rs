@@ -30,7 +30,9 @@ use super::AppState;
 use super::resident::{Lease, SlotSnapshot};
 use super::thinking::{Part, ThinkingSplitter};
 use crate::audit::{AuditEntry, AuditLogger};
-use crate::inference::{GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent};
+use crate::inference::{
+    AnswerStats, GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent,
+};
 use crate::models::EU_CATALOG;
 use crate::tools;
 
@@ -1237,6 +1239,7 @@ async fn collect_stream(mut rx: mpsc::Receiver<StreamEvent>) -> Result<Collected
     // If the stream ends without a Done event the answer is incomplete, so
     // Length is the honest default rather than Stop.
     let mut stop_reason = StopReason::Length;
+    let mut stats = AnswerStats::default();
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -1246,11 +1249,13 @@ async fn collect_stream(mut rx: mpsc::Receiver<StreamEvent>) -> Result<Collected
                 tokens_prompt: tp,
                 duration_ms: d,
                 stop_reason: sr,
+                stats: st,
             } => {
                 tokens_generated = tg;
                 tokens_prompt = tp;
                 duration_ms = d;
                 stop_reason = sr;
+                stats = st;
                 break;
             }
             StreamEvent::Error(e) => return Err(e),
@@ -1263,6 +1268,7 @@ async fn collect_stream(mut rx: mpsc::Receiver<StreamEvent>) -> Result<Collected
         tokens_prompt,
         duration_ms,
         stop_reason,
+        stats,
     })
 }
 
@@ -1273,6 +1279,7 @@ struct Collected {
     tokens_prompt: u32,
     duration_ms: u64,
     stop_reason: StopReason,
+    stats: AnswerStats,
 }
 
 // ── Web content injection ────────────────────────────────────────────────────
@@ -2256,6 +2263,7 @@ async fn generate_with(
                 tokens_prompt,
                 duration_ms,
                 stop_reason,
+                stats,
             } = collect_stream(rx).await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2269,6 +2277,7 @@ async fn generate_with(
                 tokens_prompt,
                 tokens_generated,
                 duration_ms,
+                &stats,
             );
 
             let (response, thinking) = generate_answer(text, split_thinking);
@@ -2281,14 +2290,14 @@ async fn generate_with(
                 "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
                 "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": tokens_prompt,
-                "prompt_eval_duration": 0,
+                "prompt_eval_duration": nanos(stats.prompt_time),
                 "eval_count": tokens_generated,
-                "eval_duration": duration_ms * 1_000_000
+                "eval_duration": nanos(stats.eval_time)
             });
             if let Some(thinking) = thinking {
                 answer["thinking"] = Value::String(thinking);
             }
-            Ok(Json(audit.extended(answer)).into_response())
+            Ok(Json(audit.extended(with_drafts(answer, &stats))).into_response())
         }
     } else {
         // ── Sequential fallback ────────────────────────────────────
@@ -2330,6 +2339,7 @@ async fn generate_with(
                 result.tokens_prompt,
                 result.tokens_generated,
                 result.duration_ms,
+                &result.stats,
             );
 
             let (response, thinking) = generate_answer(result.text, split_thinking);
@@ -2342,14 +2352,14 @@ async fn generate_with(
                 "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
                 "load_duration": nanos(snap.load_duration),
                 "prompt_eval_count": result.tokens_prompt,
-                "prompt_eval_duration": 0,
+                "prompt_eval_duration": nanos(result.stats.prompt_time),
                 "eval_count": result.tokens_generated,
-                "eval_duration": result.duration_ms * 1_000_000
+                "eval_duration": nanos(result.stats.eval_time)
             });
             if let Some(thinking) = thinking {
                 answer["thinking"] = Value::String(thinking);
             }
-            Ok(Json(audit.extended(answer)).into_response())
+            Ok(Json(audit.extended(with_drafts(answer, &result.stats))).into_response())
         }
     }
 }
@@ -2508,6 +2518,7 @@ async fn chat_with(
             tokens_prompt,
             duration_ms,
             stop_reason,
+            stats,
         } = collect_stream(rx).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2520,20 +2531,24 @@ async fn chat_with(
             tokens_prompt,
             tokens_generated,
             duration_ms,
+            &stats,
         );
-        return Ok(Json(audit.extended(json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "message": chat_message(text, split_thinking),
-            "done": true,
-            "done_reason": stop_reason.as_api_str(),
-            "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
-            "load_duration": nanos(snap.load_duration),
-            "prompt_eval_count": tokens_prompt,
-            "prompt_eval_duration": 0,
-            "eval_count": tokens_generated,
-            "eval_duration": duration_ms * 1_000_000
-        })))
+        return Ok(Json(audit.extended(with_drafts(
+            json!({
+                "model": model,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "message": chat_message(text, split_thinking),
+                "done": true,
+                "done_reason": stop_reason.as_api_str(),
+                "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
+                "load_duration": nanos(snap.load_duration),
+                "prompt_eval_count": tokens_prompt,
+                "prompt_eval_duration": nanos(stats.prompt_time),
+                "eval_count": tokens_generated,
+                "eval_duration": nanos(stats.eval_time)
+            }),
+            &stats,
+        )))
         .into_response());
     }
 
@@ -2583,6 +2598,7 @@ async fn chat_with(
                 tokens_prompt,
                 duration_ms,
                 stop_reason,
+                stats,
             } = collect_stream(rx).await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -2596,21 +2612,25 @@ async fn chat_with(
                 tokens_prompt,
                 tokens_generated,
                 duration_ms,
+                &stats,
             );
 
-            Ok(Json(audit.extended(json!({
-                "model": model,
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "message": chat_message(text, split_thinking),
-                "done": true,
-                "done_reason": stop_reason.as_api_str(),
-                "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
-                "load_duration": nanos(snap.load_duration),
-                "prompt_eval_count": tokens_prompt,
-                "prompt_eval_duration": 0,
-                "eval_count": tokens_generated,
-                "eval_duration": duration_ms * 1_000_000
-            })))
+            Ok(Json(audit.extended(with_drafts(
+                json!({
+                    "model": model,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                    "message": chat_message(text, split_thinking),
+                    "done": true,
+                    "done_reason": stop_reason.as_api_str(),
+                    "total_duration": duration_ms * 1_000_000 + nanos(snap.load_duration),
+                    "load_duration": nanos(snap.load_duration),
+                    "prompt_eval_count": tokens_prompt,
+                    "prompt_eval_duration": nanos(stats.prompt_time),
+                    "eval_count": tokens_generated,
+                    "eval_duration": nanos(stats.eval_time)
+                }),
+                &stats,
+            )))
             .into_response())
         }
     } else {
@@ -2652,21 +2672,25 @@ async fn chat_with(
                 result.tokens_prompt,
                 result.tokens_generated,
                 result.duration_ms,
+                &result.stats,
             );
 
-            Ok(Json(audit.extended(json!({
-                "model": model,
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "message": chat_message(result.text, split_thinking),
-                "done": true,
-                "done_reason": result.stop_reason.as_api_str(),
-                "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
-                "load_duration": nanos(snap.load_duration),
-                "prompt_eval_count": result.tokens_prompt,
-                "prompt_eval_duration": 0,
-                "eval_count": result.tokens_generated,
-                "eval_duration": result.duration_ms * 1_000_000
-            })))
+            Ok(Json(audit.extended(with_drafts(
+                json!({
+                    "model": model,
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                    "message": chat_message(result.text, split_thinking),
+                    "done": true,
+                    "done_reason": result.stop_reason.as_api_str(),
+                    "total_duration": result.duration_ms * 1_000_000 + nanos(snap.load_duration),
+                    "load_duration": nanos(snap.load_duration),
+                    "prompt_eval_count": result.tokens_prompt,
+                    "prompt_eval_duration": nanos(result.stats.prompt_time),
+                    "eval_count": result.tokens_generated,
+                    "eval_duration": nanos(result.stats.eval_time)
+                }),
+                &result.stats,
+            )))
             .into_response())
         }
     }
@@ -3122,6 +3146,7 @@ async fn chat_completions_with(
             tokens_prompt,
             duration_ms,
             stop_reason,
+            stats,
         } = collect_stream(rx).await.map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -3135,6 +3160,7 @@ async fn chat_completions_with(
             tokens_prompt,
             tokens_generated,
             duration_ms,
+            &stats,
         );
 
         let (message, called_tools) = match tmpl.parse_output(&text) {
@@ -3179,6 +3205,7 @@ async fn chat_completions_with(
             "completion_tokens": tokens_generated,
             "total_tokens": tokens_prompt + tokens_generated,
         });
+        let timings = openai_timings(tokens_prompt, tokens_generated, &stats);
 
         if is_streaming(&body) {
             let stream = buffered_message_sse(
@@ -3186,6 +3213,7 @@ async fn chat_completions_with(
                 message,
                 finish_reason.to_string(),
                 usage,
+                timings,
                 snap.lease,
                 audit,
             );
@@ -3202,6 +3230,7 @@ async fn chat_completions_with(
                 "finish_reason": finish_reason,
             }],
             "usage": usage,
+            "timings": timings,
         })))
         .into_response());
     }
@@ -3226,6 +3255,7 @@ async fn chat_completions_with(
                 tokens_prompt,
                 duration_ms,
                 stop_reason,
+                stats,
             } = collect_stream(rx).await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -3239,6 +3269,7 @@ async fn chat_completions_with(
                 tokens_prompt,
                 tokens_generated,
                 duration_ms,
+                &stats,
             );
 
             Ok(Json(audit.extended(json!({
@@ -3258,7 +3289,8 @@ async fn chat_completions_with(
                     "prompt_tokens": tokens_prompt,
                     "completion_tokens": tokens_generated,
                     "total_tokens": tokens_prompt + tokens_generated
-                }
+                },
+                "timings": openai_timings(tokens_prompt, tokens_generated, &stats),
             })))
             .into_response())
         }
@@ -3301,6 +3333,7 @@ async fn chat_completions_with(
                 result.tokens_prompt,
                 result.tokens_generated,
                 result.duration_ms,
+                &result.stats,
             );
 
             Ok(Json(audit.extended(json!({
@@ -3320,7 +3353,8 @@ async fn chat_completions_with(
                     "prompt_tokens": result.tokens_prompt,
                     "completion_tokens": result.tokens_generated,
                     "total_tokens": result.tokens_prompt + result.tokens_generated
-                }
+                },
+                "timings": openai_timings(result.tokens_prompt, result.tokens_generated, &result.stats),
             })))
             .into_response())
         }
@@ -3342,6 +3376,7 @@ fn buffered_message_sse(
     message: Value,
     finish_reason: String,
     usage: Value,
+    timings: Value,
     lease: Lease,
     audit: AuditCtx,
 ) -> impl Stream<Item = Result<Event, std::convert::Infallible>> {
@@ -3354,6 +3389,7 @@ fn buffered_message_sse(
         "model": model,
         "choices": [{ "index": 0, "delta": {}, "finish_reason": finish_reason }],
         "usage": usage,
+        "timings": timings,
     }));
     async_stream::stream! {
         let _lease = lease;
@@ -3432,6 +3468,7 @@ impl AuditCtx {
         tokens_prompt: u32,
         tokens_generated: u32,
         duration_ms: u64,
+        stats: &AnswerStats,
     ) -> AuditEntry {
         let mut entry = AuditEntry::new(model.to_string(), format.request_type().to_string());
         entry.input_tokens = tokens_prompt;
@@ -3439,6 +3476,10 @@ impl AuditCtx {
         entry.duration_ms = duration_ms;
         entry.user_id = self.user_id.clone();
         entry.route = self.route.as_ref().map(super::route::RouteInfo::reference);
+        if stats.draft_n > 0 {
+            entry.draft_n = Some(stats.draft_n);
+            entry.draft_n_accepted = Some(stats.draft_n_accepted);
+        }
         entry
     }
 
@@ -3450,6 +3491,7 @@ impl AuditCtx {
         tokens_prompt: u32,
         tokens_generated: u32,
         duration_ms: u64,
+        stats: &AnswerStats,
     ) {
         AuditLogger::new().log(&self.entry(
             model,
@@ -3457,6 +3499,7 @@ impl AuditCtx {
             tokens_prompt,
             tokens_generated,
             duration_ms,
+            stats,
         ));
     }
 }
@@ -3486,14 +3529,14 @@ fn stream_from_channel_sse(
                     let data = format_token_event(&piece, &model, &completion_id, format);
                     yield Ok(Event::default().data(data.to_string()));
                 }
-                StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
+                StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason, stats } => {
                     // Audit log
-                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
+                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms, &stats);
 
                     let data = audit.extended(format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
-                        load_duration,
+                        load_duration, &stats,
                     ));
                     yield Ok(Event::default().data(data.to_string()));
 
@@ -3551,7 +3594,7 @@ fn ndjson_stream_response(
                         yield Ok::<_, std::convert::Infallible>(line);
                     }
                 }
-                StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason } => {
+                StreamEvent::Done { tokens_generated, tokens_prompt, duration_ms, stop_reason, stats } => {
                     // What the splitter still held: the end of the answer, or
                     // of reasoning the token budget cut short.
                     for part in splitter.take().map(ThinkingSplitter::finish).unwrap_or_default() {
@@ -3560,12 +3603,12 @@ fn ndjson_stream_response(
                         line.push('\n');
                         yield Ok(line);
                     }
-                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms);
+                    audit.log(&model, format, tokens_prompt, tokens_generated, duration_ms, &stats);
 
                     let data = audit.extended(format_done_event(
                         &model, &completion_id, format,
                         tokens_generated, tokens_prompt, duration_ms, stop_reason,
-                        load_duration,
+                        load_duration, &stats,
                     ));
                     let mut line = data.to_string();
                     line.push('\n');
@@ -3651,6 +3694,32 @@ fn generate_answer(text: String, split_thinking: bool) -> (String, Option<String
     }
 }
 
+/// `answer` with the MTP drafts its model proposed and kept, under
+/// llama-server's names, when the head proposed any (`--mtp`).
+fn with_drafts(mut answer: Value, stats: &AnswerStats) -> Value {
+    if stats.draft_n > 0 {
+        answer["draft_n"] = json!(stats.draft_n);
+        answer["draft_n_accepted"] = json!(stats.draft_n_accepted);
+    }
+    answer
+}
+
+/// llama-server's `timings` for an OpenAI answer: how long reading its
+/// prompt and writing it took, in milliseconds, and the MTP drafts when the
+/// head proposed any. Not part of OpenAI's API: clients that do not know it
+/// ignore it, and the ones written for llama-server read it.
+fn openai_timings(tokens_prompt: u32, tokens_generated: u32, stats: &AnswerStats) -> Value {
+    with_drafts(
+        json!({
+            "prompt_n": tokens_prompt,
+            "prompt_ms": stats.prompt_time.as_secs_f64() * 1000.0,
+            "predicted_n": tokens_generated,
+            "predicted_ms": stats.eval_time.as_secs_f64() * 1000.0,
+        }),
+        stats,
+    )
+}
+
 fn format_token_event(
     piece: &str,
     model: &str,
@@ -3702,39 +3771,46 @@ fn format_done_event(
     duration_ms: u64,
     stop_reason: StopReason,
     load_duration: std::time::Duration,
+    stats: &AnswerStats,
 ) -> Value {
     let reason = stop_reason.as_api_str();
     let load = nanos(load_duration);
     match format {
-        StreamFormat::OllamaGenerate => json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "response": "",
-            "done": true,
-            "done_reason": reason,
-            "total_duration": duration_ms * 1_000_000 + load,
-            "load_duration": load,
-            "prompt_eval_count": tokens_prompt,
-            "prompt_eval_duration": 0,
-            "eval_count": tokens_generated,
-            "eval_duration": duration_ms * 1_000_000,
-        }),
-        StreamFormat::OllamaChat => json!({
-            "model": model,
-            "created_at": chrono::Utc::now().to_rfc3339(),
-            "message": {
-                "role": "assistant",
-                "content": "",
-            },
-            "done": true,
-            "done_reason": reason,
-            "total_duration": duration_ms * 1_000_000 + load,
-            "load_duration": load,
-            "prompt_eval_count": tokens_prompt,
-            "prompt_eval_duration": 0,
-            "eval_count": tokens_generated,
-            "eval_duration": duration_ms * 1_000_000,
-        }),
+        StreamFormat::OllamaGenerate => with_drafts(
+            json!({
+                "model": model,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "response": "",
+                "done": true,
+                "done_reason": reason,
+                "total_duration": duration_ms * 1_000_000 + load,
+                "load_duration": load,
+                "prompt_eval_count": tokens_prompt,
+                "prompt_eval_duration": nanos(stats.prompt_time),
+                "eval_count": tokens_generated,
+                "eval_duration": nanos(stats.eval_time),
+            }),
+            stats,
+        ),
+        StreamFormat::OllamaChat => with_drafts(
+            json!({
+                "model": model,
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "message": {
+                    "role": "assistant",
+                    "content": "",
+                },
+                "done": true,
+                "done_reason": reason,
+                "total_duration": duration_ms * 1_000_000 + load,
+                "load_duration": load,
+                "prompt_eval_count": tokens_prompt,
+                "prompt_eval_duration": nanos(stats.prompt_time),
+                "eval_count": tokens_generated,
+                "eval_duration": nanos(stats.eval_time),
+            }),
+            stats,
+        ),
         StreamFormat::OpenAI => json!({
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -3750,6 +3826,7 @@ fn format_done_event(
                 "completion_tokens": tokens_generated,
                 "total_tokens": tokens_prompt + tokens_generated,
             },
+            "timings": openai_timings(tokens_prompt, tokens_generated, stats),
         }),
     }
 }
@@ -3836,9 +3913,17 @@ mod tests {
             10,
             StopReason::Stop,
             std::time::Duration::ZERO,
+            &AnswerStats::default(),
         );
         assert_eq!(AuditCtx::default().extended(done.clone()), done);
-        let entry = AuditCtx::default().entry("small-m", StreamFormat::OpenAI, 5, 3, 10);
+        let entry = AuditCtx::default().entry(
+            "small-m",
+            StreamFormat::OpenAI,
+            5,
+            3,
+            10,
+            &AnswerStats::default(),
+        );
         assert!(entry.route.is_none());
     }
 
@@ -3854,7 +3939,7 @@ mod tests {
                     user_id: user_id.clone(),
                     route: None,
                 };
-                let entry = ctx.entry("qwen3-8b", format, 12, 40, 900);
+                let entry = ctx.entry("qwen3-8b", format, 12, 40, 900, &AnswerStats::default());
                 // As the copies built it.
                 let mut old = AuditEntry::new("qwen3-8b".to_string(), request_type.to_string());
                 old.input_tokens = 12;
@@ -3873,6 +3958,77 @@ mod tests {
                 assert_eq!(new, old, "{request_type}");
             }
         }
+    }
+
+    /// The MTP drafts go on a generation's audit line only when there were
+    /// some: a line without them is the line written before they existed.
+    #[test]
+    fn an_audit_entry_names_the_mtp_drafts_only_when_there_were_some() {
+        let ctx = AuditCtx::default();
+        let entry = |stats: &AnswerStats| {
+            serde_json::to_value(ctx.entry("m", StreamFormat::OllamaChat, 1, 2, 3, stats)).unwrap()
+        };
+        let plain = entry(&AnswerStats::default());
+        assert!(plain.get("draft_n").is_none() && plain.get("draft_n_accepted").is_none());
+        let drafted = entry(&AnswerStats {
+            draft_n: 274,
+            draft_n_accepted: 117,
+            ..AnswerStats::default()
+        });
+        assert_eq!(
+            (
+                drafted["draft_n"].as_u64(),
+                drafted["draft_n_accepted"].as_u64()
+            ),
+            (Some(274), Some(117))
+        );
+    }
+
+    /// The last line of a stream says where the time went: Ollama's
+    /// `prompt_eval_duration` and `eval_duration` from the stats (they were 0
+    /// and the whole request), the drafts beside them when there were some,
+    /// and llama-server's `timings` on the OpenAI chunk.
+    #[test]
+    fn the_last_line_reports_prompt_and_answer_times_and_the_drafts() {
+        use std::time::Duration;
+        let stats = AnswerStats {
+            prompt_time: Duration::from_millis(250),
+            eval_time: Duration::from_millis(1500),
+            draft_n: 40,
+            draft_n_accepted: 30,
+        };
+        let done = |format, stats: &AnswerStats| {
+            format_done_event(
+                "m",
+                "c",
+                format,
+                100,
+                20,
+                1800,
+                StopReason::Stop,
+                Duration::ZERO,
+                stats,
+            )
+        };
+        let chat = done(StreamFormat::OllamaChat, &stats);
+        assert_eq!(chat["prompt_eval_duration"], 250_000_000);
+        assert_eq!(chat["eval_duration"], 1_500_000_000);
+        assert_eq!(chat["total_duration"], 1_800_000_000);
+        assert_eq!(
+            (chat["draft_n"].as_u64(), chat["draft_n_accepted"].as_u64()),
+            (Some(40), Some(30))
+        );
+        let plain = done(StreamFormat::OllamaGenerate, &AnswerStats::default());
+        assert!(plain.get("draft_n").is_none());
+        let openai = done(StreamFormat::OpenAI, &stats);
+        assert_eq!(openai["timings"]["prompt_ms"], 250.0);
+        assert_eq!(openai["timings"]["predicted_n"], 100);
+        assert_eq!(openai["timings"]["draft_n_accepted"], 30);
+        assert!(
+            done(StreamFormat::OpenAI, &AnswerStats::default())["timings"]
+                .get("draft_n")
+                .is_none()
+        );
     }
 
     // A reasoning model doing free-text tool-calling can burn through
