@@ -30,7 +30,8 @@
 #   docker-gpu       the CUDA image built and asked one question; skipped
 #                    without Docker's NVIDIA runtime or with port 11434 taken
 #
-# What the steps download (the Q8_0 GGUF, the catalog models in PULLS) starts
+# What the steps of STEPS download (the Q8_0 GGUF for mtp-head-q8, the
+# catalog models in PULLS for residency, auto, soak and docker-gpu) starts
 # at once, at low priority, and a step that needs it waits for it first. A
 # step whose model is not on disk is skipped and says which file it missed.
 # Paths default to the reference PC's; every one can be set below.
@@ -370,11 +371,23 @@ nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,nohead
     >"$NIGHT/gpu-apps-at-start.txt" 2>/dev/null
 df -h "$HOME" "$MODELS" "$STORE" 2>/dev/null | awk '!seen[$0]++' >"$NIGHT/disk-at-start.txt"
 
-# Downloads, one after the other, behind everything else.
+# Downloads, one after the other, behind everything else: only those a step
+# of STEPS needs. On 5 October a night of three steps would have fetched the
+# Q8_0 GGUF again, 9.5 GB onto a disk with 20 free, for a step it was not
+# running.
+in_steps() { # any of the steps named is in STEPS
+    local s
+    for s in "$@"; do
+        [[ " $STEPS " == *" $s "* ]] && return 0
+    done
+    return 1
+}
 (
     renice -n 19 -p "$BASHPID" >/dev/null 2>&1
     ionice -c2 -n7 -p "$BASHPID" >/dev/null 2>&1
-    if [[ -s $M9_Q8 ]]; then
+    if ! in_steps mtp-head-q8; then
+        rc="0 (not needed)"
+    elif [[ -s $M9_Q8 ]]; then
         rc=0
     else
         mkdir -p "$(dirname "$M9_Q8")"
@@ -383,10 +396,12 @@ df -h "$HOME" "$MODELS" "$STORE" 2>/dev/null | awk '!seen[$0]++' >"$NIGHT/disk-a
     fi
     echo "q8 $rc"
     echo "$rc" >"$NIGHT/q8.done"
-    for model in $PULLS; do
-        "$BIN" pull "$model" </dev/null
-        echo "pull $model $?"
-    done
+    if in_steps residency auto soak docker-gpu; then
+        for model in $PULLS; do
+            "$BIN" pull "$model" </dev/null
+            echo "pull $model $?"
+        done
+    fi
     echo done >"$NIGHT/pulls.done"
 ) >"$NIGHT/downloads.log" 2>&1 &
 
