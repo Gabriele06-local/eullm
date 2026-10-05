@@ -74,7 +74,7 @@ Poi si invia il prompt sopra come unico messaggio utente all'endpoint `/v1/chat/
 ### Ollama
 
 ```bash
-ollama run hf.co/eullm/legal-it-8b:Q4_K_M
+ollama run hf.co/EuLLM/legal-it-8b:Q4_K_M
 ```
 
 ## Risultati
@@ -88,7 +88,7 @@ Le domande sono costruite automaticamente dal testo degli articoli: che cosa pre
 | **legal-it-8b** | **382 (89,0%)** | **202 (92,2%)** |
 | legal-it-8b con il solo SFT, senza GRPO | 363 (84,6%) | 199 (90,9%) |
 | Ministral-3-8B-Instruct-2512, di partenza | 347 (80,9%) | 191 (87,2%) |
-| [legal-it-4b](https://huggingface.co/eullm/legal-it-4b) | 365 (85,1%) | 200 (91,3%) |
+| [legal-it-4b](https://huggingface.co/EuLLM/legal-it-4b) | 365 (85,1%) | 200 (91,3%) |
 
 Contro il modello di partenza, domanda per domanda (test esatto di McNemar):
 
