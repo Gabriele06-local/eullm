@@ -519,6 +519,10 @@ def f32_refs(specs) -> list:
     return sorted(files.items())
 
 
+def has_finetune(engine) -> bool:
+    return bool(sh([engine, "finetune", "--help"], timeout=60))
+
+
 def missing_f32(queue, specs) -> list:
     return [(f, repo) for f, repo in f32_refs(specs)
             if not os.path.exists(os.path.join(queue, "f32", f))]
@@ -562,6 +566,10 @@ def cmd_plan(args):
                   "points will block:")
             for _, ref in missing:
                 print(f"  {args.engine} pull {ref}")
+    if args.engine and f32_refs(specs) and not has_finetune(args.engine):
+        print(f"\n{args.engine} has no `finetune` command (a build from before it): the "
+              "finetune points will block until EULLM_BIN is a build that has it "
+              "(tools/lumi/build_engine.sh), then `campaign.py unblock`.")
     missing = missing_f32(args.queue, specs)
     if missing:
         print(f"\nF32 models for the finetune points, not in {args.queue}/f32 yet — "
