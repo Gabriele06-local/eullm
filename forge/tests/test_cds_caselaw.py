@@ -249,3 +249,20 @@ def test_the_cards_job_serves_one_teacher_per_gpu(tmp_path):
                        env={**env, "CS_TEACHER": str(tmp_path / "none.gguf")},
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 1 and "no teacher GGUF" in r.stderr and not (tmp_path / "args").exists()
+
+
+def test_a_second_chain_skips_what_the_first_one_carded(corpus, teacher, tmp_path):
+    chunks, og = corpus
+    url, seen = teacher
+    ids = tmp_path / "ids.txt"
+    ids.write_text("cds/2019000000\ncds/2021000004\n")
+    out = tmp_path / "cds" / "schede.jsonl"
+    mod = _load("cds_schede")
+    base = ["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids), "--url", url]
+    assert mod.main(base + ["--out", str(out), "--limit", "1"]) == 0
+    first = json.loads(out.read_text().splitlines()[0])["id"]
+    n = len(seen)
+    other = out.with_name("schede-b.jsonl")
+    assert mod.main(base + ["--out", str(other)]) == 0
+    assert len(seen) == n + 1                                  # only the one not done
+    assert first not in other.read_text()

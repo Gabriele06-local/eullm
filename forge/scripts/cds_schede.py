@@ -15,8 +15,11 @@ the rulings are spread over them; with ``--url`` the servers are already
 running.
 
 Resumable and safe to chain: a ruling already carded, or refused, is not
-asked again, and ``--stop-after`` stops taking new rulings in time for a
-2-hour link to end on its own. Refusals go to ``<out>.rejects.jsonl`` with
+asked again -- in this output or in any sibling (``schede*.jsonl`` beside
+it), which is how two chains share one list from opposite ends: each
+re-reads the other's files every five minutes and skips what it did --
+and ``--stop-after`` stops taking new rulings in time for a 2-hour link
+to end on its own. Refusals go to ``<out>.rejects.jsonl`` with
 their reason and no text.
 
 Every 100 cards it prints throughput (cards/min, prompt and generated
@@ -53,6 +56,16 @@ def ask(url: str, msgs: list[dict], max_tokens: int, temperature: float,
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
+
+
+def siblings(out: Path) -> list[Path]:
+    """This output and every other of the same family beside it, rejects included.
+
+    ``schede.jsonl`` -> ``schede*.jsonl``: a second chain writing
+    ``schede-b.jsonl`` from the other end of the list is one of the family.
+    """
+    stem = out.name.split(".")[0].split("-")[0]
+    return sorted(out.parent.glob(f"{stem}*.jsonl")) + [out]
 
 
 def done_ids(*paths: Path) -> set[str]:
@@ -94,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
 
     wanted = [line.strip() for line in args.ids.open(encoding="utf-8") if line.strip()]
     rejects_path = args.out.with_name(args.out.name.replace(".jsonl", "") + ".rejects.jsonl")
-    skip = done_ids(args.out, rejects_path)
+    skip = done_ids(*siblings(args.out), rejects_path)
     todo_ids = [i for i in wanted if i not in skip]
     if args.limit:
         todo_ids = todo_ids[:args.limit]
@@ -176,13 +189,20 @@ def main(argv: list[str] | None = None) -> int:
             pending = set()
             it = iter(enumerate(todo))
             stopped = False
+            others, refreshed = set(), time.monotonic()
             while True:
+                if time.monotonic() - refreshed > 300:      # what a sibling chain did since
+                    others = done_ids(*[p for p in siblings(args.out)
+                                        if p not in (args.out, rejects_path)])
+                    refreshed = time.monotonic()
                 while not stopped and len(pending) < in_flight:
                     if args.stop_after and time.monotonic() - t0 > args.stop_after:
                         stopped = True
                         print("[schede] time is up: finishing what is in flight", flush=True)
                         break
                     nxt = next(it, None)
+                    while nxt is not None and nxt[1].id in others:
+                        nxt = next(it, None)
                     if nxt is None:
                         stopped = True
                         break
