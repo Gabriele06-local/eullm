@@ -72,6 +72,12 @@ result() {
 up() {
     local bin=$1 log=$2
     shift 2
+    # A server already on the port would answer for ours, and every check
+    # would measure it instead.
+    if curl -sf "$URL/api/version" > /dev/null; then
+        echo "something already answers on port $PORT: stop it, or set PORT"
+        return 1
+    fi
     (cd "$OUT" && EULLM_AUDIT_DIR="$OUT/audit" exec "$bin" serve --port "$PORT" "$@") > "$log" 2>&1 &
     PID=$!
     for _ in $(seq 1 600); do
