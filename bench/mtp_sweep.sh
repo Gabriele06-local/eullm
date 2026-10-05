@@ -54,7 +54,8 @@ for setting in $SETTINGS; do
     "$BIN" serve --port "$PORT" --default-model "$MODEL" --mtp "$n" --mtp-p-min "$p" "$@" \
         >"$log" 2>&1 &
     pid=$!
-    for _ in $(seq 1 120); do
+    # An MoE with --moe-cache reads 20-35 GB of experts into memory first.
+    for _ in $(seq 1 600); do
         curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 1
