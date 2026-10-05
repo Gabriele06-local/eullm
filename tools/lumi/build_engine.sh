@@ -46,6 +46,25 @@ log "cmake: $CMAKE_VER"
 command -v cargo >/dev/null || err "cargo not found — install rustup into \$HOME from a login node (they have outbound network; compute nodes do not)"
 log "cargo: $(cargo --version)"
 
+# On a Cray system `cc` and `CC` are the Cray compiler wrappers, and they hand
+# the linker options of Cray's own toolchain (-plugin-opt=defaults=cray,
+# -plugin-opt=lto=0, ...). Rust links with rust-lld by default, which rejects
+# them, so every build script fails to link before anything is compiled —
+# seen on a LUMI login node on 05-10-2026. The GNU compilers behind the
+# wrappers do the job: C/C++ host code and linking go to gcc/g++, the HIP
+# kernels still to ROCm's clang (HIPCXX below).
+if [ -n "${CRAYPE_VERSION:-}" ] || cc --version 2>/dev/null | grep -qi cray; then
+    if ! command -v gcc >/dev/null || ! command -v g++ >/dev/null; then
+        err "Cray compiler wrappers and no gcc/g++ behind them — 'module load gcc-native' (or PrgEnv-gnu)"
+    fi
+    GCC_MAJOR=$(gcc -dumpversion | cut -d. -f1)
+    # llama.cpp is C++17 with <filesystem>: GCC 9 or newer. SLES's own gcc is 7.
+    [ "$GCC_MAJOR" -ge 9 ] \
+        || err "gcc $GCC_MAJOR is too old for llama.cpp (9+) — 'module load gcc-native' (or PrgEnv-gnu) first"
+    export CC=gcc CXX=g++ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
+    log "Cray wrappers detected: building and linking with gcc $(gcc -dumpversion) instead"
+fi
+
 [ -f "$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp/CMakeLists.txt" ] \
     || err "the llama.cpp submodule is missing — run: git -C '$EULLM_REPO' submodule update --init --recursive"
 
