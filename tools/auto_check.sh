@@ -100,6 +100,12 @@ up() {
     local audit
     audit="$OUT/audit-$(basename "$log" .log)"
     rm -rf "$audit"
+    # A server already on the port would answer for ours, and every check
+    # would measure it instead.
+    if curl -sf "$URL/api/version" > /dev/null; then
+        echo "something already answers on port $PORT: stop it, or set PORT"
+        return 1
+    fi
     (cd "$OUT" && EULLM_AUDIT_DIR="$audit" exec "$BIN" serve --port "$PORT" "$@") > "$log" 2>&1 &
     PID=$!
     for _ in $(seq 1 600); do
@@ -351,10 +357,21 @@ if embed:
     kinds.append(("embed", "/api/embed", {"model": embed, "input": ["a lighthouse", "a harbour"]}))
 done = {k[0]: 0 for k in kinds}
 failed = []
+by_kind = {}
 vram = []
 started = time.time()
 stop = started + duration
 lock = threading.Lock()
+def kind_of(name, e):
+    text = str(e)
+    for k in ("Connection refused", "queue full", "timed out"):
+        if k in text:
+            return f"{name}: {k}"
+    try:
+        text = json.loads(text)["error"]
+    except (ValueError, KeyError, TypeError):
+        pass
+    return f"{name}: {text.split(':')[0][:60]}"
 def worker(w):
     i = w
     while time.time() < stop:
@@ -371,6 +388,12 @@ def worker(w):
         except Exception as e:
             with lock:
                 failed.append(f"{name}: {e}"[:300])
+                k, at = kind_of(name, e), round(time.time() - started)
+                n, first, _ = by_kind.get(k, (0, at, at))
+                by_kind[k] = (n + 1, first, at)
+            # A server that fails at once would otherwise be asked thousands
+            # of times a second: on 5 October a stopped one made 6 million.
+            time.sleep(1)
 def sample():
     while time.time() < stop:
         try:
@@ -393,7 +416,7 @@ low = min(settled, key=lambda v: v[1]) if settled else None
 high = max(settled, key=lambda v: v[1]) if settled else None
 def minute(samples):
     return round(sum(m for _, m in samples) / len(samples)) if samples else None
-print(json.dumps({"done": done, "failed": failed[:20], "failures": len(failed),
+print(json.dumps({"done": done, "failed": failed[:20], "failures": len(failed), "by_kind": by_kind,
                   "vram_min": low[1] if low else None, "vram_min_at": low[0] if low else None,
                   "vram_max": high[1] if high else None, "vram_max_at": high[0] if high else None,
                   "vram_second_minute": minute(settled[:12]), "vram_last_minute": minute(vram[-12:]),
@@ -409,7 +432,9 @@ swaps, evictions = int(sys.argv[4]), int(sys.argv[5])
 done = report["done"]
 problems = []
 if report["failures"]:
-    problems.append(f"{report['failures']} failed requests, e.g. {report['failed'][:2]}")
+    kinds = sorted(report.get("by_kind", {}).items(), key=lambda kv: -kv[1][0])
+    problems.append(f"{report['failures']} failed requests: " + "; ".join(
+        f"'{k}' {n} times, from {a} s to {b} s" for k, (n, a, b) in kinds[:6]))
 lo, hi = report["vram_min"], report["vram_max"]
 if lo is not None and hi > lo * 1.05:
     problems.append(

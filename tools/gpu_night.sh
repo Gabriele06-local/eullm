@@ -209,6 +209,11 @@ fi
 
 note() { echo "$(date '+%H:%M:%S') $*"; }
 
+# One night at a time: two would share the GPU, their checks would use the
+# same ports, and each would stop the other's servers after its steps.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/eullm-gpu-night.lock"
+flock -n 9 || { echo "another tools/gpu_night.sh is running: one at a time" >&2; exit 1; }
+
 # The servers a step leaves behind (a killed script cannot always stop its
 # own), and any started by hand: on 5 October one held 11.7 GB of VRAM when
 # the night began, and no phase 6 server could start beside it. Waits until
@@ -339,7 +344,8 @@ run() {
         return
     fi
     note "$name: at most $limit minutes"
-    timeout --kill-after=120 "${limit}m" bash "$SELF" "step:$name" >"$NIGHT/$name.log" 2>&1
+    # 9>&-: what a step starts must not hold the lock after the night ends.
+    timeout --kill-after=120 "${limit}m" bash "$SELF" "step:$name" >"$NIGHT/$name.log" 2>&1 9>&-
     rc=$?
     stop_servers
     case $rc in
@@ -386,7 +392,7 @@ fi
 
 if command -v nvidia-smi >/dev/null; then
     nvidia-smi --query-gpu=timestamp,temperature.gpu,clocks.sm,power.draw,utilization.gpu,memory.used \
-        --format=csv,noheader,nounits -l 60 >"$NIGHT/gpu.csv" 2>/dev/null &
+        --format=csv,noheader,nounits -l 60 >"$NIGHT/gpu.csv" 2>/dev/null 9>&- &
     sampler=$!
     trap 'kill $sampler 2>/dev/null' EXIT
 fi
@@ -426,7 +432,7 @@ in_steps() { # any of the steps named is in STEPS
         done
     fi
     echo done >"$NIGHT/pulls.done"
-) >"$NIGHT/downloads.log" 2>&1 &
+) >"$NIGHT/downloads.log" 2>&1 9>&- &
 
 for s in $STEPS; do
     case $s in
