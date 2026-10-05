@@ -46,13 +46,15 @@
 # before its end-to-end stage — reserved there too, its 2 GiB would keep the
 # pair from sitting side by side on a 16 GB card. LIMIT=100 items per set, SETS=gsm8k,arc-easy,
 # arc-challenge,mmlu. DURATION=3600. CPU_SMALL=qwen3-1.7b.
+# CHECKS="1 2 3 4 5": the checks run (1 and 2 share a server, so one runs the
+# other); CHECKS=4 is the soak alone.
 # PORT=11500, OUT=/tmp/auto-check. Needs curl and python3.
 set -u
 # Numbers with a decimal point whatever the locale.
 export LC_ALL=C
 
 if [ $# -lt 2 ] || [ $# -gt 3 ]; then
-    sed -n '2,47p' "$0"
+    sed -n '2,51p' "$0"
     exit 2
 fi
 BIN=$(realpath "$1")
@@ -75,6 +77,8 @@ OUT=$(realpath -m "${OUT:-/tmp/auto-check}")
 URL=http://127.0.0.1:$PORT
 BENCH=$(dirname "$(realpath "$0")")/../bench/reflexbench/autobench.py
 read -r SMALL LARGE <<< "$(echo "${PAIRS%% *}" | tr ',' ' ')"
+CHECKS=${CHECKS:-1 2 3 4 5}
+want() { [[ " $CHECKS " == *" $1 "* ]]; }
 mkdir -p "$OUT"
 : > "$OUT/summary.txt"
 PASS=0
@@ -205,6 +209,7 @@ fi
 echo
 
 # 1 and 2, with each decision model.
+if want 1 || want 2; then
 n=0
 for decision in "${DECISIONS[@]}"; do
     n=$((n + 1))
@@ -261,8 +266,10 @@ PY
     fi
     down
 done
+fi
 
 # 3. AutoBench on each pair with each decision model.
+if want 3; then
 for pair in $PAIRS; do
     read -r small large <<< "$(echo "$pair" | tr ',' ' ')"
     flags=(--ctx-size "$CTX")
@@ -296,14 +303,25 @@ print(f"{min(v):.3f}" if v else "none")' "$OUT/3-$tag.json" 2> /dev/null)
         fi
     done
 done
+fi
 
 # 4. Soak: mixed traffic at concurrency 8, VRAM sampled every 5 s.
+if want 4; then
 routed "$OUT/4.log" "$SMALL" "$LARGE" "${DECISIONS[0]}" --ctx-size "$CTX" \
     ${EMBED:+--embedding-model "$EMBED"} || exit 1
 warmed "$OUT/4.log"
-python3 - "$URL" "$DURATION" "$SMALL" "$LARGE" "$EMBED" > "$OUT/4.json" << 'PY'
+# The server's own count of models unloaded, before and after: VRAM that moves
+# while models come and go is churn, VRAM that grows with none is a leak.
+churn() {
+    curl -s "$URL/api/version" | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+print(d.get("model_swaps", 0), d.get("generation_evictions", 0))'
+}
+read -r swaps0 evictions0 <<< "$(churn)"
+python3 - "$URL" "$DURATION" "$SMALL" "$LARGE" "$EMBED" "$OUT/4-vram.csv" > "$OUT/4.json" << 'PY'
 import json, subprocess, sys, threading, time, urllib.request
 url, duration, small, large, embed = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+series = sys.argv[6]
 chat = [{"role": "user", "content": "Give one tip for a tidy desk."}]
 kinds = [
     ("chat", "/api/chat", {"model": small, "messages": chat, "stream": True, "options": {"num_predict": 48}}),
@@ -318,7 +336,8 @@ if embed:
 done = {k[0]: 0 for k in kinds}
 failed = []
 vram = []
-stop = time.time() + duration
+started = time.time()
+stop = started + duration
 lock = threading.Lock()
 def worker(w):
     i = w
@@ -342,7 +361,7 @@ def sample():
             out = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
                                  capture_output=True, text=True, timeout=10).stdout.split()
             if out:
-                vram.append(int(out[0]))
+                vram.append((round(time.time() - started), int(out[0])))
         except (OSError, subprocess.SubprocessError, ValueError):
             pass
         time.sleep(5)
@@ -351,22 +370,38 @@ for t in threads:
     t.start()
 for t in threads:
     t.join()
+with open(series, "w") as f:
+    f.write("seconds,mib\n" + "".join(f"{s},{m}\n" for s, m in vram))
 settled = vram[12:] or vram
+low = min(settled, key=lambda v: v[1]) if settled else None
+high = max(settled, key=lambda v: v[1]) if settled else None
+def minute(samples):
+    return round(sum(m for _, m in samples) / len(samples)) if samples else None
 print(json.dumps({"done": done, "failed": failed[:20], "failures": len(failed),
-                  "vram_min": min(settled) if settled else None, "vram_max": max(settled) if settled else None,
+                  "vram_min": low[1] if low else None, "vram_min_at": low[0] if low else None,
+                  "vram_max": high[1] if high else None, "vram_max_at": high[0] if high else None,
+                  "vram_second_minute": minute(settled[:12]), "vram_last_minute": minute(vram[-12:]),
                   "samples": len(vram)}))
 PY
+read -r swaps1 evictions1 <<< "$(churn)"
 down
-soak=$(python3 - "$OUT/4.json" "$OUT/audit-4/audit.jsonl" "$OUT/4.log" << 'PY'
+soak=$(python3 - "$OUT/4.json" "$OUT/audit-4/audit.jsonl" "$OUT/4.log" \
+    "$((swaps1 - swaps0))" "$((evictions1 - evictions0))" << 'PY'
 import json, re, sys
 report = json.load(open(sys.argv[1]))
+swaps, evictions = int(sys.argv[4]), int(sys.argv[5])
 done = report["done"]
 problems = []
 if report["failures"]:
     problems.append(f"{report['failures']} failed requests, e.g. {report['failed'][:2]}")
 lo, hi = report["vram_min"], report["vram_max"]
 if lo is not None and hi > lo * 1.05:
-    problems.append(f"VRAM moved from {lo} to {hi} MiB after the first minute")
+    problems.append(
+        f"VRAM moved between {lo} MiB ({report['vram_min_at']} s) and {hi} MiB ({report['vram_max_at']} s) "
+        f"after the first minute, {report['vram_second_minute']} MiB in the second minute and "
+        f"{report['vram_last_minute']} in the last, with {swaps} models unloaded meanwhile")
+elif swaps:
+    problems.append(f"{swaps} models unloaded while every model fit, {evictions} of them to make room")
 log = re.sub(r"\x1b\[[0-9;]*m", "", open(sys.argv[3], errors="replace").read())
 if re.search(r"GGML_ASSERT|out of memory|failed to allocate", log, re.I):
     problems.append("an out-of-memory or GGML_ASSERT in the log")
@@ -390,15 +425,16 @@ want = {"chat": done["chat"] + done["auto"], "chat.completions": done["chat.comp
 for kind, n in want.items():
     if not n <= counts.get(kind, 0) <= n + 8:
         problems.append(f"{counts.get(kind, 0)} '{kind}' audit lines for {n} requests")
-vram = "" if lo is None else f", VRAM {lo}-{hi} MiB over {report['samples']} samples"
+vram = "" if lo is None else f", VRAM {lo}-{hi} MiB over {report['samples']} samples (4-vram.csv)"
 summary = ", ".join(f"{n} {k}" for k, n in done.items()) + vram
 print(("FAIL " + "; ".join(problems) + f" ({summary})") if problems else f"PASS {summary}")
 PY
 )
 result "${soak%% *}" "4 soak, $DURATION s at concurrency 8: ${soak#* }"
+fi
 
 # 5. Router latency on a CPU.
-if [ -n "$CPU_DECISION" ]; then
+if want 5 && [ -n "$CPU_DECISION" ]; then
     # The last check: the GPU stays hidden from here on.
     export CUDA_VISIBLE_DEVICES= OMP_WAIT_POLICY=PASSIVE
     routed "$OUT/5.log" "$CPU_SMALL" "$SMALL" "$(realpath "$CPU_DECISION")" --ctx-size 4096 || exit 1

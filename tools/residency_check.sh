@@ -28,8 +28,10 @@
 # SMALL=qwen3-1.7b A=qwen3-4b B=qwen3-8b; BIG and VISION only when set.
 # EMBED=qwen3-embedding-0.6b-gguf-q8_0, pulled from EMBED_PULL
 # (hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0); EMBED= skips check 7.
-# EMBED_CTX=20480: the context A and B get in check 7, large enough that the
-# two leave the embedder too little room on a 16 GB card.
+# EMBED_CTX="20480 16384 12288 8192": the contexts check 7 tries for A and B,
+# largest first; it keeps the first at which the two sit side by side, which
+# leaves the embedder the least room. 20480 alone was too much for a 16 GB
+# card: loading B unloaded A, and the check had nothing to measure.
 # PORT=11500, OUT=/tmp/residency-check. Needs curl and python3.
 set -u
 # Numbers with a decimal point whatever the locale: awk and printf read and
@@ -37,7 +39,7 @@ set -u
 export LC_ALL=C
 
 if [ $# -ne 2 ]; then
-    sed -n '2,33p' "$0"
+    sed -n '2,35p' "$0"
     exit 2
 fi
 MAIN=$(realpath "$1")
@@ -51,7 +53,7 @@ BIG=${BIG:-}
 VISION=${VISION:-}
 EMBED=${EMBED-qwen3-embedding-0.6b-gguf-q8_0}
 EMBED_PULL=${EMBED_PULL:-hf.co/Qwen/Qwen3-Embedding-0.6B-GGUF:Q8_0}
-EMBED_CTX=${EMBED_CTX:-20480}
+EMBED_CTX=${EMBED_CTX:-20480 16384 12288 8192}
 URL=http://127.0.0.1:$PORT
 mkdir -p "$OUT"
 : > "$OUT/summary.txt"
@@ -336,8 +338,16 @@ d=json.load(sys.stdin)
 print(d.get("model_swaps"), d.get("generation_evictions"))'
 }
 if [ -n "$EMBED" ]; then
-    up "$BRANCH" "$OUT/7.log" --max-loaded-models 2 --ctx-size "$EMBED_CTX" || exit 1
     pair=$(printf '%s\n' "$A" "$B" | sort | tr '\n' ' ' | sed 's/ $//')
+    # The largest context at which A and B sit side by side.
+    for ctx in $EMBED_CTX; do
+        up "$BRANCH" "$OUT/7.log" --max-loaded-models 2 --ctx-size "$ctx" || exit 1
+        ask "$A" > /dev/null
+        ask "$B" > /dev/null
+        [ "$(resident)" = "$pair" ] && break
+        down
+    done
+    [ -n "$PID" ] || up "$BRANCH" "$OUT/7.log" --max-loaded-models 2 --ctx-size "$ctx" || exit 1
     rounds=""
     ok=1
     evicting=0
@@ -356,7 +366,7 @@ if [ -n "$EMBED" ]; then
             rounds="$rounds (answers '$a' / '$b', embed '$e')"
         elif [ "$before_round" != "$pair" ]; then
             ok=0
-            rounds="$rounds ($A and $B were not both loaded before embedding: '$before_round'; lower EMBED_CTX)"
+            rounds="$rounds ($A and $B were not both loaded before embedding at --ctx-size $ctx: '$before_round')"
         elif [ "$went" = 0 ]; then
             [ "$after_round" = "$pair" ] || ok=0
         else
@@ -366,9 +376,9 @@ if [ -n "$EMBED" ]; then
     done
     down
     if [ $ok = 1 ] && [ $evicting = 1 ]; then
-        result PASS "7 an embedder beside two models: the least recently used goes, and only it —$rounds; model_swaps $swaps1, generation_evictions $gen1"
+        result PASS "7 an embedder beside two models at --ctx-size $ctx: the least recently used goes, and only it —$rounds; model_swaps $swaps1, generation_evictions $gen1"
     elif [ $ok = 1 ]; then
-        result PASS "7 an embedder beside two models: it fit beside both, nothing unloaded —$rounds (raise EMBED_CTX to see the eviction order)"
+        result PASS "7 an embedder beside two models at --ctx-size $ctx: it fit beside both, nothing unloaded —$rounds (no context left the embedder too little room: see EMBED_CTX)"
     else
         result FAIL "7 an embedder beside two models:$rounds; model_swaps $swaps1 (see $OUT/7.log)"
     fi

@@ -56,8 +56,14 @@ for setting in $SETTINGS; do
     pid=$!
     for _ in $(seq 1 120); do
         curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null && break
+        kill -0 "$pid" 2>/dev/null || break
         sleep 1
     done
+    if ! curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null; then
+        echo "the server did not come up for --mtp $n; the end of $log:" >&2
+        tail -n 15 "$log" >&2
+        exit 1
+    fi
     read -r story story_kept story_drafted <<<"$(speed)"
     read -r code code_kept code_drafted <<<"$(speed --write-prompt "$CODE")"
     kill "$pid"

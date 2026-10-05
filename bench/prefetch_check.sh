@@ -18,6 +18,9 @@
 #    GPU computes from them;
 # 2. measures it with bench/speed_check.py over a fresh document as long.
 #
+# ORDER="1 0" starts the server with the prefetch first, to tell an effect of
+# the prefetch from one of running second.
+#
 # One line per setting: reading and writing speeds, a checksum of each answer
 # and what the server said about the prefetch on stderr (`on, 2 slots of ...`
 # or `off, <why>`); then whether the answers match. LLAMA_MOE_PREFETCH_SLOTS
@@ -73,7 +76,7 @@ EOF
 
 said_on=
 printf '%-12s %12s %12s %18s  %s\n' setting read_tok/s write_tok/s answers server_said
-for p in 0 1; do
+for p in ${ORDER:-0 1}; do
     log="$OUT/serve-prefetch$p.log"
     LLAMA_MOE_PREFETCH=$p "$BIN" serve --port "$PORT" --default-model "$MODEL" \
         --ctx-size "$CTX" --moe-cache "$MOE_CACHE" --n-ubatch "$N_UBATCH" "$@" >"$log" 2>&1 &

@@ -136,6 +136,8 @@ a 33,200-token document (`PROMPT_TOKENS`). One line per setting: reading and
 writing speeds, a checksum of each answer, and the server's `moe prefetch:`
 line; then whether the four answers match, which they must, or why the
 comparison says nothing (the prefetch stayed off, a server gave no answer).
+`ORDER="1 0"` starts the server with the prefetch first, which tells an
+effect of the prefetch on writing from one of running second.
 
 ## `interleave_check.py` — roadmap 0.7-D
 

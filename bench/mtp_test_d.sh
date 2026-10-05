@@ -41,6 +41,10 @@ if ! python3 "$SPEED_CHECK" --help 2>/dev/null | grep -q -- --temperature; then
     echo "$SPEED_CHECK is missing or too old (no --temperature): use bench/speed_check.py" >&2
     exit 1
 fi
+if [[ ! -f $MODEL ]]; then
+    echo "no model at $MODEL" >&2
+    exit 1
+fi
 if ! "$SERVER" --help 2>/dev/null | grep -q -- --moe-cache-mib; then
     echo "$SERVER has no --moe-cache-mib: build llama-server from the llama.cpp EuLLM pins" >&2
     exit 1
@@ -73,6 +77,11 @@ for n in $DRAFTS; do
         kill -0 "$pid" 2>/dev/null || break
         sleep 1
     done
+    if ! curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; then
+        echo "llama-server did not come up with $n drafts; the end of $log:" >&2
+        tail -n 15 "$log" >&2
+        exit 1
+    fi
     read -r story story_kept story_drafted <<<"$(speed)"
     read -r code code_kept code_drafted <<<"$(speed --write-prompt "$CODE")"
     kill "$pid"

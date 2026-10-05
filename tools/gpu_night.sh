@@ -13,11 +13,11 @@
 # step's whole output is in $NIGHT/<step>.log.
 #
 # Steps, in this order (STEPS="..." runs some of them):
-#   prefetch-fixed   phase 6 again, both servers with the same expert cache
-#                    (MOE_CACHE=4608): whether the writing speed lost on
-#                    4 October at --n-ubatch 4096 came from the prefetch or
-#                    from a cache --fit made a step smaller for the second
-#   prefetch-slots4  the same with LLAMA_MOE_PREFETCH_SLOTS=4
+#   prefetch         phase 6 at each slot count of PREFETCH_SLOTS (4 6 8 4:r),
+#                    both servers of a run with the same expert cache
+#                    (PREFETCH_CACHE=3584 MiB, room for eight slots); N:r starts
+#                    the server with the prefetch first, to tell its effect on
+#                    writing from one of running second
 #   interleave       bench/interleave_check.py on qwen3-8b, --batch-size 2 (0.7-D)
 #   mtp-t08          bench/mtp_sweep.sh at TEMPERATURE=0.8 on Qwen3.5-9B-MTP (B6)
 #   llama-pin        llama-server and llama-quantize from the pinned llama.cpp
@@ -25,12 +25,14 @@
 #   test-d           bench/mtp_test_d.sh on Qwen3.6-35B-A3B-MTP (B7)
 #   residency        tools/residency_check.sh with BIG=qwen3-32b (V3, V5)
 #   auto             tools/auto_check.sh, the full run (V7-V9)
+#   soak             tools/auto_check.sh's hour of mixed traffic alone (V8)
 #   rag              the Italian RAG gate set, built and measured (MVP 1)
 #   docker-gpu       the CUDA image built and asked one question; skipped
 #                    without Docker's NVIDIA runtime or with port 11434 taken
 #
 # What the steps download (the Q8_0 GGUF, the catalog models in PULLS) starts
-# at once, at low priority, and a step that needs it waits for it first.
+# at once, at low priority, and a step that needs it waits for it first. A
+# step whose model is not on disk is skipped and says which file it missed.
 # Paths default to the reference PC's; every one can be set below.
 # LIMIT_MINUTES caps every step's time limit, for a short trial of the chain.
 set -u
@@ -53,7 +55,9 @@ DECISION_LARGE=${DECISION_LARGE:-$STORE/jev-style-2b-decision-v3-gguf-q4_k_m/Jev
 CORPUS=${CORPUS:-$HOME/work/corpus*/legislazione_*.chunks.jsonl}
 INTERLEAVE_MODEL=${INTERLEAVE_MODEL:-qwen3-8b}
 PULLS=${PULLS-"qwen3-32b qwen3-14b qwen3-8b qwen3-4b qwen3-1.7b qwen3-0.6b"}
-STEPS=${STEPS:-"prefetch-fixed prefetch-slots4 interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
+STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
+PREFETCH_SLOTS=${PREFETCH_SLOTS:-"4 6 8 4:r"}
+PREFETCH_CACHE=${PREFETCH_CACHE:-3584}
 STOP_AT=${STOP_AT:-06:45}
 EVENING=${EVENING:-"$HOME/work/prefetch-check $HOME/work/prefetch-check-2048 $HOME/work/prefetch-check-slots3"}
 
@@ -75,17 +79,29 @@ serve_on() {
     return 1
 }
 
+# Skips the step (exit 3) unless every file named exists.
+need() {
+    local f
+    for f in "$@"; do
+        [[ -f $f ]] || { echo "SKIPPED: no $f"; exit 3; }
+    done
+}
+
 # One step, run by the night below under `timeout` as `gpu_night.sh step:NAME`.
 # Exit 3 means skipped.
 step() {
     case $1 in
-    prefetch-fixed)
-        MOE_CACHE=4608 N_UBATCH=4096 OUT=$NIGHT/prefetch-fixed \
-            "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
-        ;;
-    prefetch-slots4)
-        LLAMA_MOE_PREFETCH_SLOTS=4 MOE_CACHE=4608 N_UBATCH=4096 OUT=$NIGHT/prefetch-slots4 \
-            "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+    prefetch)
+        need "$FLASH"
+        local entry slots order label
+        for entry in $PREFETCH_SLOTS; do
+            slots=${entry%%:*} order="0 1" label=""
+            [[ $entry == *:r ]] && order="1 0" label=", the prefetch server first"
+            echo "== LLAMA_MOE_PREFETCH_SLOTS=$slots, --moe-cache $PREFETCH_CACHE$label"
+            ORDER=$order LLAMA_MOE_PREFETCH_SLOTS=$slots MOE_CACHE=$PREFETCH_CACHE N_UBATCH=4096 \
+                OUT=$NIGHT/prefetch-${entry/:/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+            echo
+        done
         ;;
     interleave)
         serve_on 11550 "$NIGHT/interleave-serve.log" \
@@ -94,6 +110,7 @@ step() {
         python3 "$REPO/bench/interleave_check.py" --url http://127.0.0.1:11550 --model "$INTERLEAVE_MODEL"
         ;;
     mtp-t08)
+        need "$M9"
         TEMPERATURE=0.8 MTP_SETTINGS="0 1 2 3" SPEED_CHECK=$REPO/bench/speed_check.py \
             OUT=$NIGHT/mtp-sweep-t08 "$REPO/bench/mtp_sweep.sh" "$BIN" "$M9"
         ;;
@@ -110,16 +127,22 @@ step() {
             "$REPO/bench/mtp_head_q8.sh" "$BIN" "$M9_Q8"
         ;;
     test-d)
+        need "$M35" "$LLAMA_PIN/bin/llama-server"
         OUT=$NIGHT/mtp-test-d "$REPO/bench/mtp_test_d.sh" "$LLAMA_PIN/bin/llama-server" "$M35"
         ;;
     residency)
         BIG=qwen3-32b OUT=$NIGHT/residency "$REPO/tools/residency_check.sh" "$BIN" "$BIN"
         ;;
     auto)
+        need "$DECISION_SMALL" "$DECISION_LARGE"
         local cpu_decision
         cpu_decision=$(ls "$STORE"/qwen3-0.6b/*.gguf 2>/dev/null | head -1)
         LIMIT=100 DURATION=3600 CPU_DECISION=$cpu_decision OUT=$NIGHT/auto-check \
             "$REPO/tools/auto_check.sh" "$BIN" "$DECISION_SMALL" "$DECISION_LARGE"
+        ;;
+    soak)
+        need "$DECISION_SMALL"
+        CHECKS=4 DURATION=3600 OUT=$NIGHT/soak "$REPO/tools/auto_check.sh" "$BIN" "$DECISION_SMALL"
         ;;
     rag)
         compgen -G "$CORPUS" >/dev/null || { echo "SKIPPED: nothing matches $CORPUS"; return 3; }
@@ -192,7 +215,9 @@ limit_of() { # minutes a step may take
     local m
     case $1 in
     interleave) m=15 ;;
-    mtp-t08 | prefetch-fixed | prefetch-slots4) m=45 ;;
+    mtp-t08) m=45 ;;
+    prefetch) m=90 ;;
+    soak) m=90 ;;
     llama-pin) m=60 ;;
     mtp-head-q8 | test-d) m=90 ;;
     rag | docker-gpu) m=120 ;;
@@ -209,6 +234,8 @@ extract() {
     local log=$NIGHT/$1.log
     case $1 in
     residency) cat "$NIGHT/residency/summary.txt" 2>/dev/null; tail -n 1 "$log" ;;
+    soak) cat "$NIGHT/soak/summary.txt" 2>/dev/null; tail -n 1 "$log" ;;
+    prefetch) grep -v '^$' "$log" ;;
     auto)
         cat "$NIGHT/auto-check/summary.txt" 2>/dev/null
         tail -n 1 "$log"
@@ -366,7 +393,7 @@ df -h "$HOME" "$MODELS" "$STORE" 2>/dev/null | awk '!seen[$0]++' >"$NIGHT/disk-a
 for s in $STEPS; do
     case $s in
     mtp-head-q8) wait_for q8.done ;;
-    residency | auto | docker-gpu) wait_for pulls.done ;;
+    residency | auto | soak | docker-gpu) wait_for pulls.done ;;
     esac
     run "$s"
 done
