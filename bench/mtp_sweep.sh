@@ -19,8 +19,12 @@ export LC_ALL=C
 BIN=$1
 MODEL=$2
 shift 2
+HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=${PORT:-11510}
-SPEED_CHECK=${SPEED_CHECK:-$HOME/work/speed_check.py}
+# The copy beside this script, as bench/mtp_test_d.sh and
+# bench/prefetch_check.sh use: a default of ~/work/speed_check.py, an old
+# copy's place, stopped a comparison halfway on 6 October.
+SPEED_CHECK=${SPEED_CHECK:-$HERE/speed_check.py}
 OUT=${OUT:-$HOME/work/mtp-sweep}
 SETTINGS=${MTP_SETTINGS:-"0 1 2 3 3:0.5 4:0.5 6:0.5"}
 TEMPERATURE=${TEMPERATURE:-0}
