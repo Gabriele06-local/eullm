@@ -335,3 +335,18 @@ def test_answers_digest_ignores_noise_below_four_decimals():
     b = {"q": {"type": "choice", "choice": "x", "probabilities": {"x": 0.712341, "y": 0.287659}}}
     c = {"q": {"type": "choice", "choice": "y", "probabilities": {"x": 0.4, "y": 0.6}}}
     assert point.answers_digest(a) == point.answers_digest(b) != point.answers_digest(c)
+
+
+def test_failed_points_can_be_retried_by_group(tmp_path):
+    q = Queue(str(tmp_path))
+    for pid in ("moe-1", "moe-2", "rt-1"):
+        q.add({"id": pid, "kind": "throughput"})
+        q.claim(pid, {"job": "j"})
+        q.finish(pid, "failed", "first")
+        q.claim(pid, {"job": "j"})
+        q.finish(pid, "failed", "second")
+    assert sorted(q.ids("failed")) == ["moe-1", "moe-2", "rt-1"]
+    assert sorted(q.retry("moe-")) == ["moe-1", "moe-2"]
+    p = q.load("todo", "moe-1")
+    assert p["attempts"] == 0 and p["notes"] == ["first", "second"]
+    assert q.ids("failed") == ["rt-1"]

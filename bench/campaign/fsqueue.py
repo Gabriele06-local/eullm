@@ -164,5 +164,19 @@ class Queue:
             moved.append(pid)
         return moved
 
+    def retry(self, prefix: str = "") -> list:
+        """Failed points whose id starts with `prefix` back to todo, with
+        their attempts reset and their notes kept: after the cause is fixed."""
+        moved = []
+        for pid in self.ids("failed"):
+            if not pid.startswith(prefix):
+                continue
+            point = self.load("failed", pid)
+            point["attempts"] = 0
+            _write(self._path("todo", pid), point)
+            os.remove(self._path("failed", pid))
+            moved.append(pid)
+        return moved
+
     def counts(self) -> dict:
         return {state: len(self.ids(state)) for state in STATES}
