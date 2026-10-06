@@ -18,19 +18,19 @@ EULLM aims to close that gap.
 
 ## Compared with Ollama and llama.cpp
 
-A local inference stack gives you a model and a port. What it usually does not give you is a record of what was asked and answered, a compliance story for regulated work, a registry with verifiable provenance, or a path to a model specialized for your domain. EULLM is built around those four, without giving up the developer experience of a single binary you start in a terminal.
+A local inference stack gives you a model and a port. What it usually does not give you is a record of every answer (who asked which model, and when), a compliance story for regulated work, a registry with verifiable provenance, or a path to a model specialized for your domain. EULLM is built around those four, without giving up the developer experience of a single binary you start in a terminal.
 
 | | Ollama / llama.cpp | EULLM |
 |---|---|---|
 | Inference engine | llama.cpp | llama.cpp (same backend, same performance) |
-| Request scheduling | Configurable parallelism (`OLLAMA_NUM_PARALLEL`, low default, one KV-cache copy per slot) | **Continuous batching** by default — single-pass parallel decode, shared KV |
+| Request scheduling | Configurable parallelism (`OLLAMA_NUM_PARALLEL`, low default, one KV-cache copy per slot) | **Continuous batching** (`--batch-size N`) — single-pass parallel decode, shared KV |
 | API compatibility | Ollama API or custom | Ollama-compatible + OpenAI-compatible |
 | GPU support | Manual build flags | `--features cuda/rocm/vulkan/metal` |
 | **Transparent web browsing** | Via function calling (model must support tool use; requires tool-capable model) | **`--web` flag — model-agnostic, works with any GGUF, no tool-use support required** |
-| Model registry | US servers (HuggingFace) | EU servers (Hetzner DE, OVH FR) |
-| AI Act compliance | None | Built-in audit trail + compliance card templates |
+| Model registry | Ollama's registry, Hugging Face | Hugging Face today; an EU-hosted registry is planned |
+| AI Act | Nothing built in | A local audit trail designed for its record-keeping |
 | Model verticalizzazione | Manual, requires ML expertise | Forge CLI + pipeline modules (end-to-end integration in progress) |
-| Domain-specific EU models | None | Hub catalog (demo models in development) |
+| Domain-specific EU models | None | `legal-it-4b` and `legal-it-8b` in the catalog; more in development |
 | White-label branding | System prompt only (bypassable) | Fine-tuned into weights |
 | Telemetry | Varies | **None.** No analytics, no crash reports, no usage stats. Audit trail stored locally at `~/.eullm/audit/audit.jsonl`, never transmitted |
 | Migration effort | — | **Zero.** Same API, same port, same tools |
@@ -41,8 +41,8 @@ EULLM aims to be a complete sovereign AI stack — engine, tools, and models in 
 
 The EU AI Act (Regulation 2024/1689) is easy to discuss on paper and hard to
 study on *running* software. EULLM is built to be an open, reproducible
-**testbed** for exactly that: every inference is written to a local,
-inspectable audit trail, nothing leaves the machine, and the whole stack is
+**testbed** for exactly that: every answer and decision is written to
+a local, inspectable audit trail, nothing leaves the machine, and the whole stack is
 AGPL-3.0 with no hidden services — so a lab can instrument, measure and
 prototype transparency, traceability and human-oversight mechanisms on a real
 engine instead of a mock.
@@ -54,7 +54,7 @@ consortium collaborations are welcome** — see [Contributing](../README.md#cont
 
 ## Models and licenses
 
-EULLM exclusively uses models with fully permissive licenses:
+The catalog favours permissive licenses. The families it draws on:
 
 | Model | License | Rebrand | Commercial use |
 |-------|---------|---------|----------------|
@@ -64,5 +64,7 @@ EULLM exclusively uses models with fully permissive licenses:
 | **GPT-OSS** (OpenAI) | Apache 2.0 | Free | Unlimited |
 | **Falcon 3** (TII) | Apache 2.0 | Free | Unlimited |
 | ~~Llama (Meta)~~ | Custom | Requires "Built with Llama" | Restrictions |
+
+Two Gemma models in the catalog come under Google's Gemma Terms of Use and one DeepSeek model under the DeepSeek License Agreement, which carry use restrictions of their own; the chat UI's model browser shows each model's licence before you download it.
 
 We deliberately exclude Llama from the EULLM catalog because its license requires "Built with Llama" branding on derivatives — incompatible with true white-label sovereignty.
