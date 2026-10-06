@@ -193,14 +193,23 @@ These are estimates, to be replaced by the measurements of section 7.
 One piece at a time, each measured before the next:
 
 1. **The measurements of section 7.** No code; they replace the estimates above.
-2. **The loan (piece 7).** The rest of the reading road, and a larger cache for writing.
-3. **The draft layer (pieces 8 and 9).** Check the norm on llama-server, then `--mtp` from a file of its own with Q2_0 experts.
-4. **Phase 3 (piece 10).** Sized by what a check costs once step 3 runs.
-5. **Phase 4 (piece 11).** Only if the GPU idles.
+2. **A llama.cpp bump past PR #29943, with PR #29887 as it was rewritten on 6 October** (`docs/moe-offload-plan.md` §3). It ports patches `0002`-`0004`. The pieces below are written on that base, not on the one about to go.
+3. **The loan (piece 7).** The rest of the reading road, and a larger cache for writing.
+4. **The draft layer (pieces 8 and 9).** Check the norm on llama-server, then `--mtp` from a file of its own with Q2_0 experts.
+5. **Phase 3 (piece 10).** Sized by what a check costs once step 4 runs.
+6. **Phase 4 (piece 11).** Only if the GPU idles.
 
-Steps 2 and 3 can swap: step 3 is smaller, and step 2's gain is surer.
+Steps 3 and 4 can swap: step 4 is smaller, and step 3's gain is surer.
 
 ## 7. What to measure first
+
+All of it in one run of `tools/gpu_night.sh`:
+
+```bash
+STEPS="strata fresh ceiling llama-pin test-flash" nohup tools/gpu_night.sh > ~/work/gpu-night.out 2>&1 &
+```
+
+The steps call `bench/strata_check.sh`, `bench/fresh_check.sh`, `bench/prefetch_check.sh` and `bench/mtp_test_d.sh`. What each measures follows.
 
 **Strata, as installed (0.1.35).**
 
