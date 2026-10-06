@@ -706,7 +706,7 @@ COLUMNS = (
     "agg_tok_s_cv_pct", "ttft_ms_p50", "decode_tok_s", "prefill_tok_s", "duration_s",
     "requests", "accuracy", "consistency", "drift_pct", "vram_peak_mib_max", "use_mean",
     "engine", "bench_rev", "ft_ctx", "optimizer", "train_tensors", "ft_loss_before",
-    "ft_loss_after", "ft_tok_s", "ft_trainable_params",
+    "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
 )
 
 
@@ -745,6 +745,8 @@ def row_of(r: dict) -> dict:
                    ft_loss_after=last.get("loss"),
                    ft_tok_s=round(sum(speeds) / len(speeds), 1) if speeds else None,
                    ft_trainable_params=ft.get("trainable_params"),
+                   ft_mem_est_mib=round(((ft.get("memory_estimate") or {}).get("total") or 0)
+                                        / 2**20) or None,
                    train_tensors=",".join(p.get("train_tensors") or []))
     devs = r.get("device_stats")
     if isinstance(devs, dict):
