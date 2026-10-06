@@ -243,3 +243,26 @@ def test_the_allocation_left_and_the_pace_to_use_it_are_shown(tmp_path, runs, mo
     monkeypatch.setenv("EULLM_BUDGET_END", "2000-01-01")
     assert "it has ended" in run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")],
                                         ended=[])
+
+
+def test_opd_progress_and_case_law_results_are_shown(tmp_path, runs, monkeypatch):
+    """2026-10-06: the user asked how to tell that a pilot's first link had run."""
+    logs = runs.parent / "opd" / "logs"
+    logs.mkdir(parents=True)
+    (logs / "eullm-opd-opd2-4b-80.out").write_text(
+        "[opd] repo /w/eullm (fcebb63), student cuda:0, teacher 1,2\n"
+        "[opd] step 1/60 kl 0.7665 len 174 53s/step\n"
+        "[opd] step 2/60 kl 0.7001 len 180 45s/step\n"
+        "[opd] step 33/60 kl 0.4194 len 210 45s/step\n"
+        "[opd] time is up at step 33: saved, the next link carries on\n")
+    repo_logs = tmp_path / "repo-logs"
+    repo_logs.mkdir()
+    (repo_logs / "eullm-cds-exam-9.out").write_text(
+        "[cds-exam] v04-4b-q4: 1200 questions; source ruling retrieved 0.350, cited 0.069; "
+        "answers citing only rulings they were given 0.677 -> /w/answers-v04-4b-q4.jsonl\n")
+    monkeypatch.setenv("EULLM_REPO_LOGS", str(repo_logs))
+    out = run_status(tmp_path, queue=[("eullm-opd", "RUNNING", "None")], ended=[])
+    assert "     [opd] step 1/60 kl 0.7665" in out
+    assert "     [opd] time is up at step 33" in out and "step 2/60" not in out
+    assert "   [cds-exam] v04-4b-q4: 1200 questions; source ruling retrieved 0.350" in out
+    assert "nothing wrong found" in out
