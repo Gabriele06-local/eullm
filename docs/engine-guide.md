@@ -642,6 +642,12 @@ larger compute buffer takes 1.5 GiB more from the cache. Two slots gained
 10-15%, three 18%, and six or eight no more than four. `--moe-prefetch N`
 takes 2 to 8 slots, `--moe-prefetch 0` turns it off.
 
+With an expert cache, the experts it already holds are copied into the slots
+from its own VRAM, and only the others over the bus: a 5.5 GiB cache saves
+the bus a sixth of the bytes. One line on stderr says the share taken from
+VRAM; `LLAMA_MOE_PREFETCH_FROM_CACHE=0` copies everything over the bus, a
+diagnostic to compare the two, like the variables above.
+
 It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
 build), to experts kept in RAM with the model read into memory rather than
 mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM allows.

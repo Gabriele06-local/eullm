@@ -162,7 +162,10 @@ checksum of each answer, and llama.cpp's `moe prefetch:` line; then whether
 the answers match, which they must, or why the comparison says nothing (the
 prefetch stayed off, a server gave no answer). `SETTINGS="4 0"` starts the
 server with the prefetch first, which tells an effect of the prefetch on
-writing from one of running second.
+writing from one of running second. A setting `N:bus` runs `--moe-prefetch N`
+with `LLAMA_MOE_PREFETCH_FROM_CACHE=0`, every expert over the bus as before
+patch `0004`: `SETTINGS="4:bus 4"`, and the reverse, measure what copying the
+experts the cache holds from VRAM gains (phase 6b).
 
 ## `interleave_check.py` — roadmap 0.7-D
 
