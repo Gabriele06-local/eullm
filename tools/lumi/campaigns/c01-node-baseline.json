@@ -8,7 +8,11 @@
     "Objectives (1) memory/throughput by size, KV type, context; (2) batching under concurrency;",
     "(3) layer split vs replicas on 2/4/8 GCDs; stability under sustained load, with graded answers.",
     "--fit-strict everywhere: a configuration that does not fit is recorded as does-not-fit,",
-    "never measured half on the CPU."
+    "never measured half on the CPU.",
+    "prompt_tokens is nominal, at 4 characters a token; the Italian filler is ~3.3 for Qwen3, so",
+    "30000 is ~36,500 real tokens (the results hold the counted ones). In a 32768 slot it does",
+    "not fit (12 failed points, 06-10-2026); long-context-40k measures it in a 40960 slot,",
+    "Qwen3's own trained context."
   ],
   "pull": ["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"],
   "defaults": {"kind": "throughput", "repeats": 3, "extra_args": ["--fit-strict"]},
@@ -42,6 +46,10 @@
      "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
               "batch": [1, 4], "prompt_tokens": [0, 8000, 16000, 30000],
               "kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "long-context-40k", "priority": 55, "est_s": 1800,
+     "set": {"gcds": 1, "slot_ctx": 40960, "prompt_tokens": 30000},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
+              "batch": [1, 4], "kv": ["f16/f16", "q8_0/q8_0"]}},
 
     {"name": "scale-split", "priority": 40, "est_s": 1200,
      "set": {"batch": 16, "slot_ctx": 4096},
