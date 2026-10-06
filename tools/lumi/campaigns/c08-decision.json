@@ -1,0 +1,56 @@
+{
+  "campaign": "c08-decision",
+  "notes": [
+    "/v1/systemone with the Jev-Style decision releases (Apache-2.0, Qwen3.5 fine-tunes with a",
+    "verdict readout), on one GCD and replicated over several. Objective (2) for decisions: the",
+    "engine runs one decision at a time per server (one worker, the decision held under a lock),",
+    "so latency under concurrency is queueing — measured here as wait_ms (the server's time minus",
+    "its decode time). That is the 'before' of batching decisions in the engine; replicas, one",
+    "server per GCD, are today's way to scale, and dec-replicas measures them.",
+    "Synthetic ticket histories and questions (bench/decision_bench.py), each state opened by its",
+    "own line so no request hits the state the server kept from the one before, and each asked",
+    "several times: consistency says whether concurrency changes an answer.",
+    "Q4_K_M, Q8_0 and F16 of each release, from the Hub, 06-10-2026: 0.8B 505/774/1446 MiB,",
+    "2B 1215/1919/3601 MiB. qwen3-0.6b (catalog) as the code-readout reference."
+  ],
+  "pull": [
+    "hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q4_K_M",
+    "hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:Q8_0",
+    "hf.co/chaoliangUNSW/Jev-Style-0.8B-Decision-v3-GGUF:F16",
+    "hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q4_K_M",
+    "hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:Q8_0",
+    "hf.co/chaoliangUNSW/Jev-Style-2B-Decision-v3-GGUF:F16"
+  ],
+  "defaults": {"kind": "decision", "gcds": 1, "decision_ctx": 16384, "requests": 400},
+  "groups": [
+    {"name": "dec-one-gcd", "priority": 65, "est_s": 600,
+     "axes": {"model": ["jev-style-0.8b-decision-v3-gguf-q4_k_m",
+                        "jev-style-2b-decision-v3-gguf-q4_k_m"],
+              "concurrency": [1, 4, 16, 64],
+              "state_tokens": [256, 1024, 4096],
+              "questions": [8, 64],
+              "decision_mode": ["shared_prefix", "batched"]}},
+
+    {"name": "dec-precision", "priority": 65, "est_s": 600,
+     "set": {"concurrency": 1, "state_tokens": 1024},
+     "axes": {"model": ["jev-style-0.8b-decision-v3-gguf-q4_k_m",
+                        "jev-style-0.8b-decision-v3-gguf-q8_0",
+                        "jev-style-0.8b-decision-v3-gguf-f16",
+                        "jev-style-2b-decision-v3-gguf-q4_k_m",
+                        "jev-style-2b-decision-v3-gguf-q8_0",
+                        "jev-style-2b-decision-v3-gguf-f16"],
+              "questions": [8, 64]}},
+
+    {"name": "dec-replicas", "priority": 65, "est_s": 600,
+     "set": {"replica_gcds": 1, "state_tokens": 1024, "questions": 8},
+     "axes": {"model": ["jev-style-0.8b-decision-v3-gguf-q4_k_m",
+                        "jev-style-2b-decision-v3-gguf-q4_k_m"],
+              "gcds": [2, 4, 8],
+              "concurrency": [16, 64]}},
+
+    {"name": "dec-codes-reference", "priority": 60, "est_s": 600,
+     "set": {"model": "qwen3-0.6b", "state_tokens": 1024},
+     "axes": {"concurrency": [1, 16], "questions": [8, 64],
+              "decision_mode": ["shared_prefix", "batched"]}}
+  ]
+}
