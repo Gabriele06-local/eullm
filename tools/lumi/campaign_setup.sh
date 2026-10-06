@@ -8,8 +8,9 @@
 #   bash tools/lumi/campaign_setup.sh [SPEC.json ...]
 #
 # Default specs: tools/lumi/campaigns/c01-node-baseline.json (catalog models,
-# starts at once), c02-quant-large-moe.json (~1.2 TB from Hugging Face) and
-# c05-finetune.json (`eullm finetune` on F32 models this script converts).
+# starts at once) and c02-quant-large-moe.json (~1.2 TB from Hugging Face).
+# Not c05-finetune.json: this allocation is declared inference-only
+# (docs/lumi/allocation-plan.md), so no spec that trains is planned here.
 #
 #   SKIP_PULLS=1      plan without pulling or converting (their points block
 #                     until the models are there; `campaign.py unblock` after
@@ -25,8 +26,14 @@ if [ $# -gt 0 ]; then
     SPECS=("$@")
 else
     SPECS=("$EULLM_REPO/tools/lumi/campaigns/c01-node-baseline.json"
-           "$EULLM_REPO/tools/lumi/campaigns/c02-quant-large-moe.json"
-           "$EULLM_REPO/tools/lumi/campaigns/c05-finetune.json")
+           "$EULLM_REPO/tools/lumi/campaigns/c02-quant-large-moe.json")
+fi
+# DEV-278 is declared inference-only to EuroHPC: a spec that trains is refused
+# here rather than queued by a command copied from somewhere else.
+if grep -l '"kind": *"finetune"' "${SPECS[@]}" >/dev/null 2>&1; then
+    echo "[err] $(grep -l '"kind": *"finetune"' "${SPECS[@]}" | tr '\n' ' ')has finetune points;" \
+         "this allocation is inference-only (docs/lumi/allocation-plan.md)" >&2
+    exit 1
 fi
 mkdir -p "$CAMPAIGN_DIR" "$EULLM_MODELS_DIR"
 echo "queue  $CAMPAIGN_DIR"

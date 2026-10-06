@@ -6,6 +6,9 @@
 #   export SBATCH_ACCOUNT=project_465003366
 #   bash tools/lumi/make_f32_models.sh [SPEC.json ...]
 #
+# Not for LUMI DEV-278, which is declared inference-only (see
+# docs/lumi/allocation-plan.md): for a machine where training is declared.
+#
 # Default spec: tools/lumi/campaigns/c05-finetune.json. For every model its
 # finetune points name and $CAMPAIGN_DIR/f32 lacks (`campaign.py f32s`), the
 # Hugging Face repo the spec's `f32` map names is downloaded — weights and
