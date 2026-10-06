@@ -1,0 +1,34 @@
+{
+  "campaign": "c07-runtimes",
+  "notes": [
+    "The engine against the servers it is measured by, on the same GGUF, the same GCD, the same",
+    "KV pool, slots and cache types: llama-server built from the engine's own llama.cpp commit",
+    "without EuLLM's patches (the difference is EuLLM's runtime: scheduler, batching, API) and",
+    "Ollama, the API EuLLM is compatible with. Objective (2), and the reference frame for (1).",
+    "Binaries: tools/lumi/install_runtimes.sh (llama-server built here, Ollama's latest release",
+    "with its ROCm libraries, its models made from the EuLLM store's GGUFs).",
+    "vLLM is not here yet: it serves Hugging Face weights rather than GGUF, so it needs its own",
+    "like-for-like design, and its ROCm container has to be shown to run on gfx90a first.",
+    "Catalog models (Q4_K_M), already in the store for c01."
+  ],
+  "defaults": {"gcds": 1, "slot_ctx": 4096},
+  "groups": [
+    {"name": "rt-throughput", "priority": 75, "est_s": 900,
+     "set": {"kind": "throughput", "repeats": 3},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
+              "batch": [1, 4, 16],
+              "runtime": ["eullm", "llama-server", "ollama"]}},
+
+    {"name": "rt-prefill", "priority": 75, "est_s": 900,
+     "set": {"kind": "throughput", "repeats": 3, "batch": 1, "slot_ctx": 32768,
+             "prompt_tokens": 16000},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
+              "runtime": ["eullm", "llama-server", "ollama"]}},
+
+    {"name": "rt-graded", "priority": 75, "est_s": 3600,
+     "set": {"kind": "workload", "sets": ["gsm8k"], "limit": 400, "batch": 16,
+             "concurrency": 16, "max_tokens": 768, "think": false},
+     "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
+              "runtime": ["eullm", "llama-server", "ollama"]}}
+  ]
+}

@@ -2,6 +2,11 @@
 """A stand-in for the eullm binary, for the tests: `--version`, `list`,
 `serve --port N`, whose server answers /api/version, /api/generate and
 /api/chat the way the engine does (streamed NDJSON, Ollama's fields), and
+`serve --decision-model M`, whose /v1/systemone answers one decision at a
+time as the engine's single decision worker does (a model starting with
+"missing" stops the server at startup, as a model not in the store does);
+called with `-m GGUF` it is llama-server (/health, OpenAI's SSE endpoints),
+and as `serve` without `--port` it is Ollama (OLLAMA_HOST). And
 `finetune MODEL --output O --report R`, which writes both the way the engine
 does: models starting with "huge" are refused as too large for the free
 memory, those starting with "notf32" as quantized, and a model file that does
@@ -17,6 +22,7 @@ grades correct. FAKE_EULLM_DELAY_S sets the time per token.
 import json
 import os
 import sys
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -24,8 +30,32 @@ DELAY = float(os.environ.get("FAKE_EULLM_DELAY_S", "0.001"))
 WORDS = ["Il", " mare", " era", " calmo", "."]
 
 
+DECISION_LOCK = threading.Lock()
+
+
+def decision(body):
+    """Answers that depend on the state and the questions only, as a
+    deterministic model's do."""
+    seed = sum(map(ord, body.get("state", ""))) % 97
+    answers = {}
+    for k, (qid, q) in enumerate(body.get("questions", {}).items()):
+        p = ((seed + k) % 10) / 10
+        if q.get("type") == "choice":
+            opts = list(q.get("criteria", {}))
+            probs = {o: (0.7 if j == (seed + k) % len(opts) else 0.3 / (len(opts) - 1))
+                     for j, o in enumerate(opts)}
+            answers[qid] = {"type": "choice", "choice": max(probs, key=probs.get),
+                            "probabilities": probs}
+        elif q.get("type") == "score":
+            answers[qid] = {"type": "score", "score": 1 + p * 3}
+        else:
+            answers[qid] = {"type": "noul", "noul": p}
+    return answers
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    flavour = "eullm"
 
     def log_message(self, *args):
         pass
@@ -39,13 +69,32 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        if self.path == "/api/version":
+        if self.path == "/health" and self.flavour == "llama":
+            self._json(200, {"status": "ok"})
+        elif self.path == "/api/version" and self.flavour != "llama":
             self._json(200, {"version": "0.0.0-fake"})
         else:
             self._json(404, {"error": "not found"})
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+        if self.path == "/v1/systemone":
+            started = time.time()
+            with DECISION_LOCK:  # one worker: requests wait their turn
+                decode_ms = DELAY * 1000 * (2 + len(body.get("questions", {})))
+                time.sleep(decode_ms / 1000)
+                answers = decision(body)
+            self._json(200, {"model": "jev-fake", "answers": answers,
+                             "eullm": {"request_ms": (time.time() - started) * 1000,
+                                       "timings_ms": {"prefix": decode_ms / 2,
+                                                      "questions": decode_ms / 2},
+                                       "prompt_tokens": len(body.get("state", "")) // 4,
+                                       "evaluated_tokens": len(body.get("state", "")) // 4,
+                                       "mode": (body.get("eullm") or {}).get("mode")}})
+            return
+        if self.path in ("/v1/completions", "/v1/chat/completions"):
+            self._openai(body)
+            return
         model = body.get("model", "")
         if model.startswith("missing"):
             self._json(404, {"error": f"model '{model}' not found"})
@@ -87,6 +136,39 @@ class Handler(BaseHTTPRequestHandler):
               "prompt_eval_duration": 0, "load_duration": 2000000})
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
+
+
+def _openai(self, body):
+    """llama-server's OpenAI endpoints, streamed as SSE, with its usage and
+    timings in the last chunk."""
+    n = min(int(body.get("max_tokens") or 16), 32)
+    pieces = [WORDS[i % len(WORDS)] for i in range(max(n - 4, 1))] + ["\nAnswer: 4"]
+    chat = self.path.endswith("chat/completions")
+    prompt = body.get("prompt") or json.dumps(body.get("messages"))
+    self.send_response(200)
+    self.send_header("Content-Type", "text/event-stream")
+    self.send_header("Transfer-Encoding", "chunked")
+    self.end_headers()
+
+    def send(obj):
+        data = f"data: {json.dumps(obj) if isinstance(obj, dict) else obj}\n\n".encode()
+        self.wfile.write(f"{len(data):x}\r\n".encode() + data + b"\r\n")
+        self.wfile.flush()
+
+    started = time.time()
+    for piece in pieces:
+        time.sleep(DELAY)
+        send({"choices": [{"delta": {"content": piece}} if chat else {"text": piece}]})
+    send({"choices": [], "usage": {"completion_tokens": len(pieces),
+                                   "prompt_tokens": len(prompt) // 4},
+          "timings": {"predicted_n": len(pieces), "prompt_n": len(prompt) // 4,
+                      "predicted_ms": (time.time() - started) * 1000, "prompt_ms": 1.0}})
+    send("[DONE]")
+    self.wfile.write(b"0\r\n\r\n")
+    self.wfile.flush()
+
+
+Handler._openai = _openai
 
 
 def flag(argv, name, default=None):
@@ -150,8 +232,20 @@ def main(argv):
         return 0
     if argv and argv[0] == "finetune":
         return finetune(argv[1:])
+    if "-m" in argv:  # llama-server
+        Handler.flavour = "llama"
+        port = int(flag(argv, "--port"))
+        ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
     if argv and argv[0] == "serve":
-        port = int(argv[argv.index("--port") + 1])
+        model = flag(argv, "--decision-model")
+        if model and model.startswith("missing"):
+            print(f"Error: decision model '{model}' not found.", file=sys.stderr)
+            return 1
+        if "--port" in argv:
+            port = int(flag(argv, "--port"))
+        else:  # Ollama
+            Handler.flavour = "ollama"
+            port = int(os.environ["OLLAMA_HOST"].rsplit(":", 1)[1])
         ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
     return 2
 

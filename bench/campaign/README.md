@@ -36,7 +36,8 @@ field. The ones that matter:
 
 | field | meaning |
 |---|---|
-| `kind` | `throughput` (the Leonardo method, repeated), `workload` (sustained load, graded) or `finetune` (the engine's trainer) |
+| `kind` | `throughput` (the Leonardo method, repeated), `workload` (sustained load, graded), `decision` (`/v1/systemone`) or `finetune` (the engine's trainer) |
+| `runtime` | `eullm` (default), `llama-server` or `ollama`: the same point served by another runtime, for comparison |
 | `gcds` | devices the point uses: 1, 2, 4, 8 |
 | `replica_gcds` | devices per server; `gcds / replica_gcds` servers (replicas) |
 | `exclusive` | alone on the node: the control for neighbour interference |
@@ -46,6 +47,31 @@ field. The ones that matter:
 | `sets`, `min/max_duration_s` | workload: which sets, and how long; it stretches to the time free |
 | `extra_args` | anything else for `eullm serve` (`--fit-strict` in the shipped specs) |
 | `priority`, `est_s` | scheduling only; not part of a point's identity |
+
+A `decision` point serves a decision model alone (`eullm serve
+--decision-model <model> --decision-ctx <decision_ctx>`, a Jev-Style release
+or a code-readout model) and sends `requests` decisions from `concurrency`
+clients: synthetic ticket histories of `state_tokens` tokens with
+`questions` questions each, in `decision_mode` (`shared_prefix`, `batched`,
+`separate`). Each state is opened by its own line, so no request reuses the
+state the server kept, and `distinct_states` of them are cycled, so each is
+asked several times. It reports decisions per second, client latency p50/p95/
+p99, the server's decode time and its wait (server time minus decode: the
+engine runs one decision at a time per server), and consistency — whether a
+state asked again, under concurrency, got the same answers to four decimals.
+
+A point with `runtime: llama-server` or `ollama` runs the same
+measurement against that server instead of `eullm serve`, with the same KV
+pool, slots and cache types; `extra_args` are EuLLM's own and are not passed,
+`runtime_args` are. llama-server gets the GGUF from the EuLLM store, Ollama a
+model of the same name in its own store; both binaries come from
+`LLAMA_SERVER_BIN` and `OLLAMA_BIN` (`tools/lumi/install_runtimes.sh`).
+Requests are translated to llama-server's OpenAI endpoints and back.
+
+Points with a new kind or a runtime carry `runner: 2`: a runner older than
+that leaves them in the queue. A job keeps the code it started with, so
+after a pull that adds a kind, the running jobs are cancelled (their
+`afterany` successors start on the new code) before the new specs are planned.
 
 A `finetune` point runs `eullm finetune` on one GCD instead of a server. Its
 own fields are the command's flags — `data`, `ft_ctx` (a multiple of 256),

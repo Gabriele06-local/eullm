@@ -15,6 +15,14 @@ export EULLM_REPO
 export CAMPAIGN_DIR="${CAMPAIGN_DIR:-/scratch/${SBATCH_ACCOUNT:-project_465003366}/${USER}/campaign}"
 export EULLM_MODELS_DIR="${EULLM_MODELS_DIR:-/scratch/${SBATCH_ACCOUNT:-project_465003366}/${USER}/eullm-models}"
 export REFLEXBENCH_CACHE="${REFLEXBENCH_CACHE:-$CAMPAIGN_DIR/reflexbench-cache}"
+# The runtimes the engine is compared with (install_runtimes.sh), when there.
+if [ -z "${LLAMA_SERVER_BIN:-}" ] && [ -x "$CAMPAIGN_DIR/runtimes/llama-server" ]; then
+    export LLAMA_SERVER_BIN="$CAMPAIGN_DIR/runtimes/llama-server"
+fi
+if [ -z "${OLLAMA_BIN:-}" ] && [ -x "$CAMPAIGN_DIR/runtimes/ollama/bin/ollama" ]; then
+    export OLLAMA_BIN="$CAMPAIGN_DIR/runtimes/ollama/bin/ollama"
+fi
+export OLLAMA_MODELS="${OLLAMA_MODELS:-$CAMPAIGN_DIR/ollama-models}"
 
 # SLES 15's /usr/bin/python3 is 3.6, too old for the campaign code (3.8+).
 # Take the newest interpreter on PATH, then LUMI's cray-python module.

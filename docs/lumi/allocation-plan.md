@@ -104,6 +104,9 @@ sustained load; dense and MoE; one device to a full node).
 | `c01-node-baseline` | 205 | ~115 | catalog models only: **runs today** |
 | `c02-quant-large-moe` | 75 | ~130 | ~1.2 TB pulled from Hugging Face first |
 | ~~`c05-finetune`~~ | — | — | withdrawn from LUMI on 06-10-2026, see below |
+| `c06-mtp` | 48 | ~4 | MTP GGUFs (~114 GiB): speculative decoding, objective (5) |
+| `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
+| `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -249,6 +252,31 @@ three epochs at three learning rates. The text is GSM8K's training split
 
 It was planned as software engineering and benchmarking of the runtime, on
 public data, with no model as an output; the sentence above settles it.
+
+## Engine work the hours measure (decided 06-10-2026)
+
+With training off this allocation, what fills it is what the proposal asked
+for: engine changes, each measured before and after on identical workloads.
+In order:
+
+1. **MTP** (`c06`): speculative decoding with the model's own head on
+   MI250X, graded at temperature 0 (answers must not change) and at default
+   sampling. Objective (5).
+2. **The reference frame** (`c07`): the same points on llama-server (same
+   llama.cpp commit, without EuLLM's runtime) and on Ollama. What EuLLM's
+   scheduler and batching add or cost is the difference. vLLM after a
+   like-for-like design (it does not serve GGUF) and a check that its ROCm
+   container runs on gfx90a.
+3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
+   engine runs one decision at a time per server; `c08` measures the queueing
+   that causes as concurrency grows, and replicas as today's way round it.
+   Batching decisions in the engine is the change it is the "before" of.
+4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
+   RAM, the direction Strata takes on consumer GPUs (the head-to-head with
+   Strata stays on the RTX 5070 Ti, `docs/moe-offload-plan.md`). Objective
+   (5).
+
+Every change that lands in `main` from these is a new round of `c01`+`c02`.
 
 ## Lines not to cross
 

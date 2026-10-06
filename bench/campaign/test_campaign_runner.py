@@ -328,3 +328,82 @@ def test_an_engine_without_finetune_blocks_the_points(tmp_path, capsys):
     campaign.Runner(run_args(str(qdir), str(old), port_base=free_port_base())).loop()
     counts = Queue(str(qdir)).counts()
     assert counts["blocked"] == 1 and counts["failed"] == 0 and counts["done"] == 0
+
+
+def test_decision_points_queue_behind_one_worker_and_answer_the_same(tmp_path, engine, capsys,
+                                                                     monkeypatch):
+    qdir = tmp_path / "q"
+    spec = {"campaign": "c-dec", "defaults": {"kind": "decision", "requests": 24,
+                                              "distinct_states": 5, "questions": 4},
+            "groups": [
+        {"name": "one", "est_s": 60, "set": {"model": "jev-style-fake"},
+         "axes": {"concurrency": [1, 4]}},
+        {"name": "rep", "est_s": 60,
+         "set": {"model": "jev-style-fake", "gcds": 2, "replica_gcds": 1, "concurrency": 4}},
+        {"name": "gone", "est_s": 60, "set": {"model": "missing-jev"}},
+    ]}
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec))
+    assert campaign.main(["plan", str(spec_path), "--queue", str(qdir)]) == 0
+    monkeypatch.setenv("FAKE_EULLM_DELAY_S", "0.002")
+    campaign.Runner(run_args(str(qdir), engine, port_base=free_port_base())).loop()
+
+    assert Queue(str(qdir)).counts() == {"todo": 0, "running": 0, "done": 3, "failed": 0,
+                                         "blocked": 1}
+    out = capsys.readouterr().out
+    results = [json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+               if line.startswith("BENCH_RESULT ")]
+    by = {(r["group"], r["params"]["concurrency"]): r for r in results}
+    alone, queued = by[("one", 1)]["decision"], by[("one", 4)]["decision"]
+    assert alone["requests"] == 24 and alone["failed"] == 0 and alone["decisions_per_s"] > 0
+    # One worker: four clients wait behind each other, one does not.
+    assert queued["wait_ms_p50"] > alone["wait_ms_p50"]
+    # Each of the 5 states was asked several times, and answered the same.
+    assert alone["consistency"] == {"compared": 19, "identical": 19, "rate": 1.0}
+    assert by[("rep", 4)]["params"]["replicas"] == 2
+    assert campaign.main(["collect", "--queue", str(qdir)]) == 0
+    rows = list(csv.DictReader(open(qdir / "results" / "summary.csv")))
+    assert {r["kind"] for r in rows} == {"decision"} and all(r["dec_per_s"] for r in rows)
+
+
+def test_llama_server_and_ollama_are_measured_like_the_engine(tmp_path, engine, capsys,
+                                                             monkeypatch):
+    store = tmp_path / "models" / "qwen3-8b"
+    store.mkdir(parents=True)
+    (store / "Qwen3-8B-Q4_K_M.gguf").write_bytes(b"GGUF")
+    (store / "manifest.json").write_text(json.dumps({"gguf_file": "Qwen3-8B-Q4_K_M.gguf"}))
+    monkeypatch.setenv("EULLM_MODELS_DIR", str(tmp_path / "models"))
+    monkeypatch.setenv("LLAMA_SERVER_BIN", engine)
+    monkeypatch.setenv("OLLAMA_BIN", engine)
+    qdir = tmp_path / "q"
+    spec = {"campaign": "c-rt", "defaults": {"repeats": 1, "num_predict": 12},
+            "groups": [
+        {"name": "rt", "est_s": 60, "set": {"model": "qwen3-8b", "batch": 2},
+         "axes": {"runtime": ["eullm", "llama-server", "ollama"]}},
+        {"name": "rt-chat", "est_s": 60,
+         "set": {"kind": "workload", "model": "qwen3-8b", "sets": ["tiny"], "concurrency": 2,
+                 "runtime": "llama-server"}},
+        {"name": "rt-gone", "est_s": 60,
+         "set": {"model": "not-in-store", "runtime": "llama-server"}},
+    ]}
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text(json.dumps(spec))
+    assert campaign.main(["plan", str(spec_path), "--queue", str(qdir)]) == 0
+    (qdir / "sets").mkdir()
+    with open(qdir / "sets" / "tiny.jsonl", "w") as f:
+        for i in range(4):
+            f.write(json.dumps({"id": f"t{i}", "answer": "4", "grader": "number",
+                                "messages": [{"role": "user", "content": "2+2?"}]}) + "\n")
+    campaign.Runner(run_args(str(qdir), engine, port_base=free_port_base())).loop()
+
+    assert Queue(str(qdir)).counts()["done"] == 4
+    assert Queue(str(qdir)).counts()["blocked"] == 1  # no GGUF to give llama-server
+    out = capsys.readouterr().out
+    results = {(r["group"], r["params"].get("runtime")): r
+               for r in (json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+                         if line.startswith("BENCH_RESULT "))}
+    for rt in ("eullm", "llama-server", "ollama"):
+        t = results[("rt", rt)]["throughput"]["repeats"][0]
+        assert t["ok"] == 2 and t["generated_tokens"] > 0 and t["ttft_ms_p50"] is not None
+    chat = results[("rt-chat", "llama-server")]["workload"]
+    assert chat["accuracy"]["tiny"]["accuracy"] == 1.0  # translated to OpenAI and back

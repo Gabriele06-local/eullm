@@ -301,3 +301,37 @@ def test_shipped_campaigns_expand():
             if p["kind"] == "finetune":
                 name = p["data"].rsplit(".jsonl", 1)[0]
                 assert name in campaign.FINETUNE_SETS, f"{path}: {p['data']} is not prefetched"
+
+
+def test_a_runner_leaves_points_it_cannot_run_in_the_queue():
+    import point
+
+    assert point.can_run({"kind": "throughput"})
+    assert not point.can_run({"kind": "throughput", "runner": point.RUNNER_VERSION + 1})
+    assert not point.can_run({"kind": "something-new"})
+    assert not point.can_run({"kind": "throughput", "runtime": "unknown-server"})
+
+
+def test_new_fields_leave_old_ids_alone_and_mark_their_points():
+    old = normalize({"model": "m"})
+    assert "runtime" not in old and "runner" not in old
+    rt = normalize({"model": "m", "runtime": "llama-server"})
+    assert rt["runner"] == 2 and rt["runtime_args"] == []
+    dec = normalize({"kind": "decision", "model": "jev"})
+    assert dec["runner"] == 2 and dec["decision_mode"] == "shared_prefix"
+    assert dec["mode"] == "single" and dec["questions"] == 8
+    for bad in ({"model": "m", "runtime": "vllm-maybe"},
+                {"kind": "finetune", "model": "m", "data": "d", "runtime": "ollama"},
+                {"kind": "decision", "model": "jev", "questions": 65},
+                {"kind": "decision", "model": "jev", "decision_mode": "fast"}):
+        with pytest.raises(SpecError):
+            normalize(bad)
+
+
+def test_answers_digest_ignores_noise_below_four_decimals():
+    import point
+
+    a = {"q": {"type": "choice", "choice": "x", "probabilities": {"x": 0.71234, "y": 0.28766}}}
+    b = {"q": {"type": "choice", "choice": "x", "probabilities": {"x": 0.712341, "y": 0.287659}}}
+    c = {"q": {"type": "choice", "choice": "y", "probabilities": {"x": 0.4, "y": 0.6}}}
+    assert point.answers_digest(a) == point.answers_digest(b) != point.answers_digest(c)

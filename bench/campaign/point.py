@@ -38,6 +38,25 @@ from devices import VISIBLE_ENV, cores_for
 HERE = os.path.dirname(os.path.abspath(__file__))
 REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 
+# What this runner can run. A point planned by newer code carries `runner`
+# above this, or a kind or runtime this file does not know, and is left in
+# the queue for a runner that does: jobs keep the code they started with
+# for up to 48 hours, while plan adds points at any time.
+RUNNER_VERSION = 2
+KINDS = ("throughput", "workload", "finetune", "decision")
+# The servers a point can measure: the engine, and for comparison the stock
+# llama.cpp server (the same backend without EuLLM's runtime) and Ollama
+# (the API EuLLM is compatible with). Their binaries come from the
+# environment: LLAMA_SERVER_BIN, OLLAMA_BIN.
+RUNTIMES = ("eullm", "llama-server", "ollama")
+RUNTIME_BIN_ENV = {"llama-server": "LLAMA_SERVER_BIN", "ollama": "OLLAMA_BIN"}
+
+
+def can_run(p: dict) -> bool:
+    return (p.get("runner", 1) <= RUNNER_VERSION and p.get("kind") in KINDS
+            and p.get("runtime", "eullm") in RUNTIMES)
+
+
 READY_TIMEOUT_S = 900
 REQUEST_TIMEOUT_S = 1800
 WARMUP_TIMEOUT_S = 3600  # a 400 GB model read off Lustre is the slow case
@@ -97,18 +116,86 @@ def server_args(p: dict) -> list:
     ] + list(p.get("extra_args", []))
 
 
+def store_gguf(model_id: str):
+    """The GGUF the EuLLM store holds for `model_id` (the first part of a
+    split one), or None: llama-server is given the same file."""
+    root = os.environ.get("EULLM_MODELS_DIR") or os.path.join(
+        os.path.expanduser("~"), ".eullm", "models")
+    d = os.path.join(root, model_id)
+    try:
+        with open(os.path.join(d, "manifest.json")) as f:
+            name = json.load(f).get("gguf_file")
+        if name and os.path.exists(os.path.join(d, name)):
+            return os.path.join(d, name)
+    except (OSError, ValueError):
+        pass
+    try:
+        files = sorted(n for n in os.listdir(d) if n.endswith(".gguf") and "mmproj" not in n)
+    except OSError:
+        return None
+    return os.path.join(d, files[0]) if files else None
+
+
+def runtime_command(p: dict, engine: str):
+    """(binary, arguments, extra environment) of the server a point measures.
+    The same KV pool, slots and cache types for every runtime; EuLLM's own
+    flags (`extra_args`) only for EuLLM, `runtime_args` for the others."""
+    runtime = p.get("runtime", "eullm")
+    if p["kind"] == "decision":
+        # The decision model alone, loaded at startup; generation flags do
+        # not apply to its slot.
+        args = ["--decision-model", p["model"], "--decision-ctx", str(p["decision_ctx"])]
+        return engine, args + list(p.get("extra_args", [])), {}
+    if runtime == "eullm":
+        return engine, server_args(p), {}
+    binary = os.environ.get(RUNTIME_BIN_ENV[runtime])
+    if not binary or not os.path.exists(binary):
+        raise ModelMissing(f"{runtime}: set {RUNTIME_BIN_ENV[runtime]} to its binary")
+    k, v = p["kv"].split("/")
+    extra = list(p.get("runtime_args", []))
+    if runtime == "llama-server":
+        gguf = store_gguf(p["model"])
+        if gguf is None:
+            raise ModelMissing(f"model {p['model']} is not in the EuLLM store")
+        return binary, [
+            "-m", gguf, "--alias", p["model"], "-c", str(p["ctx"]), "-np", str(p["batch"]),
+            "-ngl", "999", "-ctk", k, "-ctv", v,
+        ] + extra, {}
+    # Ollama: configured through its environment, the model by its name in
+    # Ollama's own store (tools/lumi/make_ollama_models.sh).
+    env = {
+        "OLLAMA_NUM_PARALLEL": str(p["batch"]),
+        "OLLAMA_CONTEXT_LENGTH": str(p["slot_ctx"]),
+        "OLLAMA_MAX_LOADED_MODELS": "1",
+        "OLLAMA_KEEP_ALIVE": "-1",
+    }
+    if (k, v) != ("f16", "f16"):
+        env.update(OLLAMA_FLASH_ATTENTION="1", OLLAMA_KV_CACHE_TYPE=k)
+    return binary, extra, env
+
+
 class Server:
-    def __init__(self, engine, port, args, env, log_path, cores=None):
+    def __init__(self, engine, port, args, env, log_path, cores=None, runtime="eullm"):
         self.engine, self.port, self.args = engine, port, args
         self.env, self.log_path, self.cores = env, log_path, cores
+        self.runtime = runtime
         self.proc = None
 
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
+    @property
+    def ready_path(self) -> str:
+        return "/health" if self.runtime == "llama-server" else "/api/version"
+
     def command(self) -> list:
         prefix = ["taskset", "-c", self.cores] if self.cores else []
+        if self.runtime == "llama-server":
+            host = ["--host", "127.0.0.1", "--port", str(self.port)]
+            return prefix + [self.engine] + host + self.args
+        if self.runtime == "ollama":
+            return prefix + [self.engine, "serve"] + self.args
         return prefix + [self.engine, "serve", "--port", str(self.port)] + self.args
 
     def start(self) -> None:
@@ -126,12 +213,15 @@ class Server:
             if stop is not None and stop.is_set():
                 raise Interrupted("stopped while waiting for the server")
             if self.proc.poll() is not None:
+                tail = self.log_tail()
+                if "not found." in tail and "model '" in tail:
+                    raise ModelMissing(tail.strip().splitlines()[-1][:300])
                 raise PointError(
                     f"server on port {self.port} exited ({self.proc.returncode}):\n"
                     + self.log_tail()
                 )
             try:
-                with urllib.request.urlopen(self.url + "/api/version", timeout=5):
+                with urllib.request.urlopen(self.url + self.ready_path, timeout=5):
                     return
             except (urllib.error.URLError, ConnectionError, OSError):
                 time.sleep(1)
@@ -212,6 +302,84 @@ def request(url, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
         "eval_duration_ns": last.get("eval_duration") or 0,
         "prompt_eval_duration_ns": last.get("prompt_eval_duration") or 0,
         "load_duration_ns": last.get("load_duration") or 0,
+    }
+
+
+def call(server, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
+    """An Ollama-shaped request to whichever runtime `server` is: as it is
+    to EuLLM and Ollama, translated to OpenAI's API for llama-server."""
+    if getattr(server, "runtime", "eullm") == "llama-server":
+        return openai_request(server.url, path, body, timeout)
+    return request(server.url, path, body, timeout)
+
+
+def openai_request(url, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
+    """`body`, an Ollama /api/generate or /api/chat request, sent to
+    llama-server's OpenAI endpoints; the answer in `request()`'s shape, its
+    counts and timings from llama-server's `usage` and `timings`."""
+    options = body.get("options") or {}
+    n = options.get("num_predict") or body.get("num_predict") or 128
+    stream = body.get("stream", True)
+    payload = {"model": body["model"], "max_tokens": n, "stream": stream,
+               "cache_prompt": body.get("cache_prompt", True)}
+    for key in ("temperature", "top_k", "top_p", "seed"):
+        if key in options:
+            payload[key] = options[key]
+    if stream:
+        payload["stream_options"] = {"include_usage": True}
+    if path == "/api/chat":
+        endpoint = "/v1/chat/completions"
+        payload["messages"] = body["messages"]
+        payload["chat_template_kwargs"] = {"enable_thinking": bool(body.get("think"))}
+    else:
+        endpoint = "/v1/completions"
+        payload["prompt"] = body["prompt"]
+    req = urllib.request.Request(url + endpoint, data=json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    started = time.perf_counter()
+    first, pieces, usage, timings = None, [], {}, {}
+
+    def take(chunk):
+        nonlocal first
+        if "error" in chunk:
+            raise RequestError(str(chunk["error"]))
+        for choice in chunk.get("choices") or []:
+            piece = choice.get("text")
+            if piece is None:
+                piece = (choice.get("delta") or choice.get("message") or {}).get("content")
+            if piece:
+                if first is None:
+                    first = time.perf_counter()
+                pieces.append(piece)
+        usage.update(chunk.get("usage") or {})
+        timings.update(chunk.get("timings") or {})
+
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            if stream:
+                for raw in r:
+                    line = raw.decode(errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[5:].strip()
+                    if data == "[DONE]":
+                        break
+                    take(json.loads(data))
+            else:
+                take(json.loads(r.read()))
+    except urllib.error.HTTPError as e:
+        raise RequestError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}",
+                           code=e.code) from None
+    ended = time.perf_counter()
+    return {
+        "text": "".join(pieces),
+        "ttft_ms": ((first or ended) - started) * 1000,
+        "total_ms": (ended - started) * 1000,
+        "eval_count": usage.get("completion_tokens") or timings.get("predicted_n") or 0,
+        "prompt_eval_count": usage.get("prompt_tokens") or timings.get("prompt_n") or 0,
+        "eval_duration_ns": int((timings.get("predicted_ms") or 0) * 1e6),
+        "prompt_eval_duration_ns": int((timings.get("prompt_ms") or 0) * 1e6),
+        "load_duration_ns": 0,
     }
 
 
@@ -309,8 +477,16 @@ def start_servers(p: dict, ctx: Context) -> list:
             env.pop("HIP_VISIBLE_DEVICES", None)
             env.pop("GPU_DEVICE_ORDINAL", None)
         log = os.path.join(ctx.workdir, f"{p['id']}.server{r}.log")
-        server = Server(ctx.engine, ctx.port_base + r, server_args(p), env, log,
-                        cores_for(ctx.binding, group))
+        # Every request leaves an audit line; on the scratch filesystem, not
+        # in a home directory with a quota, unless the job says otherwise.
+        if not env.get("EULLM_AUDIT_DIR"):
+            env["EULLM_AUDIT_DIR"] = os.path.join(ctx.workdir, "audit")
+            os.makedirs(env["EULLM_AUDIT_DIR"], exist_ok=True)
+        binary, args, extra_env = runtime_command(p, ctx.engine)
+        env.update(extra_env)
+        env["OLLAMA_HOST"] = f"127.0.0.1:{ctx.port_base + r}"
+        server = Server(binary, ctx.port_base + r, args, env, log,
+                        cores_for(ctx.binding, group), runtime=p.get("runtime", "eullm"))
         server.start()
         servers.append(server)
     return servers
@@ -322,7 +498,7 @@ def warm_up(p: dict, servers: list, ctx: Context, body: dict) -> dict:
     cache = "warm" if p["model"] in ctx.model_seen else "cold"
     t0 = time.time()
     got = concurrently(
-        len(servers), lambda i: request(servers[i].url, "/api/generate", body, WARMUP_TIMEOUT_S)
+        len(servers), lambda i: call(servers[i], "/api/generate", body, WARMUP_TIMEOUT_S)
     )
     wall = time.time() - t0
     for i, g in enumerate(got):
@@ -356,7 +532,7 @@ def run_throughput(p: dict, servers: list, ctx: Context) -> tuple:
         t0 = time.time()
         got = concurrently(
             p["concurrency"],
-            lambda i: request(servers[i % len(servers)].url, "/api/generate", body_for(i, rep)),
+            lambda i: call(servers[i % len(servers)], "/api/generate", body_for(i, rep)),
         )
         t1 = time.time()
         first_t = first_t or t0
@@ -449,7 +625,7 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
             path, body = ab_methods.chat_body(item, p["model"], p["think"], p["max_tokens"])
             rec = {"i": i, "pass": i // n, "item": item.id, "set": item.set}
             try:
-                got = request(server.url, path, body)
+                got = call(server, path, body)
                 rec.update(ok=True, ttft_ms=got["ttft_ms"], total_ms=got["total_ms"],
                            eval=got["eval_count"], prompt=got["prompt_eval_count"],
                            sha=hashlib.sha1(got["text"].encode()).hexdigest()[:16])
@@ -652,6 +828,131 @@ def run_finetune(p: dict, ctx: Context, workdir: str) -> tuple:
     return measured, (start, end)
 
 
+# ── decisions ────────────────────────────────────────────────────────────
+
+
+def decision_request(url, body, timeout=REQUEST_TIMEOUT_S) -> tuple:
+    """POST /v1/systemone: (client milliseconds, the response)."""
+    req = urllib.request.Request(url + "/v1/systemone", data=json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    started = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            out = json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        raise RequestError(f"HTTP {e.code}: {e.read().decode(errors='replace')[:300]}",
+                           code=e.code) from None
+    return (time.perf_counter() - started) * 1000, out
+
+
+def answers_digest(answers: dict) -> str:
+    """The answers, to four decimals: equal digests are the same decision."""
+    def values(a):
+        for key in ("noul", "choice", "score", "probabilities"):
+            v = a.get(key)
+            if isinstance(v, (int, float)):
+                yield key, round(v, 4)
+            elif isinstance(v, dict):
+                yield key, {k: round(x, 4) for k, x in sorted(v.items())}
+            elif v is not None:
+                yield key, v
+    canon = {qid: dict(values(a)) for qid, a in sorted((answers or {}).items())}
+    return hashlib.sha1(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def decision_bodies(p: dict) -> list:
+    """`distinct_states` requests: one synthetic ticket history, each opened
+    by its own line so no state is the one the server kept from the request
+    before (that would measure a cache hit), and the same questions."""
+    bench = os.path.dirname(HERE)
+    if bench not in sys.path:
+        sys.path.insert(0, bench)
+    import decision_bench
+
+    state = decision_bench.make_state(p["state_tokens"])
+    questions = decision_bench.make_questions(p["questions"])
+    return [{"state": f"[ticket {k:04d}]\n{state}", "questions": questions,
+             "eullm": {"mode": p["decision_mode"]}} for k in range(p["distinct_states"])]
+
+
+def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
+    """`requests` decisions from `concurrency` clients over the servers.
+    Client latency, the server's own time and its decode time apart — the
+    difference is the wait behind other requests — and whether a state asked
+    again, under other concurrency, got the same answers."""
+    bodies = decision_bodies(p)
+    n = p["requests"]
+    lock = threading.Lock()
+    counter = [0]
+    records = []
+
+    def worker():
+        while not ctx.stop.is_set():
+            with lock:
+                i = counter[0]
+                counter[0] += 1
+            if i >= n:
+                return
+            k = i % len(bodies)
+            rec = {"i": i, "state": k}
+            try:
+                ms, out = decision_request(servers[i % len(servers)].url, bodies[k])
+                e = out.get("eullm") or {}
+                t = e.get("timings_ms") or {}
+                rec.update(ok=True, client_ms=ms, server_ms=e.get("request_ms"),
+                           decode_ms=(t.get("prefix") or 0) + (t.get("questions") or 0),
+                           prompt_tokens=e.get("prompt_tokens"),
+                           evaluated_tokens=e.get("evaluated_tokens"),
+                           digest=answers_digest(out.get("answers")))
+            except Exception as ex:
+                rec.update(ok=False, error=str(ex)[:200])
+            rec["t"] = time.time()
+            with lock:
+                records.append(rec)
+
+    start = time.time()
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(p["concurrency"])]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    end = time.time()
+    if ctx.stop.is_set():
+        raise Interrupted("stopped during the decisions")
+    ok = [r for r in records if r["ok"]]
+    if records and len(ok) < len(records) / 2:
+        raise PointError(f"{len(records) - len(ok)} of {len(records)} decisions failed: "
+                         f"{[r.get('error') for r in records if not r['ok']][:3]}")
+    by_state = {}
+    for r in ok:
+        by_state.setdefault(r["state"], []).append(r["digest"])
+    repeats = [d for ds in by_state.values() for d in ds[1:]]
+    same = sum(d == by_state[s][0] for s, ds in by_state.items() for d in ds[1:])
+    client = [r["client_ms"] for r in ok]
+    server = [r["server_ms"] for r in ok if r["server_ms"] is not None]
+    decode = [r["decode_ms"] for r in ok]
+    wait = [r["server_ms"] - r["decode_ms"] for r in ok if r["server_ms"] is not None]
+    elapsed = end - start
+    return {
+        "requests": len(records),
+        "failed": len(records) - len(ok),
+        "decisions_per_s": r1(rate(len(ok), elapsed)),
+        "questions_per_s": r1(rate(len(ok) * p["questions"], elapsed)),
+        "client_ms_p50": r1(percentile(client, 0.5)),
+        "client_ms_p95": r1(percentile(client, 0.95)),
+        "client_ms_p99": r1(percentile(client, 0.99)),
+        "server_ms_p50": r1(percentile(server, 0.5)),
+        "decode_ms_p50": r1(percentile(decode, 0.5)),
+        "wait_ms_p50": r1(percentile(wait, 0.5)),
+        "wait_ms_p95": r1(percentile(wait, 0.95)),
+        "prompt_tokens_mean": mean([r["prompt_tokens"] for r in ok]),
+        "evaluated_tokens_mean": mean([r["evaluated_tokens"] for r in ok]),
+        "consistency": {"compared": len(repeats), "identical": same,
+                        "rate": round(same / len(repeats), 4) if repeats else None},
+        "duration_s": round(elapsed, 1),
+    }, (start, end)
+
+
 WARMUP_BODY = {"prompt": "Ciao.", "stream": True, "think": False, "num_predict": 8,
                "options": {"num_predict": 8}}
 
@@ -662,11 +963,27 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
         measured, window = run_finetune(p, ctx, ctx.workdir)
         stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
         return {"finetune": measured, "device_stats": stats}
+    started = time.time()
     servers = start_servers(p, ctx)
     ctx.servers = servers
     try:
         for s in servers:
             s.wait_ready(stop=ctx.stop)
+        if p["kind"] == "decision":
+            # The model loads before the server answers: readiness is the load.
+            cache = "warm" if p["model"] in ctx.model_seen else "cold"
+            ready_s = time.time() - started
+            got = concurrently(len(servers), lambda i: decision_request(
+                servers[i].url, decision_bodies(dict(p, distinct_states=1))[0], WARMUP_TIMEOUT_S))
+            for i, g in enumerate(got):
+                if isinstance(g, Exception):
+                    raise PointError(f"first decision failed on server {i}: {g}\n"
+                                     + servers[i].log_tail())
+            ctx.model_seen.add(p["model"])
+            measured, window = run_decision(p, servers, ctx)
+            stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
+            return {"load": {"cache": cache, "wall_s": round(ready_s, 2)},
+                    "decision": measured, "device_stats": stats}
         if p["kind"] == "throughput":
             warm_body = generate_body(p, p["prompt"] if not p["prompt_tokens"]
                                       else synthetic_prompt(p["prompt_tokens"], "warmup"))

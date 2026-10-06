@@ -423,7 +423,8 @@ class Runner:
             # on Lustre: do it when devices free up, not on every poll, and
             # every few minutes for points other jobs put back or added.
             if self.reap() or time.time() >= replan_at:
-                todo = sorted(self.queue.todo(), key=order_key)
+                todo = sorted((p for p in self.queue.todo() if point.can_run(p)),
+                              key=order_key)
                 while todo and not self.stop.is_set():
                     choice = self.plan_next(time.time(), todo)
                     if choice is None:
@@ -707,6 +708,8 @@ COLUMNS = (
     "requests", "accuracy", "consistency", "drift_pct", "vram_peak_mib_max", "use_mean",
     "engine", "bench_rev", "ft_ctx", "optimizer", "train_tensors", "ft_loss_before",
     "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
+    "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
+    "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
 )
 
 
@@ -748,6 +751,16 @@ def row_of(r: dict) -> dict:
                    ft_mem_est_mib=round(((ft.get("memory_estimate") or {}).get("total") or 0)
                                         / 2**20) or None,
                    train_tensors=",".join(p.get("train_tensors") or []))
+    d = r.get("decision")
+    if d:
+        row.update(dec_per_s=d.get("decisions_per_s"),
+                   dec_client_ms_p50=d.get("client_ms_p50"),
+                   dec_client_ms_p99=d.get("client_ms_p99"),
+                   dec_wait_ms_p50=d.get("wait_ms_p50"),
+                   dec_decode_ms_p50=d.get("decode_ms_p50"),
+                   dec_consistency=(d.get("consistency") or {}).get("rate"),
+                   duration_s=d.get("duration_s"), requests=d.get("requests"))
+    row["runtime"] = p.get("runtime", "eullm")
     devs = r.get("device_stats")
     if isinstance(devs, dict):
         peaks = [d.get("vram_peak_mib") for d in devs.values() if d.get("vram_peak_mib")]

@@ -28,7 +28,12 @@ import hashlib
 import itertools
 import json
 
-KINDS = ("throughput", "workload", "finetune")
+KINDS = ("throughput", "workload", "finetune", "decision")
+RUNTIMES = ("eullm", "llama-server", "ollama")
+DECISION_MODES = ("shared_prefix", "batched", "separate")
+# Points that need a runner newer than the first one carry this (see
+# point.RUNNER_VERSION); the others keep the ids they always had.
+NEW_RUNNER = 2
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -86,7 +91,18 @@ FINETUNE_DEFAULTS = {
 # Scheduling hints: not part of what a point measures.
 HINTS = ("priority", "est_s")
 
-DEFAULT_EST_S = {"throughput": 900, "workload": 3600, "finetune": 3600}
+# Fields of a `decision` point only: /v1/systemone with a decision model
+# (`model`, a store id: a Jev-Style release or a code-readout model).
+DECISION_DEFAULTS = {
+    "decision_ctx": 16384,  # --decision-ctx
+    "state_tokens": 1024,  # synthetic ticket history, ~4 characters a token
+    "questions": 8,  # per request, cycling noul / choice / score
+    "decision_mode": "shared_prefix",  # eullm.mode (`mode` is the servers' layout)
+    "requests": 400,  # in all, over `concurrency` clients
+    "distinct_states": 97,  # states cycled; each asked several times
+}
+
+DEFAULT_EST_S = {"throughput": 900, "workload": 3600, "finetune": 3600, "decision": 600}
 
 
 class SpecError(ValueError):
@@ -98,6 +114,8 @@ def normalize(raw: dict) -> dict:
     p = dict(DEFAULTS)
     if raw.get("kind") == "finetune":
         p.update(FINETUNE_DEFAULTS)
+    if raw.get("kind") == "decision":
+        p.update(DECISION_DEFAULTS)
     p.update(raw)
     if p["kind"] not in KINDS:
         raise SpecError(f"kind must be one of {KINDS}, got {p['kind']!r}")
@@ -145,6 +163,22 @@ def normalize(raw: dict) -> dict:
         if not p["lr"] > 0:
             raise SpecError("lr must be above zero")
         p["train_tensors"] = [str(t) for t in p["train_tensors"]]
+    if p["kind"] == "decision":
+        if p["decision_mode"] not in DECISION_MODES:
+            raise SpecError(f"decision_mode must be one of {DECISION_MODES}, "
+                            f"got {p['decision_mode']!r}")
+        if not 1 <= p["questions"] <= 64:
+            raise SpecError("questions must be 1 to 64, as /v1/systemone allows")
+        if p["requests"] < 1 or p["distinct_states"] < 1:
+            raise SpecError("requests and distinct_states must be at least 1")
+        p["runner"] = NEW_RUNNER
+    if "runtime" in raw:
+        if p["runtime"] not in RUNTIMES:
+            raise SpecError(f"runtime must be one of {RUNTIMES}, got {p['runtime']!r}")
+        if p["kind"] not in ("throughput", "workload"):
+            raise SpecError("only throughput and workload points compare runtimes")
+        p["runtime_args"] = [str(a) for a in p.get("runtime_args", [])]
+        p["runner"] = NEW_RUNNER
     if p["kind"] == "workload":
         if not p["sets"]:
             raise SpecError("a workload point needs sets")
