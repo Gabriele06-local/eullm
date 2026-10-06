@@ -17,7 +17,7 @@
 //! the on-disk file size is used as a proxy for total weight bytes.
 
 use std::io::IsTerminal;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// GGUF magic: ASCII "GGUF" stored little-endian as the u32 0x46554747.
 const GGUF_MAGIC: u32 = 0x4655_4747;
@@ -585,6 +585,81 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
         expert_bytes_per_layer,
         largest_expert_tensor_bytes,
     })
+}
+
+/// Every file of a model on disk, in order: all the parts of a split GGUF
+/// (`<name>-00001-of-00009.gguf`, as llama.cpp's gguf-split names them) when
+/// `path` is one of them and every part is there, else `path` alone.
+///
+/// llama.cpp loads every part from the path of the first, and every size
+/// taken from that one file was a ninth of the model: `--fit` called
+/// DeepSeek-V3.1 Q4_K_M "45.14 GiB, fits fully" for 378 GiB in nine parts,
+/// and `--fit-strict` let it start a load that ran an hour on LUMI
+/// (06-10-2026) instead of refusing it in a second.
+pub fn gguf_parts(path: &Path) -> Vec<PathBuf> {
+    if let Some((prefix, count)) = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(split_gguf_name)
+    {
+        let dir = path.parent().unwrap_or_else(|| Path::new(""));
+        let parts: Vec<PathBuf> = (1..=count)
+            .map(|i| dir.join(format!("{prefix}-{i:05}-of-{count:05}.gguf")))
+            .collect();
+        if parts.iter().all(|p| p.is_file()) {
+            return parts;
+        }
+    }
+    vec![path.to_path_buf()]
+}
+
+/// `("<name>", count)` for `<name>-NNNNN-of-MMMMM.gguf`, gguf-split's naming.
+fn split_gguf_name(name: &str) -> Option<(&str, u32)> {
+    let stem = name.strip_suffix(".gguf")?;
+    let (rest, count) = stem.rsplit_once("-of-")?;
+    let (prefix, index) = rest.rsplit_once('-')?;
+    let five_digits = |s: &str| s.len() == 5 && s.bytes().all(|b| b.is_ascii_digit());
+    if prefix.is_empty() || !five_digits(index) || !five_digits(count) {
+        return None;
+    }
+    let count: u32 = count.parse().ok()?;
+    let index: u32 = index.parse().ok()?;
+    (count >= 1 && (1..=count).contains(&index)).then_some((prefix, count))
+}
+
+/// The bytes of the whole model: every part of a split GGUF.
+pub fn model_file_bytes(path: &Path) -> u64 {
+    gguf_parts(path)
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
+}
+
+/// [`read_gguf_moe_layout`] over every part of a model: each part's header
+/// describes the tensors in that part, so the layout is their sum. `None`
+/// if any part cannot be read, as for one file.
+pub fn read_model_moe_layout(path: &Path, n_layers: u32) -> Option<MoeLayout> {
+    let mut total: Option<MoeLayout> = None;
+    for part in gguf_parts(path) {
+        let size = std::fs::metadata(&part).ok()?.len();
+        let layout = read_gguf_moe_layout(&part, size, n_layers)?;
+        total = Some(match total {
+            None => layout,
+            Some(mut t) => {
+                t.non_expert_bytes += layout.non_expert_bytes;
+                for (sum, part_bytes) in t
+                    .expert_bytes_per_layer
+                    .iter_mut()
+                    .zip(layout.expert_bytes_per_layer)
+                {
+                    *sum += part_bytes;
+                }
+                t
+            }
+        });
+    }
+    total
 }
 
 /// Read a GGUF file's leading bytes and parse its tensor layout.
@@ -1623,7 +1698,7 @@ fn run_fit_impl(
     let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
     let free_vram = vram.map(|(free, _)| free);
     let info = read_gguf_info(model_path);
-    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = model_file_bytes(model_path);
 
     let decision = compute_fit(
         vram,
@@ -1746,9 +1821,9 @@ pub fn run_moe_fit(
     reserve_bytes: u64,
 ) -> MoeFitDecision {
     let info = read_gguf_info(model_path);
-    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = model_file_bytes(model_path);
     let layout = match (&info, file_size) {
-        (Some(i), size) if size > 0 => read_gguf_moe_layout(model_path, size, i.n_layers),
+        (Some(i), size) if size > 0 => read_model_moe_layout(model_path, i.n_layers),
         _ => None,
     };
     let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
@@ -1780,9 +1855,9 @@ pub fn run_moe_cache(
     prefetch: MoePrefetch,
 ) -> Option<MoeCachePlan> {
     let info = read_gguf_info(model_path);
-    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = model_file_bytes(model_path);
     let layout = match (&info, file_size) {
-        (Some(i), size) if size > 0 => read_gguf_moe_layout(model_path, size, i.n_layers),
+        (Some(i), size) if size > 0 => read_model_moe_layout(model_path, i.n_layers),
         _ => None,
     };
     let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
@@ -1978,9 +2053,9 @@ pub fn decide_mmproj_placement(
         return MmprojPlacement::FollowText;
     }
     let info = read_gguf_info(model_path);
-    let file_size = std::fs::metadata(model_path).map(|m| m.len()).unwrap_or(0);
+    let file_size = model_file_bytes(model_path);
     let layout = match (&info, file_size) {
-        (Some(i), size) if size > 0 => read_gguf_moe_layout(model_path, size, i.n_layers),
+        (Some(i), size) if size > 0 => read_model_moe_layout(model_path, i.n_layers),
         _ => None,
     };
     let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
@@ -4189,6 +4264,67 @@ mod moe_layout_tests {
 
         let file_size = b.len() as u64;
         (b, file_size)
+    }
+
+    #[test]
+    fn split_names_are_read_as_gguf_split_writes_them() {
+        assert_eq!(
+            split_gguf_name("DeepSeek-V3.1-Q4_K_M-00001-of-00009.gguf"),
+            Some(("DeepSeek-V3.1-Q4_K_M", 9))
+        );
+        assert_eq!(split_gguf_name("m-00009-of-00009.gguf"), Some(("m", 9)));
+        for not_split in [
+            "Qwen3-8B-Q4_K_M.gguf",
+            "m-1-of-2.gguf",
+            "m-00010-of-00009.gguf",
+            "m-00000-of-00009.gguf",
+            "-00001-of-00002.gguf",
+            "m-00001-of-00002.bin",
+        ] {
+            assert_eq!(split_gguf_name(not_split), None, "{not_split}");
+        }
+    }
+
+    #[test]
+    fn a_split_model_is_sized_and_laid_out_from_every_part() {
+        let dir = std::env::temp_dir().join(format!("eullm-split-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, one_size) = make_gguf_with_tensors(
+            None,
+            &[
+                ("token_embd.weight", 1000),
+                ("blk.0.attn_q.weight", 100),
+                ("blk.0.ffn_up_exps.weight", 3000),
+            ],
+        );
+        let (two, two_size) = make_gguf_with_tensors(
+            None,
+            &[
+                ("blk.1.attn_q.weight", 100),
+                ("blk.1.ffn_up_exps.weight", 4000),
+                ("output.weight", 500),
+            ],
+        );
+        let first = dir.join("m-00001-of-00002.gguf");
+        std::fs::write(&first, &one).unwrap();
+        // One part missing: llama.cpp could not load it either, so the file
+        // given is taken alone.
+        assert_eq!(gguf_parts(&first), vec![first.clone()]);
+        assert_eq!(model_file_bytes(&first), one_size);
+
+        std::fs::write(dir.join("m-00002-of-00002.gguf"), &two).unwrap();
+        assert_eq!(gguf_parts(&first).len(), 2);
+        assert_eq!(model_file_bytes(&first), one_size + two_size);
+        let layout = read_model_moe_layout(&first, 2).expect("both parts parse");
+        assert_eq!(layout.non_expert_bytes, 1000 + 100 + 100 + 500);
+        assert_eq!(layout.expert_bytes_per_layer, vec![3000, 4000]);
+
+        // A file that is not split is itself, as before.
+        let single = dir.join("single.gguf");
+        std::fs::write(&single, &one).unwrap();
+        assert_eq!(gguf_parts(&single), vec![single.clone()]);
+        assert_eq!(model_file_bytes(&single), one_size);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
