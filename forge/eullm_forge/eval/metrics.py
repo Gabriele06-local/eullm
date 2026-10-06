@@ -24,8 +24,9 @@ _WS = re.compile(r"\s+")
 # A "<number> <unit>" the way an answer writes it, and the deadline it names.
 # Both keyword_coverage and the GRPO reward need to ask "does this text name
 # exactly this deadline, as a number", because the deadline keyword is a plain
-# string and "20 giorni" is inside "120 giorni". Kept here, next to the match
-# that needs it, so eval and rl agree and neither imports the other.
+# string and "20 giorni" is inside "120 giorni". Kept here because this is the
+# module both sides can import: norm_exam imports it (so its tables cannot be
+# imported here without a cycle) and rl/rewards.py already imports from it.
 _DEADLINE_UNITS = {"giorni": "giorni", "giorno": "giorni", "mesi": "mesi", "mese": "mesi",
                    "anni": "anni", "anno": "anni", "ore": "ore", "ora": "ore"}
 _ANY_DEADLINE = re.compile(
