@@ -22,6 +22,14 @@ same model would write questions in the very words of its own cards), the
 research questions and the exam questions apart. The index holds every
 ruling, the development ones included, as it will in use.
 
+``--limit`` asks a fixed random sample (``--seed``), the same for every
+setting, so the settings are compared on the same questions. The 8,000-odd
+questions of all 1,300 development rulings, each reranked, took more than
+two hours per setting, and the first run lost three links that way
+(2026-10-06): each setting's rows now go to ``--csv`` as soon as it is
+measured, and a setting already there is skipped, so the next link carries
+on where the last stopped.
+
 Counts only, never a question or a ruling.
 """
 
@@ -30,6 +38,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import random
 import sys
 import time
 from collections import defaultdict
@@ -82,7 +91,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--embedder", help="also embeddings, fused with BM25")
     ap.add_argument("--reranker", help="with --embedder: reorder the fused list")
     ap.add_argument("--cache-dir", type=Path, help="where unit embeddings are cached")
-    ap.add_argument("--limit", type=int, default=0, help="ask at most this many questions")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="ask a random sample of this many questions (0: all)")
+    ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--csv", type=Path, help="append one row per setting and kind here")
     args = ap.parse_args(argv)
 
@@ -90,8 +101,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.dev_ids:
         dev = {ln.strip() for ln in args.dev_ids.open(encoding="utf-8") if ln.strip()}
     asked = questions_of(read_jsonl(args.questions), dev)
-    if args.limit:
-        asked = asked[:args.limit]
+    if args.limit and len(asked) > args.limit:
+        asked = random.Random(args.seed).sample(asked, args.limit)
     if not asked:
         print("[ret] no questions", file=sys.stderr)
         return 1
@@ -112,8 +123,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.reranker:
             rerank = Reranker(args.reranker)
 
-    rows = []
+    done = set()
+    if args.csv and args.csv.exists():
+        with args.csv.open(encoding="utf-8") as f:
+            done = {(r["setting"], r["retrieval"]) for r in csv.DictReader(f)}
+    how_of = ("bm25" if embed is None else "bm25+dense" + (", rerank" if rerank else ""))
     for name in args.setting:
+        if (name, how_of) in done:
+            print(f"[ret] {name}: already in {args.csv}, skipped", flush=True)
+            continue
         prefix_chunks, card_units = SETTINGS[name]
         if (prefix_chunks or card_units) and not cards:
             print(f"[ret] {name}: needs --cards, skipped", file=sys.stderr)
@@ -132,6 +150,7 @@ def main(argv: list[str] | None = None) -> int:
             how = "bm25+dense" + (", rerank" if rerank else "")
         print(f"[ret] {name}: {len(units):,} units, built in {time.monotonic() - t0:.0f} s "
               f"({how})", flush=True)
+        rows = []
         hits = defaultdict(lambda: [0, 0, 0, 0])            # @1, @3, @10, n
         for kind, q, target in asked:
             found = index.search(q, k=10)
@@ -144,13 +163,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[ret] {name:<13} {kind:<8} n={n:<5} recall@1 {a1 / n:.3f}  "
                   f"recall@3 {a3 / n:.3f}  recall@10 {a10 / n:.3f}", flush=True)
             rows.append([name, how, kind, n, f"{a1 / n:.4f}", f"{a3 / n:.4f}", f"{a10 / n:.4f}"])
-    if args.csv and rows:
-        new = not args.csv.exists()
-        with args.csv.open("a", newline="", encoding="utf-8") as f:
-            w = csv.writer(f)
-            if new:
-                w.writerow(["setting", "retrieval", "kind", "n", "recall1", "recall3", "recall10"])
-            w.writerows(rows)
+        if args.csv and rows:
+            new = not args.csv.exists()
+            args.csv.parent.mkdir(parents=True, exist_ok=True)
+            with args.csv.open("a", newline="", encoding="utf-8") as f:
+                w = csv.writer(f)
+                if new:
+                    w.writerow(["setting", "retrieval", "kind", "n", "recall1", "recall3",
+                                "recall10"])
+                w.writerows(rows)
     return 0
 
 
