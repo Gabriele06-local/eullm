@@ -5,23 +5,27 @@ the prefetch, a 2048-token micro-batch of a long prompt takes as long as
 the copy of its experts over PCIe 4.0 (33 GiB at 24 GB/s on
 Qwen3.8-Flash-Next IQ2_XS, 1.48 s); the GPU's computing is hidden under it.
 The expert cache of PR #29887 keeps some of those experts in VRAM all the
-while (a 5.5 GiB cache, a sixth of them), and the prefetch copied them over
+while (a 6 GiB cache, 18% of the bytes), and the prefetch copied them over
 the bus all the same.
 
 ggml_backend_sched_set_moe_prefetch_lookup gives the scheduler a callback
 that says, for a host expert tensor, which of its experts sit in a device
 tensor and in which slot. The prefetch then fills a slot in runs: the
-experts the cache holds by device-to-device copies from its bank, the
-others over the bus, merging consecutive experts where they are
-consecutive at both ends. llama.cpp sets the callback where a context has
-both the cache and the prefetch; the cache answers from its LRU, whose slot
-for a (layer, expert) is the same in the banks of all of the layer's
-projections.
+others over the bus on its copy stream, as before, and the experts the
+cache holds by device-to-device copies from its bank, merging consecutive
+experts where they are consecutive at both ends. llama.cpp sets the
+callback where a context has both the cache and the prefetch; the cache
+answers from its LRU, whose slot for a (layer, expert) is the same in the
+banks of all of the layer's projections.
 
-The cache changes nothing while a graph of 512 tokens or more runs: it
-serves batches of up to 32 tokens. What it copied into its banks for the
-steps before is still queued on the GPU's stream when such a graph starts,
-so the copy stream first waits for an event recorded there.
+The copies from VRAM go on the GPU's own stream, queued when the slot's
+previous reader already is: the stream's order puts them after it, and
+after the cache's own copies into its banks for the steps before. A first
+version put them on the copy stream, between the copies over the bus: the
+answers were the same and 18% of the bytes came from VRAM, but reading a
+33,200-token prompt went from 1,419 to 1,061 tokens/s. The cache changes
+nothing while a graph of 512 tokens or more runs: it serves batches of up
+to 32 tokens.
 
 LLAMA_MOE_PREFETCH_FROM_CACHE=0 copies everything over the bus, as before,
 to compare. One line on stderr says the share of a micro-batch's bytes
@@ -51,10 +55,10 @@ index 73a0b3e..70504eb 100644
  }
  #endif
 diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
-index 915b4eb..d50f9d6 100644
+index 915b4eb..892368a 100644
 --- a/ggml/src/ggml-backend.cpp
 +++ b/ggml/src/ggml-backend.cpp
-@@ -957,6 +957,14 @@ struct ggml_backend_sched_moe_cache_entry {
+@@ -957,6 +957,16 @@ struct ggml_backend_sched_moe_cache_entry {
  // pageable memory a copy would hold the host until its slot is free. The slots are
  // made only if they leave a twentieth of the VRAM, and at least 512 MiB, to what a
  // compute allocates as it goes.
@@ -62,14 +66,16 @@ index 915b4eb..d50f9d6 100644
 +// With an expert cache (ggml_backend_sched_set_moe_prefetch_lookup), the experts it
 +// holds are copied from its slots in VRAM and only the others over the bus. Where the
 +// bus takes longer to fill the slots than the GPU to compute (a 2048-token micro-batch
-+// on PCIe 4.0 x16), every byte the cache holds is time saved. Those copies wait for
-+// what the GPU had queued before the graph, the cache's own copies into its slots among
-+// it; the cache changes nothing while a graph of this size runs, since it serves
-+// batches of up to 32 tokens.
++// on PCIe 4.0 x16), every byte the cache holds is time saved. The copies from VRAM go
++// on the GPU's own stream, where its order puts them after the slot's previous reader
++// and after the cache's own copies into its slots; mixed into the copy stream they
++// held its copies over the bus up, and reading was 25% slower in EuLLM's measurement.
++// The cache changes nothing while a graph of this size runs: it serves batches of up
++// to 32 tokens.
  #define GGML_SCHED_PREFETCH_MAX_SLOTS 8
  
  struct ggml_backend_sched_prefetch_input {
-@@ -982,6 +990,15 @@ struct ggml_backend_sched_prefetch {
+@@ -982,6 +992,14 @@ struct ggml_backend_sched_prefetch {
      bool reused;                    // a staged copy is read by a later split as well: not this graph
      bool placed;                    // the inputs are in their slots: their copies run ahead
      bool was_placed;                // the previous graph's were [GGML_SCHED_DEBUG_REALLOC]
@@ -77,7 +83,6 @@ index 915b4eb..d50f9d6 100644
 +    // the experts the expert cache holds, copied from its slots in VRAM
 +    ggml_backend_sched_moe_prefetch_lookup_t lookup;
 +    void * lookup_user_data;
-+    ggml_backend_event_t start;     // recorded on the GPU's stream as a graph starts: those copies come after it
 +    std::vector<int32_t> slot_of;   // the lookup's answer for one tensor
 +    size_t bytes_bus;               // the current graph's bytes copied over the bus
 +    size_t bytes_vram;              // and from the cache's slots
@@ -85,31 +90,12 @@ index 915b4eb..d50f9d6 100644
  };
  
  struct ggml_backend_sched {
-@@ -1127,6 +1144,7 @@ static void ggml_backend_sched_prefetch_free(ggml_backend_sched_t sched) {
-         ggml_backend_event_free(pf->copied[s]);
-         ggml_backend_event_free(pf->freed[s]);
-     }
-+    ggml_backend_event_free(pf->start);
-     ggml_backend_buffer_free(pf->slots);
-     ggml_backend_free(pf->copy_backend);
-     delete pf;
-@@ -1216,6 +1234,11 @@ static void ggml_backend_sched_prefetch_place(ggml_backend_sched_t sched) {
-                 return;
-             }
-         }
-+        pf->start = ggml_backend_event_new(dev);
-+        if (pf->start == NULL) {
-+            ggml_backend_sched_prefetch_fail(sched, "no events on the GPU");
-+            return;
-+        }
-     }
- 
-     // a slot holds the largest copy with its padding, which the kernels that read past a copy's
-@@ -1277,10 +1300,61 @@ static void ggml_backend_sched_prefetch_place(ggml_backend_sched_t sched) {
+@@ -1277,10 +1295,62 @@ static void ggml_backend_sched_prefetch_place(ggml_backend_sched_t sched) {
      pf->placed = true;
  }
  
 -// queues the copy of a staged input on the copy stream, once the slot's previous reader has run
+-static void ggml_backend_sched_prefetch_issue(ggml_backend_sched_prefetch * pf, const ggml_backend_sched_prefetch_input * in) {
 +// `size` bytes of a tensor's data from `offset` on, as a tensor of their own, for a copy of part of it
 +static struct ggml_tensor ggml_backend_sched_prefetch_bytes(const struct ggml_tensor * t, size_t offset, size_t size) {
 +    struct ggml_tensor v = {};
@@ -123,9 +109,10 @@ index 915b4eb..d50f9d6 100644
 +    return v;
 +}
 +
-+// queues the copy of a staged input on the copy stream, once the slot's previous reader has run: the
-+// experts the expert cache holds from its slots in VRAM, the others over the bus
- static void ggml_backend_sched_prefetch_issue(ggml_backend_sched_prefetch * pf, const ggml_backend_sched_prefetch_input * in) {
++// queues the copy of a staged input: over the bus on the copy stream, once the slot's previous reader
++// has run, and the experts the expert cache holds from its slots in VRAM on the GPU's stream `gpu`,
++// where the slot's previous reader is queued already
++static void ggml_backend_sched_prefetch_issue(ggml_backend_sched_prefetch * pf, ggml_backend_t gpu, const ggml_backend_sched_prefetch_input * in) {
      ggml_backend_event_wait(pf->copy_backend, pf->freed[in->slot]);
 -    ggml_backend_tensor_set_async(pf->copy_backend, in->input_cpy, in->input->data, 0, ggml_nbytes(in->input_cpy));
 +
@@ -160,7 +147,7 @@ index 915b4eb..d50f9d6 100644
 +                }
 +                struct ggml_tensor from = ggml_backend_sched_prefetch_bytes(bank, (size_t) s*expert_size, n*expert_size);
 +                struct ggml_tensor to   = ggml_backend_sched_prefetch_bytes(in->input_cpy, e*expert_size, n*expert_size);
-+                ggml_backend_tensor_copy_async(pf->copy_backend, pf->copy_backend, &from, &to);
++                ggml_backend_tensor_copy_async(gpu, gpu, &from, &to);
 +                pf->bytes_vram += n*expert_size;
 +            }
 +            e += n;
@@ -169,16 +156,10 @@ index 915b4eb..d50f9d6 100644
      ggml_backend_event_record(pf->copied[in->slot], pf->copy_backend);
  }
  
-@@ -2220,6 +2294,17 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -2220,6 +2290,11 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          sched->callback_moe_cache_begin(sched->callback_moe_cache_user_data);
      }
  
-+    // EuLLM: the copies from the expert cache's slots wait for what the GPU had queued before this
-+    // graph, the cache's own copies into those slots among it
-+    if (pf != NULL && pf->lookup != NULL) {
-+        ggml_backend_event_record(pf->start, sched->backends[pf->backend_id]);
-+        ggml_backend_event_wait(pf->copy_backend, pf->start);
-+    }
 +    if (pf != NULL) {
 +        pf->bytes_bus  = 0;
 +        pf->bytes_vram = 0;
@@ -187,7 +168,16 @@ index 915b4eb..d50f9d6 100644
      for (int split_id = 0; split_id < sched->n_splits; split_id++) {
          struct ggml_backend_sched_split * split = &splits[split_id];
          int split_backend_id = split->backend_id;
-@@ -2475,6 +2560,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+@@ -2237,7 +2312,7 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+ 
+         // EuLLM: queue the copies whose slots are free, ahead of the splits that read them
+         while (staged_issued < n_staged && staged_issued < staged_done + pf->n_slots) {
+-            ggml_backend_sched_prefetch_issue(pf, &pf->inputs[staged_issued++]);
++            ggml_backend_sched_prefetch_issue(pf, sched->backends[pf->backend_id], &pf->inputs[staged_issued++]);
+         }
+ 
+         // EuLLM: the slots of the copies this split reads, which the GPU waits for after the other
+@@ -2475,6 +2550,12 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
          prev_backend_id = split_backend_id;
      }
  
@@ -200,7 +190,7 @@ index 915b4eb..d50f9d6 100644
      return GGML_STATUS_SUCCESS;
  }
  
-@@ -2719,6 +2810,26 @@ void ggml_backend_sched_set_moe_prefetch(ggml_backend_sched_t sched, int n_slots
+@@ -2719,6 +2800,26 @@ void ggml_backend_sched_set_moe_prefetch(ggml_backend_sched_t sched, int n_slots
      ggml_backend_sched_prefetch_init(sched, n_slots, min_tokens);
  }
  
