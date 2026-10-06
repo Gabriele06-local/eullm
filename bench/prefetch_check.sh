@@ -25,6 +25,11 @@
 # SETTINGS="4 0" starts the server with the prefetch first, to tell an effect
 # of the prefetch from one of running second.
 #
+# A setting N:bus is --moe-prefetch N with LLAMA_MOE_PREFETCH_FROM_CACHE=0:
+# the experts the expert cache holds are copied over the bus as well, as before
+# patch 0004, so SETTINGS="4:bus 4" (and "4 4:bus") measures what copying them
+# from VRAM gains (phase 6b).
+#
 # One line per setting: reading and writing speeds, the expert cache the
 # server sized, a checksum of each answer and what llama.cpp said about the
 # prefetch on stderr (`on, 4 slots of ...` or `off, <why>`); then whether the
@@ -85,10 +90,16 @@ EOF
 ubatch=()
 [[ -n $N_UBATCH ]] && ubatch=(--n-ubatch "$N_UBATCH")
 not_on=
+names=
 printf '%-14s %12s %12s %8s %18s  %s\n' setting read_tok/s write_tok/s cache answers server_said
-for p in $SETTINGS; do
+for setting in $SETTINGS; do
+    slots=${setting%%:*}
+    p=${setting/:/-} # the setting in file names
+    names="$names $p"
+    vars=()
+    [[ $setting == *:bus ]] && vars=(LLAMA_MOE_PREFETCH_FROM_CACHE=0)
     log="$OUT/serve-prefetch$p.log"
-    "$BIN" serve --port "$PORT" --default-model "$MODEL" --moe-prefetch "$p" \
+    env "${vars[@]}" "$BIN" serve --port "$PORT" --default-model "$MODEL" --moe-prefetch "$slots" \
         --ctx-size "$CTX" --moe-cache "$MOE_CACHE" "${ubatch[@]}" "$@" >"$log" 2>&1 &
     pid=$!
     for _ in $(seq 1 600); do
@@ -109,21 +120,22 @@ for p in $SETTINGS; do
     wait "$pid" 2>/dev/null
     pid=
     said=$(grep -o 'moe prefetch: .*' "$log" | sort -u | paste -sd ';' -)
-    [[ $p != 0 && $said != *"moe prefetch: on"* ]] && not_on="$not_on $p"
+    [[ $slots != 0 && $said != *"moe prefetch: on"* ]] && not_on="$not_on $setting"
     # the --fit line: "expert tensors in CPU RAM, 5.75 GiB of VRAM caching ..."
     cache=$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -o 'CPU RAM, [0-9.]* GiB of VRAM caching' |
         head -n 1 | awk '{print $3 "G"}')
     sums=$(for i in 1 2; do
         if [[ -s $OUT/answer-prefetch$p-$i.txt ]]; then md5sum <"$OUT/answer-prefetch$p-$i.txt" | cut -c1-8; else echo none; fi
     done | paste -sd / -)
-    printf '%-14s %12s %12s %8s %18s  %s\n' "prefetch=$p" "${reads:-?}" "${writes:-?}" "${cache:--}" "$sums" "${said:--}"
+    printf '%-14s %12s %12s %8s %18s  %s\n' "prefetch=$setting" "${reads:-?}" "${writes:-?}" "${cache:--}" "$sums" "${said:--}"
 done
 
 echo
-first=${SETTINGS%% *}
+first=${names# }
+first=${first%% *}
 same() { cmp -s "$OUT/answer-prefetch$1.txt" "$OUT/answer-prefetch$2.txt"; }
 missing=
-for p in $SETTINGS; do
+for p in $names; do
     [[ -s $OUT/answer-prefetch$p-1.txt ]] || missing="$missing $p"
 done
 if [[ -n $missing ]]; then
@@ -132,7 +144,7 @@ elif [[ -n $not_on ]]; then
     echo "The prefetch did not turn on with --moe-prefetch$not_on (server_said above): this compared nothing"
 else
     differs=
-    for p in $SETTINGS; do
+    for p in $names; do
         if ! same "$p-1" "$p-2"; then
             echo "--moe-prefetch $p answered the same request two ways: the comparison says nothing ($OUT/answer-prefetch$p-*.txt)"
             differs=1

@@ -14,6 +14,7 @@
 - **Tests:** Required for all core functionality
 - **Docs:** Every public API documented
 - **No vendor lock-in:** Abstract external services behind interfaces
+- **Records of public conversations**: the docs keep what was said in posts and comments elsewhere (Reddit, forums, other projects' pull requests and issues) and on which site, by its main domain only (reddit.com, github.com). No links to the posts or comments, and no subreddit or thread names; a pull request we build on is still named by its number.
 - **Always check latest versions**: When adding or updating any dependency (Rust crates, Python packages, GitHub Actions), look up the current latest stable version online and use that. Never guess or copy version numbers from memory — they go stale quickly.
 
 ## License

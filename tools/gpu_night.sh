@@ -16,11 +16,13 @@
 #
 # Steps, in this order (STEPS="..." runs some of them):
 #   prefetch         bench/prefetch_check.sh once for each run of PREFETCH_RUNS
-#                    ("0,4 4,0": the --moe-prefetch of each server of a run, in
-#                    order), with --moe-cache PREFETCH_CACHE (auto) and the
-#                    engine's own micro-batch unless PREFETCH_UBATCH is set:
-#                    what four slots gain on reading and what the VRAM they
-#                    take from the cache costs the writing, in either order
+#                    ("4:bus,4 4,4:bus": the --moe-prefetch of each server of a
+#                    run, in order, N:bus with every expert over the bus), with
+#                    --moe-cache PREFETCH_CACHE (auto) and the engine's own
+#                    micro-batch unless PREFETCH_UBATCH is set: what copying
+#                    the experts the cache holds from VRAM gains on reading
+#                    (phase 6b), in either order; "0,4 4,0" measures the
+#                    prefetch itself
 #   interleave       bench/interleave_check.py on qwen3-8b, --batch-size 2 (0.7-D)
 #   mtp-t08          bench/mtp_sweep.sh at TEMPERATURE=0.8 on Qwen3.5-9B-MTP (B6)
 #   llama-pin        llama-server and llama-quantize from the pinned llama.cpp
@@ -62,7 +64,7 @@ INTERLEAVE_MODEL=${INTERLEAVE_MODEL:-qwen3-8b}
 RAG_DECISION=${RAG_DECISION:-jev-style-2b-decision-v3-gguf-q4_k_m}
 PULLS=${PULLS-"qwen3-32b qwen3-14b qwen3-8b qwen3-4b qwen3-1.7b qwen3-0.6b"}
 STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
-PREFETCH_RUNS=${PREFETCH_RUNS:-"0,4 4,0"}
+PREFETCH_RUNS=${PREFETCH_RUNS:-"4:bus,4 4,4:bus"}
 PREFETCH_CACHE=${PREFETCH_CACHE:-auto}
 PREFETCH_UBATCH=${PREFETCH_UBATCH:-}
 STOP_AT=${STOP_AT:-06:45}
@@ -104,7 +106,7 @@ step() {
         for run in $PREFETCH_RUNS; do
             echo "== --moe-prefetch ${run//,/ then }, --moe-cache $PREFETCH_CACHE${PREFETCH_UBATCH:+, --n-ubatch $PREFETCH_UBATCH}"
             SETTINGS=${run//,/ } MOE_CACHE=$PREFETCH_CACHE N_UBATCH=$PREFETCH_UBATCH \
-                OUT=$NIGHT/prefetch-${run//,/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+                OUT=$NIGHT/prefetch-${run//[,:]/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
             echo
         done
         ;;

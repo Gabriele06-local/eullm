@@ -630,11 +630,23 @@ then computes them, one after the other, with the GPU idle during the copy.
 The prefetch copies the next expert tensors on a second stream of the GPU
 while the current one computes, into four slots of VRAM the size of the
 largest expert tensor (1 GiB in all on the model above). On the reference
-PC, with `--n-ubatch 4096` and a fixed cache, it read a 33,200-token prompt
-at 1,743 tokens/s instead of 1,228 (+42%; +24-28% in the runs of the next
-day), to the same answer token for token; two slots gained 10-15%, three
-18%, and six or eight no more than four. `--moe-prefetch N` takes 2 to 8
-slots, `--moe-prefetch 0` turns it off.
+PC, with `--moe-cache auto` and nothing else set, it read a 33,200-token
+prompt at 1,373 tokens/s instead of 968 (+42%, the mean of two runs in each
+order), to the same answer token for token, and wrote as fast with the
+cache 1 GiB smaller for the slots (54.3 tokens/s against 53.3). That is as
+fast as PCIe 4.0 brings
+the experts in: each 2048-token micro-batch copies all 33 GiB of them, 1.48 s
+at 24 GB/s, and took 1.46-1.53 s. With `--n-ubatch 4096` the same copy is
+spread over twice the tokens, and it read at up to 1,743 tokens/s, but the
+larger compute buffer takes 1.5 GiB more from the cache. Two slots gained
+10-15%, three 18%, and six or eight no more than four. `--moe-prefetch N`
+takes 2 to 8 slots, `--moe-prefetch 0` turns it off.
+
+With an expert cache, the experts it already holds are copied into the slots
+from its own VRAM, and only the others over the bus: a 5.5 GiB cache saves
+the bus a sixth of the bytes. One line on stderr says the share taken from
+VRAM; `LLAMA_MOE_PREFETCH_FROM_CACHE=0` copies everything over the bus, a
+diagnostic to compare the two, like the variables above.
 
 It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
 build), to experts kept in RAM with the model read into memory rather than
@@ -645,9 +657,10 @@ GPUs) the flag changes nothing.
 With `--moe-cache`, `--fit` keeps the slots' VRAM out of the cache, which is
 that much smaller, unless that would cost the cache its minimum, the size
 `--moe-cache` asked for or the larger micro-batch; the startup line says
-what it kept (`and 1.00 GiB beside it for the slots of --moe-prefetch`). A
-smaller cache writes more slowly (the table above: writing follows the
-cache's size), and `--moe-prefetch 0` gives it the room back. Where nothing
+what it kept (`and 1.00 GiB beside it for the slots of --moe-prefetch`). On
+the model above the writing follows the cache's size only below about 5 GiB
+(4.5 GiB: 49-50 tokens/s, 3.5 GiB: 43-45); a model whose writing slows down
+with the slots gets the room back with `--moe-prefetch 0`. Where nothing
 was kept for them, the slots are made at the first long prompt only if a
 twentieth of the card, at least 512 MiB, stays free beside them; if not, the
 prefetch stays off, says how much it needed, and a `--moe-cache` lower by the
