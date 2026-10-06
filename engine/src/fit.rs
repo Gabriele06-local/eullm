@@ -1170,8 +1170,11 @@ const MOE_CACHE_STEP_BYTES: u64 = 256 * 1024 * 1024;
 /// `docs/moe-offload-plan.md`). It applies to micro-batches of 512 tokens or
 /// more, on one CUDA GPU, to experts in the GPU's pinned host memory: a model
 /// read into memory. Measured on Qwen3.8-Flash-Next IQ2_XS on an RTX 5070 Ti:
-/// four slots of 256 MiB read a 33,200-token prompt 24-42% faster, to the
-/// same answer, two 10-15% and three 18%; six and eight no faster than four.
+/// with an `auto` cache 1 GiB smaller for four slots of 256 MiB, at the
+/// default micro-batch of 2048, a 33,200-token prompt read 42% faster (968
+/// to 1,373 tokens/s), to the same answer, and answers were written as fast
+/// (53.3 and 54.3 tokens/s). Two slots gained 10-15% and three 18%, six and
+/// eight no more than four (at micro-batch 4096 and a fixed cache).
 pub const MOE_PREFETCH_SLOTS: u32 = 4;
 
 /// Parse `--moe-prefetch`: `0` (off), or 2 to 8 slots. With one, every copy

@@ -303,8 +303,9 @@ struct RuntimeOpts {
     /// RAM can spare the experts), on micro-batches of 512 tokens or more.
     /// Each slot holds the largest expert tensor, and --moe-cache keeps that
     /// VRAM out of the cache where there is room: on an RTX 5070 Ti,
-    /// Qwen3.8-Flash-Next (IQ2_XS) took four slots of 256 MiB and read a
-    /// 33,200-token prompt 24-42% faster, to the same answer.
+    /// Qwen3.8-Flash-Next (IQ2_XS) took four slots of 256 MiB out of its
+    /// cache, read a 33,200-token prompt 42% faster, to the same answer, and
+    /// wrote as fast.
     #[arg(
         long,
         value_name = "N",
