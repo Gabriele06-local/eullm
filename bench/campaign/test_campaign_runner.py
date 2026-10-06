@@ -304,6 +304,7 @@ def test_finetune_points_train_block_and_record_the_boundary(tmp_path, engine, c
     assert float(row["ft_loss_after"]) == pytest.approx(1.3)
     assert float(row["ft_tok_s"]) == 4000.5
     assert row["ft_trainable_params"] == "440467456"
+    assert row["lr"] == "1e-06" and row["epochs"] == "2" and row["ft_mem_est_mib"] == "9216"
 
 
 def test_an_engine_without_finetune_blocks_the_points(tmp_path, capsys):

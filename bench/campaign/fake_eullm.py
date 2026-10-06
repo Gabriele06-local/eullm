@@ -130,6 +130,7 @@ def finetune(argv):
         "train_tensors": [t for t in (flag(argv, "--train-tensors") or "").split(",") if t],
         "optimizer": flag(argv, "--optimizer", "adamw"), "lr": lr, "epochs": epochs,
         "n_ctx": n_ctx, "baseline": pass_(1.9, n_ctx), "per_epoch": per_epoch,
+        "memory_estimate": {"total": 9 * 2**30},
         "dry_run": False,
     }
     with open(flag(argv, "--output"), "wb") as f:
