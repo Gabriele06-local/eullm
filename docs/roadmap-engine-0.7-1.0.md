@@ -398,12 +398,23 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   Sul codice circa un sesto in più, sopra il rumore; sul racconto dal 3 al 7%,
   dentro il rumore. Con `auto`, `--mtp 1` prende quanto 2. La cache è la
   stessa con e senza `--mtp` (8,50 GiB in tutti e tre gli avvii): il contesto
-  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Aperto, da
-  misurare a parte:** senza bozze EuLLM scrive il codice più piano di
-  `llama-server` (93-98 tok/s contro 112,6) e il racconto uguale (120-123
-  contro 123,6). Non è il ragionamento, spento su tutti e due (`llama-server`
-  legge `reasoning_effort: none` come `enable_thinking = false`); ma è un
-  avvio per riga, e i due server possono aver scritto testi diversi.
+  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Aperto:**
+  senza bozze EuLLM scrive il codice più piano di `llama-server` (93-98 tok/s
+  contro 112,6) e il racconto uguale (120-123 contro 123,6). Non è il
+  ragionamento, spento su tutti e due (`llama-server` legge
+  `reasoning_effort: none` come `enable_thinking = false`). Rimisurato il
+  5 ottobre, due giri per server, cache 8000 MiB, contesto 8192, micro-batch
+  512: `llama-server` 129,7 e 129,9 tok/s sul racconto, 110,3 e 110,2 sul
+  codice; EuLLM 116,1 e 116,2, 91,5 e 91,5. Il divario è stabile (−10% sul
+  racconto, −17% sul codice), ma i due server non scrivevano lo stesso
+  testo: `bench/speed_check.py` mandava solo la temperatura, e ognuno
+  completava la richiesta con i propri default, EuLLM con la penalità di
+  ripetizione 1,1 di Ollama, `llama-server` senza. A temperatura 0 la
+  penalità cambia i token scelti, di più nel codice, che si ripete per
+  natura, e con le risposte cambiano gli esperti usati e quanti la cache ne
+  ha. Ora lo script manda ogni parametro di campionamento, ai valori di
+  EuLLM, e stampa l'impronta del testo scritto: il prossimo giro dice se i
+  testi coincidono e, se sì, quanto del divario resta al motore.
 
   A temperatura 0.8, quella di default (EuLLM, `--moe-cache auto`, stessi
   flag):

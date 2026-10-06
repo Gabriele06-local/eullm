@@ -632,7 +632,8 @@ the GPU while the current one computes, into four slots of VRAM the size of
 the largest expert tensor (1 GiB in all on the model above;
 `LLAMA_MOE_PREFETCH_SLOTS`, 2 to 8). On the reference PC it read a
 33,200-token prompt at 1,743 tokens/s instead of 1,228 (+42%), to the same
-answer token for token; two slots gained 10%, three 18%. It
+answer token for token; two slots gained 10%, three 18%, and six or eight no
+more than four. Writing speed does not change. It
 applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
 on one NVIDIA GPU (a CUDA build), with the model read into memory rather
 than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
