@@ -1,0 +1,45 @@
+{
+  "campaign": "c06-mtp",
+  "notes": [
+    "Speculative decoding with the model's own MTP head (--mtp N) on one MI250X GCD: objective",
+    "(5), and the engine work of roadmap 0.8-Z2 measured on the HPC side. One slot, as --mtp needs.",
+    "mtp-graded: GSM8K at temperature 0 (ReflexBench's greedy, reproducible requests), so the",
+    "answers must be the same with and without drafts, and single-stream speed is read on real",
+    "prompts. mtp-throughput: the Leonardo prompt at the engine's default sampling, which is what",
+    "a user gets, and where fewer drafts are kept.",
+    "GGUFs that keep the MTP layers: unsloth's *-MTP-GGUF repositories, Apache-2.0; sizes from the",
+    "Hub API, 06-10-2026: 9B Q4_K_M 5.5 GiB, Q8_0 9.1; 27B Q4_K_M 15.9, Q8_0 27.1; 35B-A3B",
+    "UD-Q4_K_M 21.1, Q8_0 35.2 (~114 GiB in all)."
+  ],
+  "pull": [
+    "hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M",
+    "hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q8_0",
+    "hf.co/unsloth/Qwen3.6-27B-MTP-GGUF:Q4_K_M",
+    "hf.co/unsloth/Qwen3.6-27B-MTP-GGUF:Q8_0",
+    "hf.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_M",
+    "hf.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF:Q8_0"
+  ],
+  "defaults": {"gcds": 1, "batch": 1, "slot_ctx": 8192},
+  "groups": [
+    {"name": "mtp-graded", "priority": 70, "est_s": 3600,
+     "set": {"kind": "workload", "sets": ["gsm8k"], "limit": 300, "concurrency": 1,
+             "max_tokens": 768, "think": false},
+     "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.5-9b-mtp-gguf-q8_0",
+                        "qwen3.6-27b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q8_0",
+                        "qwen3.6-35b-a3b-mtp-gguf-ud-q4_k_m", "qwen3.6-35b-a3b-mtp-gguf-q8_0"],
+              "extra_args": [["--fit-strict"],
+                             ["--fit-strict", "--mtp", "1"],
+                             ["--fit-strict", "--mtp", "2"],
+                             ["--fit-strict", "--mtp", "3"]]}},
+
+    {"name": "mtp-throughput", "priority": 70, "est_s": 900,
+     "set": {"kind": "throughput", "repeats": 3},
+     "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.5-9b-mtp-gguf-q8_0",
+                        "qwen3.6-27b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q8_0",
+                        "qwen3.6-35b-a3b-mtp-gguf-ud-q4_k_m", "qwen3.6-35b-a3b-mtp-gguf-q8_0"],
+              "extra_args": [["--fit-strict"],
+                             ["--fit-strict", "--mtp", "1"],
+                             ["--fit-strict", "--mtp", "2"],
+                             ["--fit-strict", "--mtp", "3"]]}}
+  ]
+}
