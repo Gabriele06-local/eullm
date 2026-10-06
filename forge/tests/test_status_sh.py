@@ -53,7 +53,7 @@ esac
     short = "\\n".join(f"{n}|{s}" for _, n, s, _ in ended)
     _exe(bin_ / "sacct", f"""#!/usr/bin/env bash
 case "$*" in
-  *ElapsedRaw*) printf '6480 1\\n' ;;
+  *ElapsedRaw*) printf '6480|billing=32,cpu=32,gres/gpu=4,mem=480G,node=1\\n' ;;
   *JobID*) printf '{rows}\\n' ;;
   *) printf '{short}\\n' ;;
 esac
@@ -215,7 +215,7 @@ def test_an_idle_gpu_queue_is_flagged_and_a_queued_chain_is_not(tmp_path, runs):
     out = run_status(tmp_path, queue=[("eullm-gguf-grpo-v04", "RUNNING", "None")],
                      ended=[], gpu_queue=[])
     assert "the allocation is idle" in out
-    assert "1.8 node-hours since" in out
+    assert "57.6 local hours (1.8 node-hours) since" in out
     out = run_status(tmp_path, queue=[("eullm-grpo-r2-v04", "PENDING", "Dependency")],
                      ended=[], gpu_queue=["59332673"])
     assert "idle" not in out and "nothing wrong found" in out
@@ -229,3 +229,17 @@ def test_a_full_disk_is_flagged(tmp_path, runs):
     out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[],
                      disk_pct=78)
     assert "78% full" in out and "nothing wrong found" in out
+
+
+def test_the_allocation_left_and_the_pace_to_use_it_are_shown(tmp_path, runs, monkeypatch):
+    """2026-10-06: ~13,000 local hours on course to be lost, worked out by hand."""
+    monkeypatch.setenv("EULLM_BUDGET_HOURS", "100")
+    monkeypatch.setenv("EULLM_BUDGET_START", "2026-09-02")
+    monkeypatch.setenv("EULLM_BUDGET_END", "2999-01-01")
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[])
+    assert "allocation: 58 of 100 local hours used since 2026-09-02, 42 left for" in out
+    assert "pace of the window above:" in out and "saldo -b is the bill" in out
+    assert "[!!]" not in out
+    monkeypatch.setenv("EULLM_BUDGET_END", "2000-01-01")
+    assert "it has ended" in run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")],
+                                        ended=[])
