@@ -484,10 +484,10 @@ impl AppState {
             }
         });
         let info = crate::fit::read_gguf_info(&gguf_path);
-        let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
+        let file_size = crate::fit::model_file_bytes(&gguf_path);
         let layout = match (&info, file_size) {
             (Some(i), size) if self.fit && size > 0 => {
-                crate::fit::read_gguf_moe_layout(&gguf_path, size, i.n_layers)
+                crate::fit::read_model_moe_layout(&gguf_path, i.n_layers)
             }
             _ => None,
         };
