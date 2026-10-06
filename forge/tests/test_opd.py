@@ -103,6 +103,47 @@ def test_prompts_leave_out_dev_and_sensitive_rulings_and_mix_statutes(tmp_path, 
     assert "1 development and 1 sensitive" in printed and "principio" not in printed
 
 
+def test_cited_numbers_reads_both_forms():
+    mod = _load("cds_answer")
+    text = ("Come chiarito da Cons. Stato, Sez. V, n. 202301234 e dalla sentenza n. 45/2021, "
+            "nonché dall'art. 120, n. 3 c.p.a.")
+    assert mod.cited_numbers(text) == {"202301234", "202100045"}
+    assert mod.cited_numbers("") == set()
+
+
+def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, monkeypatch,
+                                                                     capsys):
+    chunks, cards, dev, _ = _corpus(tmp_path)
+    questions = tmp_path / "dev-cards.jsonl"
+    questions.write_text("".join(json.dumps({"id": rid, "domande_esame": [
+        {"domanda": f"Quando si applica il principio{n}?", "risposta": f"Sempre ({n}).",
+         "rubrica": "Dice sempre."}] * 2}) + "\n"
+        for n, rid in ((0, "cds/202000000"), (1, "cds/202000001"))))
+    mod = _load("cds_answer")
+    seen = []
+
+    def fake(args, contents):
+        seen.extend(contents)
+        return [("Secondo n. 202000000 il principio si applica.", True),
+                ("Lo dice la sentenza n. 999/2019.", True)]
+
+    monkeypatch.setattr(mod, "generate", fake)
+    out = tmp_path / "answers" / "answers-x.jsonl"
+    assert mod.main(["model", "--label", "x", "--questions", str(questions), "--dev-ids",
+                     str(dev), "--chunks", str(chunks), "--cards", str(cards),
+                     "--answers", str(out)]) == 0
+    rows = [json.loads(line) for line in out.read_text().splitlines()]
+    assert [r["id"] for r in rows] == ["cds-202000000-0", "cds-202000000-1"]
+    assert {"question", "reference", "rubric", "answer"} <= set(rows[0])
+    assert all(c.startswith("Testi di riferimento") for c in seen)
+    first, second = rows
+    assert first["source_retrieved"] and first["context"][0] == "cds/202000000"
+    assert first["cited_ok"] and first["source_cited"]
+    assert not second["cited_ok"] and not second["source_cited"]
+    printed = capsys.readouterr().out
+    assert "2 questions" in printed and "principio" not in printed
+
+
 @pytest.fixture
 def tiny_model(tmp_path):
     torch = pytest.importorskip("torch")
