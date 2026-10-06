@@ -21,6 +21,16 @@ Qwen3.8-Flash-Next IQ2_XS on the reference PC, measured with `bench/speed_check.
 
 With `--moe-cache auto` the GPU was busy 59% of the time and the CPU idle.
 
+Where it stands on 6 October, after phases 2 and 6 (same PC and model):
+
+| Engine | Writes (tokens/s) | Reads a prompt (tokens/s) |
+|---|---:|---:|
+| EuLLM, the default with a cache (`--moe-cache auto`, experts pinned, micro-batch 2048) | 54.9 | 963.8 |
+| the same with the prefetch of phase 6 (`LLAMA_MOE_PREFETCH=1`, 4 slots, micro-batch 4096) | 43–50 | 1,494–1,743 |
+| llama-server and EuLLM at the same 7,000 MiB cache, experts pinned, context 8,192 | 55.6 and 59.3 | — |
+
+**"llama-server" in these tables is not stock llama.cpp.** It is built from EuLLM's pin, which carries PR #29887, so the expert cache is in it as much as in EuLLM: comparing the two says what EuLLM's own layer costs (nothing measurable), not what the work bought. What llama.cpp does without the cache is the usual split, the experts of the last layers on the GPU: 22.4 tokens/s writing and 249 reading, against EuLLM's 54.9 and 963.8 by default.
+
 **Plain decoding is level.** Strata's paper gives 47-57 tokens/s without its MTP layer (finding 2, on an RTX 5070 with DDR5). The cache brings llama.cpp to 49.4.
 
 **MTP is where the gap is, and why it does not pay for us.** Strata gets 1.6-1.8× from its MTP layer; llama.cpp lost 15-20% with it. A check of three tokens routes them to up to 30 experts per layer. In llama.cpp every one of those not in VRAM is copied over PCIe before the GPU can start, so a check costs about 2.5 single steps and yields 2.05 tokens (52% of the drafts kept). In Strata the extra experts go to the CPU, which computes them while the GPU works, so a check costs little more than a step.
@@ -154,6 +164,7 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
 - Phase 3 extends PR #29887's design. Discuss it with its author on that PR, with phase 1's numbers in hand.
+- 6 October: the maintainer posted this plan's measurements on [PR #29887](https://github.com/ggml-org/llama.cpp/pull/29887) (open, by am17an): decode from 22.4 to 49.4 tokens/s with the cache and 58.1 with the experts pinned, prompt processing with every expert in RAM and a larger `-ub`, the cost of llama.cpp's MTP on top of the cache, and phases 3 and 6. Its description already notes that batches over 32 tokens bypass the cache.
 - llama.cpp's rules apply to anything posted there (`CONTRIBUTING.md`, `AGENTS.md`):
   - code written with AI help must be disclosed, and the person submitting must be able to explain every line;
   - issues, PR descriptions and replies must be written by a person;

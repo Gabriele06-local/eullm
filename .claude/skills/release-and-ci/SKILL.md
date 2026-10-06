@@ -140,6 +140,22 @@ Rationale: any long-pole CUDA build can take 30 min – 1h depending on cache st
 | Linux CUDA | ~18 min | ~3-5 min |
 | **Windows CUDA** (long-pole) | **~50 min** (cold) | **~10-15 min** (warm) |
 
+**A llama.cpp bump makes the next release cold.** sccache keys on the C++/CUDA
+sources, so a new pin misses on every kernel. v0.7.30 moved the pin
+(7ab4ee7 → 6b7b03a) and took 69 minutes: `build-windows-cuda` 67 (CUDA 13.1
+toolkit install 12, build 52), the RDNA `build-rocm` 61, against 17-20 and
+9-10 for v0.7.11 and v0.7.20, which shared one pin. Expect it after every
+bump; it is not a regression.
+
+**The Intel macOS build stays until GitHub drops its runner, or nobody
+downloads it.** Decided 6 October: `macos-15-intel` is GitHub's last x86_64
+macOS image, supported until August 2027, and macOS 26 is the last release
+for Intel Macs. The job is never the long pole (5-10 minutes, no queue). Over
+the 29 releases v0.6.80-rc11 → v0.7.20 `eullm-macos-x64` was downloaded 28
+times against 31 for `eullm-macos-arm64`, with none in the last three: drop it
+earlier if that stays at zero. A "longer queue times" notice on the macOS
+jobs is GitHub's generic capacity warning, not a wait.
+
 ## How a release in progress looks on GitHub (don't be fooled)
 
 When the tag is pushed, GitHub creates the release **immediately** with only
@@ -213,6 +229,19 @@ The **real** reasons S3/MinIO remains the right backend for sccache:
    head, and its whole security posture is that it stays secret-less while
    doing so. Giving PR runs the cache needs a read-only bucket credential, not
    a lifted guard.
+
+   What it costs today (6 October): the PR run's engine job takes about 16
+   minutes, compiling llama.cpp's C++ twice from scratch, against about 4 on
+   main. Two ways to give PR runs a read-only cache, both needing a change on
+   the MinIO side: sccache 0.8.0 (the pinned version) reads a public-read
+   bucket with `SCCACHE_S3_NO_CREDENTIALS=true`, no secret at all, which its
+   docs name as the way to give pull requests a read-only cache; newer sccache
+   takes a read-only key with `SCCACHE_S3_RW_MODE=READ_ONLY`, which means
+   upgrading both workflows together. Not done yet. `main` has no required
+   checks, so a PR can be merged before its run ends; the
+   `No AI attribution` job is the one worth waiting for (about 10 seconds):
+   PR #502 was merged three seconds into its run, and the commit that run
+   flagged is in `main` for good.
 3. **Cross-repo reuse (future).** If we ever add a sibling repo (Forge or
    Hub C++ work), the same MinIO bucket continues to serve. GitHub cache
    is per-repo, hard boundary.
