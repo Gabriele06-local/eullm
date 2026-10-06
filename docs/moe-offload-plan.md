@@ -205,7 +205,20 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - **Correct, and slower.** All the answers the same (`b2941bfb`), 18% of a micro-batch's bytes taken from VRAM as expected, and reading 25% slower: 1.93 s per micro-batch against 1.44.
 - The likely reason: a slot filled by one copy over the bus took about 170, a micro-batch about 25,000, and the device-to-device copies sat on the copy stream between those over the bus. 0.49 s lost where 0.27 s were to be saved is about 30 µs per copy, far more than a copy over the bus costs on its own; a copy within the GPU, waiting its turn among the computing stream's kernels or for the copy engine, holds up every copy over the bus queued behind it.
 - **Second version:** the copies from VRAM go on the GPU's own stream, queued once the slot's previous reader is: the stream's order puts them after that reader and after the cache's own copies into its banks, so the event the first version recorded at the start of each graph goes. The copy stream carries only the copies over the bus, about 80 per tensor. At 2048 tokens the GPU's stream has the time: its computing takes about 0.6 s of the 1.44.
-- **To measure** the same way. If the copies over the bus, split into runs, still cost more than the bytes they save, phase 6b goes, and the reading road's next step is the larger micro-batch.
+
+**Measured** on 6 October, the second version, the same way:
+
+| order | setting | expert cache | reading, tokens/s | writing, tokens/s |
+|---|---|---:|---:|---:|
+| bus first | `4:bus` | 5.75 GiB | 1,388.6 | 54.9 |
+| | `4`, 17% from VRAM | 5.75 GiB | 1,483.1 | 53.4 |
+| VRAM first | `4`, 17% from VRAM | 5.75 GiB | 1,534.9 | 53.2 |
+| | `4:bus` | 5.75 GiB | 1,347.4 | 54.7 |
+
+- **Reading 10% faster:** 1,368.0 → 1,509.0 tokens/s on average; with the order of the two servers taken out, +141 tokens/s for the copies from VRAM (and −46.5 for running second). All the answers the same (`b2941bfb`). Phase 6b stays on by default.
+- **Half the gain expected:** a micro-batch takes 1.36 s against the 1.23 s its copy over the bus alone would, now that 17% stays off the bus. The 0.13 s left are likely the copies over the bus themselves, about 11,500 per micro-batch instead of 144: some 11 µs each, which is what copying in runs costs.
+- **Writing 1.5 tokens/s slower** (54.8 → 53.3) in both orders, with no share for the order. Nothing of this change runs while an answer is written: a decode step stages no expert. One guess is the GPU's clock after a prompt read harder, the speed_check's writing following its long questions; a writing test on a server that has read no long prompt yet tells.
+- What is left for reading: fewer, larger copies over the bus, or the larger micro-batch with the cache's VRAM lent while a prompt is read (Strata §3.5), the larger change of the two.
 
 ## 3. Upstream
 
@@ -231,5 +244,5 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 1. ~~A q8_0 KV cache with `--n-ubatch 2048`~~ Measured: little to gain on this model. Only one layer in four has attention, so its KV cache is about 1 GiB at a 40,960-token context and `--fit` already charges it that way; q8_0 gave the expert cache 0.25 GiB more (7.00 GiB at 2,048), for 55.8 tokens/s writing and 935.7 reading. At 4,096, 53.2 and 1,195.1. `--n-ubatch 2048` without it stays the balance: about 55 writing, about 960 reading.
 2. llama.cpp's MTP with the experts pinned (llama-server, `--load-mode none`): a check of three tokens copies more experts, which cost 2.5 steps at 9 GB/s and costs far less at 24. If drafting pays now, loading the MTP head from its own file in EuLLM is a smaller job than phase 3.
 3. ~~`--no-mmap` on by itself with `--moe-cache`~~ Done: a load with a cache reads the model into memory when the RAM can spare the experts (`--mmap` to keep the mapping) and reads prompts 2,048 tokens at a time unless `--n-ubatch` says otherwise.
-4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots read no faster than four (5 October). On by default since 6 October (`--moe-prefetch`), with `--fit` keeping the slots' VRAM out of an `auto` cache: at the default micro-batch 42% faster (968 → 1,373 tokens/s) with the writing unchanged. Reading is now bounded by PCIe 4.0 at that micro-batch; what is left for it is in phase 6 ("Measured" of 6 October). Phase 6b, the experts the cache holds copied from VRAM (patch `0004`), is written and next to measure.
+4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots read no faster than four (5 October). On by default since 6 October (`--moe-prefetch`), with `--fit` keeping the slots' VRAM out of an `auto` cache: at the default micro-batch 42% faster (968 → 1,373 tokens/s) with the writing unchanged. Reading is now bounded by PCIe 4.0 at that micro-batch; what is left for it is in phase 6 ("Measured" of 6 October). Phase 6b, the experts the cache holds copied from VRAM (patch `0004`), reads 10% faster again (1,368 → 1,509 tokens/s).
 5. The GPU's busy time per step, to split the 13.5-14 ms before the routers into computing and waiting: phase 4 if the waiting is large.
