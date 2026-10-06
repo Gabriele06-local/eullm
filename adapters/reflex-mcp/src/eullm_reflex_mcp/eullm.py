@@ -96,7 +96,7 @@ class EuLLM:
                 "`eullm serve --decision-model jev-style-2b-decision-v3-gguf-q4_k_m`, "
                 "or set EULLM_URL"
             ) from None
-        if response.status_code >= 400:
+        if not 200 <= response.status_code < 300:
             raise error(response, path)
         try:
             return response.json()
@@ -110,6 +110,19 @@ def error(response, path):
     """EuLLM's refusal, in its own words. `/v1/systemone` answers in the
     System One shape; the OpenAI and Ollama endpoints with
     `{"error": "message"}` or `{"error": {"message": ...}}`."""
+    # A 3xx is not EuLLM refusing: it is something between the two of us
+    # moving the caller elsewhere -- a gateway on the new API path, an auth
+    # proxy sending it to a login page. Named as such, because the body of a
+    # redirect says nothing about why it was sent. httpx does not follow
+    # redirects here, and following one would let a proxy's answer, not
+    # EuLLM's, reach the tool.
+    if 300 <= response.status_code < 400:
+        where = f" to {response.headers['location']}" if "location" in response.headers else ""
+        return EuLLMError(
+            f"EuLLM's {path} answered {response.status_code} redirect{where} instead of an "
+            f"answer, so EuLLM was not reached: check EULLM_URL",
+            status=response.status_code,
+        )
     try:
         detail = response.json().get("error")
     except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
