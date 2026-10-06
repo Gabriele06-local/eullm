@@ -19,7 +19,10 @@
 #                 Qwen3-Reranker-0.6B; CR_EMBEDDER=none for BM25 alone)
 #   CR_CHUNKS     chunk files (default $WORK/datasets/legal_it_amm/{train,val}.jsonl)
 #   CR_CACHE      embedding cache (default $WORK/eval/cds/retrieval-cache)
-#   CR_CSV        results (default $WORK/eval/cds/retrieval.csv)
+#   CR_CSV        results (default $WORK/eval/cds/retrieval.csv); a setting already in
+#                 it is skipped, so a later link measures only what is left
+#   CR_LIMIT      questions asked, a fixed random sample (default 1500; 0: all ~8,000,
+#                 more than two hours a setting with the reranker)
 #   CR_REPO       checkout to run (default: the one this file was submitted from)
 #
 #SBATCH --job-name=eullm-cds-retrieval
@@ -75,4 +78,5 @@ heartbeat_start
 python "$REPO/forge/scripts/cds_retrieval.py" --chunks "${CHUNKS[@]}" \
     --openga $WORK/eval/openga/cds-sentenze-2017-2024.csv "${CARD_ARGS[@]}" \
     --questions "$CR_QUESTIONS" --dev-ids "$WORK/eval/cds/cds-dev-ids.txt" \
-    --setting "${SETTINGS[@]}" "${EMB[@]}" --csv "${CR_CSV:-$WORK/eval/cds/retrieval.csv}"
+    --setting "${SETTINGS[@]}" "${EMB[@]}" --csv "${CR_CSV:-$WORK/eval/cds/retrieval.csv}" \
+    --limit "${CR_LIMIT:-1500}"

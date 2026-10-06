@@ -358,6 +358,15 @@ def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, t
     assert all(float(r["recall3"]) == 1.0 for r in rows)
     printed = capsys.readouterr().out
     assert "fatto0_3" not in printed and "recall@3 1.000" in printed
+    # a later link skips what is measured and measures only what is not
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--cards", str(cards),
+                     "--questions", str(questions), "--dev-ids", str(dev), "--limit", "2",
+                     "--setting", "chunks", "prefix", "--csv", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "chunks: already in" in printed and "prefix: already" not in printed
+    rows = list(csv.DictReader(out.open()))
+    assert [r["setting"] for r in rows].count("chunks") == 2
+    assert sum(int(r["n"]) for r in rows if r["setting"] == "prefix") == 2
 
 
 def test_a_reasoning_block_before_the_card_is_skipped():
