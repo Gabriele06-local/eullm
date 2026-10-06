@@ -60,6 +60,23 @@ def test_keyword_coverage_alternatives_are_one_requirement():
     assert keyword_coverage("la risoluzione", ["risoluzione|"]) == 1.0
 
 
+def test_a_deadline_keyword_is_matched_as_a_number_not_a_substring():
+    """The keyword is a plain string, so "20 giorni" is inside "120 giorni".
+
+    A deadline six times too long satisfied the exam's own requirement, and
+    the GRPO reward -- which compares the number for exactly this reason --
+    disagreed with this headline number about the same answer.
+    """
+    kws = ["20 giorni|venti giorni"]
+    assert keyword_coverage("entro venti giorni dalla notifica", kws) == 1.0
+    assert keyword_coverage("entro 20 giorni dalla notifica", kws) == 1.0
+    assert keyword_coverage("Il termine è di 30 giorni dalla sentenza.", kws) == 0.0
+    assert keyword_coverage("Il termine è di 120 giorni dalla sentenza.", kws) == 0.0
+    assert keyword_coverage("Il termine è di centoventi giorni.", kws) == 0.0
+    # the repo's own example, in its own docstring
+    assert keyword_coverage("entro centosessanta giorni", ["60 giorni|sessanta giorni"]) == 0.0
+
+
 def test_a_perfect_answer_scores_full_keyword_coverage_on_the_seed():
     """The gate's headline number has to be reachable. An answer identical to
     an item's own reference used to score 0.883, because two seed items listed
