@@ -69,6 +69,8 @@ def _names_deadline(text: str, deadline: tuple[int, str]) -> bool:
         if n and n == wanted_n and _DEADLINE_UNITS[unit.lower()] == wanted_unit:
             return True
     return False
+
+
 _PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
 
 
