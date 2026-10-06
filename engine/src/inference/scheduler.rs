@@ -328,39 +328,89 @@ impl SchedulerHandle {
         super::render_oai_chat_template(&model, messages_json, tools_json, tool_choice, think)
     }
 
-    /// Submit a request for inference. Returns immediately.
+    /// Queue a request for inference, or say at once why it was not queued.
+    /// Returns immediately either way.
     ///
-    /// The caller should listen on the returned `mpsc::Receiver<StreamEvent>`
-    /// for token events.
-    pub fn submit(&self, request: GenerateRequest) -> mpsc::Receiver<StreamEvent> {
+    /// The caller listens on the returned `mpsc::Receiver<StreamEvent>` for
+    /// token events. A refusal comes before anything is generated, which is
+    /// what lets the HTTP server answer it with a status code instead of
+    /// opening a stream only to carry the error (see [`NotQueued`]).
+    pub fn try_submit(
+        &self,
+        request: GenerateRequest,
+    ) -> Result<mpsc::Receiver<StreamEvent>, NotQueued> {
         let (tx, rx) = mpsc::channel::<StreamEvent>(256);
-
-        // Best-effort send — if the queue is full the request is rejected.
-        match self.tx.try_send(ScheduledRequest {
-            request,
-            tx: tx.clone(),
-        }) {
+        match self.tx.try_send(ScheduledRequest { request, tx }) {
             Ok(()) => {
                 // Wake up the scheduler thread.
                 let _lock = self.notify_mutex.lock().unwrap();
                 self.notify.notify_one();
+                Ok(rx)
             }
-            Err(crossbeam_channel::TrySendError::Full(_)) => {
-                let _ = tx.try_send(StreamEvent::Error(
-                    "Scheduler queue full — try again later".into(),
-                ));
-            }
+            Err(crossbeam_channel::TrySendError::Full(_)) => Err(NotQueued::QueueFull),
             // The decode thread has exited: the model was unloaded between
             // this request finding it and reaching it. This used to say the
             // queue was full, which sent people looking for a load problem.
-            Err(crossbeam_channel::TrySendError::Disconnected(_)) => {
-                let _ = tx.try_send(StreamEvent::Error(MODEL_UNLOADED.into()));
-            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => Err(NotQueued::Unloaded),
         }
+    }
 
-        rx
+    /// [`Self::try_submit`] for a caller with nothing to do with a refusal
+    /// but show it: the refusal arrives as the stream's only event, an
+    /// error, as every other failure does.
+    pub fn submit(&self, request: GenerateRequest) -> mpsc::Receiver<StreamEvent> {
+        self.try_submit(request).unwrap_or_else(|refused| {
+            let (tx, rx) = mpsc::channel::<StreamEvent>(1);
+            let _ = tx.try_send(StreamEvent::Error(refused.to_string()));
+            rx
+        })
     }
 }
+
+#[cfg(test)]
+impl SchedulerHandle {
+    /// A handle with no model and no decode thread behind it, and the far
+    /// end of its queue of `capacity` places: what a server does with a
+    /// full queue, or with a model unloaded under a request (drop the
+    /// queue's end), tested without loading a model.
+    pub(crate) fn detached(
+        capacity: usize,
+    ) -> (Self, crossbeam_channel::Receiver<ScheduledRequest>) {
+        let (tx, rx) = crossbeam_channel::bounded(capacity);
+        let handle = Self {
+            tx,
+            model: std::sync::Weak::new(),
+            notify: Arc::new(std::sync::Condvar::new()),
+            notify_mutex: Arc::new(std::sync::Mutex::new(())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            thread: Arc::new(std::sync::Mutex::new(None)),
+        };
+        (handle, rx)
+    }
+}
+
+/// Why [`SchedulerHandle::try_submit`] did not queue a request. Neither is
+/// the request's fault, and the same request can succeed when sent again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotQueued {
+    /// Every place in the queue (`SchedulerConfig::queue_capacity`) is
+    /// taken: it frees up as the running requests finish.
+    QueueFull,
+    /// The model was unloaded between the request finding it and reaching
+    /// its queue. Sent again, the request loads it back.
+    Unloaded,
+}
+
+impl std::fmt::Display for NotQueued {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::QueueFull => "Scheduler queue full — try again later",
+            Self::Unloaded => MODEL_UNLOADED,
+        })
+    }
+}
+
+impl std::error::Error for NotQueued {}
 
 /// What a request gets when the model it was sent to is unloaded before it
 /// starts: it was queued, or on its way to the queue.
@@ -2650,9 +2700,9 @@ fn warn_if_logits_corrupt(ctx: &LlamaContext, idx: i32, seq_id: i32) {
 mod tests {
     use super::super::output::stop_prefix_holdback;
     use super::{
-        CachedSlot, PieceOutcome, PromptCheckpoint, SendOutcome, StreamEvent, best_checkpoint,
-        common_prefix_len, drafts_kept, mtp_drafts, pick_slot, process_piece, text_prefix_match,
-        try_send_piece,
+        CachedSlot, GenerateRequest, NotQueued, PieceOutcome, PromptCheckpoint, SchedulerHandle,
+        SendOutcome, StreamEvent, best_checkpoint, common_prefix_len, drafts_kept, mtp_drafts,
+        pick_slot, process_piece, text_prefix_match, try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
@@ -3204,5 +3254,50 @@ mod tests {
             delivered, "alphabetagammadelta",
             "no byte may be lost or reordered when the channel back-pressures"
         );
+    }
+
+    /// A full queue refuses the next request at once, before anything is
+    /// generated, so the server can answer with a status code (503) rather
+    /// than a stream that carries only the error.
+    #[test]
+    fn a_full_queue_refuses_the_next_request_before_it_starts() {
+        let (handle, queue) = SchedulerHandle::detached(1);
+        let queued = handle.try_submit(GenerateRequest::default());
+        assert!(queued.is_ok(), "the queue's one place was free");
+        assert_eq!(
+            handle.try_submit(GenerateRequest::default()).err(),
+            Some(NotQueued::QueueFull)
+        );
+
+        // Its place freed — the decode thread took the first request — the
+        // same request goes in.
+        drop(queue.try_recv().expect("the first request is queued"));
+        assert!(handle.try_submit(GenerateRequest::default()).is_ok());
+    }
+
+    #[test]
+    fn a_queue_no_decode_thread_reads_any_more_is_an_unloaded_model() {
+        let (handle, queue) = SchedulerHandle::detached(4);
+        drop(queue);
+        assert_eq!(
+            handle.try_submit(GenerateRequest::default()).err(),
+            Some(NotQueued::Unloaded)
+        );
+    }
+
+    /// `submit`, which the terminal chat uses, still reports a refusal as
+    /// the stream's one event, and the stream then ends.
+    #[test]
+    fn submit_reports_a_refusal_as_the_streams_only_event() {
+        let (handle, _queue) = SchedulerHandle::detached(0);
+        let mut rx = handle.submit(GenerateRequest::default());
+        match rx.try_recv() {
+            Ok(StreamEvent::Error(e)) => assert_eq!(e, NotQueued::QueueFull.to_string()),
+            other => panic!("expected the refusal, got {other:?}"),
+        }
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }

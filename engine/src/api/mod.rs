@@ -5035,4 +5035,118 @@ mod http_tests {
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// A server whose one resident, `busy-m`, is answered by `scheduler`, a
+    /// handle with no decode thread behind it (`SchedulerHandle::detached`).
+    async fn spawn_with_scheduler(
+        tmp: &std::path::Path,
+        scheduler: crate::inference::SchedulerHandle,
+    ) -> String {
+        let store = store_with_one_model(tmp, "busy-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state
+            .models
+            .write()
+            .await
+            .insert(resident::LoadedModel::new(
+                "busy-m".into(),
+                tmp.join("busy-m").join("model.gguf"),
+                None,
+                Some(scheduler),
+            ));
+        spawn_state(state).await
+    }
+
+    /// Every endpoint that queues a generation, streamed and not, and the
+    /// status and `Retry-After` each answers with.
+    async fn refusals(base: &str) -> Vec<(String, u16, Option<String>, serde_json::Value)> {
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        let mut answers = Vec::new();
+        for stream in [false, true] {
+            for (endpoint, body) in [
+                (
+                    "/api/generate",
+                    serde_json::json!({ "model": "busy-m", "prompt": "hi", "stream": stream }),
+                ),
+                (
+                    "/api/chat",
+                    serde_json::json!({ "model": "busy-m", "messages": hi, "stream": stream }),
+                ),
+                (
+                    "/v1/chat/completions",
+                    serde_json::json!({ "model": "busy-m", "messages": hi, "stream": stream }),
+                ),
+            ] {
+                let response = reqwest::Client::new()
+                    .post(format!("{base}{endpoint}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("request");
+                let status = response.status().as_u16();
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let body = response.json().await.unwrap_or(serde_json::Value::Null);
+                answers.push((
+                    format!("{endpoint} stream={stream}"),
+                    status,
+                    retry_after,
+                    body,
+                ));
+            }
+        }
+        answers
+    }
+
+    /// A full queue is a 503 with `Retry-After` on every endpoint, streamed
+    /// or not, answered before any stream opens — as Ollama answers its own
+    /// full queue. It was a 500 without streaming, which says the fault is
+    /// the server's, and with streaming a 200 whose only line was the error,
+    /// which a client cannot tell from an answer that failed halfway.
+    #[tokio::test]
+    async fn a_full_queue_is_a_503_with_retry_after_on_every_endpoint() {
+        let tmp = std::env::temp_dir().join(format!("eullm-queue-full-{}", uuid::Uuid::new_v4()));
+        let (scheduler, _queue) = crate::inference::SchedulerHandle::detached(1);
+        let _first = scheduler
+            .try_submit(crate::inference::GenerateRequest::default())
+            .expect("the queue's one place was free");
+        let base = spawn_with_scheduler(&tmp, scheduler).await;
+
+        for (request, status, retry_after, body) in refusals(&base).await {
+            assert_eq!(status, 503, "{request}: {body}");
+            assert_eq!(retry_after.as_deref(), Some("5"), "{request}");
+            assert_eq!(
+                body["error"], "Scheduler queue full — try again later",
+                "{request}: a JSON error, not a stream"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A model unloaded between a request finding it and reaching its queue
+    /// is a 503 too, which the request can be sent again after at once: it
+    /// loads the model back.
+    #[tokio::test]
+    async fn a_model_unloaded_before_the_request_starts_is_a_503() {
+        let tmp = std::env::temp_dir().join(format!("eullm-unloaded-{}", uuid::Uuid::new_v4()));
+        let (scheduler, queue) = crate::inference::SchedulerHandle::detached(1);
+        drop(queue);
+        let base = spawn_with_scheduler(&tmp, scheduler).await;
+
+        for (request, status, retry_after, body) in refusals(&base).await {
+            assert_eq!(status, 503, "{request}: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "{request}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("send it again")),
+                "{request}: {body}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

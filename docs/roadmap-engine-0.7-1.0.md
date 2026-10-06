@@ -56,11 +56,21 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   `batch_size=1` e `>1`.
 
 - [ ] **0.7-C · Backpressure HTTP e deadline** *(P0 — prima parte del lifecycle)*
-  Coda piena → HTTP 429 con `Retry-After` **prima** di aprire SSE/NDJSON (il
-  `try_send` sullo scheduler fallisce già in modo sincrono: va solo intercettato
-  prima dell'apertura dello stream); modello non disponibile → 503; validazione →
-  400; prompt oltre il context → 413/422 con messaggio esplicito. Deadline
-  opzionale per richiesta con `finish_reason` coerente e rilascio risorse.
+  - [x] Coda piena → HTTP **503** con `Retry-After: 5` **prima** di aprire
+    SSE/NDJSON, su `/api/generate`, `/api/chat` e `/v1/chat/completions`
+    *(fatto il 2026-10-06)*. 503 e non il 429 previsto qui: è quello che
+    risponde Ollama alla sua coda piena (`ErrMaxQueue` →
+    `StatusServiceUnavailable`), e un client Ollama non deve vedere differenze.
+    `SchedulerHandle::try_submit` restituisce il rifiuto prima che esista lo
+    stream; prima era un 500 senza streaming e un 200 con il solo errore nello
+    stream.
+  - [x] Modello non disponibile → 503: nessun modello caricato, nessun modello
+    scaricabile in tempo (`Busy`/`NoRoom`, `Retry-After: 5`) e ora anche il
+    modello scaricato tra la ricerca e la coda (`Retry-After: 1`, la richiesta
+    stessa lo ricarica). Un modello che non esiste resta 404, come in Ollama.
+  - [ ] Validazione → 400; prompt oltre il context → 413/422 con messaggio
+    esplicito. Deadline opzionale per richiesta con `finish_reason` coerente e
+    rilascio risorse.
   La cancellazione via disconnessione client (receiver drop) esiste già nel decode
   loop; l'endpoint `DELETE /api/requests/{id}` è rinviato a 0.9 (richiede il
   registry dei request_id, valore marginale finché il receiver-drop copre i casi reali).

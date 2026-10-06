@@ -583,6 +583,13 @@ llama.cpp computes it one micro-batch at a time from the same positions, so
 the answer is the one a prompt read whole gets. Prompts wait in arrival
 order; one is read at a time.
 
+**A full queue is a 503.** Behind the requests being answered, each slot
+keeps up to eight waiting, in arrival order: with the default single slot,
+one answering and eight waiting. One more is refused at once with
+`503 Service Unavailable`, `Retry-After: 5` and the error as JSON, streamed
+or not, before any stream opens, as Ollama answers its own full queue. A
+backend for many concurrent users raises `--batch-size` rather than retrying.
+
 ### Context window and batch slots
 
 The `--ctx-size` flag sets the **total** KV cache budget, shared across all batch slots (matching Ollama/llama.cpp server behaviour). Each slot gets `ctx_size / batch_size` tokens of context:
