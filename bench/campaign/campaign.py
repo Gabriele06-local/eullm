@@ -8,6 +8,7 @@
     campaign.py run      --queue DIR [--devices 0-7]   drain the queue on this node
     campaign.py status   --queue DIR                   what is waiting, running, done
     campaign.py unblock  --queue DIR                   retry points blocked on a model
+    campaign.py retry    --queue DIR [--group PREFIX]  failed points back, once fixed
     campaign.py collect  --queue DIR [--out FILE.csv]  one row per measured point
     campaign.py budget   [--start --end --budget-node-hours]   spend against the calendar
 
@@ -183,6 +184,7 @@ class Runner:
         self.free = set(self.devices)
         self.running = {}
         self.finished = []
+        self.draining = []  # (servers that outlived their kill, their devices)
         self.lock = threading.Lock()
         self.stop = threading.Event()
         # Set when a point finishes or a stop arrives, so the next point
@@ -363,11 +365,25 @@ class Runner:
     def reap(self) -> int:
         with self.lock:
             finished, self.finished = self.finished, []
+        # Devices whose server outlived its kill come back when it is gone.
+        freed = 0
+        for straggler in list(self.draining):
+            if all(s.proc.poll() is not None for s in straggler[0]):
+                self.draining.remove(straggler)
+                with self.lock:
+                    self.free |= set(straggler[1])
+                print(f"[{now_iso()}] devices {sorted(straggler[1])} free again", flush=True)
+                freed += 1
         for run, state, note, ended in finished:
             pid = run.p["id"]
             with self.lock:
                 self.running.pop(pid, None)
-                self.free |= set(run.reserved)
+                if run.ctx.stragglers:
+                    self.draining.append((run.ctx.stragglers, set(run.reserved)))
+                    print(f"[{now_iso()}] {pid}: a server outlived its kill; devices "
+                          f"{sorted(run.reserved)} wait for it", flush=True)
+                else:
+                    self.free |= set(run.reserved)
             for d in run.reserved:
                 self.busy_s[d] += ended - run.started
             try:
@@ -382,7 +398,7 @@ class Runner:
             self.counts[key] = self.counts.get(key, 0) + 1
             print(f"[{now_iso()}] {final:8s} {pid} after {ended - run.started:.0f}s"
                   f"{': ' + note[:300] if note else ''}", flush=True)
-        return len(finished)
+        return len(finished) + freed
 
     def shutdown(self):
         """Stop: kill every server at once (Slurm allows seconds, not
@@ -435,7 +451,7 @@ class Runner:
                     if claimed is not None:
                         self.launch(claimed, use, reserved, duration)
                 replan_at = time.time() + REPLAN_S
-            if not self.running:
+            if not self.running and not self.draining:
                 break
             self.wake.wait(self.args.poll_s)
             self.wake.clear()
@@ -694,6 +710,12 @@ def cmd_status(args):
     return 0
 
 
+def cmd_retry(args):
+    moved = Queue(args.queue).retry(args.group or "")
+    print(f"{len(moved)} failed points back in todo")
+    return 0
+
+
 def cmd_unblock(args):
     moved = Queue(args.queue).unblock()
     print(f"{len(moved)} points back in todo")
@@ -856,6 +878,8 @@ def main(argv=None):
 
     with_queue(sub.add_parser("status"))
     with_queue(sub.add_parser("unblock"))
+    p = with_queue(sub.add_parser("retry"))
+    p.add_argument("--group", help="only points whose id starts with this, e.g. moe-671b")
 
     p = with_queue(sub.add_parser("collect"))
     p.add_argument("--results")
@@ -870,7 +894,7 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,
-                "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock,
+                "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock, "retry": cmd_retry,
                 "collect": cmd_collect, "budget": cmd_budget}
     if args.cmd not in commands:
         ap.print_help()

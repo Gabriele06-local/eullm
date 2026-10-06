@@ -58,6 +58,10 @@ def can_run(p: dict) -> bool:
 
 
 READY_TIMEOUT_S = 900
+# How long a killed server may take to go. One unloading hundreds of GB, or
+# stuck in a Lustre read, outlives SIGKILL by minutes; until it is gone its
+# devices and its port are not free (c02's largest MoE, 06-10-2026).
+KILL_WAIT_S = 600
 REQUEST_TIMEOUT_S = 1800
 WARMUP_TIMEOUT_S = 3600  # a 400 GB model read off Lustre is the slow case
 
@@ -228,17 +232,28 @@ class Server:
         raise PointError(f"server on port {self.port} not ready in {timeout_s} s:\n"
                          + self.log_tail())
 
-    def stop(self) -> None:
+    def stop(self, kill_wait_s=KILL_WAIT_S) -> bool:
+        """Stop the server; whether it is gone. Never raises: it runs in the
+        `finally` of a point, where an exception would replace the error
+        that ended the point."""
         if self.proc is None or self.proc.poll() is not None:
-            return
+            return True
         try:
             os.killpg(self.proc.pid, signal.SIGTERM)
             self.proc.wait(timeout=30)
+            return True
         except subprocess.TimeoutExpired:
-            os.killpg(self.proc.pid, signal.SIGKILL)
-            self.proc.wait(timeout=30)
-        except ProcessLookupError:
             pass
+        except ProcessLookupError:
+            return True
+        try:
+            os.killpg(self.proc.pid, signal.SIGKILL)
+            self.proc.wait(timeout=kill_wait_s)
+            return True
+        except ProcessLookupError:
+            return True
+        except subprocess.TimeoutExpired:
+            return False
 
     def kill(self) -> None:
         """Immediately, without waiting: for a job whose time is up."""
@@ -461,6 +476,7 @@ class Context:
         self.sets_dir = sets_dir
         self.f32_dir = f32_dir  # F32 GGUFs for finetune points
         self.servers = []  # set by run(), so the runner can stop them from outside
+        self.stragglers = []  # servers still alive after stop(): their devices stay taken
 
 
 def start_servers(p: dict, ctx: Context) -> list:
@@ -997,5 +1013,4 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
         stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
         return {"load": load, p["kind"]: measured, "device_stats": stats}
     finally:
-        for s in servers:
-            s.stop()
+        ctx.stragglers = [s for s in servers if not s.stop()]

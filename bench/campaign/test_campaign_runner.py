@@ -407,3 +407,44 @@ def test_llama_server_and_ollama_are_measured_like_the_engine(tmp_path, engine, 
         assert t["ok"] == 2 and t["generated_tokens"] > 0 and t["ttft_ms_p50"] is not None
     chat = results[("rt-chat", "llama-server")]["workload"]
     assert chat["accuracy"]["tiny"]["accuracy"] == 1.0  # translated to OpenAI and back
+
+
+def test_devices_of_a_server_that_outlives_its_kill_wait_for_it(tmp_path, engine):
+    class Proc:
+        alive = True
+
+        def poll(self):
+            return None if self.alive else -9
+
+    class Straggler:
+        proc = Proc()
+
+    class Ctx:
+        stragglers = [Straggler()]
+
+    class Run:
+        p = {"id": "x-1"}
+        reserved = [2, 3]
+        started = time.time()
+        ctx = Ctx()
+
+    runner = campaign.Runner(run_args(str(tmp_path / "q"), engine, port_base=free_port_base()))
+    runner.free -= {2, 3}
+    runner.running["x-1"] = Run()
+    runner.finished.append((Run(), "failed", "boom", time.time()))
+    runner.reap()
+    assert not {2, 3} & runner.free and runner.draining
+    Straggler.proc.alive = False
+    assert runner.reap() == 1
+    assert {2, 3} <= runner.free and not runner.draining
+
+
+def test_stop_does_not_raise_when_the_server_outlives_the_wait(tmp_path):
+    import subprocess
+
+    import point
+
+    s = point.Server("sleep", 0, [], dict(os.environ), str(tmp_path / "log"))
+    s.proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
+    assert s.stop(kill_wait_s=5) is True  # SIGTERM is enough for sleep
+    assert s.stop() is True  # already gone
