@@ -18,6 +18,13 @@ git checkout -- <files>        # the submodule goes back to the pinned commit
 A later patch may change a file an earlier one changed; it is then a diff
 against the tree with the earlier patches applied.
 
+Keep new declarations out of the headers every backend's sources include
+(`ggml.h`, `ggml-backend.h`, `ggml-impl.h`): a patch that changes one rebuilds
+all of them, the CUDA kernels among them, on every machine that builds it and
+in every release build, where sccache finds none of them cached. `0003`
+declares its one function in `ggml-backend-prefetch.h`, a header of its own,
+for that reason.
+
 When the submodule moves, `cargo test --test llama_patches` in `engine/` says
 which patches still apply. Regenerate the ones that do not against the new
 commit, and delete the ones upstream has taken.
