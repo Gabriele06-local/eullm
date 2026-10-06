@@ -10,6 +10,7 @@ by a domain expert (F0-A in the Forge R&D roadmap).
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -82,12 +83,37 @@ def load_eval_set(path: str | Path) -> list[EvalItem]:
 
 
 def save_eval_set(items: list[EvalItem], path: str | Path) -> Path:
-    """Write items to JSONL, creating parent directories as needed."""
+    """Write items to JSONL, creating parent directories as needed.
+
+    Serialised in full before the destination is touched, and moved into
+    place with os.replace. Opening the target with "w" truncated it first, so
+    a value json cannot represent -- a Path left in an item's metadata is the
+    easy one -- aborted on that line and left the exam that was already on
+    disk shortened by exactly one item, with nothing in the file to say so
+    and no count anywhere to notice against. load_eval_set read the result
+    without complaint.
+
+    The error now names the item and the file it was going into.
+    """
     path = Path(path)
+    lines = []
+    for i, item in enumerate(items):
+        try:
+            lines.append(json.dumps(item.to_dict(), ensure_ascii=False))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{path}: item {i} ({item.id!r}) is not JSON serialisable: {exc}"
+            ) from exc
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as fh:
-        for item in items:
-            fh.write(json.dumps(item.to_dict(), ensure_ascii=False) + "\n")
+    partial = path.with_name(path.name + ".partial")
+    try:
+        with open(partial, "w", encoding="utf-8") as fh:
+            for line in lines:
+                fh.write(line + "\n")
+        os.replace(partial, path)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
     return path
 
 

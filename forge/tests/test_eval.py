@@ -147,6 +147,42 @@ def test_dataset_roundtrip_and_filter(tmp_path):
     assert filter_items(loaded, category="gdpr")[0].id == "b"
 
 
+def test_saving_over_a_set_leaves_the_old_one_intact_when_an_item_is_not_serialisable(
+        tmp_path):
+    """The destination used to be truncated before anything was serialised.
+
+    A value json cannot represent -- a Path left in an item's metadata is the
+    easy one -- aborted on that line, and the exam already on disk was left one
+    item shorter with nothing in it to say so. load_eval_set read the result
+    without a murmur, so a 3-item set silently became 2.
+    """
+    from pathlib import Path as _Path
+
+    path = tmp_path / "exam.jsonl"
+    good = [EvalItem(id=f"x{i}", domain="legal", lang="it", question=f"q{i}")
+            for i in range(1, 4)]
+    save_eval_set(good, path)
+
+    bad = good[:2] + [EvalItem(id="x3", domain="legal", lang="it", question="q3",
+                              metadata={"src": _Path("x")})]
+    with pytest.raises(ValueError, match="x3"):
+        save_eval_set(bad, path)
+
+    # the three items are still there, and the reader is happy with them
+    assert [i.id for i in load_eval_set(path)] == ["x1", "x2", "x3"]
+    # ...and nothing partial is left behind
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_saving_leaves_no_partial_file_and_the_writer_is_atomic(tmp_path):
+    """os.replace, so a reader never sees a half-written set."""
+    path = tmp_path / "set.jsonl"
+    items = [EvalItem(id="a", domain="legal", lang="it", question="q")]
+    save_eval_set(items, path)
+    assert not list(tmp_path.glob("*.partial"))
+    assert path.is_file()
+
+
 def test_from_dict_ignores_unknown_keys():
     it = EvalItem.from_dict({"id": "z", "domain": "legal", "lang": "it",
                              "question": "q", "bogus": 123})
