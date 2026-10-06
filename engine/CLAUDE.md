@@ -41,7 +41,7 @@ silently disabled is worse off than someone whose process refused to start.
 
 ## One `RuntimeOpts`, flattened into `run` and `serve`
 
-The 21 flags the two commands share are declared once, in a
+The flags the two commands share (42 of them) are declared once, in a
 `#[derive(clap::Args)] struct RuntimeOpts` that both subcommands take via
 `#[command(flatten)]`. **Add a model-loading or inference flag there and it
 exists on both, with the same default and the same help text.** There is no

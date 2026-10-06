@@ -15,11 +15,12 @@
 # step's whole output is in $NIGHT/<step>.log.
 #
 # Steps, in this order (STEPS="..." runs some of them):
-#   prefetch         phase 6 at each slot count of PREFETCH_SLOTS (4 6 8 4:r),
-#                    both servers of a run with the same expert cache
-#                    (PREFETCH_CACHE=3584 MiB, room for eight slots); N:r starts
-#                    the server with the prefetch first, to tell its effect on
-#                    writing from one of running second
+#   prefetch         bench/prefetch_check.sh once for each run of PREFETCH_RUNS
+#                    ("0,4 4,0": the --moe-prefetch of each server of a run, in
+#                    order), with --moe-cache PREFETCH_CACHE (auto) and the
+#                    engine's own micro-batch unless PREFETCH_UBATCH is set:
+#                    what four slots gain on reading and what the VRAM they
+#                    take from the cache costs the writing, in either order
 #   interleave       bench/interleave_check.py on qwen3-8b, --batch-size 2 (0.7-D)
 #   mtp-t08          bench/mtp_sweep.sh at TEMPERATURE=0.8 on Qwen3.5-9B-MTP (B6)
 #   llama-pin        llama-server and llama-quantize from the pinned llama.cpp
@@ -61,8 +62,9 @@ INTERLEAVE_MODEL=${INTERLEAVE_MODEL:-qwen3-8b}
 RAG_DECISION=${RAG_DECISION:-jev-style-2b-decision-v3-gguf-q4_k_m}
 PULLS=${PULLS-"qwen3-32b qwen3-14b qwen3-8b qwen3-4b qwen3-1.7b qwen3-0.6b"}
 STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
-PREFETCH_SLOTS=${PREFETCH_SLOTS:-"4 6 8 4:r"}
-PREFETCH_CACHE=${PREFETCH_CACHE:-3584}
+PREFETCH_RUNS=${PREFETCH_RUNS:-"0,4 4,0"}
+PREFETCH_CACHE=${PREFETCH_CACHE:-auto}
+PREFETCH_UBATCH=${PREFETCH_UBATCH:-}
 STOP_AT=${STOP_AT:-06:45}
 EVENING=${EVENING:-"$HOME/work/prefetch-check $HOME/work/prefetch-check-2048 $HOME/work/prefetch-check-slots3"}
 
@@ -98,13 +100,11 @@ step() {
     case $1 in
     prefetch)
         need "$FLASH"
-        local entry slots order label
-        for entry in $PREFETCH_SLOTS; do
-            slots=${entry%%:*} order="0 1" label=""
-            [[ $entry == *:r ]] && order="1 0" label=", the prefetch server first"
-            echo "== LLAMA_MOE_PREFETCH_SLOTS=$slots, --moe-cache $PREFETCH_CACHE$label"
-            ORDER=$order LLAMA_MOE_PREFETCH_SLOTS=$slots MOE_CACHE=$PREFETCH_CACHE N_UBATCH=4096 \
-                OUT=$NIGHT/prefetch-${entry/:/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+        local run
+        for run in $PREFETCH_RUNS; do
+            echo "== --moe-prefetch ${run//,/ then }, --moe-cache $PREFETCH_CACHE${PREFETCH_UBATCH:+, --n-ubatch $PREFETCH_UBATCH}"
+            SETTINGS=${run//,/ } MOE_CACHE=$PREFETCH_CACHE N_UBATCH=$PREFETCH_UBATCH \
+                OUT=$NIGHT/prefetch-${run//,/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
             echo
         done
         ;;

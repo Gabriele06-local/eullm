@@ -769,6 +769,33 @@ impl LlamaContextParams {
         self.context_params.moe_cache_size
     }
 
+    /// EuLLM addition: set how many slots in VRAM the MoE experts kept in
+    /// pinned host memory are copied into ahead of the layer that reads them,
+    /// while a prompt is read at least 512 tokens per micro-batch; `0` (the
+    /// default) disables it, and other values are kept between 2 and 8.
+    /// EuLLM's llama.cpp patch `0003`: one CUDA GPU, the model loaded without
+    /// mmap.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// # use llama_cpp_2::context::params::LlamaContextParams;
+    /// let params = LlamaContextParams::default().with_moe_prefetch_slots(4);
+    /// assert_eq!(params.moe_prefetch_slots(), 4);
+    /// ```
+    #[must_use]
+    pub fn with_moe_prefetch_slots(mut self, slots: u32) -> Self {
+        self.context_params.moe_prefetch_slots = slots;
+        self
+    }
+
+    /// EuLLM addition: get how many slots the MoE experts of a long prompt
+    /// are copied into ahead of their layer; `0` when disabled.
+    #[must_use]
+    pub fn moe_prefetch_slots(&self) -> u32 {
+        self.context_params.moe_prefetch_slots
+    }
+
     /// Set whether to use full sliding window attention
     ///
     /// # Examples

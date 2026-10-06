@@ -149,16 +149,20 @@ each on that model and on Qwen3.8-Flash-Next
 ## `prefetch_check.sh` — phase 6 of `docs/moe-offload-plan.md`
 
 `prefetch_check.sh EULLM MODEL.gguf [FLAGS]` starts `eullm serve` on an MoE
-whose experts do not all fit in VRAM, with `LLAMA_MOE_PREFETCH=0` and then
-`=1` (`--ctx-size 40960 --moe-cache auto --n-ubatch 4096` unless `CTX`,
-`MOE_CACHE` and `N_UBATCH` say otherwise). Each server answers the same long question twice,
+whose experts do not all fit in VRAM once for each `--moe-prefetch` value of
+`SETTINGS` (`"0 4"`: off, then the default four slots), with `--ctx-size
+40960 --moe-cache auto` unless `CTX` and `MOE_CACHE` say otherwise, and
+`--n-ubatch N_UBATCH` only when that is set (unset, the engine chooses: 2048
+with an expert cache). Each server answers the same long question twice,
 greedy and with `cache_prompt: false`, and `speed_check.py` measures it over
 a 33,200-token document (`PROMPT_TOKENS`). One line per setting: reading and
-writing speeds, a checksum of each answer, and the server's `moe prefetch:`
-line; then whether the four answers match, which they must, or why the
-comparison says nothing (the prefetch stayed off, a server gave no answer).
-`ORDER="1 0"` starts the server with the prefetch first, which tells an
-effect of the prefetch on writing from one of running second.
+writing speeds, the expert cache the server sized (with `auto` the slots'
+VRAM comes out of it, which is where the prefetch costs the writing), a
+checksum of each answer, and llama.cpp's `moe prefetch:` line; then whether
+the answers match, which they must, or why the comparison says nothing (the
+prefetch stayed off, a server gave no answer). `SETTINGS="4 0"` starts the
+server with the prefetch first, which tells an effect of the prefetch on
+writing from one of running second.
 
 ## `interleave_check.py` — roadmap 0.7-D
 

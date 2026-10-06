@@ -624,25 +624,36 @@ At exit the cache's totals print too. Both variables are read by the
 patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
 and may change or go once it is settled.
 
-**Copying the experts ahead while reading a prompt (experimental, off by
-default).** Reading a prompt copies each layer's experts to the card and
+**Copying the experts ahead while reading a prompt (`--moe-prefetch`, on
+by default).** Reading a prompt copies each layer's experts to the card and
 then computes them, one after the other, with the GPU idle during the copy.
-`LLAMA_MOE_PREFETCH=1` copies the next expert tensors on a second stream of
-the GPU while the current one computes, into four slots of VRAM the size of
-the largest expert tensor (1 GiB in all on the model above;
-`LLAMA_MOE_PREFETCH_SLOTS`, 2 to 8). On the reference PC it read a
-33,200-token prompt at 1,743 tokens/s instead of 1,228 (+42%), to the same
-answer token for token; two slots gained 10%, three 18%, and six or eight no
-more than four. Writing speed does not change. It
-applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
-on one NVIDIA GPU (a CUDA build), with the model read into memory rather
-than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
-allows. The slots come out of the VRAM `--fit` leaves free, and only if a
-twentieth of the card, at least 512 MiB, stays free beside them; if not, it
-stays off and says how much it needed, and lowering `--moe-cache` by the
+The prefetch copies the next expert tensors on a second stream of the GPU
+while the current one computes, into four slots of VRAM the size of the
+largest expert tensor (1 GiB in all on the model above). On the reference
+PC, with `--n-ubatch 4096` and a fixed cache, it read a 33,200-token prompt
+at 1,743 tokens/s instead of 1,228 (+42%; +24-28% in the runs of the next
+day), to the same answer token for token; two slots gained 10-15%, three
+18%, and six or eight no more than four. `--moe-prefetch N` takes 2 to 8
+slots, `--moe-prefetch 0` turns it off.
+
+It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
+build), to experts kept in RAM with the model read into memory rather than
+mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM allows.
+Elsewhere (every expert on the GPU, a mapped file, another backend, several
+GPUs) the flag changes nothing.
+
+With `--moe-cache`, `--fit` keeps the slots' VRAM out of the cache, which is
+that much smaller, unless that would cost the cache its minimum, the size
+`--moe-cache` asked for or the larger micro-batch; the startup line says
+what it kept (`and 1.00 GiB beside it for the slots of --moe-prefetch`). A
+smaller cache writes more slowly (the table above: writing follows the
+cache's size), and `--moe-prefetch 0` gives it the room back. Where nothing
+was kept for them, the slots are made at the first long prompt only if a
+twentieth of the card, at least 512 MiB, stays free beside them; if not, the
+prefetch stays off, says how much it needed, and a `--moe-cache` lower by the
 difference makes room. One line on stderr says it is on, with the slots'
-size, or why it is off. `bench/prefetch_check.sh` compares the answer and
-the speeds with and without it on any MoE (`docs/moe-offload-plan.md`,
+size, or why it is off. `bench/prefetch_check.sh` compares the answers, the
+speeds and the cache of each setting on any MoE (`docs/moe-offload-plan.md`,
 phase 6, has the measurements).
 
 ## Speculative decoding with the model's MTP head (`--mtp N`)
