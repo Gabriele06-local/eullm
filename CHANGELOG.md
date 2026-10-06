@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.30 — 2026-10-06
 
 ### Changed
 - **`think: true` on `/api/chat` and `/api/generate` returns the reasoning apart, in `thinking`, as Ollama does.** A reasoning model's thinking came back inside the answer, between `<think>` and `</think>` (`<|channel>thought` and `<channel|>` on Gemma 4), and a client written for Ollama, which reads it from `message.thinking` (`thinking` on `/api/generate`), found nothing there. Asked to think, both endpoints now put the reasoning there, without its tags, and only the answer in `content` (or `response`); streamed, the reasoning comes first, in lines of its own. Qwen3-0.6B, asked to say hello in Italian in one word, answers with its reasoning in `thinking` and `Ciao!` in `content`, streamed or not. A client that sends `think: true` and read the reasoning from the tags in `content` reads it from `thinking` now. Without `think`, and on `/v1/chat/completions`, the reasoning stays in the answer as before. The web chat, which sends `think` and goes through `/api/chat` when a conversation carries an attachment, reads the new field.
