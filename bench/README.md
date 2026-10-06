@@ -125,19 +125,47 @@ the drafts the model kept, which every answer reports:
   expert cache. If drafting gains there, it is worth measuring in EuLLM
   (`mtp_sweep.sh` with `--moe-cache auto`).
 
+## `speed_check.py` — two servers, the same answer
+
+`speed_check.py --url http://HOST:PORT/v1` times a 256-token answer and a
+long prompt on any server that speaks `/v1/chat/completions`. Comparing two
+servers is only fair when they write the same text, so every request sends
+all its sampling parameters (repeat penalty off, `top_k` 40, `top_p` 0.9,
+`min_p` 0), thinking off three ways, and `cache_prompt: false`; the timed
+answer is printed hashed (`answer text:`) and written to `--answer-file`.
+`mtp_sweep.sh` and `mtp_test_d.sh` show the two hashes of each setting in an
+`answers` column and keep the texts in `$OUT`.
+
+Learnt on 6 October: sent only a temperature, EuLLM applied Ollama's repeat
+penalty of 1.1 and llama-server none, and llama-server also counts the
+prompt's last tokens in the penalty's window. At temperature 0 the two wrote
+different answers, and EuLLM looked 10-17% slower than llama-server on
+Qwen3.6-35B-A3B. Sampled the same way it is not: the answers agree for their
+first 60-170 tokens, then part on a near-tie word (the two builds compute a
+hair differently), and EuLLM writes at least as fast, 4-8% faster in one run
+each on that model and on Qwen3.8-Flash-Next
+(`docs/roadmap-engine-0.7-1.0.md`, 0.8-Z2).
+
 ## `prefetch_check.sh` — phase 6 of `docs/moe-offload-plan.md`
 
 `prefetch_check.sh EULLM MODEL.gguf [FLAGS]` starts `eullm serve` on an MoE
-whose experts do not all fit in VRAM, with `LLAMA_MOE_PREFETCH=0` and then
-`=1` (`--ctx-size 40960 --moe-cache auto --n-ubatch 4096` unless `CTX`,
-`MOE_CACHE` and `N_UBATCH` say otherwise). Each server answers the same long question twice,
+whose experts do not all fit in VRAM once for each `--moe-prefetch` value of
+`SETTINGS` (`"0 4"`: off, then the default four slots), with `--ctx-size
+40960 --moe-cache auto` unless `CTX` and `MOE_CACHE` say otherwise, and
+`--n-ubatch N_UBATCH` only when that is set (unset, the engine chooses: 2048
+with an expert cache). Each server answers the same long question twice,
 greedy and with `cache_prompt: false`, and `speed_check.py` measures it over
 a 33,200-token document (`PROMPT_TOKENS`). One line per setting: reading and
-writing speeds, a checksum of each answer, and the server's `moe prefetch:`
-line; then whether the four answers match, which they must, or why the
-comparison says nothing (the prefetch stayed off, a server gave no answer).
-`ORDER="1 0"` starts the server with the prefetch first, which tells an
-effect of the prefetch on writing from one of running second.
+writing speeds, the expert cache the server sized (with `auto` the slots'
+VRAM comes out of it, which is where the prefetch costs the writing), a
+checksum of each answer, and llama.cpp's `moe prefetch:` line; then whether
+the answers match, which they must, or why the comparison says nothing (the
+prefetch stayed off, a server gave no answer). `SETTINGS="4 0"` starts the
+server with the prefetch first, which tells an effect of the prefetch on
+writing from one of running second. A setting `N:bus` runs `--moe-prefetch N`
+with `LLAMA_MOE_PREFETCH_FROM_CACHE=0`, every expert over the bus as before
+patch `0004`: `SETTINGS="4:bus 4"`, and the reverse, measure what copying the
+experts the cache holds from VRAM gains (phase 6b).
 
 ## `interleave_check.py` — roadmap 0.7-D
 

@@ -60,6 +60,23 @@ def test_keyword_coverage_alternatives_are_one_requirement():
     assert keyword_coverage("la risoluzione", ["risoluzione|"]) == 1.0
 
 
+def test_a_deadline_keyword_is_matched_as_a_number_not_a_substring():
+    """The keyword is a plain string, so "20 giorni" is inside "120 giorni".
+
+    A deadline six times too long satisfied the exam's own requirement, and
+    the GRPO reward -- which compares the number for exactly this reason --
+    disagreed with this headline number about the same answer.
+    """
+    kws = ["20 giorni|venti giorni"]
+    assert keyword_coverage("entro venti giorni dalla notifica", kws) == 1.0
+    assert keyword_coverage("entro 20 giorni dalla notifica", kws) == 1.0
+    assert keyword_coverage("Il termine è di 30 giorni dalla sentenza.", kws) == 0.0
+    assert keyword_coverage("Il termine è di 120 giorni dalla sentenza.", kws) == 0.0
+    assert keyword_coverage("Il termine è di centoventi giorni.", kws) == 0.0
+    # the repo's own example, in its own docstring
+    assert keyword_coverage("entro centosessanta giorni", ["60 giorni|sessanta giorni"]) == 0.0
+
+
 def test_a_perfect_answer_scores_full_keyword_coverage_on_the_seed():
     """The gate's headline number has to be reachable. An answer identical to
     an item's own reference used to score 0.883, because two seed items listed
@@ -128,6 +145,42 @@ def test_dataset_roundtrip_and_filter(tmp_path):
     assert len(filter_items(loaded, lang="it")) == 1
     assert len(filter_items(loaded, domain="legal")) == 2
     assert filter_items(loaded, category="gdpr")[0].id == "b"
+
+
+def test_saving_over_a_set_leaves_the_old_one_intact_when_an_item_is_not_serialisable(
+        tmp_path):
+    """The destination used to be truncated before anything was serialised.
+
+    A value json cannot represent -- a Path left in an item's metadata is the
+    easy one -- aborted on that line, and the exam already on disk was left one
+    item shorter with nothing in it to say so. load_eval_set read the result
+    without a murmur, so a 3-item set silently became 2.
+    """
+    from pathlib import Path as _Path
+
+    path = tmp_path / "exam.jsonl"
+    good = [EvalItem(id=f"x{i}", domain="legal", lang="it", question=f"q{i}")
+            for i in range(1, 4)]
+    save_eval_set(good, path)
+
+    bad = good[:2] + [EvalItem(id="x3", domain="legal", lang="it", question="q3",
+                              metadata={"src": _Path("x")})]
+    with pytest.raises(ValueError, match="x3"):
+        save_eval_set(bad, path)
+
+    # the three items are still there, and the reader is happy with them
+    assert [i.id for i in load_eval_set(path)] == ["x1", "x2", "x3"]
+    # ...and nothing partial is left behind
+    assert not list(tmp_path.glob("*.partial"))
+
+
+def test_saving_leaves_no_partial_file_and_the_writer_is_atomic(tmp_path):
+    """os.replace, so a reader never sees a half-written set."""
+    path = tmp_path / "set.jsonl"
+    items = [EvalItem(id="a", domain="legal", lang="it", question="q")]
+    save_eval_set(items, path)
+    assert not list(tmp_path.glob("*.partial"))
+    assert path.is_file()
 
 
 def test_from_dict_ignores_unknown_keys():

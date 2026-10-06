@@ -38,12 +38,12 @@ EULLM is composed of three independent components that work together to create, 
 - GPU acceleration: NVIDIA CUDA, AMD ROCm, Vulkan, Apple Metal
 - Native EULLM API (`/api/generate`, `/api/chat`, `/api/tags`, etc.) — Ollama-compatible
 - OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`)
-- CORS enabled for browser-based tools (Open WebUI)
-- Built-in EU model catalog (7 pre-configured models)
+- Browser access from this machine by default; `EULLM_ALLOWED_ORIGINS` widens it (Open WebUI on another host)
+- Built-in catalog of 27 open models, among them `legal-it-4b` and `legal-it-8b`
 - Model download from HuggingFace with streaming progress
 - Local model store at `~/.eullm/models/`
-- AI Act audit trail — persistent JSONL at `~/.eullm/audit/audit.jsonl`
-- Zero telemetry to non-EU servers
+- Audit trail designed for the EU AI Act — persistent JSONL at `~/.eullm/audit/audit.jsonl`: model, tokens, timing, never the text
+- No telemetry at all
 
 **Status:** Fully functional. Compiles and runs inference on any GGUF model.
 
@@ -214,7 +214,7 @@ All EULLM infrastructure runs on EU servers:
 
 | Service | Provider | Location |
 |---|---|---|
-| Model registry | Hetzner | Nuremberg, DE |
+| Model registry (planned) | Hetzner | Nuremberg, DE |
 | Object storage | S3-compatible | Hetzner/OVH, EU |
 | GPU compute | Hetzner/OVH/HF | EU datacenters |
 | Website | Hetzner | DE |
@@ -232,9 +232,9 @@ Zero telemetry is sent outside the EU.
 ┌──────────────────────▼──────────────────────────────┐
 │                   EULLM Engine                       │
 │  ┌─────────┐  ┌──────────┐  ┌────────────────────┐  │
-│  │ Runtime  │  │ Audit    │  │ Compliance         │  │
-│  │ (llama   │  │ Trail    │  │ Documentation      │  │
-│  │  .cpp)   │  │ Logger   │  │ Generator          │  │
+│  │ Runtime  │  │ Audit    │  │ Reflex decisions   │  │
+│  │ (llama   │  │ Trail    │  │ and model routing  │  │
+│  │  .cpp)   │  │ Logger   │  │ (/v1/systemone)    │  │
 │  └─────────┘  └──────────┘  └────────────────────┘  │
 └──────────────────────┬──────────────────────────────┘
                        │

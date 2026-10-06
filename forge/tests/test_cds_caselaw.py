@@ -82,7 +82,7 @@ def test_a_card_is_parsed_and_the_case_cannot_leak_into_it():
                                "per il motivo dedotto."]}, "placeholder"),
         ({**GOOD, "materia": "RSSMRA80A01H501U"}, "structured_pii"),
         ({**GOOD, "domande_esame": GOOD["domande_esame"][:1]}, "count"),
-        ({**GOOD, "norme": ["la regola generale"]}, "bad_norm"),
+        ({**GOOD, "principi": []}, "count"),
     ]:
         with pytest.raises(CardRejected) as e:
             parse_card(json.dumps(bad, ensure_ascii=False))
@@ -196,8 +196,9 @@ def test_cards_are_written_refused_and_not_asked_twice(corpus, teacher, tmp_path
     assert c["teacher"] == "qwen3-30b-q8" and c["principi"] == GOOD["principi"]
     rejects = [json.loads(line) for line in
                (out.parent / "schede.rejects.jsonl").read_text().splitlines()]
-    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder"}]
+    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 2}]
     assert seen[0]["response_format"] == {"type": "json_object"} and seen[0]["temperature"] == 0
+    assert seen[0]["chat_template_kwargs"] == {"enable_thinking": False}
     n = len(seen)
     assert mod.main(args) == 0 and len(seen) == n            # nothing asked again
     printed = capsys.readouterr()
@@ -249,3 +250,125 @@ def test_the_cards_job_serves_one_teacher_per_gpu(tmp_path):
                        env={**env, "CS_TEACHER": str(tmp_path / "none.gguf")},
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 1 and "no teacher GGUF" in r.stderr and not (tmp_path / "args").exists()
+
+
+def test_a_second_chain_skips_what_the_first_one_carded(corpus, teacher, tmp_path):
+    chunks, og = corpus
+    url, seen = teacher
+    ids = tmp_path / "ids.txt"
+    ids.write_text("cds/2019000000\ncds/2021000004\n")
+    out = tmp_path / "cds" / "schede.jsonl"
+    mod = _load("cds_schede")
+    base = ["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids), "--url", url]
+    assert mod.main(base + ["--out", str(out), "--limit", "1"]) == 0
+    first = json.loads(out.read_text().splitlines()[0])["id"]
+    n = len(seen)
+    other = out.with_name("schede-b.jsonl")
+    assert mod.main(base + ["--out", str(other)]) == 0
+    assert len(seen) == n + 1                                  # only the one not done
+    assert first not in other.read_text()
+
+
+def test_odd_norms_are_dropped_and_extra_items_cut_not_the_card_refused():
+    card = parse_card(json.dumps({**GOOD, "norme": [
+        "art. 120 c.p.a.", "Direttiva 2014/24/UE", "R.D. n. 1265/1934", "la regola generale",
+        "d.l. n. 34/2020"], "principi": GOOD["principi"] * 6}, ensure_ascii=False))
+    assert card["norme"] == ["art. 120 c.p.a.", "Direttiva 2014/24/UE", "R.D. n. 1265/1934",
+                             "d.l. n. 34/2020"]
+    assert len(card["principi"]) == 4
+    assert prefix(card, {"esito_openga": "ACCOGLIE"}).endswith("- accoglie - art. 120 c.p.a.; "
+                                                               "Direttiva 2014/24/UE; "
+                                                               "R.D. n. 1265/1934]")
+
+
+def test_refusals_under_older_checks_are_asked_again_once(corpus, teacher, tmp_path):
+    chunks, og = corpus
+    url, seen = teacher
+    ids = tmp_path / "ids.txt"
+    ids.write_text("cds/2019000000\ncds/2021000004\n")
+    out = tmp_path / "cds" / "schede.jsonl"
+    out.parent.mkdir(parents=True)
+    (out.parent / "schede.rejects.jsonl").write_text(
+        '{"id": "cds/2019000000", "reason": "bad_norm"}\n'
+        '{"id": "cds/2021000004", "reason": "placeholder", "v": 2}\n')
+    mod = _load("cds_schede")
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids),
+                     "--out", str(out), "--url", url]) == 0
+    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == ["cds/2019000000"]
+    assert len(seen) == 1
+
+
+def test_sparse_bm25_ranks_like_bm25_and_returns_rulings_once():
+    from eullm_forge.caselaw.index import RulingIndex, SparseBM25, Unit
+
+    units = [Unit("cds/1", "aggiudicazione termine impugnazione profilo committente"),
+             Unit("cds/1", "spese di giudizio compensate"),
+             Unit("cds/2", "paesaggio strutture balneari vincolo"),
+             Unit("cds/3", "termine impugnazione bando di gara")]
+    bm = SparseBM25([u.text for u in units])
+    assert bm.ranking("impugnazione aggiudicazione", 10)[0] == 0
+    assert bm.ranking("parola assente", 10) == []
+    index = RulingIndex(units, bm25=bm)
+    # both words in both rulings: the shorter unit first, cds/1 once despite two units
+    assert index.search("termine impugnazione", k=10) == ["cds/3", "cds/1"]
+    assert index.search("strutture balneari", k=1) == ["cds/2"]
+
+
+def test_units_carry_the_card_prefix_and_cards_become_units(corpus):
+    from eullm_forge.caselaw import attach_meta, load_openga
+    from eullm_forge.caselaw.index import build_units
+
+    chunks_path, og = corpus
+    rulings = load_rulings([chunks_path])
+    attach_meta(rulings, load_openga([og]))
+    chunks = [json.loads(line) for line in chunks_path.read_text().splitlines()
+              if json.loads(line).get("kind") == "cds"]
+    cards = {"cds/2019000000": {**GOOD, "esito_openga": "RESPINGE"}}
+    plain = build_units(rulings, chunks)
+    pre = build_units(rulings, chunks, cards=cards, prefix_chunks=True, card_units=True)
+    assert len(pre) == len(plain) + 1
+    first = next(u for u in pre if u.ruling == "cds/2019000000")
+    assert first.text.startswith("[Cons. Stato, Sezione Quarta, n. 2019000000")
+    assert "respinge" in first.text.split("\n", 1)[0]
+    assert pre[-1].ruling == "cds/2019000000" and "termine per impugnare" in pre[-1].text
+
+
+def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, tmp_path, capsys):
+    chunks, og = corpus
+    questions = tmp_path / "dev-cards.jsonl"
+    questions.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in [
+        {"id": "cds/2019000000", "domande_ricerca": ["fatto0_3 fatto0_17 motivo0_9"],
+         "domande_esame": [{"domanda": "motivo0_100 motivo0_101", "risposta": "x",
+                            "rubrica": "y"}]},
+        {"id": "cds/2021000004", "domande_ricerca": ["fatto4_8 motivo4_150"],
+         "domande_esame": []}]))
+    dev = tmp_path / "dev.txt"
+    dev.write_text("cds/2019000000\ncds/2021000004\n")
+    cards = tmp_path / "schede.jsonl"
+    cards.write_text(json.dumps({"id": "cds/2019000000", **GOOD}, ensure_ascii=False) + "\n")
+    out = tmp_path / "ret.csv"
+    mod = _load("cds_retrieval")
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--cards", str(cards),
+                     "--questions", str(questions), "--dev-ids", str(dev),
+                     "--setting", "chunks", "prefix+cards", "--csv", str(out)]) == 0
+    rows = list(csv.DictReader(out.open()))
+    assert {(r["setting"], r["kind"]) for r in rows} == {
+        ("chunks", "ricerca"), ("chunks", "esame"),
+        ("prefix+cards", "ricerca"), ("prefix+cards", "esame")}
+    assert all(float(r["recall3"]) == 1.0 for r in rows)
+    printed = capsys.readouterr().out
+    assert "fatto0_3" not in printed and "recall@3 1.000" in printed
+    # a later link skips what is measured and measures only what is not
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--cards", str(cards),
+                     "--questions", str(questions), "--dev-ids", str(dev), "--limit", "2",
+                     "--setting", "chunks", "prefix", "--csv", str(out)]) == 0
+    printed = capsys.readouterr().out
+    assert "chunks: already in" in printed and "prefix: already" not in printed
+    rows = list(csv.DictReader(out.open()))
+    assert [r["setting"] for r in rows].count("chunks") == 2
+    assert sum(int(r["n"]) for r in rows if r["setting"] == "prefix") == 2
+
+
+def test_a_reasoning_block_before_the_card_is_skipped():
+    card = parse_card("<think>\nLa sentenza riguarda...\n</think>\n" + json.dumps(GOOD))
+    assert card["esito"] == "rigetto"

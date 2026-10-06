@@ -56,11 +56,21 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   `batch_size=1` e `>1`.
 
 - [ ] **0.7-C · Backpressure HTTP e deadline** *(P0 — prima parte del lifecycle)*
-  Coda piena → HTTP 429 con `Retry-After` **prima** di aprire SSE/NDJSON (il
-  `try_send` sullo scheduler fallisce già in modo sincrono: va solo intercettato
-  prima dell'apertura dello stream); modello non disponibile → 503; validazione →
-  400; prompt oltre il context → 413/422 con messaggio esplicito. Deadline
-  opzionale per richiesta con `finish_reason` coerente e rilascio risorse.
+  - [x] Coda piena → HTTP **503** con `Retry-After: 5` **prima** di aprire
+    SSE/NDJSON, su `/api/generate`, `/api/chat` e `/v1/chat/completions`
+    *(fatto il 2026-10-06)*. 503 e non il 429 previsto qui: è quello che
+    risponde Ollama alla sua coda piena (`ErrMaxQueue` →
+    `StatusServiceUnavailable`), e un client Ollama non deve vedere differenze.
+    `SchedulerHandle::try_submit` restituisce il rifiuto prima che esista lo
+    stream; prima era un 500 senza streaming e un 200 con il solo errore nello
+    stream.
+  - [x] Modello non disponibile → 503: nessun modello caricato, nessun modello
+    scaricabile in tempo (`Busy`/`NoRoom`, `Retry-After: 5`) e ora anche il
+    modello scaricato tra la ricerca e la coda (`Retry-After: 1`, la richiesta
+    stessa lo ricarica). Un modello che non esiste resta 404, come in Ollama.
+  - [ ] Validazione → 400; prompt oltre il context → 413/422 con messaggio
+    esplicito. Deadline opzionale per richiesta con `finish_reason` coerente e
+    rilascio risorse.
   La cancellazione via disconnessione client (receiver drop) esiste già nel decode
   loop; l'endpoint `DELETE /api/requests/{id}` è rinviato a 0.9 (richiede il
   registry dei request_id, valore marginale finché il receiver-drop copre i casi reali).
@@ -341,7 +351,7 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   dà una risposta positiva a un caso che perde il 38%. Mezza giornata di misura
   ha evitato settimane di implementazione contro un modello sbagliato del costo.
 
-- [ ] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(aperta il 2026-10-04)*
+- [x] **0.8-Z2 · MTP: dove conviene, dove no, e cosa resta da misurare** *(chiusa il 2026-10-05: misurata sul denso e sul MoE)*
   La 0.8-Z resta chiusa per lo speculative su MoE in CPU. L'MTP ([#655](https://github.com/eullm/eullm/pull/655),
   `--mtp N`) è un'altra cosa: la bozza la scrive la testa addestrata insieme al
   modello, e su un **denso in GPU** guadagna. Misurato su RTX 5070 Ti con
@@ -350,25 +360,122 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   Su CPU con un modello piccolo non conviene (Qwen3.5 0.8B su 4 core: 14-17 tok/s
   contro 20): la testa costa quasi quanto risparmia.
 
-  **Sui MoE con esperti in RAM non lo scriviamo finché non lo misuriamo.** La
-  ragione della 0.8-Z (un lotto di verifica legge più esperti) vale ancora, ma
-  con `--moe-cache` un draft rifiutato non paga più tutti i suoi esperti: molti
-  sono già in VRAM. Si decide con la prova D: `llama-server` con l'MTP su
-  Qwen3.6-35B-A3B-MTP con gli esperti in RAM, e poi `bench/mtp_sweep.sh` sullo
-  stesso modello in EuLLM. Lo script c'è: `bench/mtp_test_d.sh` (0, 1 e 2
-  bozze, esperti in RAM bloccati con `--load-mode none` e cache in VRAM).
+  **Sui MoE con esperti in RAM il guadagno è piccolo anche quando la testa
+  indovina molto.** La ragione della 0.8-Z (un lotto di verifica legge più
+  esperti) vale ancora; `--moe-cache` la attenua, perché molti esperti di un
+  draft rifiutato sono già in VRAM. Su Qwen3.8-Flash-Next, con le bozze tenute
+  il 52% delle volte, l'MTP rallentava (`docs/engine-guide.md`, sezione
+  `--moe-cache`). La prova D, il 5 ottobre con `bench/mtp_test_d.sh`:
+  `llama-server` del pin su RTX 5070 Ti, Qwen3.6-35B-A3B-MTP UD-Q4_K_M con tutti
+  gli esperti in RAM bloccata (`--cpu-moe --load-mode none`), 8000 MiB di cache
+  in VRAM, contesto 8192, temperatura 0:
+
+  | bozze | racconto (tok/s) | codice (tok/s) | bozze tenute |
+  |---|---:|---:|---:|
+  | 0 | 123,6 | 112,6 | — |
+  | 1 | 136,1 (+10%) | 117,9 (+5%) | 83% |
+  | 2 | 121,6 (−2%) | 126,6 (+12%) | 71% |
+
+  La testa indovina più che sul denso (75% e 58% con 1 e 2 bozze su
+  Qwen3.5-9B-MTP), eppure con 2 bozze il denso guadagnava +27% sul racconto e
+  +62% sul codice, il MoE −2% e +12%. Il costo sta nella verifica, che legge
+  gli esperti di due o tre token insieme e prende dalla RAM quelli che la
+  cache non ha. Con un solo avvio per riga, e un rumore tra avvii che sul denso
+  è arrivato all'8% (sotto), solo le due righe migliori, 1 bozza sul racconto e
+  2 sul codice, stanno sopra il rumore, e di poco. Lo schema è quello del
+  denso: una bozza per la prosa, due per il codice.
+
+  **In EuLLM, stesso modello e stessa scheda** (`bench/mtp_sweep.sh`,
+  contesto 8192, temperatura 0), le bozze tenute sono quelle di `llama-server`
+  (82% con 1, 69% con 2) e il guadagno è dello stesso ordine:
+
+  | `--mtp` | cache 8000 MiB, micro-batch 512: racconto | codice | `--moe-cache auto` (8,50 GiB): racconto | codice |
+  |---|---:|---:|---:|---:|
+  | 0 | 119,8 | 93,0 | 122,9 | 98,4 |
+  | 1 | 124,7 (+4%) | 103,1 (+11%) | 132,0 (+7%) | 113,7 (+16%) |
+  | 2 | 127,0 (+6%) | 107,0 (+15%) | 127,1 (+3%) | 114,4 (+16%) |
+
+  Sul codice circa un sesto in più, sopra il rumore; sul racconto dal 3 al 7%,
+  dentro il rumore. Con `auto`, `--mtp 1` prende quanto 2. La cache è la
+  stessa con e senza `--mtp` (8,50 GiB in tutti e tre gli avvii): il contesto
+  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Chiuso il
+  6 ottobre, non era il motore:** senza bozze EuLLM scriveva il codice più
+  piano di `llama-server` (93-98 tok/s
+  contro 112,6) e il racconto uguale (120-123 contro 123,6). Non è il
+  ragionamento, spento su tutti e due (`llama-server` legge
+  `reasoning_effort: none` come `enable_thinking = false`). Rimisurato il
+  5 ottobre, due giri per server, cache 8000 MiB, contesto 8192, micro-batch
+  512: `llama-server` 129,7 e 129,9 tok/s sul racconto, 110,3 e 110,2 sul
+  codice; EuLLM 116,1 e 116,2, 91,5 e 91,5. Il divario è stabile (−10% sul
+  racconto, −17% sul codice), ma i due server non scrivevano lo stesso
+  testo: `bench/speed_check.py` mandava solo la temperatura, e ognuno
+  completava la richiesta con i propri default, EuLLM con la penalità di
+  ripetizione 1,1 di Ollama, `llama-server` senza. A temperatura 0 la
+  penalità cambia i token scelti, di più nel codice, che si ripete per
+  natura, e con le risposte cambiano gli esperti usati e quanti la cache ne
+  ha. Anche a parità di penalità le prime parole differirebbero:
+  `llama-server` mette gli ultimi token del prompt nella finestra della
+  penalità, EuLLM solo quelli della risposta. Ora lo script manda ogni
+  parametro di campionamento, con la penalità spenta (1,0), così a
+  temperatura 0 ogni server sceglie a ogni passo il token più probabile,
+  rilegge il prompt intero a ogni richiesta (`cache_prompt: false`) e salva
+  il testo scritto.
+
+  Rimisurato così il 6 ottobre, a PC libero, un avvio per server, cache
+  7000 MiB per tutti e due (6,84 GiB nel log di EuLLM; `llama-server` la
+  prende come chiesta o non parte), esperti tutti in RAM bloccata,
+  contesto 8192, micro-batch 512:
+
+  | modello | server | racconto (tok/s) | codice (tok/s) |
+  |---|---|---:|---:|
+  | Qwen3.6-35B-A3B | `llama-server` | 115,5 | 95,5 |
+  | Qwen3.6-35B-A3B | EuLLM | 124,6 (+8%) | 100,4 (+5%) |
+  | Qwen3.8-Flash-Next 125B | `llama-server` | 55,6 | 49,5 |
+  | Qwen3.8-Flash-Next 125B | EuLLM | 59,3 (+7%) | 51,4 (+4%) |
+
+  Le quattro coppie di risposte sono identiche per i primi 60-170 token e
+  si separano su una parola quasi alla pari ("houses" contro "cathedrals"):
+  stesso prompt, stesso campionamento, e uno scarto minimo nei calcoli fra
+  le due compilazioni che a un certo punto fa vincere l'altra parola. Non
+  si elimina fra due programmi diversi, e i testi restano dello stesso
+  tipo: le velocità si confrontano. EuLLM è veloce almeno quanto
+  `llama-server` su tutti e due i modelli; il 4-8% in più è un avvio per
+  riga, dentro lo scarto fra avvii visto altrove (5-8%). Il −10%/−17% di
+  prima era la penalità. A margine: `llama-server` sul 35B con 7000 MiB di
+  cache scrive il 13-14% più piano che con 8000 (115,5 contro 132,5 sul
+  racconto): su questo modello la dimensione della cache conta molto.
+
+  A temperatura 0.8, quella di default (EuLLM, `--moe-cache auto`, stessi
+  flag):
+
+  | `--mtp` | racconto (tok/s) | codice (tok/s) | bozze tenute |
+  |---|---:|---:|---:|
+  | 0 | 107,7 | 91,7 | — |
+  | 1 | 109,3 (+1%) | 99,9 (+9%) | 72% |
+  | 2 | 115,5 (+7%) | 110,9 (+21%) | 66% |
+
+  Qui due bozze rendono più di una su tutti e due i testi. Anche senza bozze
+  il MoE scrive più piano che a temperatura 0 (107,7 contro 122,9 sul
+  racconto), e sul denso non succede (113,7 contro 114,8): probabilmente un
+  testo campionato è più vario e trova meno esperti nella cache.
+
+  **Decisione:** sui MoE con esperti in RAM l'MTP conviene per il codice, e si
+  dichiara per quello che dà: con `--mtp 2` dal 16 al 21% sul codice e poco
+  sulla prosa, contro +62% e +27% su un denso in VRAM. `--mtp 2` resta il
+  punto di partenza anche qui. `docs/engine-guide.md` lo dice.
 
   Sotto-voci, ciascuna con la misura che la decide (misurate il 4 ottobre su
   RTX 5070 Ti con Qwen3.5-9B-MTP, tranne la prova D):
-  - **Guardia adattiva sull'accettazione** (come colibri: finestra di proposte,
-    pausa sotto una soglia, ripresa dopo N token). Ha senso dove un draft
-    rifiutato costa: MoE con offload, temperatura alta. **Su un denso in GPU
-    non serve:** a temperatura 0.8 le bozze tenute sono 72% con `--mtp 1`, 56%
-    con 2, 46% con 3, mai vicine a una soglia di pausa. Conta invece quante
-    bozze chiedere: a 0.8 il racconto va più veloce con `--mtp 1` (148,8 tok/s,
-    contro 140,0 con 2 e 113,7 senza), il codice con `--mtp 2` (169,6, contro
-    164,5 con 1 e 119,1 senza). Per i MoE si decide con la prova D, che non è
-    ancora partita: manca il GGUF di Qwen3.6-35B-A3B-MTP.
+  - **Guardia adattiva sull'accettazione: chiusa, non serve** (come colibri:
+    finestra di proposte, pausa sotto una soglia, ripresa dopo N token). Ha
+    senso dove un draft rifiutato costa: MoE con offload, temperatura alta.
+    **Su un denso in GPU non serve:** a temperatura 0.8 le bozze tenute sono
+    72% con `--mtp 1`, 56% con 2, 46% con 3, mai vicine a una soglia di pausa.
+    Conta invece quante bozze chiedere: a 0.8 il racconto va più veloce con
+    `--mtp 1` (148,8 tok/s, contro 140,0 con 2 e 113,7 senza), il codice con
+    `--mtp 2` (169,6, contro 164,5 con 1 e 119,1 senza). **Sul MoE con esperti
+    in RAM nemmeno:** EuLLM tiene l'82% e il 69% delle bozze con 1 e 2 a
+    temperatura 0, il 72% e il 66% a 0.8.
   - **Testa MTP in Q8_0: chiusa, non conviene.** Nei GGUF unsloth Q4_K_M la
     proiezione propria della testa è già Q8_0, ma attenzione e FFN dello strato
     MTP sono Q4_K/Q6_K. `bench/mtp_head_q8.sh` ha confrontato due Q4_K_M dalla

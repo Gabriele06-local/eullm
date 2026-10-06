@@ -426,7 +426,7 @@ pub fn read_gguf_info(path: &Path) -> Option<GgufInfo> {
 /// the tensor's declared type/shape: consecutive tensors' offsets bound each
 /// other's real on-disk byte size exactly, with no need to know every ggml
 /// quantization format's block size.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct MoeLayout {
     /// Bytes of every tensor that is not part of any layer's expert set.
     pub non_expert_bytes: u64,
@@ -434,6 +434,10 @@ pub struct MoeLayout {
     /// number parsed from the tensor name (`blk.<i>...`). A dense
     /// (non-MoE) model has every entry `0`.
     pub expert_bytes_per_layer: Vec<u64>,
+    /// The largest single expert tensor, in bytes: what one slot of the
+    /// prefetch has to hold (see [`prefetch_slot_bytes`]). `0` for a dense
+    /// model.
+    pub largest_expert_tensor_bytes: u64,
 }
 
 impl MoeLayout {
@@ -559,6 +563,7 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
 
     let mut non_expert_bytes: u64 = 0;
     let mut expert_bytes_per_layer = vec![0u64; n_layers as usize];
+    let mut largest_expert_tensor_bytes: u64 = 0;
 
     for (idx, (name, offset)) in tensors.iter().enumerate() {
         let size = match tensors.get(idx + 1) {
@@ -569,6 +574,7 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
         match (is_expert_tensor_name(name), tensor_layer_index(name)) {
             (true, Some(layer)) if (layer as usize) < expert_bytes_per_layer.len() => {
                 expert_bytes_per_layer[layer as usize] += size;
+                largest_expert_tensor_bytes = largest_expert_tensor_bytes.max(size);
             }
             _ => non_expert_bytes += size,
         }
@@ -577,6 +583,7 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
     Some(MoeLayout {
         non_expert_bytes,
         expert_bytes_per_layer,
+        largest_expert_tensor_bytes,
     })
 }
 
@@ -1231,6 +1238,81 @@ const MOE_CACHE_MIN_BYTES: u64 = 512 * 1024 * 1024;
 /// VRAM between two loads do not change the size the log reports.
 const MOE_CACHE_STEP_BYTES: u64 = 256 * 1024 * 1024;
 
+/// `--moe-prefetch`'s default: while a prompt is read, the experts kept in
+/// RAM are copied into this many slots of VRAM ahead of the layer that reads
+/// them, on a second stream of the GPU, instead of in between that layer's
+/// computations (llama.cpp patch `0003`, phase 6 of
+/// `docs/moe-offload-plan.md`). It applies to micro-batches of 512 tokens or
+/// more, on one CUDA GPU, to experts in the GPU's pinned host memory: a model
+/// read into memory. Measured on Qwen3.8-Flash-Next IQ2_XS on an RTX 5070 Ti:
+/// with an `auto` cache 1 GiB smaller for four slots of 256 MiB, at the
+/// default micro-batch of 2048, a 33,200-token prompt read 42% faster (968
+/// to 1,373 tokens/s), to the same answer, and answers were written as fast
+/// (53.3 and 54.3 tokens/s). Two slots gained 10-15% and three 18%, six and
+/// eight no more than four (at micro-batch 4096 and a fixed cache).
+pub const MOE_PREFETCH_SLOTS: u32 = 4;
+
+/// Parse `--moe-prefetch`: `0` (off), or 2 to 8 slots. With one, every copy
+/// would wait for the layer before it to be read.
+pub fn parse_moe_prefetch(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(slots) if slots == 0 || (2..=8).contains(&slots) => Ok(slots),
+        _ => Err(format!("expected 0 (off) or 2 to 8 slots, got `{s}`")),
+    }
+}
+
+/// What `--moe-prefetch` asks of a load with an expert cache, and what
+/// decides whether the slots can be used at all: only experts in pinned
+/// memory are copied ahead, and those of a load with a cache are pinned when
+/// the model is read into memory (see [`plan_read_into_memory`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MoePrefetch {
+    /// The slots asked for; `0` without the prefetch, or where it cannot run
+    /// (one CUDA GPU, as for the expert cache: see [`moe_cache_support`]).
+    pub slots: u32,
+    /// `--no-mmap`.
+    pub no_mmap: bool,
+    /// `--mmap`.
+    pub keep_mapped: bool,
+    /// The machine's RAM, `None` where it cannot be read.
+    pub ram_total: Option<u64>,
+}
+
+impl MoePrefetch {
+    /// The slots a load whose cache copies from `host_bytes` of experts can
+    /// use: all of them where those experts are pinned, none otherwise.
+    pub fn slots_for(&self, host_bytes: u64) -> u32 {
+        let (pinned, _) =
+            plan_read_into_memory(self.no_mmap, self.keep_mapped, host_bytes, self.ram_total);
+        if pinned {
+            self.slots
+        } else {
+            0
+        }
+    }
+}
+
+/// The VRAM one slot of the prefetch takes: the largest expert tensor, the
+/// most a slot is asked to hold, rounded up to a MiB for what llama.cpp adds
+/// past the end of a copy (part of a row of padding, and the alignment).
+pub fn prefetch_slot_bytes(layout: &MoeLayout) -> u64 {
+    layout.largest_expert_tensor_bytes.div_ceil(1 << 20) << 20
+}
+
+/// The slots a load asks llama.cpp for: `slots`, `--moe-prefetch`'s, where
+/// some experts are kept in RAM (`cpu_moe`, `n_cpu_moe`) and pinned (the
+/// model read into memory, `read_into_memory`); none elsewhere, where there
+/// is nothing they could copy. llama.cpp makes them at the first long prompt,
+/// if the VRAM left has room; a load with an expert cache has kept that room
+/// for them already where it could (see [`MoeCachePlan::prefetch_bytes`]).
+pub fn prefetch_slots(slots: u32, read_into_memory: bool, cpu_moe: bool, n_cpu_moe: u32) -> u32 {
+    if read_into_memory && (cpu_moe || n_cpu_moe > 0) {
+        slots
+    } else {
+        0
+    }
+}
+
 /// Where a load with an expert cache puts its experts, and the cache's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoeCachePlan {
@@ -1249,6 +1331,12 @@ pub struct MoeCachePlan {
     /// caller left it to the plan and the cache keeps its size beside the
     /// larger compute buffer, `None` to keep the caller's.
     pub n_ubatch: Option<u32>,
+    /// VRAM kept out of the cache for the prefetch's slots: `0` where the
+    /// experts are not pinned, and where keeping it would have cost the cache
+    /// its minimum, the size the user asked for or the larger micro-batch.
+    /// The slots are asked for all the same where the experts are pinned, and
+    /// llama.cpp makes them at the first long prompt if there is room then.
+    pub prefetch_bytes: u64,
 }
 
 /// The micro-batch a load with an expert cache takes when `--n-ubatch` was
@@ -1272,6 +1360,10 @@ pub const MOE_CACHE_N_UBATCH: u32 = 2048;
 /// Qwen3.8-Flash-Next IQ2_XS on an RTX 5070 Ti: every expert in RAM with an
 /// 8,000 MiB cache wrote 49.4 tokens/s, 4,000 MiB 33.1, and the split that
 /// keeps the last layers' experts on the GPU 22.4.
+///
+/// Beside the cache the room may hold the larger micro-batch's compute
+/// buffer (`auto_n_ubatch`) and the prefetch's slots (`prefetch`, where the
+/// experts are pinned): see the body for which gives way first.
 #[allow(clippy::too_many_arguments)]
 pub fn plan_moe_cache(
     request: MoeCache,
@@ -1284,6 +1376,7 @@ pub fn plan_moe_cache(
     cpu_moe: bool,
     n_cpu_moe: u32,
     auto_n_ubatch: bool,
+    prefetch: MoePrefetch,
 ) -> Option<MoeCachePlan> {
     let (Some((free_vram, total_vram)), Some(info), Some(layout)) = (vram, info, layout) else {
         return None;
@@ -1343,17 +1436,31 @@ pub fn plan_moe_cache(
         }
         Some((bytes, asked_bytes))
     };
-    // The larger micro-batch first, when the caller sized with the default
-    // and left the choice here: its compute buffer comes out of the cache,
-    // and a size the user asked for wins over it.
-    let larger = auto_n_ubatch
-        .then(|| size(room - ubatch_reserve_bytes(MOE_CACHE_N_UBATCH) as f64))
-        .flatten()
-        .filter(|&(_, asked_bytes)| asked_bytes.is_none());
-    let ((bytes, asked_bytes), n_ubatch) = match larger {
-        Some(sized) => (sized, Some(MOE_CACHE_N_UBATCH)),
-        None => (size(room)?, None),
-    };
+    // What the room holds beside the cache, in the order tried: the first
+    // that leaves a cache wins, and only the last may cut a size the user
+    // asked for. The larger micro-batch comes in when the caller sized with
+    // the default and left the choice here: it reads a prompt twice as fast
+    // (963.8 tokens/s against 451.5 on Qwen3.8-Flash-Next IQ2_XS), the slots
+    // of the prefetch a quarter faster again, so the slots give way first.
+    let larger = auto_n_ubatch.then_some(MOE_CACHE_N_UBATCH);
+    let slots_bytes = u64::from(prefetch.slots_for(in_ram)) * prefetch_slot_bytes(layout);
+    let mut beside = Vec::with_capacity(3);
+    if slots_bytes > 0 {
+        beside.push((larger, slots_bytes));
+    }
+    if larger.is_some() {
+        beside.push((larger, 0));
+    }
+    beside.push((None, 0));
+    let last = beside.len() - 1;
+    let ((bytes, asked_bytes), n_ubatch, prefetch_bytes) = beside
+        .into_iter()
+        .enumerate()
+        .find_map(|(i, (n_ubatch, slots_bytes))| {
+            let buffer = n_ubatch.map_or(0, ubatch_reserve_bytes);
+            let sized = size(room - buffer as f64 - slots_bytes as f64)?;
+            (i == last || sized.1.is_none()).then_some((sized, n_ubatch, slots_bytes))
+        })?;
     Some(MoeCachePlan {
         cpu_moe: cpu_moe || n_cpu_moe == 0,
         n_cpu_moe,
@@ -1361,6 +1468,7 @@ pub fn plan_moe_cache(
         asked_bytes,
         host_bytes: in_ram,
         n_ubatch,
+        prefetch_bytes,
     })
 }
 
@@ -1744,6 +1852,7 @@ pub fn run_moe_cache(
     cpu_moe: bool,
     n_cpu_moe: u32,
     auto_n_ubatch: bool,
+    prefetch: MoePrefetch,
 ) -> Option<MoeCachePlan> {
     let info = read_gguf_info(model_path);
     let file_size = model_file_bytes(model_path);
@@ -1763,6 +1872,7 @@ pub fn run_moe_cache(
         cpu_moe,
         n_cpu_moe,
         auto_n_ubatch,
+        prefetch,
     )
 }
 
@@ -1981,6 +2091,9 @@ pub struct OffloadFlags {
     /// micro-batch, and an expert cache may raise it (see
     /// [`MOE_CACHE_N_UBATCH`]).
     pub auto_n_ubatch: bool,
+    /// `--moe-prefetch`, and what decides whether an expert cache keeps room
+    /// for its slots.
+    pub moe_prefetch: MoePrefetch,
 }
 
 /// What sizing decided, before the `--gpu-layers` ceiling: what the load
@@ -2034,6 +2147,9 @@ pub struct OffloadPlan {
     pub moe_cache_host_bytes: u64,
     /// The micro-batch the expert cache chose (see [`MoeCachePlan::n_ubatch`]).
     pub n_ubatch: Option<u32>,
+    /// VRAM the expert cache left for the prefetch's slots (see
+    /// [`MoeCachePlan::prefetch_bytes`]); `0` for none.
+    pub moe_prefetch_bytes: u64,
 }
 
 /// Size one load: where the projector goes, then MoE expert offload, then
@@ -2088,6 +2204,7 @@ pub fn plan_offload(
             flags.cpu_moe,
             flags.n_cpu_moe,
             flags.auto_n_ubatch,
+            flags.moe_prefetch,
         )
     });
     if let Some(cache) = cache {
@@ -2109,6 +2226,7 @@ pub fn plan_offload(
             moe_cache_bytes: cache.bytes,
             moe_cache_host_bytes: cache.host_bytes,
             n_ubatch: cache.n_ubatch,
+            moe_prefetch_bytes: cache.prefetch_bytes,
         };
     }
 
@@ -2182,6 +2300,7 @@ pub fn plan_offload(
         moe_cache_bytes: 0,
         moe_cache_host_bytes: 0,
         n_ubatch: None,
+        moe_prefetch_bytes: 0,
     }
 }
 
@@ -2221,14 +2340,15 @@ impl OffloadPlan {
             ),
             OffloadBasis::MoeCache { bytes, asked_bytes } => tracing::info!(
                 "--fit: MoE model — expert tensors in CPU RAM, {} of VRAM caching the \
-                 ones it uses most{}",
+                 ones it uses most{}{}",
                 gib(*bytes),
                 asked_bytes
                     .map(|asked| format!(
                         " (--moe-cache asked for {}, that is what was left)",
                         gib(asked)
                     ))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                prefetch_room(self.moe_prefetch_bytes)
             ),
             OffloadBasis::Dense(FitDecision::FitsFully) => {
                 if let Some(v) = self.free_vram {
@@ -2264,6 +2384,19 @@ impl OffloadPlan {
             }
             OffloadBasis::Dense(FitDecision::Unknown { .. }) => {}
         }
+    }
+}
+
+/// The part of the line about an expert cache that says what it left the
+/// prefetch's slots: nothing when it left them nothing.
+pub fn prefetch_room(prefetch_bytes: u64) -> String {
+    if prefetch_bytes == 0 {
+        String::new()
+    } else {
+        format!(
+            ", and {} beside it for the slots of --moe-prefetch",
+            gib(prefetch_bytes)
+        )
     }
 }
 
@@ -2799,11 +2932,13 @@ mod plan_offload_tests {
     }
 
     /// A 30B-A3B-shaped MoE: 48 layers, 2 GiB outside the experts and
-    /// 400 MiB of experts per layer.
+    /// 400 MiB of experts per layer, in three tensors of which the largest
+    /// is 150 MiB.
     fn moe() -> (GgufInfo, MoeLayout, u64) {
         let layout = MoeLayout {
             non_expert_bytes: 2 * GIB,
             expert_bytes_per_layer: vec![400 * MIB; 48],
+            largest_expert_tensor_bytes: 150 * MIB,
         };
         (attention(48, 4), layout, 2 * GIB + 48 * 400 * MIB)
     }
@@ -2816,6 +2951,7 @@ mod plan_offload_tests {
             mmproj_offload: None,
             moe_cache: None,
             auto_n_ubatch: false,
+            moe_prefetch: MoePrefetch::default(),
         }
     }
 
@@ -3085,6 +3221,7 @@ mod plan_offload_tests {
                 cpu_moe,
                 n_cpu_moe,
                 false,
+                MoePrefetch::default(),
             )
         };
         let card = (14 * GIB, 16 * GIB);
@@ -3149,6 +3286,7 @@ mod plan_offload_tests {
                 false,
                 0,
                 auto_n_ubatch,
+                MoePrefetch::default(),
             )
         };
         let card = (14 * GIB, 16 * GIB);
@@ -3177,6 +3315,200 @@ mod plan_offload_tests {
         let kept = cache(MoeCache::Auto, tight, true).unwrap();
         assert_eq!(kept.n_ubatch, None);
         assert_eq!(kept.bytes, cache(MoeCache::Auto, tight, false).unwrap().bytes);
+    }
+
+    #[test]
+    fn the_prefetch_takes_0_or_2_to_8_slots() {
+        assert_eq!(parse_moe_prefetch("0"), Ok(0));
+        assert_eq!(parse_moe_prefetch("2"), Ok(2));
+        assert_eq!(parse_moe_prefetch("8"), Ok(8));
+        for bad in ["1", "9", "-1", "", "auto"] {
+            assert!(parse_moe_prefetch(bad).is_err(), "accepted {bad:?}");
+        }
+        assert_eq!(MOE_PREFETCH_SLOTS, 4);
+    }
+
+    /// A slot holds the largest expert tensor, with a MiB at most to spare
+    /// for what llama.cpp adds past the end of a copy.
+    #[test]
+    fn a_prefetch_slot_is_the_largest_expert_tensor_to_the_mib() {
+        let slot = |bytes| {
+            prefetch_slot_bytes(&MoeLayout {
+                largest_expert_tensor_bytes: bytes,
+                ..Default::default()
+            })
+        };
+        assert_eq!(slot(256 * MIB), 256 * MIB);
+        assert_eq!(slot(256 * MIB + 1), 257 * MIB);
+        assert_eq!(slot(1), MIB);
+        assert_eq!(slot(0), 0);
+    }
+
+    /// The slots go only where experts are kept in RAM and pinned: there is
+    /// nothing else they could copy, and from pageable memory llama.cpp turns
+    /// them off.
+    #[test]
+    fn the_prefetch_is_asked_for_only_where_experts_in_ram_are_pinned() {
+        assert_eq!(prefetch_slots(4, true, true, 0), 4);
+        assert_eq!(prefetch_slots(4, true, false, 12), 4);
+        assert_eq!(prefetch_slots(4, false, true, 0), 0, "a mapped file");
+        assert_eq!(prefetch_slots(4, true, false, 0), 0, "no expert in RAM");
+        assert_eq!(prefetch_slots(0, true, true, 0), 0, "--moe-prefetch 0");
+
+        // With an expert cache, pinned is what reading the model into memory
+        // decides: whenever the RAM can spare the experts, unless --mmap.
+        let ram = Some(62 * GIB);
+        let asked = |no_mmap, keep_mapped, ram_total| MoePrefetch {
+            slots: 4,
+            no_mmap,
+            keep_mapped,
+            ram_total,
+        };
+        assert_eq!(asked(false, false, ram).slots_for(33 * GIB), 4);
+        assert_eq!(asked(false, false, ram).slots_for(50 * GIB), 0);
+        assert_eq!(asked(false, false, None).slots_for(33 * GIB), 0);
+        assert_eq!(asked(false, true, ram).slots_for(33 * GIB), 0);
+        assert_eq!(asked(true, false, ram).slots_for(50 * GIB), 4);
+    }
+
+    /// An automatic cache leaves the prefetch's slots their VRAM where the
+    /// experts are pinned, and only there; a size the user asked for, the
+    /// cache's minimum and the larger micro-batch each come before the slots.
+    #[test]
+    fn an_expert_cache_leaves_the_prefetch_its_slots_where_it_can() {
+        let (info, layout, _) = moe();
+        let ram = Some(62 * GIB);
+        let four = MoePrefetch {
+            slots: 4,
+            ram_total: ram,
+            ..Default::default()
+        };
+        let cache = |request, vram: (u64, u64), auto_n_ubatch, prefetch| {
+            plan_moe_cache(
+                request,
+                Some(vram),
+                Some(&info),
+                Some(&layout),
+                4096,
+                F16.0,
+                F16.1,
+                false,
+                0,
+                auto_n_ubatch,
+                prefetch,
+            )
+        };
+        let card = (14 * GIB, 16 * GIB);
+        let (usable, fixed) = moe_budget(card.0, card.1, &info, &layout, 4096, F16.0, F16.1);
+        let room = (usable - fixed) as u64;
+        let step_down = |bytes: u64| bytes / (256 * MIB) * (256 * MIB);
+        let slots = 4 * 150 * MIB;
+
+        // The 18.75 GiB of experts fit the 62 GiB of RAM pinned: the slots'
+        // 600 MiB come out of the cache.
+        let without = cache(MoeCache::Auto, card, false, MoePrefetch::default()).unwrap();
+        let with = cache(MoeCache::Auto, card, false, four).unwrap();
+        assert_eq!((without.prefetch_bytes, with.prefetch_bytes), (0, slots));
+        assert_eq!(without.bytes, step_down(room));
+        assert_eq!(with.bytes, step_down(room - slots));
+        assert_eq!(with.n_ubatch, None);
+
+        // Experts left mapped, by --mmap or for want of RAM, cannot be copied
+        // ahead: the cache keeps all its room.
+        for unpinned in [
+            MoePrefetch {
+                keep_mapped: true,
+                ..four
+            },
+            MoePrefetch {
+                ram_total: Some(16 * GIB),
+                ..four
+            },
+        ] {
+            let kept = cache(MoeCache::Auto, card, false, unpinned).unwrap();
+            assert_eq!((kept.bytes, kept.prefetch_bytes), (without.bytes, 0));
+        }
+
+        // Left to choose, both the larger micro-batch and the slots, when the
+        // room holds both beside a cache.
+        let both = cache(MoeCache::Auto, card, true, four).unwrap();
+        let extra = ubatch_reserve_bytes(MOE_CACHE_N_UBATCH);
+        assert_eq!(
+            (both.n_ubatch, both.prefetch_bytes),
+            (Some(MOE_CACHE_N_UBATCH), slots)
+        );
+        assert_eq!(both.bytes, step_down(room - extra - slots));
+
+        // A size asked for that fits only without the slots stays whole.
+        let room_mib = (room / MIB) as u32;
+        let snug = cache(MoeCache::Mib(room_mib - 64), card, false, four).unwrap();
+        assert_eq!(snug.bytes, u64::from(room_mib - 64) * MIB);
+        assert_eq!((snug.asked_bytes, snug.prefetch_bytes), (None, 0));
+        // One that fits beside them gets them.
+        let asked = cache(MoeCache::Mib(2000), card, false, four).unwrap();
+        assert_eq!((asked.bytes, asked.prefetch_bytes), (2000 * MIB, slots));
+
+        // Room for the larger micro-batch and a cache of 768 MiB (and a bit),
+        // which the slots would cut below the minimum: the micro-batch stays,
+        // the slots give way.
+        let fixed_and_floor = fixed as u64 + 16 * GIB * 12 / 100 + 320 * MIB;
+        let tight = (fixed_and_floor + extra + 832 * MIB, 16 * GIB);
+        let larger = cache(MoeCache::Auto, tight, true, four).unwrap();
+        assert_eq!(larger.n_ubatch, Some(MOE_CACHE_N_UBATCH));
+        assert_eq!((larger.bytes, larger.prefetch_bytes), (768 * MIB, 0));
+    }
+
+    /// A plan with an expert cache carries what it left the slots, and says it.
+    #[test]
+    fn a_plan_with_an_expert_cache_carries_the_prefetchs_room() {
+        let (info, layout, file_size) = moe();
+        let plan = plan_offload(
+            Some((14 * GIB, 16 * GIB)),
+            Some(&info),
+            Some(&layout),
+            file_size,
+            4096,
+            F16.0,
+            F16.1,
+            0,
+            0,
+            OffloadFlags {
+                moe_cache: Some(MoeCache::Auto),
+                moe_prefetch: MoePrefetch {
+                    slots: 4,
+                    ram_total: Some(62 * GIB),
+                    ..Default::default()
+                },
+                ..flags()
+            },
+        );
+        assert_eq!(plan.moe_prefetch_bytes, 4 * 150 * MIB);
+        assert_eq!(
+            prefetch_room(plan.moe_prefetch_bytes),
+            ", and 0.59 GiB beside it for the slots of --moe-prefetch"
+        );
+        assert_eq!(prefetch_room(0), "");
+        // Without a cache there is nothing to take the room from.
+        let usual = plan_offload(
+            Some((14 * GIB, 16 * GIB)),
+            Some(&info),
+            Some(&layout),
+            file_size,
+            4096,
+            F16.0,
+            F16.1,
+            0,
+            0,
+            OffloadFlags {
+                moe_prefetch: MoePrefetch {
+                    slots: 4,
+                    no_mmap: true,
+                    ..Default::default()
+                },
+                ..flags()
+            },
+        );
+        assert_eq!(usual.moe_prefetch_bytes, 0);
     }
 
     /// Pinned experts must leave a quarter of the RAM, and at least 8 GiB.
@@ -4021,6 +4353,9 @@ mod moe_layout_tests {
             layout.expert_bytes_per_layer.iter().sum::<u64>(),
             21000
         );
+        // The largest expert tensor, not the largest tensor: the embeddings
+        // are not copied into a slot.
+        assert_eq!(layout.largest_expert_tensor_bytes, 4000);
     }
 
     #[test]
@@ -4153,6 +4488,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 5_000_000_000,
             expert_bytes_per_layer: vec![0, 0, 0],
+            ..Default::default()
         };
         let d = compute_moe_fit(
             Some((40 * 1024 * 1024 * 1024, 40 * 1024 * 1024 * 1024)),
@@ -4170,6 +4506,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 1_000_000_000,
             expert_bytes_per_layer: vec![1_000_000_000],
+            ..Default::default()
         };
         let d = compute_moe_fit(None, Some(&info(1)), Some(&layout), 4096, F16.0, F16.1);
         assert_eq!(d, MoeFitDecision::NotMoe);
@@ -4181,6 +4518,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 1_000_000_000,
             expert_bytes_per_layer: vec![500_000_000; 4],
+            ..Default::default()
         };
         let d = compute_moe_fit(
             Some((40 * 1024 * 1024 * 1024, 40 * 1024 * 1024 * 1024)),
@@ -4204,6 +4542,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 1_000_000_000, // 1 GB
             expert_bytes_per_layer: vec![per_layer_expert; 4],
+            ..Default::default()
         };
         // usable ≈ free*0.97 - 640MiB. Pick free VRAM so that after non-expert
         // (1GB) + a small KV term, there's room for exactly ~1 layer of
@@ -4225,6 +4564,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 20_000_000_000, // 20 GB
             expert_bytes_per_layer: vec![1_000_000_000; 2],
+            ..Default::default()
         };
         let free = 8_000_000_000u64; // 8 GB free
         let d = compute_moe_fit(Some((free, free)), Some(&info(2)), Some(&layout), 4096, F16.0, F16.1);
@@ -4249,6 +4589,7 @@ mod moe_fit_tests {
         let layout = MoeLayout {
             non_expert_bytes: 500_000_000_000, // 500 GB (absurd on purpose)
             expert_bytes_per_layer: vec![50_000_000_000; 8],
+            ..Default::default()
         };
         let free = 2_000_000_000u64; // 2 GB free
         let d = compute_moe_fit(Some((free, free)), Some(&info(8)), Some(&layout), 4096, F16.0, F16.1);

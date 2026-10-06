@@ -540,6 +540,16 @@ class ModelInfoTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--decision-model", result["note"])
 
 
+class Redirecting(standin.StandIn):
+    """A 302 that carries a JSON body -- what a gateway in front of EuLLM
+    sends when it moves the caller, and the case that used to pass."""
+
+    def route(self, method, path, headers, body):
+        if (method, path) == ("GET", "/v1/models"):
+            return 302, self.models()
+        return super().route(method, path, headers, body)
+
+
 class ConnectionTest(unittest.IsolatedAsyncioTestCase):
     async def test_the_api_key_goes_as_a_bearer_token(self):
         with standin.StandIn(api_key="s3cret") as eullm:
@@ -562,6 +572,16 @@ class ConnectionTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ToolFailed) as late:
                 await call(eullm.url, "model_info", {"timeout": 0.3})
         self.assertIn("did not answer /v1/models within 0.3 s (EULLM_TIMEOUT)", str(late.exception))
+
+    async def test_a_redirect_is_not_eullm_answering(self):
+        """Only a 2xx is an answer. A 3xx used to be read as the model's own
+        reply, body and all, so a gateway in front of EuLLM could have the
+        tool report a model list EuLLM never sent."""
+        with Redirecting() as eullm:
+            with self.assertRaises(ToolFailed) as moved:
+                await call(eullm.url, "model_info")
+        self.assertIn("answered 302 redirect instead of an answer", str(moved.exception))
+        self.assertIn("check EULLM_URL", str(moved.exception))
 
 
 class ToolListTest(unittest.IsolatedAsyncioTestCase):

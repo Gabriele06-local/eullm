@@ -17,16 +17,27 @@
 #     (DependencyNeverSatisfied, a hold);
 #   * a watcher whose file exists but is empty. One that simply waits long
 #     is shown, not flagged: the package watcher waits a whole training run;
+#   * $WORK more than 90% full. On 2026-10-05 it reached 109% of its 1 TB
+#     quota unnoticed, and a 27B conversion failed writing its first tensor;
+#     every job that writes a checkpoint would have been next;
 #   * no GPU job running or queued at all. On 2026-10-04 the allocation spent
 #     1.8 node-hours in a day with ~530 left for 29 days, and it was the user
 #     who noticed. Idle GPUs are flagged, unspent hours are not: the rule is
 #     never to run out of useful work, not to burn the budget on filler.
+#     What is left of the allocation, and the daily pace that would use it,
+#     is shown next to the pace of the last day.
 #
 # Read-only: it submits, cancels and writes nothing. It prints counts and
 # log lines of the pipeline, never the held-out exam.
 
 set -uo pipefail
 
+# $WORK is Leonardo's. Run on another machine, the line below used to stop
+# the script with "WORK: unbound variable" and nothing else (5 October).
+if [ -z "${EULLM_RUNS:-}" ] && [ -z "${WORK:-}" ]; then
+    echo "status.sh runs on Leonardo, where \$WORK is set: ssh <user>@login.leonardo.cineca.it first" >&2
+    exit 2
+fi
 RUNS="${EULLM_RUNS:-$WORK/eullm_runs}"
 SINCE="${1:-$(date -d '-24 hours' +%Y-%m-%dT%H:%M)}"
 PROBLEMS=0
@@ -132,16 +143,62 @@ done
 [ "$found" -eq 1 ] || echo "   none queued"
 
 echo
+echo "== disk =="
+# df, not cindata: cindata's figure lags by hours, df is the filesystem now.
+pct="$(df -P "${WORK:-$RUNS}" 2>/dev/null | awk 'NR == 2 {sub("%", "", $5); print $5}')"
+if [ -n "$pct" ]; then
+    echo "   \$WORK ${pct}% full"
+    if [ "$pct" -ge 90 ]; then
+        flag "\$WORK is ${pct}% full: free space before a job fails writing (du -sh \$WORK/*)"
+    fi
+fi
+
+echo
 echo "== GPU work =="
 # Anything on the GPU partition counts, running or waiting for its turn or
 # for a dependency: a chain queued behind a serial job is work lined up.
 gpu_jobs="$(squeue --me -h -p boost_usr_prod -o "%i" 2>/dev/null | grep -c .)"
-used="$(sacct -X -n -S "$SINCE" -r boost_usr_prod -o ElapsedRaw,NNodes 2>/dev/null |
-        awk '{s += $1 * $2} END {printf "%.1f", s / 3600}')"
-echo "   $gpu_jobs GPU job(s) running or queued; ${used:-0.0} node-hours since $SINCE"
+# Billed the way saldo bills: 8 local hours per GPU-hour, 32 a node-hour, so
+# a one-GPU exam costs a quarter of a node. Counting every job as a whole
+# node (as this did until 2026-10-06) made a day of one-GPU jobs look four
+# times as expensive. Checked against saldo: October to the 6th, 2,275 here
+# against saldo's 1,685 -- saldo is a day behind, the rest is today's jobs.
+local_hours() {  # local hours billed on the GPU partition since $1
+    sacct -X -n -S "$1" -r boost_usr_prod -o ElapsedRaw,AllocTRES -P 2>/dev/null |
+        awk -F'|' '{g = 0; if (match($2, /gres\/gpu=[0-9]+/)) g = substr($2, RSTART + 9, RLENGTH - 9)
+                    s += $1 * g * 8} END {printf "%.1f", s / 3600}'
+}
+used="$(local_hours "$SINCE")"
+echo "   $gpu_jobs GPU job(s) running or queued; ${used:-0.0} local hours" \
+     "($(awk -v u="${used:-0}" 'BEGIN {printf "%.1f", u / 32}') node-hours) since $SINCE"
 if [ "$gpu_jobs" -eq 0 ]; then
     flag "no GPU job running or queued: the allocation is idle -- decide the next useful GPU work now"
 fi
+# The allocation: how much is left and the daily pace that would use it by
+# its end, against the pace of the window above. Shown, never flagged: the
+# aim is better models, not a spent budget (forge/CLAUDE.md, rule 8).
+B_TOTAL="${EULLM_BUDGET_HOURS:-40000}"
+B_START="${EULLM_BUDGET_START:-2026-09-02}"
+B_END="${EULLM_BUDGET_END:-2026-11-02}"
+spent="$(local_hours "$B_START")"
+now="$(date +%s)"
+end="$(date -d "$B_END 23:59" +%s 2>/dev/null || echo "$now")"
+since_s="$(date -d "${SINCE/T/ }" +%s 2>/dev/null || echo $((now - 86400)))"
+awk -v total="$B_TOTAL" -v spent="${spent:-0}" -v used="${used:-0}" -v now="$now" \
+    -v end="$end" -v since="$since_s" -v start="$B_START" -v stop="$B_END" 'BEGIN {
+    left = total - spent; days = (end - now) / 86400
+    printf "   allocation: %.0f of %.0f local hours used since %s, %.0f left", spent, total, start, left
+    if (days <= 0) { print "; it has ended"; exit }
+    printf " for %.1f days = %.0f a day (%.1f node-hours)\n", days, left / days, left / days / 32
+    window = (now - since) / 86400
+    if (window <= 0) exit
+    rate = used / window
+    printf "   pace of the window above: %.0f local hours a day", rate
+    if (rate * days < left)
+        printf "; at that pace %.0f would be left unused on %s", left - rate * days, stop
+    print ""
+    print "   (saldo -b is the bill; it is a day behind these figures)"
+}'
 
 echo
 echo "== GRPO =="
@@ -157,6 +214,34 @@ for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out 2>/dev/null | head -3); do
     grep -ao '\[grpo\] step .*' "$log" | tail -2 | sed 's/^/     /'
     stop="$(grep -ao '\[grpo\] STOP.*' "$log" | tail -1)"
     [ -z "$stop" ] || flag "${log##*/}: ${stop#\[grpo\] }"
+done
+[ "$found" -eq 1 ] || echo "   none since $SINCE"
+
+echo
+echo "== OPD =="
+# opd_train.py prints a line per step: the first and the last of each recent
+# run show whether the KL is coming down, and the step reached; "adapter"
+# when the run is done.
+found=0
+for log in $(ls -t "$RUNS"/opd/logs/eullm-opd-*.out 2>/dev/null | head -4); do
+    [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
+    found=1
+    echo "   ${log##*/}"
+    grep -ao '\[opd\] \(step .*\|adapter .*\|time is up.*\)' "$log" | sed -n '1p;$p' | uniq |
+        sed 's/^/     /'
+done
+[ "$found" -eq 1 ] || echo "   none since $SINCE"
+
+echo
+echo "== case-law exam =="
+# cds_answer.py's summary line per model; the judges' grades are in the
+# graded.csv beside the answers.
+REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
+found=0
+for log in $(ls -t "$REPO_LOGS"/eullm-cds-exam-*.out 2>/dev/null | head -6); do
+    [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
+    line="$(grep -ao '\[cds-exam\] [^:]*: [0-9]* questions; .*->' "$log" | tail -1)"
+    [ -z "$line" ] || { found=1; echo "   ${line%% ->}"; }
 done
 [ "$found" -eq 1 ] || echo "   none since $SINCE"
 

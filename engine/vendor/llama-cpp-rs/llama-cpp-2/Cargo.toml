@@ -113,6 +113,10 @@
 #     The field comes from llama.cpp PR #29887, which the submodule carries
 #     on top of b11370 until upstream merges it; drop both with that commit
 #     if upstream renames the field.
+#   - `context/params/get_set.rs`: `with_moe_prefetch_slots` /
+#     `moe_prefetch_slots` (`moe_prefetch_slots`), the VRAM slots the experts
+#     of a long prompt are copied into ahead of their layer. The field is
+#     EuLLM's own, added by patch `0003`; it goes with that patch.
 #   - `llama-cpp-sys-2/llama_patches.rs` and `llama-cpp-sys-2/patches/`:
 #     EuLLM's own changes to llama.cpp, as patch files the build script
 #     applies to a copy of the submodule in OUT_DIR (CMake, the wrappers,

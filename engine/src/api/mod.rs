@@ -181,6 +181,10 @@ pub struct AppState {
     /// `--mmap`: a load with an expert cache keeps the file mapped rather
     /// than reading it in to pin the experts (`fit::plan_read_into_memory`).
     pub mmap: bool,
+    /// `--moe-prefetch`, as the user gave it: every load with experts kept
+    /// in RAM and pinned gets the slots (see `fit::prefetch_slots`), and an
+    /// expert cache keeps their VRAM out of its own where it can.
+    pub moe_prefetch: u32,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -483,6 +487,14 @@ impl AppState {
                 None
             }
         });
+        // The prefetch runs where the expert cache does, on one CUDA GPU; it
+        // is on by default, so elsewhere it goes without a word.
+        let moe_prefetch = if crate::fit::moe_cache_support().is_ok() {
+            self.moe_prefetch
+        } else {
+            0
+        };
+        let ram_total = crate::fit::system_ram_bytes();
         let info = crate::fit::read_gguf_info(&gguf_path);
         let file_size = crate::fit::model_file_bytes(&gguf_path);
         let layout = match (&info, file_size) {
@@ -527,6 +539,12 @@ impl AppState {
                 mmproj_offload: self.mmproj_offload,
                 moe_cache,
                 auto_n_ubatch: self.n_ubatch.is_none(),
+                moe_prefetch: crate::fit::MoePrefetch {
+                    slots: moe_prefetch,
+                    no_mmap: self.no_mmap,
+                    keep_mapped: self.mmap,
+                    ram_total,
+                },
             },
             mtp_reserve,
         };
@@ -616,10 +634,19 @@ impl AppState {
                 self.no_mmap,
                 self.mmap,
                 plan.as_ref().map_or(0, |plan| plan.moe_cache_host_bytes),
-                crate::fit::system_ram_bytes(),
+                ram_total,
             );
             if let Some(why) = why {
                 tracing::info!("{why}");
+            }
+            let moe_prefetch_slots =
+                crate::fit::prefetch_slots(moe_prefetch, load_no_mmap, cpu_moe, n_cpu_moe);
+            if moe_prefetch_slots > 0 {
+                tracing::info!(
+                    "--moe-prefetch: the experts in RAM of a long prompt are copied to the GPU \
+                     ahead of their layer, into {moe_prefetch_slots} slots of VRAM \
+                     (--moe-prefetch 0 turns it off)"
+                );
             }
 
             // ── 2. Load the new model ───────────────────────────────
@@ -647,6 +674,7 @@ impl AppState {
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
+                moe_prefetch_slots,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -823,6 +851,7 @@ impl AppState {
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
+                moe_prefetch_slots,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -2791,6 +2820,8 @@ pub struct ServeConfig {
     pub no_mmap: bool,
     /// `--mmap` (see `AppState::mmap`).
     pub mmap: bool,
+    /// `--moe-prefetch` (see `AppState::moe_prefetch`).
+    pub moe_prefetch: u32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3108,6 +3139,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         moe_cache: cfg.moe_cache,
         no_mmap: cfg.no_mmap,
         mmap: cfg.mmap,
+        moe_prefetch: cfg.moe_prefetch,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3284,6 +3316,7 @@ impl AppState {
             moe_cache: None,
             no_mmap: false,
             mmap: false,
+            moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,
@@ -5033,6 +5066,120 @@ mod http_tests {
                 .is_some_and(|data| data.iter().any(|m| m["id"] == "auto")),
             "{models}"
         );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A server whose one resident, `busy-m`, is answered by `scheduler`, a
+    /// handle with no decode thread behind it (`SchedulerHandle::detached`).
+    async fn spawn_with_scheduler(
+        tmp: &std::path::Path,
+        scheduler: crate::inference::SchedulerHandle,
+    ) -> String {
+        let store = store_with_one_model(tmp, "busy-m");
+        let absent = std::path::Path::new("/nonexistent/eullm-test/.env");
+        let state = AppState::for_tests(store, auth::ApiKeys::load(absent).expect("no keys"));
+        state
+            .models
+            .write()
+            .await
+            .insert(resident::LoadedModel::new(
+                "busy-m".into(),
+                tmp.join("busy-m").join("model.gguf"),
+                None,
+                Some(scheduler),
+            ));
+        spawn_state(state).await
+    }
+
+    /// Every endpoint that queues a generation, streamed and not, and the
+    /// status and `Retry-After` each answers with.
+    async fn refusals(base: &str) -> Vec<(String, u16, Option<String>, serde_json::Value)> {
+        let hi = serde_json::json!([{ "role": "user", "content": "hi" }]);
+        let mut answers = Vec::new();
+        for stream in [false, true] {
+            for (endpoint, body) in [
+                (
+                    "/api/generate",
+                    serde_json::json!({ "model": "busy-m", "prompt": "hi", "stream": stream }),
+                ),
+                (
+                    "/api/chat",
+                    serde_json::json!({ "model": "busy-m", "messages": hi, "stream": stream }),
+                ),
+                (
+                    "/v1/chat/completions",
+                    serde_json::json!({ "model": "busy-m", "messages": hi, "stream": stream }),
+                ),
+            ] {
+                let response = reqwest::Client::new()
+                    .post(format!("{base}{endpoint}"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("request");
+                let status = response.status().as_u16();
+                let retry_after = response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string);
+                let body = response.json().await.unwrap_or(serde_json::Value::Null);
+                answers.push((
+                    format!("{endpoint} stream={stream}"),
+                    status,
+                    retry_after,
+                    body,
+                ));
+            }
+        }
+        answers
+    }
+
+    /// A full queue is a 503 with `Retry-After` on every endpoint, streamed
+    /// or not, answered before any stream opens — as Ollama answers its own
+    /// full queue. It was a 500 without streaming, which says the fault is
+    /// the server's, and with streaming a 200 whose only line was the error,
+    /// which a client cannot tell from an answer that failed halfway.
+    #[tokio::test]
+    async fn a_full_queue_is_a_503_with_retry_after_on_every_endpoint() {
+        let tmp = std::env::temp_dir().join(format!("eullm-queue-full-{}", uuid::Uuid::new_v4()));
+        let (scheduler, _queue) = crate::inference::SchedulerHandle::detached(1);
+        let _first = scheduler
+            .try_submit(crate::inference::GenerateRequest::default())
+            .expect("the queue's one place was free");
+        let base = spawn_with_scheduler(&tmp, scheduler).await;
+
+        for (request, status, retry_after, body) in refusals(&base).await {
+            assert_eq!(status, 503, "{request}: {body}");
+            assert_eq!(retry_after.as_deref(), Some("5"), "{request}");
+            assert_eq!(
+                body["error"], "Scheduler queue full — try again later",
+                "{request}: a JSON error, not a stream"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A model unloaded between a request finding it and reaching its queue
+    /// is a 503 too, which the request can be sent again after at once: it
+    /// loads the model back.
+    #[tokio::test]
+    async fn a_model_unloaded_before_the_request_starts_is_a_503() {
+        let tmp = std::env::temp_dir().join(format!("eullm-unloaded-{}", uuid::Uuid::new_v4()));
+        let (scheduler, queue) = crate::inference::SchedulerHandle::detached(1);
+        drop(queue);
+        let base = spawn_with_scheduler(&tmp, scheduler).await;
+
+        for (request, status, retry_after, body) in refusals(&base).await {
+            assert_eq!(status, 503, "{request}: {body}");
+            assert_eq!(retry_after.as_deref(), Some("1"), "{request}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .is_some_and(|e| e.contains("send it again")),
+                "{request}: {body}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

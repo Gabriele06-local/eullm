@@ -30,6 +30,7 @@ use super::AppState;
 use super::resident::{Lease, SlotSnapshot};
 use super::thinking::{Part, ThinkingSplitter};
 use crate::audit::{AuditEntry, AuditLogger};
+use crate::inference::scheduler::NotQueued;
 use crate::inference::{
     AnswerStats, GenerateRequest, InferenceEngine, JSON_GBNF, StopReason, StreamEvent,
 };
@@ -88,8 +89,32 @@ impl IntoResponse for Refusal {
     }
 }
 
-/// When a client refused with `ModelError::Busy` may try again.
+/// When a client refused with `ModelError::Busy`, or by a full queue, may
+/// try again.
 const BUSY_RETRY_AFTER_SECS: u64 = 5;
+
+/// When a client may resend a request whose model was unloaded before it
+/// started: at once, since the request itself loads the model back.
+const UNLOADED_RETRY_AFTER_SECS: u64 = 1;
+
+impl From<NotQueued> for Refusal {
+    /// A request the scheduler did not queue is answered 503, as Ollama
+    /// answers its own full queue, with the `Retry-After` that says when to
+    /// send it again — and before any stream is opened: a streaming request
+    /// used to get a 200 whose only line was the error, which a client
+    /// cannot tell from an answer that failed halfway, and a non-streaming
+    /// one a 500, which says the fault is the server's.
+    fn from(not_queued: NotQueued) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            body: Json(json!({ "error": not_queued.to_string() })),
+            retry_after_secs: Some(match not_queued {
+                NotQueued::QueueFull => BUSY_RETRY_AFTER_SECS,
+                NotQueued::Unloaded => UNLOADED_RETRY_AFTER_SECS,
+            }),
+        }
+    }
+}
 
 /// Validated `(batch_size, ctx_size)` slot overrides read from a request body.
 /// `None` in either position means "keep the launch-time value".
@@ -2244,7 +2269,7 @@ async fn generate_with(
 
     if let Some(ref sched) = snap.scheduler {
         // ── Continuous batching path ────────────────────────────────
-        let rx = sched.submit(request);
+        let rx = sched.try_submit(request)?;
 
         if is_streaming(&body) {
             Ok(ndjson_stream_response(
@@ -2579,7 +2604,7 @@ async fn chat_with(
     };
 
     if let Some(ref sched) = snap.scheduler {
-        let rx = sched.submit(request);
+        let rx = sched.try_submit(request)?;
 
         if is_streaming(&body) {
             Ok(ndjson_stream_response(
@@ -3136,7 +3161,7 @@ async fn chat_completions_with(
     // streaming, just coarse.
     if let Some(tmpl) = oai_template {
         let rx = if let Some(ref sched) = snap.scheduler {
-            sched.submit(request)
+            sched.try_submit(request)?
         } else {
             sequential_to_channel(Arc::clone(snap.engine.as_ref().unwrap()), request)
         };
@@ -3236,7 +3261,7 @@ async fn chat_completions_with(
     }
 
     if let Some(ref sched) = snap.scheduler {
-        let rx = sched.submit(request);
+        let rx = sched.try_submit(request)?;
 
         if is_streaming(&body) {
             let stream = stream_from_channel_sse(

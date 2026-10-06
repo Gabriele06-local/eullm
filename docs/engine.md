@@ -1,6 +1,6 @@
 # EULLM Engine
 
-The EULLM Engine is a CLI + API server for running GGUF models locally, with real llama.cpp inference, built-in EU model catalog, local-only AI Act audit trail, and no network telemetry of any kind. Single Rust binary — no Python, no Docker.
+The EULLM Engine is a CLI + API server for running GGUF models locally, with real llama.cpp inference, a built-in catalog of open models, a local-only audit trail designed for the EU AI Act, and no network telemetry of any kind. Single Rust binary — no Python, no Docker.
 
 ## Installation
 
@@ -102,6 +102,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--moe-cache` | off | `auto` or a size in MiB: an MoE model whose experts do not all fit in VRAM keeps them all in RAM and caches the ones it uses most in the VRAM they would have taken. Speeds up writing, not prompt reading. One CUDA GPU only; experimental (llama.cpp PR #29887); see the guide |
 | `--no-mmap` | off | Read the model into memory instead of mapping its file. Experts kept in RAM then sit in memory the GPU driver has pinned, which the card copies from directly. Loads slower, and the RAM has to hold them; `--moe-cache` does it by itself when the RAM can spare the experts. See the guide |
 | `--mmap` | off | Keep the model file mapped where `--moe-cache` would read it into memory |
+| `--moe-prefetch` | 4 | Slots of VRAM (2 to 8, 0 = off) the experts in RAM of a long prompt are copied into ahead of their layer, on a second stream of the GPU. One CUDA GPU, experts in pinned memory (the model read into memory), micro-batches of 512 tokens or more; with `--moe-cache` the slots' VRAM comes out of the cache. See the guide |
 | `--cache-type-k` | `f16` | KV cache type for keys (f16, q8_0, q4_0). Quantizing frees VRAM for more layers |
 | `--cache-type-v` | `f16` | KV cache type for values (f16, q8_0, q4_0) |
 | `--no-flash-attn` | false | Disable flash attention (on by default), for the generation model and the decision model alike |
@@ -460,10 +461,12 @@ and the reason says why:
 **Latency.** A decision is one forward pass of the decision model over the
 digest: tens of milliseconds on a GPU. One decision runs at a time per
 decision model, so routed requests and `/v1/systemone` traffic queue behind
-each other; `--auto-timeout-ms` bounds the wait. On a CPU a decision takes a
-second or more — measured with Qwen3-0.6B as the decision model, every route
-timed out at the default 1000 ms — so `auto` there answers with the fallback
-unless the timeout is raised, and then every request waits for its decision.
+each other; `--auto-timeout-ms` bounds the wait. On a CPU a decision takes
+hundreds of milliseconds or more: with Qwen3-0.6B as the decision model, 239 ms
+at the median on a 16-core Ryzen 9 5950X (5 October), while an earlier run had
+every route time out at the default 1000 ms. Where a decision takes longer than
+`--auto-timeout-ms`, `auto` answers with the fallback; raise the timeout and
+every request waits for its decision instead.
 
 **Which model answered, and why.** The `model` field of the response, and of
 every streamed line or chunk, is the model that answered. The headers, sent
@@ -567,7 +570,7 @@ gave each request an eighth of the context, and answers stopped at 512 tokens
 with no flag to point at. Ask for concurrency when several clients send
 requests at the same time, and raise `--ctx-size` with it.
 
-With 16 concurrent requests on a consumer GPU, EULLM achieves ~2.5x throughput vs Ollama. See [benchmarks](benchmarks.md) for details.
+With 16 concurrent requests on an RTX 5070 Ti, EuLLM serves 259 tok/s in total, 2.75× a single request's throughput. See [benchmarks](benchmarks.md) for details.
 
 **A long prompt does not stop the others.** With more than one slot, a new
 request's prompt is read a chunk at a time between the decode steps of the
@@ -580,6 +583,13 @@ time, as before, and with one slot (the default) nothing changes. Either way
 llama.cpp computes it one micro-batch at a time from the same positions, so
 the answer is the one a prompt read whole gets. Prompts wait in arrival
 order; one is read at a time.
+
+**A full queue is a 503.** Behind the requests being answered, each slot
+keeps up to eight waiting, in arrival order: with the default single slot,
+one answering and eight waiting. One more is refused at once with
+`503 Service Unavailable`, `Retry-After: 5` and the error as JSON, streamed
+or not, before any stream opens, as Ollama answers its own full queue. A
+backend for many concurrent users raises `--batch-size` rather than retrying.
 
 ### Context window and batch slots
 
@@ -718,7 +728,7 @@ request, not something the caller has to reason about:
 - The reverse also holds: a generation request with `--fit` enabled evicts
   a resident embedder first if the sizing needs the VRAM back.
 
-On a build with no VRAM probe (non-CUDA), the server always tries to keep
+On a build with no GPU to read free VRAM from (CPU only), the server always tries to keep
 both resident and lets a genuine out-of-memory surface as a normal load
 error — the same posture `--fit` itself takes there.
 
@@ -1933,19 +1943,13 @@ made, stored next to its trace when decision traces are on. See
 
 ## Model Catalog
 
-The Engine ships with a built-in catalog of EU models:
-
-| Model | Domain | Base | VRAM | Size | Languages |
-|---|---|---|---|---|---|
-| `eullm/legal-it-4b` | Legal | Qwen3 | 6 GB | 4.5 GB | IT, EN |
-| `eullm/medical-de-7b` | Medical | Qwen3 | 6 GB | 4.5 GB | DE, EN |
-| `eullm/finance-fr-7b` | Finance | Qwen3 | 6 GB | 4.5 GB | FR, EN |
-| `eullm/general-eu-7b` | General | Qwen3 | 6 GB | 4.5 GB | EN, IT, DE, FR, ES, PT, NL |
-| `eullm/general-eu-14b` | General | Qwen3 | 10 GB | 8.5 GB | EN, IT, DE, FR, ES, PT, NL |
-| `eullm/code-eu-14b` | Code | DeepSeek | 10 GB | 8.5 GB | EN, IT, DE, FR, ES |
-| `eullm/legal-it-14b` | Legal | Qwen3 | 10 GB | 8.2 GB | IT, EN |
-
-All models are Apache 2.0 or MIT licensed.
+The engine ships with a catalog of 27 open models (Qwen, Mistral, DeepSeek,
+Gemma and others, among them EuLLM's own `legal-it-4b` and `legal-it-8b`),
+downloaded from Hugging Face by `eullm pull NAME`. `eullm list` shows them, and
+the chat UI's model browser says whether each fits your hardware and under
+which licence it comes. 24 are Apache 2.0 or MIT; two Gemma models come under
+Google's Gemma Terms of Use and one DeepSeek model under the DeepSeek License
+Agreement, which carry use restrictions of their own.
 
 ## Audit Trail
 
@@ -1978,7 +1982,7 @@ The JSONL format allows:
 - Each line independently parseable
 - Compatible with log analysis tools (Loki, ELK, etc.)
 
-This provides the traceability required by the EU AI Act (Regulation 2024/1689).
+It is designed to support the record-keeping the EU AI Act (Regulation 2024/1689) asks for; on its own it does not make a system compliant.
 
 ## GPU Acceleration
 
@@ -1993,8 +1997,8 @@ This provides the traceability required by the EU AI Act (Regulation 2024/1689).
 How much of the model goes on the GPU is decided automatically on every
 load — see [Automatic GPU sizing](#automatic-gpu-sizing) above. `--gpu-layers
 0` forces CPU-only inference; `--gpu-layers N` caps the offload at N layers.
-Sizing needs a CUDA build to read free VRAM; on the other backends
-`--gpu-layers` is used as given.
+Sizing reads free VRAM on every GPU backend (CUDA, ROCm, Vulkan, Metal); with
+no GPU, `--gpu-layers` is used as given.
 
 ## Integration Examples
 
@@ -2116,4 +2120,4 @@ The model generates fewer tokens than `num_predict` requested.
 | ChatML prompt formatting | Implemented |
 | Interactive chat REPL | Implemented |
 | Daemon mode (--daemon) | Implemented |
-| EU registry download | Implemented (client ready, registry server coming soon) |
+| EU registry download | Planned: models download from Hugging Face today |

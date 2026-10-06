@@ -1,6 +1,6 @@
 # Experts in RAM: the half of Strata llama.cpp lacks — implementation plan
 
-**Status:** phases 1 and 2 measured on the reference PC; phase 2's pinning goes through `--no-mmap`, since the driver refused to pin the mapped file. Phase 6 written (patch `0003`, `LLAMA_MOE_PREFETCH=1`) and measured: with four slots a 33,200-token prompt reads 42% faster, to the same answer · 5 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
+**Status:** phases 1 and 2 measured on the reference PC; phase 2's pinning goes through `--no-mmap`, since the driver refused to pin the mapped file. Phase 6 written (patch `0003`) and measured: with four slots a 33,200-token prompt reads 24-42% faster, to the same answer, and six or eight slots no faster than four. Since 6 October it is on by default as `--moe-prefetch`, `--fit` keeps the slots' VRAM out of an `auto` cache, and at the default micro-batch of 2048 it reads 42% faster with the writing unchanged, as fast as PCIe 4.0 brings the experts in · 6 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
 
 **How our changes are carried.** As patch files in `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, which the build script applies to a copy of the submodule (`llama_patches.rs`): the submodule stays at 6b7b03a, and nothing has to be pushed to the mirror for a change to build. `0001` gives CUDA a way to pin host memory on request; `0002` is phases 1 and 2 in the cache; `0003` is phase 6, in ggml's scheduler.
 
@@ -21,6 +21,17 @@ Qwen3.8-Flash-Next IQ2_XS on the reference PC, measured with `bench/speed_check.
 
 With `--moe-cache auto` the GPU was busy 59% of the time and the CPU idle.
 
+Where it stands on 6 October, after phases 2 and 6 (same PC and model):
+
+| Engine | Writes (tokens/s) | Reads a prompt (tokens/s) |
+|---|---:|---:|
+| EuLLM, the default with a cache (`--moe-cache auto`, experts pinned, micro-batch 2048) | 54.9 | 963.8 |
+| the same with the prefetch on by default since 6 October (4 slots, the cache 1 GiB smaller) | 53.6–54.9 | 1,338.6–1,407.3 |
+| the same with the prefetch of phase 6 (4 slots, micro-batch 4096, a fixed cache of 3.5-4.5 GiB; `--moe-prefetch` now) | 43–50 | 1,494–1,743 |
+| llama-server and EuLLM at the same 7,000 MiB cache, experts pinned, context 8,192 | 55.6 and 59.3 | — |
+
+**"llama-server" in these tables is not stock llama.cpp.** It is built from EuLLM's pin, which carries PR #29887, so the expert cache is in it as much as in EuLLM: comparing the two says what EuLLM's own layer costs (nothing measurable), not what the work bought. What llama.cpp does without the cache is the usual split, the experts of the last layers on the GPU: 22.4 tokens/s writing and 249 reading, against EuLLM's 54.9 and 963.8 by default.
+
 **Plain decoding is level.** Strata's paper gives 47-57 tokens/s without its MTP layer (finding 2, on an RTX 5070 with DDR5). The cache brings llama.cpp to 49.4.
 
 **MTP is where the gap is, and why it does not pay for us.** Strata gets 1.6-1.8× from its MTP layer; llama.cpp lost 15-20% with it. A check of three tokens routes them to up to 30 experts per layer. In llama.cpp every one of those not in VRAM is copied over PCIe before the GPU can start, so a check costs about 2.5 single steps and yields 2.05 tokens (52% of the drafts kept). In Strata the extra experts go to the CPU, which computes them while the GPU works, so a check costs little more than a step.
@@ -30,6 +41,13 @@ With `--moe-cache auto` the GPU was busy 59% of the time and the CPU idle.
 2. Per layer, the experts are split three ways. Those in the VRAM cache run on the GPU. A share of the misses is copied in by the GPU's copy engine while everything else runs (55% of them for the i-quants). The rest are computed by the CPU's cores. The GPU adds the results up.
 3. The per-layer handshake is a "doorbell" in pinned memory that the CPU spins on, and the whole 48-layer pass is one captured CUDA graph: no driver synchronisation per layer.
 4. The cache starts from a profile recorded on other prompts (50% of the experts served from VRAM) and follows the conversation (72%).
+
+**strata-nvfp4** ([sergqwer/strata-nvfp4](https://github.com/sergqwer/strata-nvfp4), MIT like Strata; its README read on 6 October) is a fork that stores the experts as NVFP4, 4.5 bits a weight, 63 GB on this model. Its CPU kernels are for NVFP4 only, so none of its code serves our IQ2_XS; three of its ideas do:
+- a cache that ranks the experts by how often they were used, the counts fading by ×0.92 a pass, and re-ranks every 2 rounds, with up to 192 swaps a time. It reports 30-40% fewer misses than before in fixed 1,000-token runs on an RTX 5090, with no measurable change in the time per round, and says that about half of those tokens came after the answer had ended. An alternative to PR #29887's LRU, to measure here, where a miss costs more (PCIe 4.0);
+- the share of each layer's misses the CPU computes and the share copied over PCIe, chosen per layer from fitted costs: phase 3's open question, step 4;
+- with too little RAM for every expert, the most used ones pinned up to the RAM less 6 GB and the rest read from disk.
+
+Its figure for a 16 GB card with 64 GB of RAM, from an earlier release (0.1.28-nvfp4.4, not measured again), is 54-56 tokens/s writing, where EuLLM is (54.9 by default, 58.1 with micro-batch 512), with experts of twice the bits; its test PC is an RTX 5090 on PCIe 5.0 x16 with DDR5, and the README does not say on what the 16 GB figure was taken.
 
 ## 1. What the cache does per MoE layer today
 
@@ -115,8 +133,8 @@ Copy layer N+1's experts while layer N computes, in larger blocks, borrowing the
 
 At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at most 1.5 s. Copied while the previous layer computes, the reading would be bound by the computing alone: about 1,800-2,300 tokens/s by that arithmetic, depending on how many experts a micro-batch leaves unused, against Strata's 2,320. This is the largest gain left on reading.
 
-**Written** (patch `0003`, in ggml's scheduler, off unless `LLAMA_MOE_PREFETCH=1`). Nothing upstream does it at b11393: open PR #21067 prefetches whole weights and regressed time to first token, and draft #28414 (expert slots) has open correctness problems, so neither is carried.
-- A MUL_MAT_ID whose experts are in host memory, of at least `LLAMA_MOE_PREFETCH_MIN_TOKENS` tokens (512, where nearly every expert is used), reads them from one of `LLAMA_MOE_PREFETCH_SLOTS` slots in VRAM (2 to 8, default 4, each the size of the largest expert tensor) instead of from the compute buffer. The slots are placed before ggml-alloc runs, which then leaves them alone, at the same addresses every micro-batch, so CUDA graphs stay valid.
+**Written** (patch `0003`, in ggml's scheduler; until 6 October behind `LLAMA_MOE_PREFETCH=1`, now `llama_context_params.moe_prefetch_slots`, which EuLLM's `--moe-prefetch` sets, see below). Nothing upstream does it at b11393: open PR #21067 prefetches whole weights and regressed time to first token, and draft #28414 (expert slots) has open correctness problems, so neither is carried.
+- A MUL_MAT_ID whose experts are in host memory, of at least 512 tokens (where nearly every expert is used), reads them from one of 2 to 8 slots in VRAM (4 by default, each the size of the largest expert tensor) instead of from the compute buffer. The slots are placed before ggml-alloc runs, which then leaves them alone, at the same addresses every micro-batch, so CUDA graphs stay valid.
 - A second instance of the GPU backend, with a stream of its own, copies each staged tensor whole, as soon as its slot's previous reader is queued. Two events per slot: the reading split waits for `copied` on the GPU, and the next copy into the slot waits for `freed`, recorded after the reading split. The host waits for neither: no read-back of the router and no drain of the GPU per layer on that path.
 - Below the threshold, with the MoE cache's decode steps, with several GPUs or with pipeline parallelism, the scheduler copies as before. Anything it needs and does not find (events, a second stream, room in VRAM for the slots) turns it off with one line on stderr, `moe prefetch: off, <why>`, and gives the slots back; when on, `moe prefetch: on, 4 slots of N MiB ...` once.
 - CUDA only. The other backends with events hold on to what an asynchronous copy or an event takes until the next full synchronization, which comes once per graph: Vulkan creates an event per record, Metal keeps a host copy of the data per copy, thousands of each per long prompt.
@@ -134,13 +152,67 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 | 4096 | 4.5 GiB (fixed) | 4 | 1,228.3 → 1,743.1 (+41.9%) | 48.9 → 50.0 |
 
 - **Four slots are the step that pays,** hence the default of 4. The likely reason is the order of the copies: a layer's three expert tensors are each read by a split of their own, and the third split goes on through the next layer's attention, the longest stretch of a micro-batch. With four slots the next layer's three copies all have a free slot while that split computes; with three, the third waits for that very split to end, and with two, the second does too. At 1,743 tokens/s a 4096-token micro-batch takes 2.35 s, against 3.3 s without and the 1.8 s of computing alone: about a third of the copying still shows. Six and eight slots (the cap is 8 now) are the next measurement, at a fixed cache small enough to leave them room (`PREFETCH_SLOTS="4 6 8" STEPS=prefetch tools/gpu_night.sh`).
-- **Writing** moved by −8% in three runs and +2% in the fourth. The slots are not on the writing path, which reads its experts through the expert cache (a MUL_MAT_ID of 512 tokens or more is staged, an answer's steps are of one token), and both servers of a run had the same cache (the `--fit` line of their logs: 5.25 and 6.75 GiB both times). So either the order the two servers run in (the prefetch one always second) or run-to-run noise of the size seen elsewhere on this machine: the same model wrote 111.4 and 120.5 tokens/s in two starts during the MTP measurements. `ORDER="1 0" bench/prefetch_check.sh` runs the pair the other way round, which tells the two apart.
+- **Writing** moved by −8% in three runs and +2% in the fourth. The slots are not on the writing path, which reads its experts through the expert cache (a MUL_MAT_ID of 512 tokens or more is staged, an answer's steps are of one token), and both servers of a run had the same cache (the `--fit` line of their logs: 5.25 and 6.75 GiB both times). So either the order the two servers run in (the prefetch one always second) or run-to-run noise of the size seen elsewhere on this machine: the same model wrote 111.4 and 120.5 tokens/s in two starts during the MTP measurements. `SETTINGS="4 0" bench/prefetch_check.sh` (then `ORDER="1 0"`) runs the pair the other way round, which tells the two apart.
 - Optional: `nsys profile` of one micro-batch shows how much of the copying still waits for a slot.
+
+**Measured again** on 5 October, six and eight slots and the order reversed, all at a fixed cache of 3,584 MiB (room for eight slots), `--n-ubatch 4096`, same model and prompt (`tools/gpu_night.sh`, `STEPS=prefetch`, nothing else on the GPU). Every answer the same again (`b2941bfb`).
+
+| slots | reading, tokens/s: off → on | writing, tokens/s: off → on |
+|---:|---|---|
+| 4 | 1,163.2 → 1,494.2 (+28.5%) | 42.8 → 42.9 |
+| 6 | 1,175.8 → 1,471.9 (+25.2%) | 42.9 → 43.1 |
+| 8 | 1,247.6 → 1,480.5 (+18.7%) | 45.4 → 43.0 |
+| 4, the prefetch server first | 1,207.0 → 1,497.7 (+24.1%) | 42.8 → 43.4 |
+
+- **More than four slots buys nothing:** with the prefetch every setting reads 1,470-1,500 tokens/s. The default of 4 stays.
+- **Writing does not move,** in either order: the −8% of 4 October was the order or noise, not the prefetch.
+- The gain is smaller than 4 October's +42% at four slots, with a smaller cache (3.5 GiB against 4.5) and with one run each: whether the cache or the day makes the difference is not known. A run made while another night ran on the same GPU (the morning of 5 October) is left out: its four-slot server could not pin the experts and wrote 4.3 tokens/s.
+
+**On by default** since 6 October, as `--moe-prefetch N` (4; 2 to 8; 0 turns it off), in place of the three environment variables. The engine asks llama.cpp for the slots only where some experts are kept in RAM and the model is read into memory, on one CUDA GPU (`fit::prefetch_slots`), so a mapped file no longer prints its `off` line. llama.cpp calls `ggml_backend_sched_set_moe_prefetch` on every scheduler it makes for such a context; the MTP draft context gets none.
+- **An `auto` cache leaves the slots their room.** Without that, four slots never turned on beside an `auto` cache: on 4 October two and three did (512 and 768 MiB) and four (1 GiB) found too little left beside the twentieth of the card the patch keeps free, hence the fixed caches of the tables above. `fit::plan_moe_cache` now takes the slots' VRAM, four times the largest expert tensor (`MoeLayout::largest_expert_tensor_bytes`, rounded up to a MiB), out of the room before sizing the cache, where the experts it copies from will be pinned (`MoePrefetch::slots_for`). The order it tries: the larger micro-batch and the slots; the larger micro-batch alone; the caller's micro-batch alone. The micro-batch comes first because it doubles the reading (963.8 against 451.5) and the slots add a quarter to it, and a size `--moe-cache` asked for, or the cache's 512 MiB minimum, comes before either. Where nothing could be kept the slots are still asked for, and llama.cpp makes them at the first long prompt if there is room then.
+
+**Measured** on 6 October at the defaults (`--moe-cache auto`, micro-batch 2048, same PC, model and prompt), with `bench/prefetch_check.sh` in both orders, nothing else on the GPU. All eight answers the same (`b2941bfb`, as on 4 and 5 October); the prefetch turned on beside the `auto` cache by itself (`on, 4 slots of 256.2 MiB`).
+
+| order | `--moe-prefetch` | expert cache | reading, tokens/s | writing, tokens/s |
+|---|---:|---:|---:|---:|
+| off first | 0 | 6.50 GiB | 942.9 | 52.4 |
+| | 4 | 5.50 GiB | 1,407.3 | 54.9 |
+| on first | 4 | 5.50 GiB | 1,338.6 | 53.6 |
+| | 0 | 6.50 GiB | 992.2 | 54.2 |
+
+- **Reading 42% faster:** 967.6 → 1,373.0 tokens/s on average, +49% and +35% in the two orders. The default stays at four slots.
+- **Writing does not move.** In both orders the second server wrote faster, by 2.5 and 0.6 tokens/s; taking that order out leaves +0.9 tokens/s to the prefetch, which is noise. The cache's 1 GiB less does not show because on this model the writing follows the cache's size only further down: 52.8 tokens/s at 5.25 GiB and 51.6 at 6.75 on 4 October, 48.9-50.3 at 4.5 GiB, 42.8-45.4 at 3.5.
+- **At this micro-batch the reading is now as fast as the bus.** Every micro-batch of 512 tokens or more copies all 33.02 GiB of experts (nearly every expert is used), 1.48 s at 24 GB/s whatever its size, and with the prefetch a 2048-token micro-batch takes 1.46-1.53 s: the computing is hidden under the copy, and 2048 tokens in 1.48 s is 1,385 tokens/s. What is left for reading:
+  - a larger micro-batch, which spreads the same copy over more tokens (4096: 1,494-1,743 tokens/s with the prefetch), but whose compute buffer comes out of the cache, 1.5 GiB at 4096, which takes the cache below the 4.5 GiB where the writing falls;
+  - fewer bytes copied, by reading from VRAM the experts the cache already holds (a 5.5 GiB cache holds a sixth of them);
+  - lending the cache's VRAM to the reading only while a prompt is read (Strata §3.5), which would allow both without costing the writing.
+
+**Phase 6b, written** (patch `0004`, 6 October): the second of those, the first step of the reading road. The experts the expert cache holds are copied into the slots from its banks in VRAM, the rest over the bus.
+- The cache answers through a callback, `ggml_backend_sched_set_moe_prefetch_lookup`, from its LRU: the slot of a (layer, expert) is the same in the banks of all of the layer's projections.
+- A slot is filled in runs, device to device for the experts the cache holds and over the bus for the others, consecutive experts merged where they are consecutive at both ends: about 170 copies per expert tensor with a sixth of the experts cached, against one before.
+- While a graph of 512 tokens or more runs the cache changes nothing: it serves batches of up to 32 tokens.
+- Expected: with a sixth of the bytes off the bus, a 2048-token micro-batch carries 1.23 s of copying instead of 1.48, about 1,650 tokens/s instead of 1,400, if the computing stays hidden under it. The gain grows with the cache.
+
+**Measured** on 6 October, the first version, with every copy on the copy stream (`SETTINGS="4:bus 4"`, then `"4 4:bus"`; `4:bus` sets `LLAMA_MOE_PREFETCH_FROM_CACHE=0`, everything over the bus as before):
+
+| order | setting | expert cache | reading, tokens/s | writing, tokens/s |
+|---|---|---:|---:|---:|
+| bus first | `4:bus` | 6.00 GiB | 1,421.1 | 56.4 |
+| | `4`, 18% from VRAM | 6.00 GiB | 1,062.2 | 56.4 |
+| VRAM first | `4`, 18% from VRAM | 6.00 GiB | 1,060.4 | 55.7 |
+| | `4:bus` | 6.00 GiB | 1,417.1 | 56.4 |
+
+- **Correct, and slower.** All the answers the same (`b2941bfb`), 18% of a micro-batch's bytes taken from VRAM as expected, and reading 25% slower: 1.93 s per micro-batch against 1.44.
+- The likely reason: a slot filled by one copy over the bus took about 170, a micro-batch about 25,000, and the device-to-device copies sat on the copy stream between those over the bus. 0.49 s lost where 0.27 s were to be saved is about 30 µs per copy, far more than a copy over the bus costs on its own; a copy within the GPU, waiting its turn among the computing stream's kernels or for the copy engine, holds up every copy over the bus queued behind it.
+- **Second version:** the copies from VRAM go on the GPU's own stream, queued once the slot's previous reader is: the stream's order puts them after that reader and after the cache's own copies into its banks, so the event the first version recorded at the start of each graph goes. The copy stream carries only the copies over the bus, about 80 per tensor. At 2048 tokens the GPU's stream has the time: its computing takes about 0.6 s of the 1.44.
+- **To measure** the same way. If the copies over the bus, split into runs, still cost more than the bytes they save, phase 6b goes, and the reading road's next step is the larger micro-batch.
 
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
 - Phase 3 extends PR #29887's design. Discuss it with its author on that PR, with phase 1's numbers in hand.
+- 6 October, on reddit.com: a comment under the Strata author's post about Qwen3.8-Flash-Next gave these figures and asked what to try next; that subreddit's karma threshold kept a post of our own out. The post itself went up on another subreddit, where a reply suggested drafting only from the experts already in VRAM, or with a small dense model, and asked whether prompt processing waits on the CPU or on transfers. On transfers: the CPU computes nothing while a prompt is read, and at the default micro-batch the time is the copy's (phase 6, "Measured" of 6 October). As for drafting, a draft is cheap with the MTP head; it is the check that pays for the misses, so a cheaper draft does not change it.
+- 6 October, on github.com: the maintainer posted this plan's measurements on llama.cpp's PR #29887 (open, by am17an): decode from 22.4 to 49.4 tokens/s with the cache and 58.1 with the experts pinned, prompt processing with every expert in RAM and a larger `-ub`, the cost of llama.cpp's MTP on top of the cache, and phases 3 and 6. Its description already notes that batches over 32 tokens bypass the cache.
 - llama.cpp's rules apply to anything posted there (`CONTRIBUTING.md`, `AGENTS.md`):
   - code written with AI help must be disclosed, and the person submitting must be able to explain every line;
   - issues, PR descriptions and replies must be written by a person;
@@ -159,5 +231,5 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 1. ~~A q8_0 KV cache with `--n-ubatch 2048`~~ Measured: little to gain on this model. Only one layer in four has attention, so its KV cache is about 1 GiB at a 40,960-token context and `--fit` already charges it that way; q8_0 gave the expert cache 0.25 GiB more (7.00 GiB at 2,048), for 55.8 tokens/s writing and 935.7 reading. At 4,096, 53.2 and 1,195.1. `--n-ubatch 2048` without it stays the balance: about 55 writing, about 960 reading.
 2. llama.cpp's MTP with the experts pinned (llama-server, `--load-mode none`): a check of three tokens copies more experts, which cost 2.5 steps at 9 GB/s and costs far less at 24. If drafting pays now, loading the MTP head from its own file in EuLLM is a smaller job than phase 3.
 3. ~~`--no-mmap` on by itself with `--moe-cache`~~ Done: a load with a cache reads the model into memory when the RAM can spare the experts (`--mmap` to keep the mapping) and reads prompts 2,048 tokens at a time unless `--n-ubatch` says otherwise.
-4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (`LLAMA_MOE_PREFETCH=1`, patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots next.
+4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots read no faster than four (5 October). On by default since 6 October (`--moe-prefetch`), with `--fit` keeping the slots' VRAM out of an `auto` cache: at the default micro-batch 42% faster (968 → 1,373 tokens/s) with the writing unchanged. Reading is now bounded by PCIe 4.0 at that micro-batch; what is left for it is in phase 6 ("Measured" of 6 October). Phase 6b, the experts the cache holds copied from VRAM (patch `0004`), is written and next to measure.
 5. The GPU's busy time per step, to split the 13.5-14 ms before the routers into computing and waiting: phase 4 if the waiting is large.

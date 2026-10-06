@@ -285,6 +285,25 @@ cases, thresholds fitted on 160, every number below on the other 162.
   contexts stopped, the embeddings stop two and a half times as many
   sufficient ones.
 
+### RAG gate, Italian legal set — RTX 5070 Ti, Jev-Style 0.8B
+
+5 October 2026, the same 322 cases, the 0.8B as the decision model
+(`RAG_DECISION=jev-style-0.8b-decision-v3-gguf-q4_k_m tools/gpu_night.sh`
+with `STEPS=rag`): the candidate where the 2B is too slow, on a CPU or a
+smaller board.
+
+| Method | AUROC | Within a question | Own decision: stopped insufficient / sufficient | Fitted threshold: stopped insufficient / sufficient | ECE | p50 |
+|---|---|---|---|---|---|---|
+| Embeddings, best similarity | 0.788 | 0.901 | — | 81.5% / 39.5% | — | 6 ms |
+| Reflex, choice among three | 0.743 | 0.864 | 65.4% / 37.0% | 72.8% / 40.7% | 0.119 | 67 ms |
+| Reflex, yes/no | 0.728 | 0.802 | 65.4% / 29.6% | 61.7% / 29.6% | 0.125 | 64 ms |
+
+- **The 0.8B is no gate here:** below the embeddings on every measure, at
+  more than ten times their time, and only a third faster than the 2B
+  (64-67 ms against 93-96). Where the 2B is too slow the fallback is the embeddings' own
+  similarity, not a smaller Reflex model. The gate worth having on such
+  hardware is one trained for it (MVP 4).
+
 ## MVP 2 — adapters, not a runtime  [✅ done]
 
 - [✅ done] **MCP through jev-style's server.** jev-style (Apache-2.0)
@@ -337,7 +356,14 @@ cases, thresholds fitted on 160, every number below on the other 162.
   models (V5) did not run: at the 20,480-token context the check gave them,
   qwen3-4b and qwen3-8b do not fit together on 16 GB, so loading one
   unloaded the other before the embedder came in. The check now picks the
-  largest context at which the two sit side by side; to run again.
+  largest context at which the two sit side by side. On 5 October it ran
+  three times, 7 of 7 each time: at the largest context the two share
+  (16,384, then 18,432) the 0.6B embedder still fit beside both, so nothing
+  was unloaded, and the eviction half of V5 is still unseen. At 20,480 the
+  two no longer fit together: with these models on 16 GB there may be no
+  context at which the pair fits and the embedder does not. A larger
+  embedder, which cannot fit beside the pair at any context, is the next
+  way to make it happen.
 - **Large-VRAM testing on EuroHPC**, where two big models fit side by side:
   - **LUMI-G** — AMD MI250X, 64 GB per GCD, eight GCDs per node. The
     development allocation EHPC-DEV-2026D09-278 funds exactly this kind of
@@ -395,7 +421,16 @@ cases, thresholds fitted on 160, every number below on the other 162.
     there to watch. The soak now takes the largest context at which the
     warm-up keeps both models beside the embedder, keeps the VRAM series
     and the server's count of models unloaded, and runs alone with
-    `CHECKS=4`. To run again.
+    `CHECKS=4`.
+  - **Run again on 5 October, the soak passes:** an hour at concurrency 8,
+    `--ctx-size 8192`, 24,089 requests (4,820 `/api/chat`, 4,816
+    `/v1/chat/completions`, 4,818 through `auto`, 4,817 `/v1/systemone`,
+    4,818 `/api/embed`), none failed, no out-of-memory and no `GGML_ASSERT`
+    in the log, every audit line parsed and counted, and the VRAM between
+    12,855 and 13,076 MiB for the whole hour (717 samples), with no model
+    unloaded. A soak that morning failed with 283,668 refused connections: a
+    second GPU night started on the same machine had stopped its server.
+    `tools/gpu_night.sh` now runs one night at a time.
 
 ## MVP 4 — decision models trained on your decisions  [🔧 now]
 

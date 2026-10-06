@@ -15,8 +15,11 @@ the rulings are spread over them; with ``--url`` the servers are already
 running.
 
 Resumable and safe to chain: a ruling already carded, or refused, is not
-asked again, and ``--stop-after`` stops taking new rulings in time for a
-2-hour link to end on its own. Refusals go to ``<out>.rejects.jsonl`` with
+asked again -- in this output or in any sibling (``schede*.jsonl`` beside
+it), which is how two chains share one list from opposite ends: each
+re-reads the other's files every five minutes and skips what it did --
+and ``--stop-after`` stops taking new rulings in time for a 2-hour link
+to end on its own. Refusals go to ``<out>.rejects.jsonl`` with
 their reason and no text.
 
 Every 100 cards it prints throughput (cards/min, prompt and generated
@@ -41,13 +44,22 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.caselaw import attach_meta, load_openga, load_rulings, ruling_view  # noqa: E402
-from eullm_forge.caselaw.schede import CardRejected, messages, parse_card  # noqa: E402
+from eullm_forge.caselaw.schede import (  # noqa: E402
+    CHECKS_VERSION,
+    CardRejected,
+    messages,
+    parse_card,
+)
 
 
 def ask(url: str, msgs: list[dict], max_tokens: int, temperature: float,
         timeout: float = 900.0) -> dict:
     body = {"messages": msgs, "temperature": temperature, "max_tokens": max_tokens,
-            "response_format": {"type": "json_object"}}
+            "response_format": {"type": "json_object"},
+            # A thinking model (Qwen3.6-27B, the development set's question
+            # writer) reasons before answering by default: all 1,300 of its
+            # first replies were refused. Templates without the switch ignore it.
+            "chat_template_kwargs": {"enable_thinking": False}}
     req = urllib.request.Request(url.rstrip("/") + "/v1/chat/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -55,14 +67,29 @@ def ask(url: str, msgs: list[dict], max_tokens: int, temperature: float,
         return json.loads(r.read())
 
 
+def siblings(out: Path) -> list[Path]:
+    """This output and every other of the same family beside it, rejects included.
+
+    ``schede.jsonl`` -> ``schede*.jsonl``: a second chain writing
+    ``schede-b.jsonl`` from the other end of the list is one of the family.
+    """
+    stem = out.name.split(".")[0].split("-")[0]
+    return sorted(out.parent.glob(f"{stem}*.jsonl")) + [out]
+
+
 def done_ids(*paths: Path) -> set[str]:
+    """Ids carded, or refused under the current checks (older refusals are asked again)."""
     out: set[str] = set()
     for p in paths:
         if p.is_file():
             with p.open(encoding="utf-8") as f:
                 for line in f:
-                    if line.strip():
-                        out.add(json.loads(line)["id"])
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if "reason" in row and row.get("v", 1) < CHECKS_VERSION:
+                        continue
+                    out.add(row["id"])
     return out
 
 
@@ -82,7 +109,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--parallel", type=int, default=8, help="requests in flight per server")
     ap.add_argument("--ctx", type=int, default=16384, help="context per request (tokens)")
     ap.add_argument("--max-chars", type=int, default=24000, help="ruling text shown (chars)")
-    ap.add_argument("--max-tokens", type=int, default=1500, help="card length limit (tokens)")
+    # 1500 cut about 3% of the cards short of their closing brace (bad_json)
+    ap.add_argument("--max-tokens", type=int, default=2500, help="card length limit (tokens)")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--teacher", default="", help="name recorded in every card")
     ap.add_argument("--limit", type=int, default=0, help="card at most this many (0: all)")
@@ -94,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
 
     wanted = [line.strip() for line in args.ids.open(encoding="utf-8") if line.strip()]
     rejects_path = args.out.with_name(args.out.name.replace(".jsonl", "") + ".rejects.jsonl")
-    skip = done_ids(args.out, rejects_path)
+    skip = done_ids(*siblings(args.out), rejects_path)
     todo_ids = [i for i in wanted if i not in skip]
     if args.limit:
         todo_ids = todo_ids[:args.limit]
@@ -140,9 +168,15 @@ def main(argv: list[str] | None = None) -> int:
             except (urllib.error.URLError, OSError, ValueError) as e:
                 return r, None, CardRejected("request", type(e).__name__), {}
             usage = reply.get("usage") or {}
+            choice = (reply.get("choices") or [{}])[0]
+            content = (choice.get("message") or {}).get("content") or ""
             try:
-                card = parse_card(reply["choices"][0]["message"]["content"])
+                card = parse_card(content)
             except CardRejected as e:
+                if e.reason in ("no_json", "bad_json"):
+                    # what came back instead, so the cause is in the rejects file and not
+                    # a guess: its start and why generation stopped
+                    e.head, e.finish = content[:200], choice.get("finish_reason")
                 return r, None, e, usage
             return r, card, None, usage
 
@@ -154,7 +188,10 @@ def main(argv: list[str] | None = None) -> int:
                     stats["rejected"] += 1
                     stats["why:" + err.reason] += 1
                     if err.reason != "request":     # a failed request is asked again next run
-                        rej.write(json.dumps({"id": r.id, "reason": err.reason}) + "\n")
+                        row = {"id": r.id, "reason": err.reason, "v": CHECKS_VERSION}
+                        if getattr(err, "head", None) is not None:
+                            row.update(head=err.head, finish=err.finish)
+                        rej.write(json.dumps(row, ensure_ascii=False) + "\n")
                         rej.flush()
                     return
                 stats["cards"] += 1
@@ -176,13 +213,20 @@ def main(argv: list[str] | None = None) -> int:
             pending = set()
             it = iter(enumerate(todo))
             stopped = False
+            others, refreshed = set(), time.monotonic()
             while True:
+                if time.monotonic() - refreshed > 300:      # what a sibling chain did since
+                    others = done_ids(*[p for p in siblings(args.out)
+                                        if p not in (args.out, rejects_path)])
+                    refreshed = time.monotonic()
                 while not stopped and len(pending) < in_flight:
                     if args.stop_after and time.monotonic() - t0 > args.stop_after:
                         stopped = True
                         print("[schede] time is up: finishing what is in flight", flush=True)
                         break
                     nxt = next(it, None)
+                    while nxt is not None and nxt[1].id in others:
+                        nxt = next(it, None)
                     if nxt is None:
                         stopped = True
                         break

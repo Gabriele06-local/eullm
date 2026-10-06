@@ -19,8 +19,12 @@ export LC_ALL=C
 BIN=$1
 MODEL=$2
 shift 2
+HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=${PORT:-11510}
-SPEED_CHECK=${SPEED_CHECK:-$HOME/work/speed_check.py}
+# The copy beside this script, as bench/mtp_test_d.sh and
+# bench/prefetch_check.sh use: a default of ~/work/speed_check.py, an old
+# copy's place, stopped a comparison halfway on 6 October.
+SPEED_CHECK=${SPEED_CHECK:-$HERE/speed_check.py}
 OUT=${OUT:-$HOME/work/mtp-sweep}
 SETTINGS=${MTP_SETTINGS:-"0 1 2 3 3:0.5 4:0.5 6:0.5"}
 TEMPERATURE=${TEMPERATURE:-0}
@@ -38,14 +42,17 @@ trap '[[ -n $pid ]] && kill "$pid" 2>/dev/null' EXIT
 trap 'exit 130' INT TERM
 
 mkdir -p "$OUT"
-speed() { # a speed_check.py run: "tokens/s kept drafted"; extra arguments go to it
+speed() { # a speed_check.py run: "tokens/s kept drafted answer"; extra arguments go to it
     python3 "$SPEED_CHECK" --url "http://127.0.0.1:$PORT/v1" --model "$MODEL" \
         --prompt-tokens 1000 --temperature "$TEMPERATURE" "$@" |
-        awk '/writes answers/ {w = $3} /drafts kept/ {k = substr($4, 2); d = substr($6, 1, length($6) - 1)}
-             END {print w, k + 0, d + 0}'
+        awk '/writes answers/ {w = $3} /answer text/ {h = $3}
+             /drafts kept/ {k = substr($4, 2); d = substr($6, 1, length($6) - 1)}
+             END {print w, k + 0, d + 0, h}'
 }
 
-printf '%-16s %12s %12s %12s\n' setting story_tok/s code_tok/s drafts_kept
+# The last column is the two answers' text, hashed: two servers, or two
+# settings, wrote the same answers when it is the same.
+printf '%-16s %12s %12s %12s  %s\n' setting story_tok/s code_tok/s drafts_kept answers
 for setting in $SETTINGS; do
     n=${setting%%:*}
     p=0
@@ -54,7 +61,8 @@ for setting in $SETTINGS; do
     "$BIN" serve --port "$PORT" --default-model "$MODEL" --mtp "$n" --mtp-p-min "$p" "$@" \
         >"$log" 2>&1 &
     pid=$!
-    for _ in $(seq 1 120); do
+    # An MoE with --moe-cache reads 20-35 GB of experts into memory first.
+    for _ in $(seq 1 600); do
         curl -sf "http://127.0.0.1:$PORT/api/version" >/dev/null && break
         kill -0 "$pid" 2>/dev/null || break
         sleep 1
@@ -64,8 +72,10 @@ for setting in $SETTINGS; do
         tail -n 15 "$log" >&2
         exit 1
     fi
-    read -r story story_kept story_drafted <<<"$(speed)"
-    read -r code code_kept code_drafted <<<"$(speed --write-prompt "$CODE")"
+    read -r story story_kept story_drafted story_text \
+        <<<"$(speed --answer-file "$OUT/answer-mtp$n-p$p-story.txt")"
+    read -r code code_kept code_drafted code_text \
+        <<<"$(speed --write-prompt "$CODE" --answer-file "$OUT/answer-mtp$n-p$p-code.txt")"
     kill "$pid"
     wait "$pid" 2>/dev/null
     pid=
@@ -73,5 +83,6 @@ for setting in $SETTINGS; do
         'BEGIN {if (d) printf "%.0f%%", 100 * k / d; else print "-"}')
     label="--mtp $n"
     [[ $p != 0 ]] && label="$label p$p"
-    printf '%-16s %12s %12s %12s\n' "$label" "${story:-?}" "${code:-?}" "$kept"
+    printf '%-16s %12s %12s %12s  %s\n' "$label" "${story:-?}" "${code:-?}" "$kept" \
+        "${story_text:-?}/${code_text:-?}"
 done

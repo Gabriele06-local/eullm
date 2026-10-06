@@ -37,6 +37,8 @@ The Linux x64, Windows x64, and Linux ARM64 (CUDA) binaries are validated end-to
 
 > **Intel Macs run on CPU, on purpose.** `eullm-macos-x64` ships without the Metal backend, because Metal produces wrong output on the GPUs those machines carry (Intel UHD 630, AMD Radeon Pro) — a known llama.cpp limitation ([#19563](https://github.com/ggml-org/llama.cpp/issues/19563), [#4004](https://github.com/ggml-org/llama.cpp/issues/4004)), which is why llama.cpp ships its own macOS x64 build the same way. Expect roughly 40-55 tok/s on a 0.6B Q4 model on 2018-era hardware. **If you are on a version before v0.6.39, upgrade**: those builds tried to use the GPU and returned garbage on Intel Macs.
 
+> **How long Intel Macs get a build.** `eullm-macos-x64` is built on GitHub's `macos-15-intel` runner, the last x86_64 macOS image GitHub offers, supported until August 2027; macOS 26 Tahoe is also the last macOS release for Intel Macs. The build stays at least until that runner goes, or until nobody downloads it: across the 29 releases from v0.6.80-rc11 to v0.7.20 it was downloaded 28 times, as often as the Apple Silicon build (31).
+
 If you run local LLMs on a Mac or an ARM64 board (Raspberry Pi 4/5, Orange Pi 5+, Rock 5B, Jetson, …), **your help validating these binaries is hugely appreciated**. See the open testing call:
 
 → **[Issue #140 — Help wanted: testing on macOS & ARM64 Linux](https://github.com/eullm/eullm/issues/140)** (`help wanted`, `testing`)

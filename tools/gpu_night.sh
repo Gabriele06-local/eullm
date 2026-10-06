@@ -5,7 +5,9 @@
 #   nohup tools/gpu_night.sh > ~/work/gpu-night.out 2>&1 &
 #
 # It keeps the machine from sleeping while it runs (systemd-inhibit), waits
-# until no bench/prefetch_check.sh is running, then runs each step of STEPS
+# until no bench/prefetch_check.sh is running, stops any server of $BIN or of
+# the pinned llama-server still up (it would share the GPU with every
+# measurement), then runs each step of STEPS
 # under a time limit of its own, and goes on whatever a step's outcome. A
 # step not started by STOP_AT (06:45) is left for another night. After every
 # step $NIGHT/summary.md is written again: each step's outcome and minutes,
@@ -13,11 +15,14 @@
 # step's whole output is in $NIGHT/<step>.log.
 #
 # Steps, in this order (STEPS="..." runs some of them):
-#   prefetch         phase 6 at each slot count of PREFETCH_SLOTS (4 6 8 4:r),
-#                    both servers of a run with the same expert cache
-#                    (PREFETCH_CACHE=3584 MiB, room for eight slots); N:r starts
-#                    the server with the prefetch first, to tell its effect on
-#                    writing from one of running second
+#   prefetch         bench/prefetch_check.sh once for each run of PREFETCH_RUNS
+#                    ("4:bus,4 4,4:bus": the --moe-prefetch of each server of a
+#                    run, in order, N:bus with every expert over the bus), with
+#                    --moe-cache PREFETCH_CACHE (auto) and the engine's own
+#                    micro-batch unless PREFETCH_UBATCH is set: what copying
+#                    the experts the cache holds from VRAM gains on reading
+#                    (phase 6b), in either order; "0,4 4,0" measures the
+#                    prefetch itself
 #   interleave       bench/interleave_check.py on qwen3-8b, --batch-size 2 (0.7-D)
 #   mtp-t08          bench/mtp_sweep.sh at TEMPERATURE=0.8 on Qwen3.5-9B-MTP (B6)
 #   llama-pin        llama-server and llama-quantize from the pinned llama.cpp
@@ -26,7 +31,8 @@
 #   residency        tools/residency_check.sh with BIG=qwen3-32b (V3, V5)
 #   auto             tools/auto_check.sh, the full run (V7-V9)
 #   soak             tools/auto_check.sh's hour of mixed traffic alone (V8)
-#   rag              the Italian RAG gate set, built and measured (MVP 1)
+#   rag              the Italian RAG gate set, built and measured (MVP 1) with
+#                    RAG_DECISION as the decision model (the 2B by default)
 #   docker-gpu       the CUDA image built and asked one question; skipped
 #                    without Docker's NVIDIA runtime or with port 11434 taken
 #
@@ -55,10 +61,12 @@ DECISION_SMALL=${DECISION_SMALL:-$STORE/jev-style-0.8b-decision-v3-gguf-q4_k_m/J
 DECISION_LARGE=${DECISION_LARGE:-$STORE/jev-style-2b-decision-v3-gguf-q4_k_m/Jev-Style-2B-Decision-v3-Q4_K_M.gguf}
 CORPUS=${CORPUS:-$HOME/work/corpus*/legislazione_*.chunks.jsonl}
 INTERLEAVE_MODEL=${INTERLEAVE_MODEL:-qwen3-8b}
+RAG_DECISION=${RAG_DECISION:-jev-style-2b-decision-v3-gguf-q4_k_m}
 PULLS=${PULLS-"qwen3-32b qwen3-14b qwen3-8b qwen3-4b qwen3-1.7b qwen3-0.6b"}
 STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residency auto rag docker-gpu"}
-PREFETCH_SLOTS=${PREFETCH_SLOTS:-"4 6 8 4:r"}
-PREFETCH_CACHE=${PREFETCH_CACHE:-3584}
+PREFETCH_RUNS=${PREFETCH_RUNS:-"4:bus,4 4,4:bus"}
+PREFETCH_CACHE=${PREFETCH_CACHE:-auto}
+PREFETCH_UBATCH=${PREFETCH_UBATCH:-}
 STOP_AT=${STOP_AT:-06:45}
 EVENING=${EVENING:-"$HOME/work/prefetch-check $HOME/work/prefetch-check-2048 $HOME/work/prefetch-check-slots3"}
 
@@ -94,13 +102,11 @@ step() {
     case $1 in
     prefetch)
         need "$FLASH"
-        local entry slots order label
-        for entry in $PREFETCH_SLOTS; do
-            slots=${entry%%:*} order="0 1" label=""
-            [[ $entry == *:r ]] && order="1 0" label=", the prefetch server first"
-            echo "== LLAMA_MOE_PREFETCH_SLOTS=$slots, --moe-cache $PREFETCH_CACHE$label"
-            ORDER=$order LLAMA_MOE_PREFETCH_SLOTS=$slots MOE_CACHE=$PREFETCH_CACHE N_UBATCH=4096 \
-                OUT=$NIGHT/prefetch-${entry/:/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+        local run
+        for run in $PREFETCH_RUNS; do
+            echo "== --moe-prefetch ${run//,/ then }, --moe-cache $PREFETCH_CACHE${PREFETCH_UBATCH:+, --n-ubatch $PREFETCH_UBATCH}"
+            SETTINGS=${run//,/ } MOE_CACHE=$PREFETCH_CACHE N_UBATCH=$PREFETCH_UBATCH \
+                OUT=$NIGHT/prefetch-${run//[,:]/-} "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
             echo
         done
         ;;
@@ -151,12 +157,12 @@ step() {
         python3 "$REPO/bench/reflexbench/rg_openbook.py" --by-heading --limit 1000 \
             --norms $CORPUS --out "$NIGHT/rag-legal-it.jsonl" || return 1
         EULLM_AUDIT_DIR=$NIGHT/rag-audit serve_on 11540 "$NIGHT/rag-serve.log" \
-            "$BIN" serve --port 11540 --decision-model jev-style-2b-decision-v3-gguf-q4_k_m \
+            "$BIN" serve --port 11540 --decision-model "$RAG_DECISION" \
             --embedding-model qwen3-embedding-0.6b-gguf-q8_0 || return 1
         python3 "$REPO/bench/reflexbench/ragbench.py" --url http://127.0.0.1:11540 --sets '' \
             --data "$NIGHT/rag-legal-it.jsonl" --embed-model qwen3-embedding-0.6b-gguf-q8_0 \
             --embed-query-prefix 'Instruct: Given a question, retrieve passages that answer it\nQuery:' \
-            --out "$NIGHT/rag-it-2b.json" --details "$NIGHT/rag-it-2b.jsonl"
+            --out "$NIGHT/rag-it-${RAG_DECISION%%-gguf*}.json" --details "$NIGHT/rag-it-${RAG_DECISION%%-gguf*}.jsonl"
         ;;
     docker-gpu)
         command -v docker >/dev/null || { echo "SKIPPED: no docker"; return 3; }
@@ -206,6 +212,26 @@ if [[ -z ${GPU_NIGHT_INHIBITED:-} ]] && command -v systemd-inhibit >/dev/null &&
 fi
 
 note() { echo "$(date '+%H:%M:%S') $*"; }
+
+# One night at a time: two would share the GPU, their checks would use the
+# same ports, and each would stop the other's servers after its steps.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/eullm-gpu-night.lock"
+flock -n 9 || { echo "another tools/gpu_night.sh is running: one at a time" >&2; exit 1; }
+
+# The servers a step leaves behind (a killed script cannot always stop its
+# own), and any started by hand: on 5 October one held 11.7 GB of VRAM when
+# the night began, and no phase 6 server could start beside it. Waits until
+# they are gone, a minute at most: freeing tens of GB of pinned memory takes
+# a while, and the next step sizes its models against the VRAM left.
+stop_servers() {
+    pkill -f -- "$BIN serve" 2>/dev/null
+    pkill -f -- "$LLAMA_PIN/bin/llama-server" 2>/dev/null
+    local _
+    for _ in $(seq 1 60); do
+        pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null || return 0
+        sleep 1
+    done
+}
 
 [[ -x $BIN ]] || { echo "no EuLLM binary at $BIN (set BIN)" >&2; exit 1; }
 mkdir -p "$NIGHT"
@@ -277,6 +303,10 @@ write_summary() {
         echo "$("$BIN" --version 2>/dev/null), branch $(git -C "$REPO" rev-parse --abbrev-ref HEAD) at $(git -C "$REPO" rev-parse --short HEAD)"
         nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null
         echo
+        if [[ -s $NIGHT/gpu-apps-at-start.txt ]]; then
+            echo "**Other programs held VRAM when the run began, and shared the GPU with every step (listed below).**"
+            echo
+        fi
         echo "| step | outcome | minutes |"
         echo "|---|---|---:|"
         cat "$NIGHT/steps.tsv" 2>/dev/null | awk -F'\t' '{printf "| %s | %s | %s |\n", $1, $2, $3}'
@@ -318,12 +348,10 @@ run() {
         return
     fi
     note "$name: at most $limit minutes"
-    timeout --kill-after=120 "${limit}m" bash "$SELF" "step:$name" >"$NIGHT/$name.log" 2>&1
+    # 9>&-: what a step starts must not hold the lock after the night ends.
+    timeout --kill-after=120 "${limit}m" bash "$SELF" "step:$name" >"$NIGHT/$name.log" 2>&1 9>&-
     rc=$?
-    # A server a step left behind (a killed script cannot always stop its own).
-    pkill -f -- "$BIN serve" 2>/dev/null
-    pkill -f -- "$LLAMA_PIN/bin/llama-server" 2>/dev/null
-    sleep 5
+    stop_servers
     case $rc in
     0) outcome=OK ;;
     3) outcome=SKIPPED ;;
@@ -361,9 +389,14 @@ while ((quiet < 2)); do
     ((quiet < 2)) && sleep 60
 done
 
+if pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null; then
+    note "stopping the servers of $BIN and llama-server still running: they would share the GPU"
+    stop_servers
+fi
+
 if command -v nvidia-smi >/dev/null; then
     nvidia-smi --query-gpu=timestamp,temperature.gpu,clocks.sm,power.draw,utilization.gpu,memory.used \
-        --format=csv,noheader,nounits -l 60 >"$NIGHT/gpu.csv" 2>/dev/null &
+        --format=csv,noheader,nounits -l 60 >"$NIGHT/gpu.csv" 2>/dev/null 9>&- &
     sampler=$!
     trap 'kill $sampler 2>/dev/null' EXIT
 fi
@@ -403,7 +436,7 @@ in_steps() { # any of the steps named is in STEPS
         done
     fi
     echo done >"$NIGHT/pulls.done"
-) >"$NIGHT/downloads.log" 2>&1 &
+) >"$NIGHT/downloads.log" 2>&1 9>&- &
 
 for s in $STEPS; do
     case $s in

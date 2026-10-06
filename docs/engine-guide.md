@@ -17,11 +17,11 @@ What you get on top of the Ollama-compatible API:
 
 | Capability | EULLM Engine |
 |---|---|
-| **Continuous batching** scheduler — single-pass parallel decode across all active slots, shared KV pool (no per-slot KV pre-allocation) | ✅ on by default |
-| **Quantized KV cache** — Q4_0, Q5_0, Q5_1, Q8_0 KV types for up to ~4× context on the same GPU | ✅ flag `--cache-type-k q4_0` |
-| **AI Act audit trail** — local-only JSONL of every request/response, never transmitted | ✅ on by default |
+| **Continuous batching** scheduler — single-pass parallel decode across all active slots, shared KV pool (no per-slot KV pre-allocation) | ✅ `--batch-size N` (1 by default) |
+| **Quantized KV cache** — Q4_0, Q5_0, Q5_1, Q8_0 KV types: keys at Q8_0 and values at Q4_0 hold about 2.5× the context of F16 on the same GPU | ✅ `--cache-type-k q8_0 --cache-type-v q4_0` |
+| **Audit trail** designed for the EU AI Act — local-only JSONL of every answer and decision (model, tokens, timing; never the text), never transmitted | ✅ on by default |
 | **Zero telemetry** — no analytics, no crash reports, no usage stats | ✅ enforced |
-| **Single binary** — Rust, no Go runtime, no Python runtime, no Docker | ✅ |
+| **Single binary** — Rust, no Go runtime, no Python runtime, no Docker needed | ✅ |
 | **EU-hosted model registry** (Forge/Hub) | 🚧 in development |
 
 [→ Engine scaling](benchmarks.md) · [→ Why EULLM](why-eullm.md) · [→ Changelog](../CHANGELOG.md)
@@ -104,14 +104,15 @@ curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '
 Leave `think` out and the reasoning comes back in the answer, tags included,
 so a UI can render it as a collapsible section.
 
-**`"think": true` returns the reasoning apart, as Ollama does.** On `/api/chat`
+**`"think": true` returns the reasoning apart, as Ollama does (new in v0.7.30).** On `/api/chat`
 the reasoning goes to `message.thinking` and `message.content` holds only the
 answer; on `/api/generate` it goes to `thinking`, beside `response`. Streamed,
 the reasoning arrives first, in lines whose `content` (or `response`) is empty,
 then the answer. The delimiters (`<think>`…`</think>`, Gemma 4's
 `<|channel>thought`…`<channel|>`) and the blank lines around them are dropped.
 An answer cut off by its token budget mid-thought has only `thinking`.
-`/v1/chat/completions` keeps the reasoning in the answer either way.
+`/v1/chat/completions` keeps the reasoning in the answer either way, except on a
+request with `tools`, where it comes back in `reasoning_content`.
 
 ```bash
 curl -s http://localhost:11434/api/chat -H 'Content-Type: application/json' -d '{
@@ -138,14 +139,22 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:11434/api/chat \
 Both endpoints behave the same way, Ollama-style `/api/chat` and OpenAI-style
 `/v1/chat/completions`.
 
+**A server with no room for one more request returns `503`, with
+`Retry-After`.** Each slot (`--batch-size`) keeps up to eight requests waiting
+behind the one it is answering; the next is refused at once with
+`503 Service Unavailable`, `Retry-After: 5` and the error as JSON, streamed or
+not, before any stream opens, as Ollama answers its own full queue. It used
+to be a `200` whose only line was the error when streaming, and a `500`
+without.
+
 ### `max_tokens`/`num_predict` and `seed`: two defaults that silently diverged from Ollama
 
 A community report on a text-based tool-calling client (Cline, via the
 Ollama-compatible `/api/chat`) described the client reliably freezing on
 long agentic conversations. Reproduced on real hardware with a scripted
 conversation that mimics Cline's own text-based MCP tool-call convention
-(eullm has no native `tools`/function-calling API, so any such client falls
-back to plain text for it):
+(`/api/chat` has no native `tools`, so a client using it falls back to plain
+text; `/v1/chat/completions` takes `tools` since v0.6.80):
 
 - With no `max_tokens`/`num_predict` in the request, eullm defaulted to
   **512** — a fixed cap that doesn't exist in Ollama itself, whose real
@@ -455,8 +464,9 @@ by the CPU, but reads its prompt on the GPU: for each pass over the prompt,
 llama.cpp copies the experts kept in RAM to the card and runs them there.
 A pass reads 512 tokens by default (`n_ubatch`, llama.cpp's own default), so
 a 33,000-token prompt is 65 passes, and 65 copies of every expert in RAM over
-PCIe. On Qwen3.8-Flash-Next IQ2_XS (68 GB, most of its experts in RAM) with
-an RTX 5070 Ti, that read the prompt at 256 tokens/s.
+PCIe. On Qwen3.8-Flash-Next IQ2_XS (125B parameters, 6B active per token, a
+68 GB file with most of its experts in RAM) with an RTX 5070 Ti, that read
+the prompt at 256 tokens/s.
 
 `--n-ubatch` sets how many tokens one pass reads. At 4096 the same prompt is
 9 passes:
@@ -510,8 +520,27 @@ now rather than all but the last layers', so it is slower, by 17% there:
 
 Combined with `--mtp` it was slower, not faster: on that model the head's
 drafts were kept 52% of the time, and each check of 3 tokens reads up to 3
-times the experts of a single step, most of them copied in. Keep `--mtp` for
-models that fit in VRAM.
+times the experts of a single step, most of them copied in. A head that is
+right more often gains, but little. On unsloth's Qwen3.6-35B-A3B-MTP
+(UD-Q4_K_M) with every expert in RAM, `--moe-cache auto` (8.5 GiB on the same
+card) and `--ctx-size 8192`, tokens per second writing a 256-token answer, at
+temperature 0 and at 0.8, the default:
+
+| Setting | A story | A piece of code | Drafts kept |
+| --- | ---: | ---: | ---: |
+| no drafts, temperature 0 | 122.9 | 98.4 | — |
+| `--mtp 1` | 132.0 (+7%) | 113.7 (+16%) | 82% |
+| `--mtp 2` | 127.1 (+3%) | 114.4 (+16%) | 69% |
+| no drafts, temperature 0.8 | 107.7 | 91.7 | — |
+| `--mtp 1` | 109.3 (+1%) | 99.9 (+9%) | 72% |
+| `--mtp 2` | 115.5 (+7%) | 110.9 (+21%) | 66% |
+
+A sixth to a fifth more on code with `--mtp 2`, and little on prose, where a
+dense model in VRAM gains 62% and 27% at temperature 0 (see `--mtp` below):
+each check still reads the experts of every token it checks. `--mtp 2` is the
+start here too: at temperature 0 one draft does as well, at 0.8 two do better.
+Two starts of the same server have differed by 8%, so the gains on prose are
+within the noise. `bench/mtp_sweep.sh` says whether it pays on your model.
 
 It needs one CUDA GPU: with more than one, or another backend, the load says
 why and runs without it. The cache is llama.cpp PR #29887, which this build
@@ -595,24 +624,50 @@ At exit the cache's totals print too. Both variables are read by the
 patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
 and may change or go once it is settled.
 
-**Copying the experts ahead while reading a prompt (experimental, off by
-default).** Reading a prompt copies each layer's experts to the card and
+**Copying the experts ahead while reading a prompt (`--moe-prefetch`, on
+by default).** Reading a prompt copies each layer's experts to the card and
 then computes them, one after the other, with the GPU idle during the copy.
-`LLAMA_MOE_PREFETCH=1` copies the next expert tensors on a second stream of
-the GPU while the current one computes, into four slots of VRAM the size of
-the largest expert tensor (1 GiB in all on the model above;
-`LLAMA_MOE_PREFETCH_SLOTS`, 2 to 8). On the reference PC it read a
-33,200-token prompt at 1,743 tokens/s instead of 1,228 (+42%), to the same
-answer token for token; two slots gained 10%, three 18%. It
-applies to batches of 512 tokens or more (`LLAMA_MOE_PREFETCH_MIN_TOKENS`)
-on one NVIDIA GPU (a CUDA build), with the model read into memory rather
-than mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM
-allows. The slots come out of the VRAM `--fit` leaves free, and only if a
-twentieth of the card, at least 512 MiB, stays free beside them; if not, it
-stays off and says how much it needed, and lowering `--moe-cache` by the
+The prefetch copies the next expert tensors on a second stream of the GPU
+while the current one computes, into four slots of VRAM the size of the
+largest expert tensor (1 GiB in all on the model above). On the reference
+PC, with `--moe-cache auto` and nothing else set, it read a 33,200-token
+prompt at 1,373 tokens/s instead of 968 (+42%, the mean of two runs in each
+order), to the same answer token for token, and wrote as fast with the
+cache 1 GiB smaller for the slots (54.3 tokens/s against 53.3). That is as
+fast as PCIe 4.0 brings
+the experts in: each 2048-token micro-batch copies all 33 GiB of them, 1.48 s
+at 24 GB/s, and took 1.46-1.53 s. With `--n-ubatch 4096` the same copy is
+spread over twice the tokens, and it read at up to 1,743 tokens/s, but the
+larger compute buffer takes 1.5 GiB more from the cache. Two slots gained
+10-15%, three 18%, and six or eight no more than four. `--moe-prefetch N`
+takes 2 to 8 slots, `--moe-prefetch 0` turns it off.
+
+With an expert cache, the experts it already holds are copied into the slots
+from its own VRAM, and only the others over the bus (18% of the bytes with
+the 6 GiB cache of the model above). One line on stderr says the share taken
+from VRAM; `LLAMA_MOE_PREFETCH_FROM_CACHE=0` copies everything over the bus,
+a diagnostic to compare the two, like the variables above. Whether this reads
+faster is still being measured (`docs/moe-offload-plan.md`, phase 6b).
+
+It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
+build), to experts kept in RAM with the model read into memory rather than
+mapped: `--no-mmap`, which `--moe-cache` already implies when the RAM allows.
+Elsewhere (every expert on the GPU, a mapped file, another backend, several
+GPUs) the flag changes nothing.
+
+With `--moe-cache`, `--fit` keeps the slots' VRAM out of the cache, which is
+that much smaller, unless that would cost the cache its minimum, the size
+`--moe-cache` asked for or the larger micro-batch; the startup line says
+what it kept (`and 1.00 GiB beside it for the slots of --moe-prefetch`). On
+the model above the writing follows the cache's size only below about 5 GiB
+(4.5 GiB: 49-50 tokens/s, 3.5 GiB: 43-45); a model whose writing slows down
+with the slots gets the room back with `--moe-prefetch 0`. Where nothing
+was kept for them, the slots are made at the first long prompt only if a
+twentieth of the card, at least 512 MiB, stays free beside them; if not, the
+prefetch stays off, says how much it needed, and a `--moe-cache` lower by the
 difference makes room. One line on stderr says it is on, with the slots'
-size, or why it is off. `bench/prefetch_check.sh` compares the answer and
-the speeds with and without it on any MoE (`docs/moe-offload-plan.md`,
+size, or why it is off. `bench/prefetch_check.sh` compares the answers, the
+speeds and the cache of each setting on any MoE (`docs/moe-offload-plan.md`,
 phase 6, has the measurements).
 
 ## Speculative decoding with the model's MTP head (`--mtp N`)
@@ -956,18 +1011,18 @@ Run sovereign LLMs locally with **real llama.cpp inference**, built-in audit tra
 Built on llama.cpp (MIT, EU-developed) with the standard set of quantized KV cache types (Q4_0, Q5_0, Q5_1, Q8_0) for ~2-4× context length on the same hardware. We also evaluated TurboQuant (Walsh-Hadamard / Lloyd-Max KV compression) end-to-end during v0.5.x but pulled it from the production build path — see [Research & Experiments](research.md) for the rationale and the archived numbers.
 
 ```bash
-# Run any GGUF model — local file or from the EU registry
+# Run any GGUF model — a local file or one from the catalog
 eullm run ./model.gguf                    # Local GGUF file
 eullm run ./model.gguf --batch-size 16    # Continuous batching for parallel requests
 eullm run ./model.gguf --web              # Transparent web browsing (URLs in messages auto-fetched)
-eullm run legal-it-4b                     # From EU registry (coming soon)
+eullm run legal-it-4b                     # From the catalog (downloaded from Hugging Face)
 eullm run big-moe-model.gguf --cpu-moe --fit  # MoE: all experts on CPU RAM, rest on GPU
 eullm run big-moe-model.gguf --n-cpu-moe 12   # MoE: only first 12 layers' experts on CPU RAM
 eullm run ./model.gguf --rust-debug           # Diagnostics: NaN/Inf logit check (see below), off by default
 
 # CLI
 eullm list                                # Show local and available models
-eullm show legal-it-4b                    # Model details, metadata, compliance info
+eullm show legal-it-4b                    # Model details and metadata
 eullm serve                               # Start API server without loading a model
 eullm serve --daemon                      # Same, detached in the background (PID + log file)
 eullm unload                              # Free the loaded model's VRAM without restarting the server
@@ -981,18 +1036,18 @@ eullm unload                              # Free the loaded model's VRAM without
 Key features:
 - **Real inference** powered by llama.cpp (not a mock, not a proxy)
 - **Multimodal (new in v0.6.0)** — vision (image OCR + scene description) and experimental audio understanding via llama.cpp `mtmd`, served through the same Ollama-compatible `/api/chat` and the embedded Chat UI. See [Multimodal](#multimodal-vision--audio-new-in-v060)
-- **Continuous batching** — multiple requests decoded in parallel, near-linear throughput scaling
+- **Continuous batching** — multiple requests decoded in parallel: 259 tok/s across 16 requests on one RTX 5070 Ti, 2.75× a single request ([benchmarks](benchmarks.md))
 - **Token streaming** — NDJSON on Ollama endpoints, SSE on OpenAI endpoint (`"stream": true`)
-- **GPU acceleration** — NVIDIA CUDA *(tested)*, Apple Metal *(community-validated)*, AMD ROCm / Vulkan *(builds available, [community testing wanted](platforms.md#validation-and-testers))*
+- **GPU acceleration** — NVIDIA CUDA, Apple Metal, AMD ROCm and Vulkan; which build was tested on what, and by whom, is in [platforms](platforms.md)
 - **Ollama-compatible API** — same endpoints, same port
 - **OpenAI-compatible API** — works with Open WebUI, LangChain, n8n, any standard client
 - **Transparent web browsing** (`--web`) — put a URL in any message and the engine fetches the page, strips HTML, selects relevant content, and injects it into the prompt before inference. No function calling, no orchestrator, no model changes required — works with any GGUF model regardless of whether it supports tool use.
-- **Built-in audit trail** for every inference (who, when, what — AI Act ready)
+- **Built-in audit trail** for every answer and decision: who, when, which model, how many tokens, never the text
 - **Quantized KV cache** — standard llama.cpp Q4_0/Q5_0/Q5_1/Q8_0 KV types reduce memory ~2-4× at some quality cost (`--cache-type-k q8_0 --cache-type-v q4_0`). Keep the **key** cache at q8_0. A 4-bit key cache combined with flash attention (on by default) produces incoherent output — not gracefully degraded text, actual word salad — reproduced on Metal, x86 CPU and ARM CPU during [#140](https://github.com/eullm/eullm/issues/140). The engine now raises the key cache to q8_0 for you and says so; if you genuinely need 4-bit keys, pass `--no-flash-attn` as well, which is the combination that works. We also tested the experimental TurboQuant approach (see [Research](research.md))
 - **Daemon mode** (`--daemon`) — detaches into the background with PID file + log file, freeing the terminal; `kill $(cat /tmp/eullm.pid)` stops it gracefully. See [Run it as a daemon](#run-it-as-a-daemon-background-service)
-- **CORS enabled** — Open WebUI and browser-based tools work out of the box
-- **Cross-platform binaries** — Linux x64 + Windows x64 *(tested)* · Linux ARM64 + macOS Apple Silicon/Metal *(community-validated)* · macOS x64 *(builds available, [community testing wanted](platforms.md#validation-and-testers))*
-- Model registry hosted on EU infrastructure (Germany, France, Finland)
+- **Browser access** — pages served from this machine can call the API out of the box; `EULLM_ALLOWED_ORIGINS` opens it to others (Open WebUI on another host)
+- **Cross-platform binaries** — Linux x64 and ARM64, Windows x64, macOS Apple Silicon and Intel: [platforms](platforms.md) lists every build and who tested it
+- An EU-hosted model registry is planned (the Hub is a prototype); models download from Hugging Face today
 - **No network telemetry** — no analytics, no crash reports, no usage stats; audit trail is written locally to `~/.eullm/audit/audit.jsonl` and never transmitted
 
 #### Multimodal: vision + audio (new in v0.6.0)
@@ -1206,7 +1261,7 @@ cd ../hub
 cargo build
 ```
 
-### Docker (recommended)
+### Docker
 
 Don't want to install Rust, Python, or CUDA on your system? Use Docker:
 
