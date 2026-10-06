@@ -28,13 +28,17 @@ every way a server may expect it: `"think": false` (EuLLM),
 `"reasoning_effort": "none"` (OpenAI style); a server ignores what it does
 not know.
 
-Every sampling parameter is sent, at EuLLM's defaults (Ollama's), because a
-server fills in what a request leaves out with its own, and those differ:
-llama-server applies no repeat penalty, EuLLM 1.1. At temperature 0 the two
-then wrote different answers to the same request (5 October, on
-Qwen3.6-35B-A3B), and the speeds of two different answers do not compare.
-The timed answer's text is printed hashed, so a comparison shows whether the
-servers wrote the same one. Standard library only.
+Every sampling parameter is sent, because a server fills in what a request
+leaves out with its own defaults, and those differ: llama-server applies no
+repeat penalty, EuLLM 1.1, Ollama's. At temperature 0 the two then wrote
+different answers to the same request (5 October, on Qwen3.6-35B-A3B), and
+the speeds of two different answers do not compare. The repeat penalty is
+off (1.0) rather than the same on both: llama-server counts the prompt's
+last tokens in the penalty's window and EuLLM only the answer's, so even an
+equal penalty picks different words at the start of an answer. Off, the
+answer at temperature 0 is the most likely token at every step, on any
+server. The timed answer's text is printed hashed, so a comparison shows
+whether the servers wrote the same one. Standard library only.
 """
 
 import argparse
@@ -110,8 +114,7 @@ def chat(base, model, content, max_tokens, args):
         "top_k": 40,
         "top_p": 0.9,
         "min_p": 0.0,
-        "repeat_penalty": 1.1,
-        "repeat_last_n": 64,
+        "repeat_penalty": 1.0,
         "stream": False,
         "think": False,
         "chat_template_kwargs": {"enable_thinking": False},

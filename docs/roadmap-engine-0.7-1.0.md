@@ -412,9 +412,13 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   ripetizione 1,1 di Ollama, `llama-server` senza. A temperatura 0 la
   penalità cambia i token scelti, di più nel codice, che si ripete per
   natura, e con le risposte cambiano gli esperti usati e quanti la cache ne
-  ha. Ora lo script manda ogni parametro di campionamento, ai valori di
-  EuLLM, e stampa l'impronta del testo scritto: il prossimo giro dice se i
-  testi coincidono e, se sì, quanto del divario resta al motore.
+  ha. Anche a parità di penalità le prime parole differirebbero:
+  `llama-server` mette gli ultimi token del prompt nella finestra della
+  penalità, EuLLM solo quelli della risposta. Ora lo script manda ogni
+  parametro di campionamento, con la penalità spenta (1,0), così a
+  temperatura 0 ogni server sceglie a ogni passo il token più probabile, e
+  stampa l'impronta del testo scritto: il prossimo giro dice se i testi
+  coincidono e, se sì, quanto del divario resta al motore.
 
   A temperatura 0.8, quella di default (EuLLM, `--moe-cache auto`, stessi
   flag):
