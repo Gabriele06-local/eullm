@@ -23,9 +23,11 @@ previous reader already is: the stream's order puts them after it, and
 after the cache's own copies into its banks for the steps before. A first
 version put them on the copy stream, between the copies over the bus: the
 answers were the same and 18% of the bytes came from VRAM, but reading a
-33,200-token prompt went from 1,419 to 1,061 tokens/s. The cache changes
-nothing while a graph of 512 tokens or more runs: it serves batches of up
-to 32 tokens.
+33,200-token prompt went from 1,419 to 1,061 tokens/s. This one read it
+at 1,509 tokens/s against 1,368 with everything over the bus (two runs in
+each order), to the same answer, with 17% of the bytes from VRAM. The cache
+changes nothing while a graph of 512 tokens or more runs: it serves batches
+of up to 32 tokens.
 
 LLAMA_MOE_PREFETCH_FROM_CACHE=0 copies everything over the bus, as before,
 to compare. One line on stderr says the share of a micro-batch's bytes
