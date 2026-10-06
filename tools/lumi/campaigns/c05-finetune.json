@@ -1,6 +1,8 @@
 {
   "campaign": "c05-finetune",
   "notes": [
+    "NOT FOR LUMI DEV-278: that allocation is declared inference-only to EuroHPC",
+    "(EHPC-AIF-2026PG01-1434), so this spec is not planned there; withdrawn 06-10-2026.",
     "The engine's own trainer (`eullm finetune`, llama.cpp's ggml-opt) measured like the rest of",
     "the runtime, on one MI250X GCD: software engineering and benchmarking of an engine feature,",
     "declared as such in the Final Report (docs/lumi/allocation-plan.md, 'Lines not to cross').",
