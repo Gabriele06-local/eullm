@@ -189,10 +189,23 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 
 **Phase 6b, written** (patch `0004`, 6 October): the second of those, the first step of the reading road. The experts the expert cache holds are copied into the slots from its banks in VRAM, the rest over the bus.
 - The cache answers through a callback, `ggml_backend_sched_set_moe_prefetch_lookup`, from its LRU: the slot of a (layer, expert) is the same in the banks of all of the layer's projections.
-- A slot is filled in runs, device to device for the experts the cache holds and over the bus for the others, consecutive experts merged where they are consecutive at both ends: about 175 copies per expert tensor with a sixth of the experts cached, against one before, queued well ahead of the GPU.
-- The copy stream first waits for an event recorded on the GPU's stream as the graph starts, which comes after the cache's own copies into its banks for the steps before. While a graph of 512 tokens or more runs the cache changes nothing: it serves batches of up to 32 tokens.
-- Expected: a 5.5 GiB cache holds a sixth of the 33 GiB, so a 2048-token micro-batch carries 1.23 s of copying over the bus instead of 1.48, about 1,650 tokens/s instead of 1,373, if the computing stays hidden under it. The gain grows with the cache.
-- **To measure:** `SETTINGS="4:bus 4" bench/prefetch_check.sh` and the reverse order (`STEPS=prefetch tools/gpu_night.sh` runs both). `4:bus` sets `LLAMA_MOE_PREFETCH_FROM_CACHE=0`, which copies everything over the bus as before; the answers must be the same, and llama.cpp says on stderr the share of a micro-batch's bytes it took from VRAM.
+- A slot is filled in runs, device to device for the experts the cache holds and over the bus for the others, consecutive experts merged where they are consecutive at both ends: about 170 copies per expert tensor with a sixth of the experts cached, against one before.
+- While a graph of 512 tokens or more runs the cache changes nothing: it serves batches of up to 32 tokens.
+- Expected: with a sixth of the bytes off the bus, a 2048-token micro-batch carries 1.23 s of copying instead of 1.48, about 1,650 tokens/s instead of 1,400, if the computing stays hidden under it. The gain grows with the cache.
+
+**Measured** on 6 October, the first version, with every copy on the copy stream (`SETTINGS="4:bus 4"`, then `"4 4:bus"`; `4:bus` sets `LLAMA_MOE_PREFETCH_FROM_CACHE=0`, everything over the bus as before):
+
+| order | setting | expert cache | reading, tokens/s | writing, tokens/s |
+|---|---|---:|---:|---:|
+| bus first | `4:bus` | 6.00 GiB | 1,421.1 | 56.4 |
+| | `4`, 18% from VRAM | 6.00 GiB | 1,062.2 | 56.4 |
+| VRAM first | `4`, 18% from VRAM | 6.00 GiB | 1,060.4 | 55.7 |
+| | `4:bus` | 6.00 GiB | 1,417.1 | 56.4 |
+
+- **Correct, and slower.** All the answers the same (`b2941bfb`), 18% of a micro-batch's bytes taken from VRAM as expected, and reading 25% slower: 1.93 s per micro-batch against 1.44.
+- The likely reason: a slot filled by one copy over the bus took about 170, a micro-batch about 25,000, and the device-to-device copies sat on the copy stream between those over the bus. 0.49 s lost where 0.27 s were to be saved is about 30 µs per copy, far more than a copy over the bus costs on its own; a copy within the GPU, waiting its turn among the computing stream's kernels or for the copy engine, holds up every copy over the bus queued behind it.
+- **Second version:** the copies from VRAM go on the GPU's own stream, queued once the slot's previous reader is: the stream's order puts them after that reader and after the cache's own copies into its banks, so the event the first version recorded at the start of each graph goes. The copy stream carries only the copies over the bus, about 80 per tensor. At 2048 tokens the GPU's stream has the time: its computing takes about 0.6 s of the 1.44.
+- **To measure** the same way. If the copies over the bus, split into runs, still cost more than the bytes they save, phase 6b goes, and the reading road's next step is the larger micro-batch.
 
 ## 3. Upstream
 
