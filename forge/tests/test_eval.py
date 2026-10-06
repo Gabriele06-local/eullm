@@ -139,7 +139,6 @@ def test_saving_over_a_set_leaves_the_old_one_intact_when_an_item_is_not_seriali
     item shorter with nothing in it to say so. load_eval_set read the result
     without a murmur, so a 3-item set silently became 2.
     """
-    import json as _json
     from pathlib import Path as _Path
 
     path = tmp_path / "exam.jsonl"
