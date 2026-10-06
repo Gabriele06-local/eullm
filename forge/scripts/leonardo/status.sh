@@ -24,6 +24,8 @@
 #     1.8 node-hours in a day with ~530 left for 29 days, and it was the user
 #     who noticed. Idle GPUs are flagged, unspent hours are not: the rule is
 #     never to run out of useful work, not to burn the budget on filler.
+#     What is left of the allocation, and the daily pace that would use it,
+#     is shown next to the pace of the last day.
 #
 # Read-only: it submits, cancels and writes nothing. It prints counts and
 # log lines of the pipeline, never the held-out exam.
@@ -156,12 +158,47 @@ echo "== GPU work =="
 # Anything on the GPU partition counts, running or waiting for its turn or
 # for a dependency: a chain queued behind a serial job is work lined up.
 gpu_jobs="$(squeue --me -h -p boost_usr_prod -o "%i" 2>/dev/null | grep -c .)"
-used="$(sacct -X -n -S "$SINCE" -r boost_usr_prod -o ElapsedRaw,NNodes 2>/dev/null |
-        awk '{s += $1 * $2} END {printf "%.1f", s / 3600}')"
-echo "   $gpu_jobs GPU job(s) running or queued; ${used:-0.0} node-hours since $SINCE"
+# Billed the way saldo bills: 8 local hours per GPU-hour, 32 a node-hour, so
+# a one-GPU exam costs a quarter of a node. Counting every job as a whole
+# node (as this did until 2026-10-06) made a day of one-GPU jobs look four
+# times as expensive. Checked against saldo: October to the 6th, 2,275 here
+# against saldo's 1,685 -- saldo is a day behind, the rest is today's jobs.
+local_hours() {  # local hours billed on the GPU partition since $1
+    sacct -X -n -S "$1" -r boost_usr_prod -o ElapsedRaw,AllocTRES -P 2>/dev/null |
+        awk -F'|' '{g = 0; if (match($2, /gres\/gpu=[0-9]+/)) g = substr($2, RSTART + 9, RLENGTH - 9)
+                    s += $1 * g * 8} END {printf "%.1f", s / 3600}'
+}
+used="$(local_hours "$SINCE")"
+echo "   $gpu_jobs GPU job(s) running or queued; ${used:-0.0} local hours" \
+     "($(awk -v u="${used:-0}" 'BEGIN {printf "%.1f", u / 32}') node-hours) since $SINCE"
 if [ "$gpu_jobs" -eq 0 ]; then
     flag "no GPU job running or queued: the allocation is idle -- decide the next useful GPU work now"
 fi
+# The allocation: how much is left and the daily pace that would use it by
+# its end, against the pace of the window above. Shown, never flagged: the
+# aim is better models, not a spent budget (forge/CLAUDE.md, rule 8).
+B_TOTAL="${EULLM_BUDGET_HOURS:-40000}"
+B_START="${EULLM_BUDGET_START:-2026-09-02}"
+B_END="${EULLM_BUDGET_END:-2026-11-02}"
+spent="$(local_hours "$B_START")"
+now="$(date +%s)"
+end="$(date -d "$B_END 23:59" +%s 2>/dev/null || echo "$now")"
+since_s="$(date -d "${SINCE/T/ }" +%s 2>/dev/null || echo $((now - 86400)))"
+awk -v total="$B_TOTAL" -v spent="${spent:-0}" -v used="${used:-0}" -v now="$now" \
+    -v end="$end" -v since="$since_s" -v start="$B_START" -v stop="$B_END" 'BEGIN {
+    left = total - spent; days = (end - now) / 86400
+    printf "   allocation: %.0f of %.0f local hours used since %s, %.0f left", spent, total, start, left
+    if (days <= 0) { print "; it has ended"; exit }
+    printf " for %.1f days = %.0f a day (%.1f node-hours)\n", days, left / days, left / days / 32
+    window = (now - since) / 86400
+    if (window <= 0) exit
+    rate = used / window
+    printf "   pace of the window above: %.0f local hours a day", rate
+    if (rate * days < left)
+        printf "; at that pace %.0f would be left unused on %s", left - rate * days, stop
+    print ""
+    print "   (saldo -b is the bill; it is a day behind these figures)"
+}'
 
 echo
 echo "== GRPO =="
