@@ -125,7 +125,7 @@ def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, m
     def fake(args, contents):
         seen.extend(contents)
         return [("Secondo n. 202000000 il principio si applica.", True),
-                ("Lo dice la sentenza n. 999/2019.", True)]
+                ("Lo dice la sentenza n. 999/2019.", False)]
 
     monkeypatch.setattr(mod, "generate", fake)
     out = tmp_path / "answers" / "answers-x.jsonl"
@@ -140,8 +140,20 @@ def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, m
     assert first["source_retrieved"] and first["context"][0] == "cds/202000000"
     assert first["cited_ok"] and first["source_cited"]
     assert not second["cited_ok"] and not second["source_cited"]
+    assert first["ended"] and not second["ended"]
     printed = capsys.readouterr().out
     assert "2 questions" in printed and "principio" not in printed
+    assert "cut at --max-new-tokens 0.500" in printed
+
+
+def test_the_note_reaches_the_teacher_only_and_leaves_the_rows_alone():
+    mod = _load("opd_train")
+    teacher = [{"role": "system", "content": "s"}, {"role": "user", "content": "Domanda"},
+               {"role": "assistant", "content": "a"}, {"role": "user", "content": "Ancora"}]
+    noted = mod.with_note(teacher, "Rispondi in breve.")
+    assert noted[3]["content"] == "Ancora\n\nRispondi in breve."
+    assert noted[1]["content"] == "Domanda" and teacher[3]["content"] == "Ancora"
+    assert mod.with_note(teacher, "") is teacher
 
 
 @pytest.fixture
@@ -186,7 +198,8 @@ def test_a_tiny_run_saves_the_adapter_and_a_stopped_run_carries_on(tiny_model, t
             "--batch", "2", "--max-new-tokens", "4", "--rank", "4"]
     assert mod.main(base + ["--steps", "2", "--stop-after", "1e-9"]) == 0
     assert (out / "ckpt" / "state.pt").is_file() and not (out / "adapter").exists()
-    assert mod.main(base + ["--steps", "2", "--save-every", "1"]) == 0
+    assert mod.main(base + ["--steps", "2", "--save-every", "1",
+                            "--teacher-note", "Rispondi in breve."]) == 0
     assert (out / "adapter" / "adapter_config.json").is_file()
     printed = capsys.readouterr().out
     assert "resuming at step 0" in printed and "step 2/2 kl" in printed

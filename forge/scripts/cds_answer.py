@@ -175,24 +175,25 @@ def main(argv: list[str] | None = None) -> int:
 
     results = generate(args, contents)
 
-    ok = src = found = 0
+    ok = src = found = cut = 0
     args.answers.parent.mkdir(parents=True, exist_ok=True)
     with args.answers.open("w", encoding="utf-8") as f:
-        for it, ctx, (answer, _ended) in zip(items, contexts, results):
+        for it, ctx, (answer, ended) in zip(items, contexts, results):
             cited = cited_numbers(answer)
             in_ctx = {r.split("/", 1)[-1] for r in ctx}
             row = {**it, "answer": answer, "context": ctx, "cited": sorted(cited),
                    "cited_ok": cited <= in_ctx,
                    "source_cited": it["ruling"].split("/", 1)[-1] in cited,
-                   "source_retrieved": it["ruling"] in ctx}
+                   "source_retrieved": it["ruling"] in ctx, "ended": ended}
             ok += row["cited_ok"]
             src += row["source_cited"]
             found += row["source_retrieved"]
+            cut += not ended
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
     n = len(items)
     print(f"[cds-exam] {args.label}: {n} questions; source ruling retrieved {found / n:.3f}, "
-          f"cited {src / n:.3f}; answers citing only rulings they were given {ok / n:.3f} "
-          f"-> {args.answers}", flush=True)
+          f"cited {src / n:.3f}; answers citing only rulings they were given {ok / n:.3f}; "
+          f"cut at --max-new-tokens {cut / n:.3f} -> {args.answers}", flush=True)
     return 0
 
 

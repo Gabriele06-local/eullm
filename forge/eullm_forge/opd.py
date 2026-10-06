@@ -17,8 +17,8 @@ Machines, On-Policy Distillation, 2025; TESSY, arXiv 2604.14164).
 
 Teacher and student must share a tokenizer: the loss compares their
 distributions token by token. `same_vocabulary` refuses a pair that does
-not (Qwen3-30B-A3B can teach Qwen3-4B; no available teacher shares
-Ministral's, so Ministral teaches itself with the source in view).
+not (Qwen3-30B-A3B can teach Qwen3-4B, Ministral-3-14B can teach
+Ministral 8B).
 """
 
 from __future__ import annotations

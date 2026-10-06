@@ -15,9 +15,16 @@ prompts; the teacher reads each answer behind its own prompt; the LoRA
 moves the student's next-token distributions towards the teacher's at the
 answer positions (`eullm_forge.opd.reverse_kl`).
 
-For Ministral no available teacher shares the tokenizer, so ``--teacher``
-is the student's own merged weights: the model with the source in view
-teaches itself without it (self-distillation, SDFT/MixSD).
+For Ministral 8B the teacher is Ministral-3-14B, which has the same
+vocabulary (checked on 2026-10-06). The student's own weights can teach it
+too (self-distillation), but the pilot of 2026-10-06 showed why not to: its
+KL stayed at 0.04 for 60 steps, with nothing to learn.
+
+``--teacher-note`` goes into the teacher's prompt only. Without one, the
+4B pilot of 2026-10-06 learnt to write 2.3 times longer: the teacher, with
+the whole ruling in front of it, always has more to say, and the student's
+answers grew from 174 tokens to the 384-token limit. A note asking the
+teacher to answer briefly keeps what it knows and drops the length.
 
 One process: the student on ``--student-device``, the teacher spread over
 ``--teacher-devices`` (bf16 Qwen3-30B-A3B is 61 GB: two 64 GB A100s). The
@@ -65,6 +72,16 @@ def template(tok, messages: list[dict]) -> list[int]:
     return list(ids)
 
 
+def with_note(messages: list[dict], note: str) -> list[dict]:
+    """The messages with ``note`` after the last user turn's text (the teacher's only)."""
+    if not note:
+        return messages
+    out = [dict(m) for m in messages]
+    last = max(i for i, m in enumerate(out) if m["role"] == "user")
+    out[last]["content"] = f"{out[last]['content']}\n\n{note}"
+    return out
+
+
 def answer_logits(model, prompt_ids: list[int], answer: list[int], device):
     """Logits that predict each answer token, [len(answer), V]."""
     import torch
@@ -98,6 +115,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--save-every", type=int, default=20)
     ap.add_argument("--stop-after", type=float, default=0, help="seconds, then save and exit")
+    ap.add_argument("--teacher-note", default="",
+                    help="text added to the teacher's prompt only, e.g. how long to answer: "
+                         "the teacher holds the source and, unprompted, never stops writing")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -177,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
         rng = random.Random(args.seed * 1_000_003 + step)    # the same batch on a resumed step
         batch = rng.sample(rows, min(args.batch, len(rows)))
         s_prompts = [template(tok, r["student"]) for r in batch]
-        t_prompts = [template(ttok, r["teacher"]) for r in batch]
+        t_prompts = [template(ttok, with_note(r["teacher"], args.teacher_note)) for r in batch]
 
         student.eval()
         width = max(len(p) for p in s_prompts)
