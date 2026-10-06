@@ -139,6 +139,14 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://localhost:11434/api/chat \
 Both endpoints behave the same way, Ollama-style `/api/chat` and OpenAI-style
 `/v1/chat/completions`.
 
+**A server with no room for one more request returns `503`, with
+`Retry-After`.** Each slot (`--batch-size`) keeps up to eight requests waiting
+behind the one it is answering; the next is refused at once with
+`503 Service Unavailable`, `Retry-After: 5` and the error as JSON, streamed or
+not, before any stream opens, as Ollama answers its own full queue. It used
+to be a `200` whose only line was the error when streaming, and a `500`
+without.
+
 ### `max_tokens`/`num_predict` and `seed`: two defaults that silently diverged from Ollama
 
 A community report on a text-based tool-calling client (Cline, via the

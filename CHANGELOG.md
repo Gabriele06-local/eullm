@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **A request the server has no room for is answered 503, with `Retry-After`, before anything is streamed.** Each slot (`--batch-size`) keeps up to eight requests waiting behind the one it is answering. One more was answered 500 without streaming, which tells a client the fault is the server's, and with streaming 200, with a stream whose only line was the error, which a client cannot tell from an answer that broke off halfway. It is now 503 Service Unavailable with `Retry-After: 5` and the error as JSON, streamed or not, on `/api/generate`, `/api/chat` and `/v1/chat/completions`, as Ollama answers its own full queue: a client that retries knows to, and when. A request whose model was unloaded just before it started, which says to send it again, gets a 503 the same way, with `Retry-After: 1`, instead of a 500.
+
 ## 0.7.30 — 2026-10-06
 
 ### Changed
