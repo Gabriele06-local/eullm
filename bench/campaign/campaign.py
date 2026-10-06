@@ -725,10 +725,10 @@ def cmd_unblock(args):
 COLUMNS = (
     "campaign", "round", "group", "point", "kind", "outcome", "model", "gcds", "replicas",
     "mode", "batch", "ctx", "slot_ctx", "kv", "concurrency", "prompt_tokens", "job", "host",
-    "devices", "neighbours_at_start", "load_cache", "load_wall_s", "agg_tok_s_mean",
-    "agg_tok_s_cv_pct", "ttft_ms_p50", "decode_tok_s", "prefill_tok_s", "duration_s",
-    "requests", "accuracy", "consistency", "drift_pct", "vram_peak_mib_max", "use_mean",
-    "engine", "bench_rev", "ft_ctx", "optimizer", "train_tensors", "ft_loss_before",
+    "devices", "neighbours_at_start", "load_cache", "load_storage", "load_wall_s",
+    "agg_tok_s_mean", "agg_tok_s_cv_pct", "ttft_ms_p50", "decode_tok_s", "prefill_tok_s",
+    "duration_s", "requests", "accuracy", "consistency", "drift_pct", "vram_peak_mib_max",
+    "use_mean", "engine", "bench_rev", "ft_ctx", "optimizer", "train_tensors", "ft_loss_before",
     "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
@@ -744,7 +744,8 @@ def row_of(r: dict) -> dict:
                host=r.get("host"),
                devices=" ".join(r.get("devices", [])),
                neighbours_at_start=r.get("neighbours_at_start"),
-               load_cache=load.get("cache"), load_wall_s=load.get("wall_s"),
+               load_cache=load.get("cache"), load_storage=load.get("storage"),
+               load_wall_s=load.get("wall_s"),
                engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"))
     t = r.get("throughput")
     if t:

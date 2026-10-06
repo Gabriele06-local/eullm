@@ -140,6 +140,24 @@ def store_gguf(model_id: str):
     return os.path.join(d, files[0]) if files else None
 
 
+def mount_root(path: str):
+    """The first component of a path once its links are followed: `/scratch`
+    or `/flash` on LUMI, without the project and user below it."""
+    parts = os.path.realpath(path).split(os.sep)
+    return os.sep + parts[1] if len(parts) > 1 and parts[1] else None
+
+
+def model_storage(p: dict):
+    """Where the point's server reads its model from (`mount_root`): a load
+    time means nothing without it, and tools/lumi/stage_flash.sh moves a
+    model to flash behind links of the same names."""
+    if p.get("runtime") == "ollama":
+        path = os.environ.get("OLLAMA_MODELS")
+    else:
+        path = store_gguf(p["model"])
+    return mount_root(path) if path else None
+
+
 def runtime_command(p: dict, engine: str):
     """(binary, arguments, extra environment) of the server a point measures.
     The same KV pool, slots and cache types for every runtime; EuLLM's own
@@ -527,6 +545,7 @@ def warm_up(p: dict, servers: list, ctx: Context, body: dict) -> dict:
     ctx.model_seen.add(p["model"])
     return {
         "cache": cache,
+        "storage": model_storage(p),
         "wall_s": round(wall, 2),
         "load_ms": [round(g["load_duration_ns"] / 1e6, 1) for g in got],
     }
@@ -998,7 +1017,8 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
             ctx.model_seen.add(p["model"])
             measured, window = run_decision(p, servers, ctx)
             stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
-            return {"load": {"cache": cache, "wall_s": round(ready_s, 2)},
+            return {"load": {"cache": cache, "storage": model_storage(p),
+                             "wall_s": round(ready_s, 2)},
                     "decision": measured, "device_stats": stats}
         if p["kind"] == "throughput":
             warm_body = generate_body(p, p["prompt"] if not p["prompt_tokens"]

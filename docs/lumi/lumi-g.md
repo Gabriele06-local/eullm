@@ -130,8 +130,10 @@ is even possible in ten seconds: `ls /usr/share/vulkan/icd.d` and
   7.0.
 - **Billing**: on `standard-g` a node-hour costs 4 GPU-hours (whole nodes are
   allocated); `small-g` and `dev-g` bill 0.5 per GCD-hour, so single-device
-  experiments are cheap. Storage bills the *allocated quota* × time: LUMI-P at
-  1×, LUMI-F (flash) at **3×**, LUMI-O (object) at 0.25×.
+  experiments are cheap. Storage bills the volume *stored* × time, not the
+  quota (LUMI's billing page, read again on 06-10-2026): LUMI-P at 1×, LUMI-F
+  (flash) at **3×**, LUMI-O (object) at 0.25×. A model staged on flash costs
+  only while it is there (`tools/lumi/stage_flash.sh`).
 
 ### The budget, in the only terms that matter
 
@@ -426,7 +428,7 @@ needs allocation time to close.
   AI-Factory allocation that produced them closes 02/11/2026.
 - **Storage tier and quota.** The application asked for 4 TB; the plan grants
   90,000 TB-hours, which at LUMI-P rates is roughly 20 TB held for six months.
-  Quota is billed whether or not it is used, and flash costs 3×.
+  What is stored is billed, not the quota, and flash costs 3×.
 - **The licence stated in the application is Apache-2.0**, in three places. The
   repository has been AGPL-3.0-or-later since August 2026. Neither affects
   eligibility — both are open source — but the final report should not

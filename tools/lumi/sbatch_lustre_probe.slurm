@@ -6,7 +6,12 @@
 #     sbatch tools/lumi/sbatch_lustre_probe.slurm [MODEL_DIR]
 #
 # MODEL_DIR is a directory of GGUF parts in the EuLLM store (default: the
-# Coder-480B of c02). Nothing is written: every read goes to /dev/null.
+# Coder-480B of c02), or their copy on flash (stage_flash.sh), to compare:
+#
+#     sbatch tools/lumi/sbatch_lustre_probe.slurm \
+#         /flash/$SBATCH_ACCOUNT/$USER/eullm-models/qwen3-coder-480b-a35b-instruct-gguf-q4_k_m
+#
+# Nothing is written: every read goes to /dev/null.
 #
 # WHY. The 480B (270 GiB) had not finished loading after the hour the runner
 # allows (c02, 05-10-2026), so the engine read it at under 80 MB/s. Its parts

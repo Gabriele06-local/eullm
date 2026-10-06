@@ -350,3 +350,21 @@ def test_failed_points_can_be_retried_by_group(tmp_path):
     p = q.load("todo", "moe-1")
     assert p["attempts"] == 0 and p["notes"] == ["first", "second"]
     assert q.ids("failed") == ["rt-1"]
+
+
+def test_a_load_records_the_file_system_its_model_is_on_through_links(tmp_path, monkeypatch):
+    import point
+
+    store, flash = tmp_path / "store", tmp_path / "flash"
+    (store / "m").mkdir(parents=True)
+    flash.mkdir()
+    (flash / "m-00001-of-00002.gguf").write_bytes(b"GGUF")
+    (store / "m" / "m-00001-of-00002.gguf").symlink_to(flash / "m-00001-of-00002.gguf")
+    (store / "m" / "manifest.json").write_text('{"gguf_file": "m-00001-of-00002.gguf"}')
+    monkeypatch.setenv("EULLM_MODELS_DIR", str(store))
+    root = "/" + os.path.realpath(tmp_path).split("/")[1]
+    assert point.model_storage({"model": "m"}) == root
+    assert point.model_storage({"model": "absent"}) is None
+    monkeypatch.setenv("OLLAMA_MODELS", str(flash))
+    assert point.model_storage({"model": "absent", "runtime": "ollama"}) == root
+    assert point.mount_root("/scratch/project_1/someone/eullm-models/x.gguf") == "/scratch"

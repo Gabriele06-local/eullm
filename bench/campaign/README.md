@@ -115,7 +115,8 @@ interrupted points back; the next job takes them up.
 `BENCH_RESULT {...}` line, schema `eullm.bench/1`: the point's parameters,
 provenance (engine version and binary hash, repository revision, ROCm
 version, devices, cores, how many other points shared the node), load time
-(cold or warm), and then
+(cold or warm, and the file system the model was read from, `/scratch` or
+`/flash`, links followed: `tools/lumi/stage_flash.sh`), and then
 
 - throughput: per repeat, aggregate tok/s over the batch wall clock, TTFT
   p50/p95, client-side prefill and decode rates, the server's own rates
