@@ -37,8 +37,14 @@ off (1.0) rather than the same on both: llama-server counts the prompt's
 last tokens in the penalty's window and EuLLM only the answer's, so even an
 equal penalty picks different words at the start of an answer. Off, the
 answer at temperature 0 is the most likely token at every step, on any
-server. The timed answer's text is printed hashed, so a comparison shows
-whether the servers wrote the same one. Standard library only.
+server. Every request also sends `cache_prompt: false`: the timed answer is
+the second of two to the same request, and a server that reused the first
+one's prompt recomputes its last tokens in a batch of its own choosing,
+which on a GPU changes the numbers enough to change a word, and every word
+after it. The timed answer's text is printed hashed, leading and trailing
+blanks aside (one server trims them, the other may not), and saved with
+`--answer-file`, so a comparison shows whether the servers wrote the same
+one. Standard library only.
 """
 
 import argparse
@@ -115,6 +121,7 @@ def chat(base, model, content, max_tokens, args):
         "top_p": 0.9,
         "min_p": 0.0,
         "repeat_penalty": 1.0,
+        "cache_prompt": False,
         "stream": False,
         "think": False,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -157,6 +164,10 @@ def main(argv=None):
         default=0,
         help="sampling temperature of the timed answers (default 0: the same answer every run)",
     )
+    parser.add_argument(
+        "--answer-file",
+        help="write the timed answer's text here, to compare two servers' answers",
+    )
     parser.add_argument("--timeout", type=float, default=1800)
     args = parser.parse_args(argv)
     base = args.url.rstrip("/")
@@ -170,7 +181,10 @@ def main(argv=None):
         f"writes answers: {written / seconds:6.1f} tokens/s  "
         f"({written} tokens in {seconds:.1f} s; the first run, warming up: {first:.1f})"
     )
-    print(f"answer text:    {hashlib.sha256(text.encode()).hexdigest()[:8]}  (hashed)")
+    print(f"answer text:    {hashlib.sha256(text.strip().encode()).hexdigest()[:8]}  (hashed)")
+    if args.answer_file:
+        with open(args.answer_file, "w", encoding="utf-8") as f:
+            f.write(text)
     if drafted:
         print(f"drafts kept:    {100 * kept / drafted:5.0f}%  ({kept} of {drafted})")
 

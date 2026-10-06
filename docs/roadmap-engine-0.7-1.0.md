@@ -398,8 +398,9 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   Sul codice circa un sesto in più, sopra il rumore; sul racconto dal 3 al 7%,
   dentro il rumore. Con `auto`, `--mtp 1` prende quanto 2. La cache è la
   stessa con e senza `--mtp` (8,50 GiB in tutti e tre gli avvii): il contesto
-  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Aperto:**
-  senza bozze EuLLM scrive il codice più piano di `llama-server` (93-98 tok/s
+  delle bozze, un solo strato, è troppo piccolo per cambiarla. **Chiuso il
+  6 ottobre, non era il motore:** senza bozze EuLLM scriveva il codice più
+  piano di `llama-server` (93-98 tok/s
   contro 112,6) e il racconto uguale (120-123 contro 123,6). Non è il
   ragionamento, spento su tutti e due (`llama-server` legge
   `reasoning_effort: none` come `enable_thinking = false`). Rimisurato il
@@ -416,9 +417,33 @@ pipeline RAG (generazione + embedding + reranking) servita da un solo processo.
   `llama-server` mette gli ultimi token del prompt nella finestra della
   penalità, EuLLM solo quelli della risposta. Ora lo script manda ogni
   parametro di campionamento, con la penalità spenta (1,0), così a
-  temperatura 0 ogni server sceglie a ogni passo il token più probabile, e
-  stampa l'impronta del testo scritto: il prossimo giro dice se i testi
-  coincidono e, se sì, quanto del divario resta al motore.
+  temperatura 0 ogni server sceglie a ogni passo il token più probabile,
+  rilegge il prompt intero a ogni richiesta (`cache_prompt: false`) e salva
+  il testo scritto.
+
+  Rimisurato così il 6 ottobre, a PC libero, un avvio per server, cache
+  7000 MiB per tutti e due (6,84 GiB nel log di EuLLM; `llama-server` la
+  prende come chiesta o non parte), esperti tutti in RAM bloccata,
+  contesto 8192, micro-batch 512:
+
+  | modello | server | racconto (tok/s) | codice (tok/s) |
+  |---|---|---:|---:|
+  | Qwen3.6-35B-A3B | `llama-server` | 115,5 | 95,5 |
+  | Qwen3.6-35B-A3B | EuLLM | 124,6 (+8%) | 100,4 (+5%) |
+  | Qwen3.8-Flash-Next 125B | `llama-server` | 55,6 | 49,5 |
+  | Qwen3.8-Flash-Next 125B | EuLLM | 59,3 (+7%) | 51,4 (+4%) |
+
+  Le quattro coppie di risposte sono identiche per i primi 60-170 token e
+  si separano su una parola quasi alla pari ("houses" contro "cathedrals"):
+  stesso prompt, stesso campionamento, e uno scarto minimo nei calcoli fra
+  le due compilazioni che a un certo punto fa vincere l'altra parola. Non
+  si elimina fra due programmi diversi, e i testi restano dello stesso
+  tipo: le velocità si confrontano. EuLLM è veloce almeno quanto
+  `llama-server` su tutti e due i modelli; il 4-8% in più è un avvio per
+  riga, dentro lo scarto fra avvii visto altrove (5-8%). Il −10%/−17% di
+  prima era la penalità. A margine: `llama-server` sul 35B con 7000 MiB di
+  cache scrive il 13-14% più piano che con 8000 (115,5 contro 132,5 sul
+  racconto): su questo modello la dimensione della cache conta molto.
 
   A temperatura 0.8, quella di default (EuLLM, `--moe-cache auto`, stessi
   flag):

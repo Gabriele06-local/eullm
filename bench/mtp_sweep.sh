@@ -19,8 +19,12 @@ export LC_ALL=C
 BIN=$1
 MODEL=$2
 shift 2
+HERE=$(cd "$(dirname "$0")" && pwd)
 PORT=${PORT:-11510}
-SPEED_CHECK=${SPEED_CHECK:-$HOME/work/speed_check.py}
+# The copy beside this script, as bench/mtp_test_d.sh and
+# bench/prefetch_check.sh use: a default of ~/work/speed_check.py, an old
+# copy's place, stopped a comparison halfway on 6 October.
+SPEED_CHECK=${SPEED_CHECK:-$HERE/speed_check.py}
 OUT=${OUT:-$HOME/work/mtp-sweep}
 SETTINGS=${MTP_SETTINGS:-"0 1 2 3 3:0.5 4:0.5 6:0.5"}
 TEMPERATURE=${TEMPERATURE:-0}
@@ -68,8 +72,10 @@ for setting in $SETTINGS; do
         tail -n 15 "$log" >&2
         exit 1
     fi
-    read -r story story_kept story_drafted story_text <<<"$(speed)"
-    read -r code code_kept code_drafted code_text <<<"$(speed --write-prompt "$CODE")"
+    read -r story story_kept story_drafted story_text \
+        <<<"$(speed --answer-file "$OUT/answer-mtp$n-p$p-story.txt")"
+    read -r code code_kept code_drafted code_text \
+        <<<"$(speed --write-prompt "$CODE" --answer-file "$OUT/answer-mtp$n-p$p-code.txt")"
     kill "$pid"
     wait "$pid" 2>/dev/null
     pid=
