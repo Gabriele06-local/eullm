@@ -181,6 +181,10 @@ pub struct AppState {
     /// `--mmap`: a load with an expert cache keeps the file mapped rather
     /// than reading it in to pin the experts (`fit::plan_read_into_memory`).
     pub mmap: bool,
+    /// `--moe-prefetch`, as the user gave it: every load with experts kept
+    /// in RAM and pinned gets the slots (see `fit::prefetch_slots`), and an
+    /// expert cache keeps their VRAM out of its own where it can.
+    pub moe_prefetch: u32,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -483,6 +487,14 @@ impl AppState {
                 None
             }
         });
+        // The prefetch runs where the expert cache does, on one CUDA GPU; it
+        // is on by default, so elsewhere it goes without a word.
+        let moe_prefetch = if crate::fit::moe_cache_support().is_ok() {
+            self.moe_prefetch
+        } else {
+            0
+        };
+        let ram_total = crate::fit::system_ram_bytes();
         let info = crate::fit::read_gguf_info(&gguf_path);
         let file_size = std::fs::metadata(&gguf_path).map(|m| m.len()).unwrap_or(0);
         let layout = match (&info, file_size) {
@@ -527,6 +539,12 @@ impl AppState {
                 mmproj_offload: self.mmproj_offload,
                 moe_cache,
                 auto_n_ubatch: self.n_ubatch.is_none(),
+                moe_prefetch: crate::fit::MoePrefetch {
+                    slots: moe_prefetch,
+                    no_mmap: self.no_mmap,
+                    keep_mapped: self.mmap,
+                    ram_total,
+                },
             },
             mtp_reserve,
         };
@@ -616,10 +634,19 @@ impl AppState {
                 self.no_mmap,
                 self.mmap,
                 plan.as_ref().map_or(0, |plan| plan.moe_cache_host_bytes),
-                crate::fit::system_ram_bytes(),
+                ram_total,
             );
             if let Some(why) = why {
                 tracing::info!("{why}");
+            }
+            let moe_prefetch_slots =
+                crate::fit::prefetch_slots(moe_prefetch, load_no_mmap, cpu_moe, n_cpu_moe);
+            if moe_prefetch_slots > 0 {
+                tracing::info!(
+                    "--moe-prefetch: the experts in RAM of a long prompt are copied to the GPU \
+                     ahead of their layer, into {moe_prefetch_slots} slots of VRAM \
+                     (--moe-prefetch 0 turns it off)"
+                );
             }
 
             // ── 2. Load the new model ───────────────────────────────
@@ -647,6 +674,7 @@ impl AppState {
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
+                moe_prefetch_slots,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -823,6 +851,7 @@ impl AppState {
                 mtp_p_min: self.mtp_p_min,
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
+                moe_prefetch_slots,
                 ctx_checkpoints: self.ctx_checkpoints,
                 checkpoint_min_step: self.checkpoint_min_step,
                 batch_size,
@@ -2791,6 +2820,8 @@ pub struct ServeConfig {
     pub no_mmap: bool,
     /// `--mmap` (see `AppState::mmap`).
     pub mmap: bool,
+    /// `--moe-prefetch` (see `AppState::moe_prefetch`).
+    pub moe_prefetch: u32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3108,6 +3139,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         moe_cache: cfg.moe_cache,
         no_mmap: cfg.no_mmap,
         mmap: cfg.mmap,
+        moe_prefetch: cfg.moe_prefetch,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3284,6 +3316,7 @@ impl AppState {
             moe_cache: None,
             no_mmap: false,
             mmap: false,
+            moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

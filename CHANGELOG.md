@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Changed
+- **Copying an MoE's experts ahead while a prompt is read is now on by default, as `--moe-prefetch`, and `LLAMA_MOE_PREFETCH` is gone.** 0.7.30 brought it in behind `LLAMA_MOE_PREFETCH=1`, off by default: the next expert tensors are copied to the GPU on a second stream while the current ones compute, into four slots of VRAM, and on an RTX 5070 Ti with `--n-ubatch 4096` Qwen3.8-Flash-Next IQ2_XS read a 33,200-token prompt 24-42% faster, to the same answer. It now runs wherever it applies (one NVIDIA GPU, experts kept in RAM, the model read into memory, which `--moe-cache` does by itself when the RAM can spare the experts), with no setting. `--moe-prefetch N` takes 2 to 8 slots and `--moe-prefetch 0` turns it off; `LLAMA_MOE_PREFETCH`, `LLAMA_MOE_PREFETCH_SLOTS` and `LLAMA_MOE_PREFETCH_MIN_TOKENS` are no longer read. With `--moe-cache`, the VRAM of the slots (four times the largest expert tensor, 1 GiB on that model) now comes out of the cache, which `--fit` sizes that much smaller, so that the prefetch has room to turn on; a smaller cache writes answers more slowly, and `--moe-prefetch 0` gives the cache its room back. The startup log says what was kept for the slots, and the banner how many there are. Where the cache would fall below its minimum, below a size `--moe-cache` asked for or lose the larger micro-batch, nothing is kept, and the slots are made at the first long prompt only if the VRAM left has room for them, as before.
+
 ## 0.7.30 — 2026-10-06
 
 ### Changed

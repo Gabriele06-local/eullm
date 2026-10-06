@@ -45,6 +45,9 @@ pub struct ModelBanner {
     /// The model was read into memory, not mapped: `--no-mmap`, or an
     /// expert cache choosing it (`fit::plan_read_into_memory`).
     pub no_mmap: bool,
+    /// Slots the experts in RAM of a long prompt are copied into ahead of
+    /// their layer (`--moe-prefetch`, where it applies); 0 for none.
+    pub moe_prefetch_slots: u32,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// 0 means the sequential engine; anything higher is the batching scheduler.
@@ -133,6 +136,12 @@ impl ModelBanner {
         // `--no-mmap`, or `--moe-cache` choosing it: the log says which.
         if self.no_mmap {
             println!("  Model file:    read into memory, not mapped");
+        }
+        if self.moe_prefetch_slots > 0 {
+            println!(
+                "  Prefetch:      {} slots of VRAM for the experts of long prompts (--moe-prefetch)",
+                self.moe_prefetch_slots
+            );
         }
         if self.rs_seq > 0 {
             println!(

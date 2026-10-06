@@ -412,6 +412,9 @@ pub(crate) fn build_ctx_params_with_cache(
     if config.moe_cache_bytes > 0 {
         params = params.with_moe_cache_size(config.moe_cache_bytes as usize);
     }
+    if config.moe_prefetch_slots > 0 {
+        params = params.with_moe_prefetch_slots(config.moe_prefetch_slots);
+    }
 
     if cache_type_k != KvCacheType::F16 || cache_type_v != KvCacheType::F16 {
         params = params.with_type_k(cache_type_k).with_type_v(cache_type_v);
@@ -563,6 +566,12 @@ pub struct InferenceConfig {
     /// the file is not mapped ("avoid using a host buffer when using mmap",
     /// `llama-model-loader.cpp`).
     pub no_mmap: bool,
+    /// Slots of VRAM the experts in RAM of a long prompt are copied into
+    /// ahead of their layer (0 = none): `--moe-prefetch` where the load keeps
+    /// experts in RAM and pinned, never the flag itself (see
+    /// `fit::prefetch_slots`). Like the expert cache, every context of this
+    /// model gets it except the MTP draft context.
+    pub moe_prefetch_slots: u32,
 }
 
 impl Default for InferenceConfig {
@@ -590,6 +599,7 @@ impl Default for InferenceConfig {
             mtp_p_min: 0.0,
             moe_cache_bytes: 0,
             no_mmap: false,
+            moe_prefetch_slots: 0,
         }
     }
 }

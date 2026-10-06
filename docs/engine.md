@@ -102,6 +102,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--moe-cache` | off | `auto` or a size in MiB: an MoE model whose experts do not all fit in VRAM keeps them all in RAM and caches the ones it uses most in the VRAM they would have taken. Speeds up writing, not prompt reading. One CUDA GPU only; experimental (llama.cpp PR #29887); see the guide |
 | `--no-mmap` | off | Read the model into memory instead of mapping its file. Experts kept in RAM then sit in memory the GPU driver has pinned, which the card copies from directly. Loads slower, and the RAM has to hold them; `--moe-cache` does it by itself when the RAM can spare the experts. See the guide |
 | `--mmap` | off | Keep the model file mapped where `--moe-cache` would read it into memory |
+| `--moe-prefetch` | 4 | Slots of VRAM (2 to 8, 0 = off) the experts in RAM of a long prompt are copied into ahead of their layer, on a second stream of the GPU. One CUDA GPU, experts in pinned memory (the model read into memory), micro-batches of 512 tokens or more; with `--moe-cache` the slots' VRAM comes out of the cache. See the guide |
 | `--cache-type-k` | `f16` | KV cache type for keys (f16, q8_0, q4_0). Quantizing frees VRAM for more layers |
 | `--cache-type-v` | `f16` | KV cache type for values (f16, q8_0, q4_0) |
 | `--no-flash-attn` | false | Disable flash attention (on by default), for the generation model and the decision model alike |
