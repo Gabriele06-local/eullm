@@ -14,6 +14,7 @@
 #
 # Settable: OPD_STUDENT, OPD_TEACHER, OPD_PROMPTS, OPD_OUT (all required),
 # OPD_ARGS (extra opd_train.py options, e.g. "--steps 300 --lr 5e-5"),
+# OPD_NOTE (--teacher-note: a sentence with spaces, which OPD_ARGS would split),
 # OPD_REPO (checkout to run; default the one this file was submitted from).
 #
 #SBATCH --job-name=eullm-opd
@@ -60,4 +61,5 @@ heartbeat_start
 # shellcheck disable=SC2086
 python "$REPO/forge/scripts/opd_train.py" --student "$OPD_STUDENT" --teacher "$OPD_TEACHER" \
     --prompts "$OPD_PROMPTS" --out "$OPD_OUT" --student-device cuda:0 \
-    --teacher-devices "$TEACHER_GPUS" --stop-after 6600 ${OPD_ARGS:-}
+    --teacher-devices "$TEACHER_GPUS" --stop-after 6600 ${OPD_ARGS:-} \
+    ${OPD_NOTE:+--teacher-note "$OPD_NOTE"}
