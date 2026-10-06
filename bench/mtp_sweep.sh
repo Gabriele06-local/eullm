@@ -72,8 +72,10 @@ for setting in $SETTINGS; do
         tail -n 15 "$log" >&2
         exit 1
     fi
-    read -r story story_kept story_drafted story_text <<<"$(speed)"
-    read -r code code_kept code_drafted code_text <<<"$(speed --write-prompt "$CODE")"
+    read -r story story_kept story_drafted story_text \
+        <<<"$(speed --answer-file "$OUT/answer-mtp$n-p$p-story.txt")"
+    read -r code code_kept code_drafted code_text \
+        <<<"$(speed --write-prompt "$CODE" --answer-file "$OUT/answer-mtp$n-p$p-code.txt")"
     kill "$pid"
     wait "$pid" 2>/dev/null
     pid=
