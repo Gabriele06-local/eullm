@@ -198,6 +198,9 @@ jobs:
               - '.github/workflows/ci.yml'
             bench:
               - 'bench/**'
+              # The campaign specs are validated by bench/campaign's tests.
+              - 'tools/lumi/campaigns/**'
+              - 'catalog/**'
               - '.github/workflows/ci.yml'
             # ReflexBench too: the adapter asks its questions word for word,
             # and a test checks they have not drifted apart.
@@ -498,6 +501,9 @@ jobs:
   # standard-library Python whose tests run offline, against a stand-in
   # server and made-up files. They were run by hand only, so a change that
   # broke a benchmark's metrics surfaced when someone next ran it on a GPU.
+  # The LUMI campaign runner (bench/campaign) is the same kind of code, and a
+  # bug in it costs whole node-hours, so it is tested here too: against
+  # fake_eullm.py, a stand-in engine, and with the shipped campaign specs.
   # No pip cache: two packages, pinned, install in seconds.
   bench:
     name: Bench (lint + test)
@@ -512,9 +518,11 @@ jobs:
       - name: Install
         run: pip install ruff==0.16.9 pytest==9.1.1
       - name: Lint
-        run: ruff check bench/reflexbench
+        run: ruff check bench/reflexbench bench/campaign
       - name: Test
         run: pytest -q bench/reflexbench
+      - name: Test (LUMI campaign runner)
+        run: pytest -q bench/campaign
 
   # ── Reflex MCP adapter ───────────────────────────────────────────────
   # adapters/reflex-mcp, a Python package of its own on the MCP SDK. Its

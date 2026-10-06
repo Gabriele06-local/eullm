@@ -17,7 +17,7 @@
 #     export SBATCH_ACCOUNT=project_465003366
 #     export EULLM_BIN=$PWD/eullm-rocm
 #     export EULLM_MODELS_DIR=/scratch/$SBATCH_ACCOUNT/$USER/eullm-models
-#     export MODEL=qwen3.8-27b-ud-q8_k_xl
+#     export MODEL=qwen3.8-27b-gguf-ud-q8_k_xl   # eullm pull hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL
 #
 #     # Like for like: the same 16 requests as the single-GCD row, but served by
 #     # 4 replicas (4 requests each) instead of one server at batch 16.

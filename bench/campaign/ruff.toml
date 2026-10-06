@@ -1,0 +1,9 @@
+# The same rules as bench/reflexbench/, forge/ and adapters/reflex-mcp/:
+# without a configuration of its own the bench would take ruff's default rule
+# set, which grows with ruff's version, so a release of ruff could fail CI
+# with no change here.
+line-length = 100
+target-version = "py38"
+
+[lint]
+select = ["E", "F", "I", "W"]

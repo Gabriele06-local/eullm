@@ -37,6 +37,40 @@ log() { printf '\033[34m[..]\033[0m  %s\n' "$*"; }
 [ -d "$ROCM_PATH/lib" ] || err "no ROCm at $ROCM_PATH — check 'module avail rocm' and set ROCM_PATH"
 log "ROCm: $("$ROCM_PATH/bin/hipconfig" --version 2>/dev/null || echo unknown) at $ROCM_PATH"
 
+# bindgen, which generates the llama.cpp bindings, loads libclang while it
+# builds, and a LUMI login node has none where it looks ("Unable to find
+# libclang", 05-10-2026). ROCm ships one with its LLVM.
+if [ -z "${LIBCLANG_PATH:-}" ]; then
+    for d in "$ROCM_PATH/llvm/lib" "$ROCM_PATH/lib/llvm/lib"; do
+        for f in "$d"/libclang.so* "$d"/libclang-*.so*; do
+            if [ -e "$f" ]; then
+                export LIBCLANG_PATH="$d"
+                break 2
+            fi
+        done
+    done
+fi
+if [ -n "${LIBCLANG_PATH:-}" ]; then
+    log "libclang: $LIBCLANG_PATH"
+else
+    log "no libclang under $ROCM_PATH: bindgen will look in the system paths (set LIBCLANG_PATH if it fails)"
+fi
+# Found that way, libclang then misses its own builtin headers ("'stdbool.h'
+# file not found" from ggml.h, 05-10-2026): they live in the resource
+# directory of the clang it belongs to, which is passed to it here, along
+# with that clang for bindgen's own include-path detection.
+for c in "$ROCM_PATH/llvm/bin/clang" "$ROCM_PATH/lib/llvm/bin/clang"; do
+    if [ -x "$c" ]; then
+        export CLANG_PATH="${CLANG_PATH:-$c}"
+        RESOURCE_DIR=$("$c" -print-resource-dir 2>/dev/null || true)
+        if [ -f "$RESOURCE_DIR/include/stdbool.h" ]; then
+            export BINDGEN_EXTRA_CLANG_ARGS="${BINDGEN_EXTRA_CLANG_ARGS:+$BINDGEN_EXTRA_CLANG_ARGS }-isystem $RESOURCE_DIR/include"
+            log "bindgen: clang's builtin headers from $RESOURCE_DIR/include"
+        fi
+        break
+    fi
+done
+
 command -v cmake >/dev/null || err "cmake not found — 'module load CMake' or equivalent"
 CMAKE_VER=$(cmake --version | head -1 | awk '{print $3}')
 # ggml-hip calls enable_language(HIP), which CMake gained in 3.21.
@@ -45,6 +79,25 @@ log "cmake: $CMAKE_VER"
 
 command -v cargo >/dev/null || err "cargo not found — install rustup into \$HOME from a login node (they have outbound network; compute nodes do not)"
 log "cargo: $(cargo --version)"
+
+# On a Cray system `cc` and `CC` are the Cray compiler wrappers, and they hand
+# the linker options of Cray's own toolchain (-plugin-opt=defaults=cray,
+# -plugin-opt=lto=0, ...). Rust links with rust-lld by default, which rejects
+# them, so every build script fails to link before anything is compiled —
+# seen on a LUMI login node on 05-10-2026. The GNU compilers behind the
+# wrappers do the job: C/C++ host code and linking go to gcc/g++, the HIP
+# kernels still to ROCm's clang (HIPCXX below).
+if [ -n "${CRAYPE_VERSION:-}" ] || cc --version 2>/dev/null | grep -qi cray; then
+    if ! command -v gcc >/dev/null || ! command -v g++ >/dev/null; then
+        err "Cray compiler wrappers and no gcc/g++ behind them — 'module load gcc-native' (or PrgEnv-gnu)"
+    fi
+    GCC_MAJOR=$(gcc -dumpversion | cut -d. -f1)
+    # llama.cpp is C++17 with <filesystem>: GCC 9 or newer. SLES's own gcc is 7.
+    [ "$GCC_MAJOR" -ge 9 ] \
+        || err "gcc $GCC_MAJOR is too old for llama.cpp (9+) — 'module load gcc-native' (or PrgEnv-gnu) first"
+    export CC=gcc CXX=g++ CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=gcc
+    log "Cray wrappers detected: building and linking with gcc $(gcc -dumpversion) instead"
+fi
 
 [ -f "$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp/CMakeLists.txt" ] \
     || err "the llama.cpp submodule is missing — run: git -C '$EULLM_REPO' submodule update --init --recursive"
