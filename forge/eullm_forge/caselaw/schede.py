@@ -107,6 +107,8 @@ def _leaks(text: str) -> str | None:
 def parse_card(raw: str) -> dict:
     """The card in a teacher reply, checked; raises CardRejected."""
     text = (raw or "").strip()
+    # a thinking model's reasoning, if it gave one despite being asked not to
+    text = re.sub(r"(?s)<think>.*?</think>", "", text).strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:

@@ -198,6 +198,7 @@ def test_cards_are_written_refused_and_not_asked_twice(corpus, teacher, tmp_path
                (out.parent / "schede.rejects.jsonl").read_text().splitlines()]
     assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 2}]
     assert seen[0]["response_format"] == {"type": "json_object"} and seen[0]["temperature"] == 0
+    assert seen[0]["chat_template_kwargs"] == {"enable_thinking": False}
     n = len(seen)
     assert mod.main(args) == 0 and len(seen) == n            # nothing asked again
     printed = capsys.readouterr()
@@ -357,3 +358,8 @@ def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, t
     assert all(float(r["recall3"]) == 1.0 for r in rows)
     printed = capsys.readouterr().out
     assert "fatto0_3" not in printed and "recall@3 1.000" in printed
+
+
+def test_a_reasoning_block_before_the_card_is_skipped():
+    card = parse_card("<think>\nLa sentenza riguarda...\n</think>\n" + json.dumps(GOOD))
+    assert card["esito"] == "rigetto"
