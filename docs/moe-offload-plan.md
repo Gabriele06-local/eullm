@@ -1,6 +1,6 @@
 # Experts in RAM: the half of Strata llama.cpp lacks — implementation plan
 
-**Status:** phases 1 and 2 measured on the reference PC; phase 2's pinning goes through `--no-mmap`, since the driver refused to pin the mapped file. Phase 6 written (patch `0003`, `LLAMA_MOE_PREFETCH=1`) and measured: with four slots a 33,200-token prompt reads 42% faster, to the same answer · 5 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
+**Status:** phases 1 and 2 measured on the reference PC; phase 2's pinning goes through `--no-mmap`, since the driver refused to pin the mapped file. Phase 6 written (patch `0003`, `LLAMA_MOE_PREFETCH=1`) and measured: with four slots a 33,200-token prompt reads 24-42% faster, to the same answer, and six or eight slots no faster than four · 6 October 2026. Written against `feat/moe-cache` at d1e0904, where llama.cpp is 6b7b03a: b11370 plus PR #29887, the expert cache. Line numbers refer to that tree. Strata's design and figures come from its paper (Strata v0.1.35); the speeds come from the reference PC: RTX 5070 Ti 16 GB on PCIe 4.0 x16, Ryzen 9 5950X (16 cores, AVX2), 64 GB of DDR4.
 
 **How our changes are carried.** As patch files in `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`, which the build script applies to a copy of the submodule (`llama_patches.rs`): the submodule stays at 6b7b03a, and nothing has to be pushed to the mirror for a change to build. `0001` gives CUDA a way to pin host memory on request; `0002` is phases 1 and 2 in the cache; `0003` is phase 6, in ggml's scheduler.
 
@@ -137,6 +137,19 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - **Writing** moved by −8% in three runs and +2% in the fourth. The slots are not on the writing path, which reads its experts through the expert cache (a MUL_MAT_ID of 512 tokens or more is staged, an answer's steps are of one token), and both servers of a run had the same cache (the `--fit` line of their logs: 5.25 and 6.75 GiB both times). So either the order the two servers run in (the prefetch one always second) or run-to-run noise of the size seen elsewhere on this machine: the same model wrote 111.4 and 120.5 tokens/s in two starts during the MTP measurements. `ORDER="1 0" bench/prefetch_check.sh` runs the pair the other way round, which tells the two apart.
 - Optional: `nsys profile` of one micro-batch shows how much of the copying still waits for a slot.
 
+**Measured again** on 5 October, six and eight slots and the order reversed, all at a fixed cache of 3,584 MiB (room for eight slots), `--n-ubatch 4096`, same model and prompt (`tools/gpu_night.sh`, `STEPS=prefetch`, nothing else on the GPU). Every answer the same again (`b2941bfb`).
+
+| slots | reading, tokens/s: off → on | writing, tokens/s: off → on |
+|---:|---|---|
+| 4 | 1,163.2 → 1,494.2 (+28.5%) | 42.8 → 42.9 |
+| 6 | 1,175.8 → 1,471.9 (+25.2%) | 42.9 → 43.1 |
+| 8 | 1,247.6 → 1,480.5 (+18.7%) | 45.4 → 43.0 |
+| 4, the prefetch server first | 1,207.0 → 1,497.7 (+24.1%) | 42.8 → 43.4 |
+
+- **More than four slots buys nothing:** with the prefetch every setting reads 1,470-1,500 tokens/s. The default of 4 stays.
+- **Writing does not move,** in either order: the −8% of 4 October was the order or noise, not the prefetch.
+- The gain is smaller than 4 October's +42% at four slots, with a smaller cache (3.5 GiB against 4.5) and with one run each: whether the cache or the day makes the difference is not known. A run made while another night ran on the same GPU (the morning of 5 October) is left out: its four-slot server could not pin the experts and wrote 4.3 tokens/s.
+
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
@@ -159,5 +172,5 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 1. ~~A q8_0 KV cache with `--n-ubatch 2048`~~ Measured: little to gain on this model. Only one layer in four has attention, so its KV cache is about 1 GiB at a 40,960-token context and `--fit` already charges it that way; q8_0 gave the expert cache 0.25 GiB more (7.00 GiB at 2,048), for 55.8 tokens/s writing and 935.7 reading. At 4,096, 53.2 and 1,195.1. `--n-ubatch 2048` without it stays the balance: about 55 writing, about 960 reading.
 2. llama.cpp's MTP with the experts pinned (llama-server, `--load-mode none`): a check of three tokens copies more experts, which cost 2.5 steps at 9 GB/s and costs far less at 24. If drafting pays now, loading the MTP head from its own file in EuLLM is a smaller job than phase 3.
 3. ~~`--no-mmap` on by itself with `--moe-cache`~~ Done: a load with a cache reads the model into memory when the RAM can spare the experts (`--mmap` to keep the mapping) and reads prompts 2,048 tokens at a time unless `--n-ubatch` says otherwise.
-4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (`LLAMA_MOE_PREFETCH=1`, patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots next.
+4. ~~Phase 6: copy the next layer's experts while a prompt's micro-batch computes.~~ Written (`LLAMA_MOE_PREFETCH=1`, patch `0003`) and measured: 1,743 tokens/s with four slots, against 1,228; six and eight slots read no faster than four (5 October). Next: a flag in place of the environment variable, and whether it is on by default, which needs `--fit` to keep the slots' VRAM out of an `auto` cache and one measurement of what that smaller cache costs the writing.
 5. The GPU's busy time per step, to split the 13.5-14 ms before the routers into computing and waiting: phase 4 if the waiting is large.

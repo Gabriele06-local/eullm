@@ -39,7 +39,7 @@
 | | |
 |---|---|
 | ⚡ **Decisions in milliseconds** | 64 questions about a page in 0.66 s, about 10 ms each, on one RTX 5070 Ti. The model gives the probability of every option and generates nothing. |
-| 🎯 **A RAG gate that knows when to stop** | On Italian law it tells whether the retrieved text can answer: AUROC 0.90 against 0.79 for embeddings, and 2.5× fewer good answers blocked. |
+| 🎯 **A RAG gate that knows when to stop** | On Italian law it tells whether the retrieved text can answer: AUROC 0.90 against 0.79 for embeddings, and 2.5× fewer good answers blocked (Jev-Style 2B). |
 | 🔁 **The same question, the same answer** | A decision does not move with the other questions asked beside it: bit for bit, checked on CPU and GPU. |
 | 🧾 **Decisions you can audit, correct and learn from** | Every decision has an id in the local audit trail. Mark it right or wrong, keep a private trace, and train your own decision model with Forge. |
 | 🐘 **A 125B model on a 16 GB GPU** | Qwen3.8-Flash-Next (125B, 6B active, IQ2_XS) writes 55 tokens/s on an RTX 5070 Ti with 64 GB of RAM: 2.5× the usual split, and long prompts read 3.8× faster. |
