@@ -455,8 +455,9 @@ by the CPU, but reads its prompt on the GPU: for each pass over the prompt,
 llama.cpp copies the experts kept in RAM to the card and runs them there.
 A pass reads 512 tokens by default (`n_ubatch`, llama.cpp's own default), so
 a 33,000-token prompt is 65 passes, and 65 copies of every expert in RAM over
-PCIe. On Qwen3.8-Flash-Next IQ2_XS (68 GB, most of its experts in RAM) with
-an RTX 5070 Ti, that read the prompt at 256 tokens/s.
+PCIe. On Qwen3.8-Flash-Next IQ2_XS (125B parameters, 6B active per token, a
+68 GB file with most of its experts in RAM) with an RTX 5070 Ti, that read
+the prompt at 256 tokens/s.
 
 `--n-ubatch` sets how many tokens one pass reads. At 4096 the same prompt is
 9 passes:
