@@ -218,6 +218,34 @@ done
 [ "$found" -eq 1 ] || echo "   none since $SINCE"
 
 echo
+echo "== OPD =="
+# opd_train.py prints a line per step: the first and the last of each recent
+# run show whether the KL is coming down, and the step reached; "adapter"
+# when the run is done.
+found=0
+for log in $(ls -t "$RUNS"/opd/logs/eullm-opd-*.out 2>/dev/null | head -4); do
+    [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
+    found=1
+    echo "   ${log##*/}"
+    grep -ao '\[opd\] \(step .*\|adapter .*\|time is up.*\)' "$log" | sed -n '1p;$p' | uniq |
+        sed 's/^/     /'
+done
+[ "$found" -eq 1 ] || echo "   none since $SINCE"
+
+echo
+echo "== case-law exam =="
+# cds_answer.py's summary line per model; the judges' grades are in the
+# graded.csv beside the answers.
+REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
+found=0
+for log in $(ls -t "$REPO_LOGS"/eullm-cds-exam-*.out 2>/dev/null | head -6); do
+    [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
+    line="$(grep -ao '\[cds-exam\] [^:]*: [0-9]* questions; .*->' "$log" | tail -1)"
+    [ -z "$line" ] || { found=1; echo "   ${line%% ->}"; }
+done
+[ "$found" -eq 1 ] || echo "   none since $SINCE"
+
+echo
 echo "== latest measurements =="
 for f in "$RUNS"/stage3/perplexity-cds.csv "$RUNS"/stage3/chat-smoke.csv "$RUNS"/*/exports/perplexity.csv; do
     [ -f "$f" ] || continue
