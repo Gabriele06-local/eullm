@@ -1839,6 +1839,13 @@ jobs:
       # Its installer carries glslc, which ggml-vulkan compiles its shaders
       # with, and the SPIRV-Headers CMake package ggml-vulkan asks for.
       VULKAN_VERSION: "1.4.363.0"
+      # A short target directory, and no --target below, for path length.
+      # ggml-vulkan configures its shader generator as a CMake project of its
+      # own, deep inside llama.cpp's build tree, and CMake's compiler checks
+      # there put objects 275 characters deep under target\x86_64-pc-
+      # windows-msvc\: past CMake's 250 and Windows' 260. Here the deepest is
+      # 233. The first run of this job failed on exactly that.
+      CARGO_TARGET_DIR: D:\t
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1913,6 +1920,8 @@ jobs:
         continue-on-error: true
         with:
           key: x86_64-pc-windows-msvc-vulkan
+          # CARGO_TARGET_DIR, as a path from the workspace (D:\a\eullm\eullm).
+          workspaces: ". -> ../../../t"
 
       - name: Install sccache
         shell: pwsh
@@ -1951,7 +1960,19 @@ jobs:
           # docs/x86-64-baseline.md.
           RUSTFLAGS: "-C target-cpu=x86-64-v3"
           CMAKE_GENERATOR: Ninja
-        run: cargo build --release --target x86_64-pc-windows-msvc --features "vulkan,multimodal" -p eullm-engine
+        run: |
+          # The shader generator's CMake project does not get the compiler cargo
+          # hands llama.cpp's: it searches PATH, where the folders the Vulkan SDK
+          # and LLVM steps add come before Visual Studio's, and on the first run
+          # it found LLVM's clang 17, whose C++ feature check then failed. CC and
+          # CXX name cl.exe, the compiler the rest of the build uses.
+          $cl = Join-Path $env:VCToolsInstallDir 'bin\HostX64\x64\cl.exe'
+          if (-not (Test-Path $cl)) { throw "cl.exe not found at $cl" }
+          $env:CC = $cl
+          $env:CXX = $cl
+          # No --target: the host is x86_64-pc-windows-msvc already, and the
+          # triple would add its own folder to every path (see CARGO_TARGET_DIR).
+          cargo build --release --features "vulkan,multimodal" -p eullm-engine
 
       - name: sccache stats (visibility into S3 hit/miss)
         if: always()
@@ -1968,7 +1989,7 @@ jobs:
         run: |
           $bundle = "eullm-windows-x64-vulkan"
           New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-          Copy-Item "target\x86_64-pc-windows-msvc\release\eullm.exe" -Destination "$bundle\eullm.exe"
+          Copy-Item "$env:CARGO_TARGET_DIR\release\eullm.exe" -Destination "$bundle\eullm.exe"
 
           # Two checks on what the exe contains rather than on what the build
           # was asked for, as build-vulkan does on Linux.
