@@ -214,6 +214,25 @@ def test_a_tiny_run_saves_the_adapter_and_a_stopped_run_carries_on(tiny_model, t
     assert "nothing left to do" in capsys.readouterr().out
 
 
+def test_an_empty_adapter_config_is_not_a_finished_adapter(tmp_path, capsys):
+    """A 0-byte adapter_config.json is an interrupted save, not a done run.
+
+    Existence alone used to count as done and exit 0 without even reading the
+    prompts, so a killed link looked exactly like a completed one. grpo_train.py
+    and stage3_sft.py test size for this reason; opd_train.py was the third
+    writer of the same shape and the only one left on existence.
+    """
+    mod = _load("opd_train")
+    out = tmp_path / "run"
+    (out / "adapter").mkdir(parents=True)
+    (out / "adapter" / "adapter_config.json").touch()  # the killed link's trace
+    with pytest.raises(FileNotFoundError):  # it reads the prompts instead
+        mod.main(["--student", "s", "--teacher", "t",
+                  "--prompts", str(tmp_path / "no-such-prompts.jsonl"),
+                  "--out", str(out)])
+    assert "nothing left to do" not in capsys.readouterr().out
+
+
 def test_a_teacher_with_another_vocabulary_is_refused(tiny_model, tmp_path):
     path, prompts = tiny_model
     transformers = pytest.importorskip("transformers")
