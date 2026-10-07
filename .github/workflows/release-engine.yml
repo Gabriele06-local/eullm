@@ -2086,12 +2086,13 @@ jobs:
           name: eullm-windows-x64-vulkan
           path: eullm-windows-x64-vulkan.zip
 
-  # ── Windows ROCm: EXPERIMENTAL, run by hand only ───────────────────────────
+  # ── Windows ROCm: EXPERIMENTAL ────────────────────────────────────────────
   #
   # Radeon RX 7000 / RX 9000 on Windows through HIP, for whoever finds the
-  # Vulkan ZIP above slower on their card. Not part of a release yet: nothing
-  # here has run on a Radeon, and the first runs are for finding out what the
-  # build needs. Dispatch it with `windows-rocm` in the `job` dropdown.
+  # Vulkan ZIP above slower on their card. Published with the releases and
+  # marked untested there: on 7 October 2026 it built, packaged and started
+  # on a runner with no GPU, and it has not yet run on a Radeon. Dispatch it
+  # on its own with `windows-rocm` (or `all`) in the `job` dropdown.
   #
   # What differs from the Linux ROCm job:
   # - ROCm comes from AMD's own pip packages (`rocm[libraries,devel]`), the
@@ -2108,7 +2109,10 @@ jobs:
   # gfx1100 (RX 7900 XTX) and gfx1201 (Radeon AI PRO R9700). Every
   # architecture added multiplies the device-code compile.
   build-windows-rocm:
-    if: ${{ inputs.job == 'windows-rocm' }}
+    if: >-
+      ${{ github.event_name == 'push'
+          || inputs.job == 'all'
+          || inputs.job == 'windows-rocm' }}
     runs-on: windows-2022
     env:
       # The newest ROCm for Windows on 7 October 2026 (released 5 October).
@@ -2456,6 +2460,7 @@ jobs:
       - build-windows
       - build-windows-cuda
       - build-windows-vulkan
+      - build-windows-rocm
       - build-windows-msix
     # Run as long as at least one upstream job built something. We never
     # want a single failing build to nuke a release after CI on the others.
@@ -2620,6 +2625,15 @@ jobs:
             Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64-vulkan.zip -OutFile eullm-vulkan.zip
             Expand-Archive eullm-vulkan.zip -DestinationPath eullm-vulkan
             .\eullm-vulkan\eullm.exe run model.gguf
+
+            # Windows x64 with an AMD Radeon RX 7900 XTX/XT, RX 9070 XT/9070 or
+            # Radeon AI PRO R9700, through ROCm 10.1. EXPERIMENTAL: not yet run
+            # on a Radeon. Needs the "AMD Software: Adrenalin Edition for ROCm
+            # 10.1" driver. ROCm's own layout: eullm.exe is in bin\, and the
+            # .kpack\ folder must stay beside it.
+            Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64-rocm.zip -OutFile eullm-rocm.zip
+            Expand-Archive eullm-rocm.zip -DestinationPath eullm-rocm
+            .\eullm-rocm\bin\eullm.exe run model.gguf
             ```
 
             ### Which binary to download?
@@ -2641,6 +2655,7 @@ jobs:
             | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 with the Visual C++ Redistributable already installed (otherwise it fails with "MSVCP140.dll was not found" — take the ZIP) |
             | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA and Visual C++ runtime DLLs — run from the extracted folder |
             | `eullm-windows-x64-vulkan.zip` | Any GPU with a Vulkan driver: AMD Radeon (cards and Ryzen integrated graphics), Intel Arc, and NVIDIA cards the CUDA build does not cover (GTX 1000, RTX 2000) | Windows 10/11 x64 and a current graphics driver, which installs the Vulkan loader. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
+            | `eullm-windows-x64-rocm.zip` | AMD Radeon through ROCm 10.1: RX 7900 XTX/XT (gfx1100), RX 9070 XT/9070 and Radeon AI PRO R9700 (gfx1201). **Experimental: not yet run on a Radeon** | Windows 11 x64 and the AMD Software: Adrenalin Edition for ROCm 10.1 driver (26.10.41.05) or newer. ZIP bundles the HIP runtime, rocBLAS and hipBLASLt with the kernels of those cards, and the Visual C++ runtime, in ROCm's own layout: run `bin\eullm.exe` and keep `.kpack\` beside `bin\`. Not installed by `install.ps1` or `eullm update` yet |
             | `eullm-windows-x64-store.msix` | CPU + NVIDIA GPU | **Not for direct install**: the unsigned package submitted to the Microsoft Store, which signs it. Use the ZIPs or `install.ps1` instead |
 
             ### Pick a model interactively
@@ -2716,6 +2731,7 @@ jobs:
       - build-windows
       - build-windows-cuda
       - build-windows-vulkan
+      - build-windows-rocm
       - release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-22.04

@@ -70,6 +70,9 @@ function Install-EuLLM {
         'cpu'    { $candidates = $cpuCandidates }
         'cuda'   { $candidates = @('eullm-windows-x64-cuda-13.1.zip') }
         'vulkan' { $candidates = @('eullm-windows-x64-vulkan.zip') }
+        # ROCm's own layout (bin\ and .kpack\), which this script, copying a
+        # ZIP's top-level files, cannot install yet.
+        'rocm'   { throw "The Windows ROCm build is not installed by this script yet: download eullm-windows-x64-rocm.zip from https://github.com/eullm/eullm/releases/latest, extract it, and run bin\eullm.exe from there." }
         default { throw "Unknown EULLM_VARIANT '$variant' (expected cpu, cuda or vulkan)." }
     }
 
