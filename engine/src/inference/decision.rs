@@ -358,7 +358,8 @@ fn question_text(question: &Question) -> String {
 /// prompt — for Qwen3 that is the pre-closed empty `<think>` block the
 /// template renders for `enable_thinking=false`. A model that always
 /// reasons regardless (the DeepSeek-R1 family) spends its first token on
-/// the opening tag instead, which shows up as a coverage near zero.
+/// its reasoning instead — the opening tag, or its first thought where the
+/// template opens the block itself — which shows up as a coverage near zero.
 ///
 /// Without an embedded template, a plain-text prompt whose last word asks
 /// for the answer.

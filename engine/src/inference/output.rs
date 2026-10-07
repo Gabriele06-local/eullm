@@ -223,6 +223,22 @@ mod tests {
         assert_eq!(out, "a<|impossible");
     }
 
+    // A response prefix (the reasoning block a template opened) is where
+    // the hold-back buffer starts: it goes out with the first piece, through
+    // the filters, exactly as if the model had written it — so with
+    // `think: false`'s filters the tag is dropped like a written one.
+    #[test]
+    fn a_response_prefix_goes_out_with_the_first_piece_through_the_filters() {
+        let mut pending = "<think>\n".to_string();
+        let out = process_piece(&mut pending, &[], &[], "The user");
+        assert_eq!(out, PieceOutcome::Emit("<think>\nThe user".to_string()));
+
+        let filters = vec!["</think>".to_string(), "<think>".to_string()];
+        let mut pending = "<think>\n".to_string();
+        let out = process_piece(&mut pending, &[], &filters, "The user");
+        assert_eq!(out, PieceOutcome::Emit("\nThe user".to_string()));
+    }
+
     #[test]
     fn the_tail_is_recoverable_when_generation_ends_without_a_stop() {
         let stops = vec!["<end_of_turn>".to_string()];
