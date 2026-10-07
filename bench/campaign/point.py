@@ -42,7 +42,7 @@ REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 # above this, or a kind or runtime this file does not know, and is left in
 # the queue for a runner that does: jobs keep the code they started with
 # for up to 48 hours, while plan adds points at any time.
-RUNNER_VERSION = 2
+RUNNER_VERSION = 3
 KINDS = ("throughput", "workload", "finetune", "decision")
 # The servers a point can measure: the engine, and for comparison the stock
 # llama.cpp server (the same backend without EuLLM's runtime) and Ollama
@@ -156,6 +156,47 @@ def model_storage(p: dict):
     else:
         path = store_gguf(p["model"])
     return mount_root(path) if path else None
+
+
+def model_files(p: dict) -> list:
+    """Every GGUF in the store directory the point's server reads its model
+    from (all the parts of a split one); none for Ollama, which reads its
+    own copies."""
+    path = None if p.get("runtime") == "ollama" else store_gguf(p["model"])
+    if not path:
+        return []
+    d = os.path.dirname(path)
+    return sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".gguf"))
+
+
+def evict(paths) -> int:
+    """Ask the kernel to drop these files from the page cache, so the next
+    load reads them from the file system whatever ran on the node before (a
+    `cold` point). Pages another process has mapped stay. The bytes asked
+    for; 0 where posix_fadvise is missing."""
+    total = 0
+    for path in paths:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except OSError:
+            continue
+        try:
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            total += os.fstat(fd).st_size
+        except (OSError, AttributeError):
+            pass
+        finally:
+            os.close(fd)
+    return total
+
+
+def cache_state(p: dict, ctx) -> str:
+    """How the point found its model: `evicted` from the page cache on
+    purpose (`cold`), else `cold` the first time this job loads it and
+    `warm` after."""
+    if p.get("cold"):
+        return "evicted"
+    return "warm" if p["model"] in ctx.model_seen else "cold"
 
 
 def runtime_command(p: dict, engine: str):
@@ -529,7 +570,7 @@ def start_servers(p: dict, ctx: Context) -> list:
 def warm_up(p: dict, servers: list, ctx: Context, body: dict) -> dict:
     """One request per server, all at once: loads every copy of the model.
     Untimed for throughput; timed here, because loading is a metric."""
-    cache = "warm" if p["model"] in ctx.model_seen else "cold"
+    cache = cache_state(p, ctx)
     t0 = time.time()
     got = concurrently(
         len(servers), lambda i: call(servers[i], "/api/generate", body, WARMUP_TIMEOUT_S)
@@ -998,6 +1039,7 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
         measured, window = run_finetune(p, ctx, ctx.workdir)
         stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
         return {"finetune": measured, "device_stats": stats}
+    evicted = evict(model_files(p)) if p.get("cold") else None
     started = time.time()
     servers = start_servers(p, ctx)
     ctx.servers = servers
@@ -1006,7 +1048,7 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
             s.wait_ready(stop=ctx.stop)
         if p["kind"] == "decision":
             # The model loads before the server answers: readiness is the load.
-            cache = "warm" if p["model"] in ctx.model_seen else "cold"
+            cache = cache_state(p, ctx)
             ready_s = time.time() - started
             got = concurrently(len(servers), lambda i: decision_request(
                 servers[i].url, decision_bodies(dict(p, distinct_states=1))[0], WARMUP_TIMEOUT_S))
@@ -1017,15 +1059,18 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
             ctx.model_seen.add(p["model"])
             measured, window = run_decision(p, servers, ctx)
             stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
-            return {"load": {"cache": cache, "storage": model_storage(p),
-                             "wall_s": round(ready_s, 2)},
-                    "decision": measured, "device_stats": stats}
+            load = {"cache": cache, "storage": model_storage(p), "wall_s": round(ready_s, 2)}
+            if evicted is not None:
+                load["evicted_bytes"] = evicted
+            return {"load": load, "decision": measured, "device_stats": stats}
         if p["kind"] == "throughput":
             warm_body = generate_body(p, p["prompt"] if not p["prompt_tokens"]
                                       else synthetic_prompt(p["prompt_tokens"], "warmup"))
         else:
             warm_body = dict(WARMUP_BODY, model=p["model"])
         load = warm_up(p, servers, ctx, warm_body)
+        if evicted is not None:
+            load["evicted_bytes"] = evicted
         if p["kind"] == "throughput":
             measured, window = run_throughput(p, servers, ctx)
         else:

@@ -242,6 +242,27 @@ written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
 changes. There is no command-line flag for it on purpose: a token on the
 command line is visible to every local user in `ps`.
 
+### Reading the model ahead of its load (`--load-threads`, experimental)
+
+`--load-threads N` has N threads read the model file, every part of a split
+one, in file order into the page cache while llama.cpp loads it, so that
+llama.cpp finds it in memory. `--load-threads auto` uses 16 on a network file
+system (Lustre, NFS, SMB, GPFS, BeeGFS, CephFS, 9p) and none on a local disk.
+**It is off by default**, because where it was measured it did not help:
+
+| LUMI-G, Lustre, cold load | no readers | 4 | 16 | 32 |
+|---|---:|---:|---:|---:|
+| Qwen3.8-27B Q8, 29 GiB, 1 GCD (3 loads each) | 45.9 s | 102.7 s | 49.5 s | 40.9 s |
+| Qwen3-235B Q4_K_M, 132 GiB, 4 GCDs (2 loads each) | 110.3 s | — | 128.3 s | — |
+
+The flag came from `dd` reading 2 GiB pieces of a model at 178 MB/s with one
+stream and 2,283 MB/s with sixteen (`tools/lumi/sbatch_lustre_probe.slurm`);
+llama.cpp's own load turned out not to be that slow stream, reading the whole
+file at 0.7 to 1.3 GB/s alone. It stays for file systems where it has not been
+measured (NFS, SMB). A model larger than the memory free for the page cache
+(the RAM, or a Slurm job's `--mem`) is never read ahead, models under 1 GiB
+neither, and the log says how many threads read how much and at what rate.
+
 ## Security
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)

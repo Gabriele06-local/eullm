@@ -572,6 +572,9 @@ pub struct InferenceConfig {
     /// `fit::prefetch_slots`). Like the expert cache, every context of this
     /// model gets it except the MTP draft context.
     pub moe_prefetch_slots: u32,
+    /// `--load-threads`: readers that bring the model file into the page
+    /// cache ahead of the load (see `crate::readahead`).
+    pub load_threads: crate::readahead::LoadThreads,
 }
 
 impl Default for InferenceConfig {
@@ -600,6 +603,7 @@ impl Default for InferenceConfig {
             moe_cache_bytes: 0,
             no_mmap: false,
             moe_prefetch_slots: 0,
+            load_threads: crate::readahead::LoadThreads::default(),
         }
     }
 }
@@ -1818,8 +1822,12 @@ impl InferenceEngine {
         }
 
         tracing::info!("Loading model: {}", config.model_path.display());
-        let model = LlamaModel::load_from_file(&backend, &config.model_path, &model_params)
-            .map_err(|e| format!("Failed to load model: {e}"))?;
+        let ahead = crate::readahead::start(&config.model_path, config.load_threads);
+        let model = LlamaModel::load_from_file(&backend, &config.model_path, &model_params);
+        if let Some(ahead) = ahead {
+            ahead.finish();
+        }
+        let model = model.map_err(|e| format!("Failed to load model: {e}"))?;
 
         tracing::info!("Model loaded successfully.");
 

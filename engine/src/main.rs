@@ -10,6 +10,7 @@ mod lineedit;
 mod llama_archs;
 mod models;
 mod picker;
+mod readahead;
 mod registry;
 mod tools;
 mod ui;
@@ -314,6 +315,23 @@ struct RuntimeOpts {
         value_parser = fit::parse_moe_prefetch
     )]
     moe_prefetch: u32,
+
+    /// Threads that read the model file ahead of the load, into the page
+    /// cache, so the load finds it in memory. Off by default (0): on Lustre
+    /// it made loads slower, not faster (LUMI-G, cold: a 132 GiB model 110 s
+    /// without readers, 128 s with 16): llama.cpp alone read the file at
+    /// 0.7-1.3 GB/s there.
+    /// Kept for file systems where it has not been measured. `auto` uses 16
+    /// on Lustre, NFS, SMB, GPFS, BeeGFS, CephFS and 9p and none on a local
+    /// disk. Never for a model larger than the memory free for the page cache
+    /// (the RAM, or a Slurm job's --mem).
+    #[arg(
+        long,
+        value_name = "N|auto",
+        default_value = "0",
+        value_parser = readahead::parse_load_threads
+    )]
+    load_threads: readahead::LoadThreads,
 
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
@@ -969,6 +987,7 @@ async fn main() {
                 no_mmap,
                 mmap,
                 moe_prefetch,
+                load_threads,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1110,6 +1129,7 @@ async fn main() {
                 no_mmap,
                 mmap,
                 moe_prefetch,
+                load_threads,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1160,6 +1180,7 @@ async fn main() {
                 no_mmap,
                 mmap,
                 moe_prefetch,
+                load_threads,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1269,6 +1290,7 @@ async fn main() {
                 no_mmap,
                 mmap,
                 moe_prefetch,
+                load_threads,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2505,6 +2527,7 @@ async fn cmd_run(
     no_mmap: bool,
     mmap: bool,
     moe_prefetch: u32,
+    load_threads: readahead::LoadThreads,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -3118,6 +3141,7 @@ async fn cmd_run(
             moe_cache_bytes,
             no_mmap,
             moe_prefetch_slots,
+            load_threads,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -3352,6 +3376,7 @@ async fn cmd_run(
             no_mmap: no_mmap_flag,
             mmap,
             moe_prefetch,
+            load_threads,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3431,6 +3456,7 @@ async fn cmd_serve(
     no_mmap: bool,
     mmap: bool,
     moe_prefetch: u32,
+    load_threads: readahead::LoadThreads,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3543,6 +3569,7 @@ async fn cmd_serve(
         no_mmap,
         mmap,
         moe_prefetch,
+        load_threads,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,
@@ -5184,6 +5211,28 @@ mod cli_default_parity_tests {
         assert!(runtime_opts(&["eullm", "run", "x", "--no-mmap"]).no_mmap);
         assert!(runtime_opts(&["eullm", "serve", "--mmap"]).mmap);
         assert!(Cli::try_parse_from(["eullm", "serve", "--mmap", "--no-mmap"]).is_err());
+    }
+
+    #[test]
+    fn the_model_is_read_ahead_only_when_asked() {
+        use readahead::LoadThreads;
+        assert_eq!(
+            runtime_opts(&["eullm", "serve"]).load_threads,
+            LoadThreads::Fixed(0)
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--load-threads", "auto"]).load_threads,
+            LoadThreads::Auto
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "serve", "--load-threads", "0"]).load_threads,
+            LoadThreads::Fixed(0)
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--load-threads", "16"]).load_threads,
+            LoadThreads::Fixed(16)
+        );
+        assert!(Cli::try_parse_from(["eullm", "serve", "--load-threads", "many"]).is_err());
     }
 
     /// `--n-ubatch` is unset unless asked, on both subcommands: llama.cpp's

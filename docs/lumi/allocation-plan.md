@@ -107,6 +107,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c06-mtp` | 48 | ~4 | MTP GGUFs (~114 GiB): speculative decoding, objective (5) |
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
+| `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -172,6 +173,14 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    binaries, each one a round, never the default.
 7. **`--moe-cache` on HIP.** It refuses any non-CUDA device and more than one
    GPU, and its pinned-memory patch is CUDA-only. Objective (5) on MoE.
+8. **Loading from Lustre: `--load-threads`** (07-10-2026, `c09`). c02's
+   Coder-480B (270 GiB) had not loaded after an hour, and `dd` reading 2 GiB
+   pieces of it on a compute node gave 178 MB/s with one stream and 2,283
+   MB/s with sixteen (`sbatch_lustre_probe.slurm`). Threads reading the model
+   ahead of llama.cpp did not pay: cold, a 132 GiB model loaded in 110 s
+   without them and 128 s with 16, since llama.cpp alone reads at 0.7-1.3
+   GB/s. The flag is off by default; the hour lost on the 480B came from
+   something else, looked for in c09's 480B and 671B loads without readers.
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 

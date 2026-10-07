@@ -34,6 +34,8 @@ DECISION_MODES = ("shared_prefix", "batched", "separate")
 # Points that need a runner newer than the first one carry this (see
 # point.RUNNER_VERSION); the others keep the ids they always had.
 NEW_RUNNER = 2
+# `cold` points need the runner that drops their model from the page cache.
+EVICT_RUNNER = 3
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -184,6 +186,11 @@ def normalize(raw: dict) -> dict:
             raise SpecError("a workload point needs sets")
         if p["max_duration_s"] < p["min_duration_s"]:
             raise SpecError("max_duration_s is below min_duration_s")
+    if "cold" in raw:
+        if p["kind"] == "finetune":
+            raise SpecError("a finetune point loads no server: cold does not apply")
+        p["cold"] = bool(p["cold"])
+        p["runner"] = max(p.get("runner", 1), EVICT_RUNNER)
     p["extra_args"] = [str(a) for a in p["extra_args"]]
     for hint in HINTS:
         p.pop(hint, None)
