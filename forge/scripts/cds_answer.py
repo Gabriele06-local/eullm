@@ -107,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--openga", nargs="*", type=Path, default=[])
     ap.add_argument("--cards", nargs="*", type=Path, default=[],
                     help="cards of the indexed rulings: the chunks carry their prefix")
+    ap.add_argument("--index", choices=["prefix", "prefix+cards"], default="prefix+cards",
+                    help="units of the case-law index: chunks with their card prefix, and the "
+                         "cards as units of their own besides (the retrieval check of "
+                         "2026-10-07: recall@3 +5.4 and +7.2 points over plain chunks)")
     ap.add_argument("--embedder")
     ap.add_argument("--reranker")
     ap.add_argument("--cache-dir", type=Path)
@@ -145,7 +149,8 @@ def main(argv: list[str] | None = None) -> int:
                 c = json.loads(line)
                 if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds":
                     chunks.append(c)
-    units = build_units(rulings, chunks, cards=cards, prefix_chunks=bool(cards))
+    units = build_units(rulings, chunks, cards=cards, prefix_chunks=bool(cards),
+                        card_units=bool(cards) and args.index == "prefix+cards")
     index = RulingIndex(units, bm25=SparseBM25([u.text for u in units]))
     if args.embedder:
         from eullm_forge.caselaw.index import shard_vectors, units_key

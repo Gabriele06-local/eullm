@@ -14,7 +14,8 @@ carded TRAINING ruling, up to ``--per-ruling`` of its research questions:
 
 * the student's prompt is the question with the ``-k`` passages the
   case-law index retrieves for it (`eullm_forge.caselaw.index`, chunks with
-  their card prefix), as it will be asked in use;
+  their card prefix and the cards themselves, ``--index``), as it will be
+  asked in use;
 * the teacher's is the same with the ruling the question came from in
   front (`caselaw.prompts.privileged_prompt`).
 
@@ -82,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-k", type=int, default=3, help="passages in the student's prompt")
     ap.add_argument("--exclude-oggetto", default=SENSITIVE,
                     help="regex on OGGETTO_RICORSO: rulings never used as a source")
+    ap.add_argument("--index", choices=["prefix", "prefix+cards"], default="prefix+cards",
+                    help="units of the case-law index: chunks with their card prefix, and the "
+                         "cards as units of their own besides (the retrieval check of "
+                         "2026-10-07: recall@3 +5.4 and +7.2 points over plain chunks)")
     ap.add_argument("--embedder", help="retrieve with embeddings too (as cds_retrieval.py)")
     ap.add_argument("--reranker")
     ap.add_argument("--cache-dir", type=Path)
@@ -115,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
 
     chunks = [c for c in read_jsonl(args.chunks)
               if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds"]
-    units = build_units(rulings, chunks, cards=cards, prefix_chunks=True)
+    units = build_units(rulings, chunks, cards=cards, prefix_chunks=True,
+                        card_units=args.index == "prefix+cards")
     index = RulingIndex(units, bm25=SparseBM25([u.text for u in units]))
     if args.embedder:
         from eullm_forge.caselaw.index import shard_vectors, units_key
@@ -130,22 +136,25 @@ def main(argv: list[str] | None = None) -> int:
         r = rulings.get(rid)
         return {"sezione": getattr(r, "section", ""), "numero": rid.split("/", 1)[-1]}
 
-    rows = []
+    rows, n_citable = [], 0
     for rid in chosen:
         qs = list(cards[rid].get("domande_ricerca", []))
         rng.shuffle(qs)
         for q in qs[:args.per_ruling]:
-            passages = []
+            passages, found = [], set()
             for i in index.ranked_units(q):
                 u = units[i]
                 passages.append((ruling_label(meta_of(u.ruling)), u.text))
+                found.add(u.ruling)
                 if len(passages) >= args.k:
                     break
             source = (ruling_label(meta_of(rid)), ruling_view(rulings[rid].text, 12000))
+            n_citable += rid in found
             rows.append({"id": f"{rid}#{len(rows)}", "kind": "caselaw", "ruling": rid,
                          "student": [{"role": "user", "content": caselaw_prompt(q, passages)}],
                          "teacher": [{"role": "user",
-                                      "content": privileged_prompt(q, passages, source)}]})
+                                      "content": privileged_prompt(
+                                          q, passages, source, citable=rid in found)}]})
     n_case = len(rows)
     if args.statutes and args.mix > 0:
         stat = read_jsonl([args.statutes])
@@ -162,8 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     tmp.replace(args.out)
     print(f"[opd-prompts] {len(rows):,} rows ({n_case:,} case-law from {len(chosen):,} rulings, "
-          f"{len(rows) - n_case:,} statute); left out {n_dev:,} development and {n_sens:,} "
-          f"sensitive rulings -> {args.out}")
+          f"{len(rows) - n_case:,} statute; source among the passages in {n_citable:,}); "
+          f"left out {n_dev:,} development and {n_sens:,} sensitive rulings -> {args.out}")
     return 0
 
 

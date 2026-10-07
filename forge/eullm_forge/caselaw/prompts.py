@@ -35,9 +35,20 @@ def caselaw_prompt(question: str, passages: list[tuple[str, str]]) -> str:
 
 
 def privileged_prompt(question: str, passages: list[tuple[str, str]], ruling: tuple[str, str],
-                      max_chars: int = 12000) -> str:
-    """The student's prompt with the source ruling in front: the teacher's view."""
+                      max_chars: int = 12000, citable: bool = True) -> str:
+    """The student's prompt with the source ruling in front: the teacher's view.
+
+    ``citable=False`` when retrieval did not find the source: the teacher is
+    shown the ruling without its number and told not to cite it. A teacher
+    that cites a ruling the student was never shown teaches the student to
+    cite from memory -- to invent. On 2026-10-06 the 8B taught by Ministral-3-14B
+    went from 84.9% to 65.7% of answers citing only rulings they were given.
+    """
     label, text = ruling
     body = text[:max_chars].rstrip() + (" […]" if len(text) > max_chars else "")
-    return (f"Sentenza da cui proviene la domanda ({label}):\n{body}\n\n---\n\n"
-            + caselaw_prompt(question, passages))
+    if citable:
+        head = f"Sentenza da cui proviene la domanda ({label}):"
+    else:
+        head = ("Sentenza da cui proviene la domanda (non è tra i testi di riferimento: usala per "
+                "sapere che cosa è giusto, ma non citarla):")
+    return f"{head}\n{body}\n\n---\n\n" + caselaw_prompt(question, passages)

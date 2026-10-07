@@ -681,8 +681,9 @@ With an expert cache, the experts it already holds are copied into the slots
 from its own VRAM, and only the others over the bus (18% of the bytes with
 the 6 GiB cache of the model above). One line on stderr says the share taken
 from VRAM; `LLAMA_MOE_PREFETCH_FROM_CACHE=0` copies everything over the bus,
-a diagnostic to compare the two, like the variables above. Whether this reads
-faster is still being measured (`docs/moe-offload-plan.md`, phase 6b).
+a diagnostic to compare the two, like the variables above. On the reference
+PC this read the 33,200-token prompt at 1,509 tokens/s instead of 1,368
+(+10%), to the same answer (`docs/moe-offload-plan.md`, phase 6b).
 
 It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
 build), to experts kept in RAM with the model read into memory rather than

@@ -16,6 +16,12 @@
 # TEMPERATURE (default 0). One line per setting, as bench/mtp_sweep.sh prints
 # for EuLLM; each server's log stays in $OUT.
 #
+# DRAFT_MODEL names a file holding the MTP layer alone, for a model whose
+# GGUF has none (Qwen3.8-Flash-Next: unsloth's mtp-Qwen3.8-Flash-Next-Q8_0.gguf,
+# or a copy of it with smaller experts). Only the settings that draft load it
+# (`-md`), all of it in VRAM (`-ngld 99`), so the setting without drafts keeps
+# the same expert cache and has the draft layer's VRAM free.
+#
 # What it decides (docs/roadmap-engine-0.7-1.0.md, 0.8-Z2): if drafting gains
 # here, MTP on an MoE with its experts in RAM is worth measuring in EuLLM
 # (bench/mtp_sweep.sh with --moe-cache auto); if it loses, it waits for phase
@@ -35,6 +41,7 @@ DRAFTS=${DRAFTS:-"0 1 2"}
 CACHE_MIB=${CACHE_MIB:-8000}
 CTX=${CTX:-8192}
 TEMPERATURE=${TEMPERATURE:-0}
+DRAFT_MODEL=${DRAFT_MODEL:-}
 CODE="Write a Python function that parses an ISO 8601 date string into a datetime, with a docstring, type hints and three unit tests."
 
 if ! python3 "$SPEED_CHECK" --help 2>/dev/null | grep -q -- --temperature; then
@@ -43,6 +50,10 @@ if ! python3 "$SPEED_CHECK" --help 2>/dev/null | grep -q -- --temperature; then
 fi
 if [[ ! -f $MODEL ]]; then
     echo "no model at $MODEL" >&2
+    exit 1
+fi
+if [[ -n $DRAFT_MODEL && ! -f $DRAFT_MODEL ]]; then
+    echo "no draft layer at $DRAFT_MODEL" >&2
     exit 1
 fi
 if ! "$SERVER" --help 2>/dev/null | grep -q -- --moe-cache-mib; then
@@ -67,7 +78,10 @@ speed() { # a speed_check.py run: "tokens/s kept drafted answer"; extra argument
 printf '%-16s %12s %12s %12s  %s\n' setting story_tok/s code_tok/s drafts_kept answers
 for n in $DRAFTS; do
     spec=()
-    [[ $n != 0 ]] && spec=(--spec-type draft-mtp --spec-draft-n-max "$n")
+    if [[ $n != 0 ]]; then
+        spec=(--spec-type draft-mtp --spec-draft-n-max "$n")
+        [[ -n $DRAFT_MODEL ]] && spec+=(-md "$DRAFT_MODEL" -ngld 99)
+    fi
     log="$OUT/llama-server-mtp$n.log"
     # One slot, as EuLLM's default: speculative checks then never share a batch.
     "$SERVER" -m "$MODEL" --port "$PORT" -c "$CTX" -np 1 -ngl 99 \

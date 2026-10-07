@@ -5,9 +5,9 @@
 #   nohup tools/gpu_night.sh > ~/work/gpu-night.out 2>&1 &
 #
 # It keeps the machine from sleeping while it runs (systemd-inhibit), waits
-# until no bench/prefetch_check.sh is running, stops any server of $BIN or of
-# the pinned llama-server still up (it would share the GPU with every
-# measurement), then runs each step of STEPS
+# until no bench/prefetch_check.sh is running, stops any server of $BIN, of
+# the pinned llama-server or of Strata (STRATA_DIR) still up (it would share
+# the GPU with every measurement), then runs each step of STEPS
 # under a time limit of its own, and goes on whatever a step's outcome. A
 # step not started by STOP_AT (06:45) is left for another night. After every
 # step $NIGHT/summary.md is written again: each step's outcome and minutes,
@@ -35,6 +35,29 @@
 #                    RAG_DECISION as the decision model (the 2B by default)
 #   docker-gpu       the CUDA image built and asked one question; skipped
 #                    without Docker's NVIDIA runtime or with port 11434 taken
+#
+# Step 1 of docs/strata-study.md (§7), with
+# STEPS="strata fresh ceiling llama-pin test-flash":
+#   strata           bench/strata_check.sh on Strata's folder (STRATA_DIR):
+#                    its 85.8 and 2,320 again with its own timings, then
+#                    without drafts, without the warm repeat, and at
+#                    temperature 0.7
+#   fresh            bench/fresh_check.sh: EuLLM's writing on servers that
+#                    have read no long prompt, phase 6b on and off, and the
+#                    share of the time the GPU has work; then one more server
+#                    with the expert cache's statistics per decode step
+#   ceiling          bench/prefetch_check.sh at each micro-batch of
+#                    CEILING_UBATCHES ("6144 8192") with a cache of
+#                    CEILING_CACHE MiB (1024), the prefetch off then on. It
+#                    gives how fast reading gets once each copy is spread over
+#                    more tokens: what lending the cache's VRAM to prompts can
+#                    reach
+#   test-flash       bench/mtp_test_d.sh with llama.cpp's MTP on
+#                    Qwen3.8-Flash-Next. The draft layer comes from its own
+#                    file (FLASH_MTP, downloaded), with its experts requantized
+#                    to Q2_0 as Strata keeps them, all of it in VRAM. The
+#                    experts are pinned, and the cache is FLASH_CACHE_MIB with
+#                    0, 2 and 3 drafts
 #
 # What the steps of STEPS download (the Q8_0 GGUF for mtp-head-q8, the
 # catalog models in PULLS for residency, auto, soak and docker-gpu) starts
@@ -67,6 +90,13 @@ STEPS=${STEPS:-"prefetch interleave mtp-t08 llama-pin mtp-head-q8 test-d residen
 PREFETCH_RUNS=${PREFETCH_RUNS:-"4:bus,4 4,4:bus"}
 PREFETCH_CACHE=${PREFETCH_CACHE:-auto}
 PREFETCH_UBATCH=${PREFETCH_UBATCH:-}
+STRATA_DIR=${STRATA_DIR:-$HOME/work/Strata}
+FLASH_MTP=${FLASH_MTP:-$MODELS/mtp-Qwen3.8-Flash-Next-Q8_0.gguf}
+FLASH_MTP_URL=${FLASH_MTP_URL:-https://huggingface.co/unsloth/Qwen3.8-Flash-Next-GGUF/resolve/main/MTP/mtp-Qwen3.8-Flash-Next-Q8_0.gguf}
+FLASH_MTP_Q2=${FLASH_MTP_Q2:-$MODELS/mtp-Qwen3.8-Flash-Next-experts-Q2_0.gguf}
+FLASH_CACHE_MIB=${FLASH_CACHE_MIB:-5000}
+CEILING_UBATCHES=${CEILING_UBATCHES:-"6144 8192"}
+CEILING_CACHE=${CEILING_CACHE:-1024}
 STOP_AT=${STOP_AT:-06:45}
 EVENING=${EVENING:-"$HOME/work/prefetch-check $HOME/work/prefetch-check-2048 $HOME/work/prefetch-check-slots3"}
 
@@ -191,6 +221,45 @@ step() {
         echo
         docker compose logs engine-gpu 2>&1 | grep -i -m5 'cuda\|offload\|gpu'
         ;;
+    strata)
+        need "$STRATA_DIR/run-iq2_xs.sh"
+        OUT=$NIGHT/strata "$REPO/bench/strata_check.sh" "$STRATA_DIR"
+        ;;
+    fresh)
+        need "$FLASH"
+        OUT=$NIGHT/fresh "$REPO/bench/fresh_check.sh" "$BIN" "$FLASH" || return 1
+        echo
+        echo "== phase 6b on, with the expert cache's statistics every 64 decode steps"
+        SETTINGS=4 STATS_EVERY=64 OUT=$NIGHT/fresh-stats "$REPO/bench/fresh_check.sh" "$BIN" "$FLASH"
+        ;;
+    ceiling)
+        need "$FLASH"
+        local ub
+        for ub in $CEILING_UBATCHES; do
+            echo "== --n-ubatch $ub, --moe-cache $CEILING_CACHE, the prefetch off then on"
+            SETTINGS="0 4" MOE_CACHE=$CEILING_CACHE N_UBATCH=$ub OUT=$NIGHT/ceiling-$ub \
+                "$REPO/bench/prefetch_check.sh" "$BIN" "$FLASH"
+            echo
+        done
+        ;;
+    test-flash)
+        need "$FLASH" "$LLAMA_PIN/bin/llama-server" "$LLAMA_PIN/bin/llama-quantize"
+        [[ -s $FLASH_MTP ]] || { echo "SKIPPED: no $FLASH_MTP (see downloads.log)"; return 3; }
+        mkdir -p "$NIGHT/mtp-flash"
+        # The draft layer's 512 experts in Q2_0, as Strata keeps them: about 0.7 GB instead of 2.7.
+        if [[ ! -s $FLASH_MTP_Q2 ]]; then
+            if ! "$LLAMA_PIN/bin/llama-quantize" --allow-requantize --tensor-type '_exps=q2_0' \
+                "$FLASH_MTP" "$FLASH_MTP_Q2.part" Q8_0 >"$NIGHT/mtp-flash/quantize.log" 2>&1; then
+                echo "quantizing the draft layer failed: $NIGHT/mtp-flash/quantize.log"
+                tail -n 15 "$NIGHT/mtp-flash/quantize.log"
+                return 1
+            fi
+            mv "$FLASH_MTP_Q2.part" "$FLASH_MTP_Q2"
+        fi
+        ls -l "$FLASH_MTP" "$FLASH_MTP_Q2"
+        DRAFT_MODEL=$FLASH_MTP_Q2 DRAFTS="0 2 3" CACHE_MIB=$FLASH_CACHE_MIB OUT=$NIGHT/mtp-flash \
+            "$REPO/bench/mtp_test_d.sh" "$LLAMA_PIN/bin/llama-server" "$FLASH"
+        ;;
     *)
         echo "no step $1"
         return 1
@@ -223,12 +292,18 @@ flock -n 9 || { echo "another tools/gpu_night.sh is running: one at a time" >&2;
 # the night began, and no phase 6 server could start beside it. Waits until
 # they are gone, a minute at most: freeing tens of GB of pinned memory takes
 # a while, and the next step sizes its models against the VRAM left.
+servers_up() {
+    pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null ||
+        pgrep -f -- "$STRATA_DIR/serve/server.py" >/dev/null || pgrep -f -- "$STRATA_DIR/engine/strata " >/dev/null
+}
 stop_servers() {
     pkill -f -- "$BIN serve" 2>/dev/null
     pkill -f -- "$LLAMA_PIN/bin/llama-server" 2>/dev/null
+    pkill -f -- "$STRATA_DIR/serve/server.py" 2>/dev/null
+    pkill -f -- "$STRATA_DIR/engine/strata " 2>/dev/null
     local _
     for _ in $(seq 1 60); do
-        pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null || return 0
+        servers_up || return 0
         sleep 1
     done
 }
@@ -246,7 +321,9 @@ limit_of() { # minutes a step may take
     prefetch) m=90 ;;
     soak) m=90 ;;
     llama-pin) m=60 ;;
-    mtp-head-q8 | test-d) m=90 ;;
+    mtp-head-q8 | test-d | test-flash) m=90 ;;
+    fresh | ceiling) m=60 ;;
+    strata) m=120 ;;
     rag | docker-gpu) m=120 ;;
     residency) m=150 ;;
     auto) m=330 ;;
@@ -262,7 +339,7 @@ extract() {
     case $1 in
     residency) cat "$NIGHT/residency/summary.txt" 2>/dev/null; tail -n 1 "$log" ;;
     soak) cat "$NIGHT/soak/summary.txt" 2>/dev/null; tail -n 1 "$log" ;;
-    prefetch) grep -v '^$' "$log" ;;
+    prefetch | strata | fresh | ceiling) grep -v '^$' "$log" ;;
     auto)
         cat "$NIGHT/auto-check/summary.txt" 2>/dev/null
         tail -n 1 "$log"
@@ -313,7 +390,7 @@ write_summary() {
         echo
         echo "GPU: $(gpu_report)"
         echo
-        echo "Downloads: $(grep -E '^(q8|pull) ' "$NIGHT/downloads.log" 2>/dev/null | tr '\n' ';')"
+        echo "Downloads: $(grep -E '^(mtp|q8|pull) ' "$NIGHT/downloads.log" 2>/dev/null | tr '\n' ';')"
         echo
         echo "Other processes on the GPU at the start (they share it with every measurement):"
         echo '```text'
@@ -389,8 +466,8 @@ while ((quiet < 2)); do
     ((quiet < 2)) && sleep 60
 done
 
-if pgrep -f -- "$BIN serve" >/dev/null || pgrep -f -- "$LLAMA_PIN/bin/llama-server" >/dev/null; then
-    note "stopping the servers of $BIN and llama-server still running: they would share the GPU"
+if servers_up; then
+    note "stopping the servers of $BIN, llama-server and Strata still running: they would share the GPU"
     stop_servers
 fi
 
@@ -418,6 +495,17 @@ in_steps() { # any of the steps named is in STEPS
 (
     renice -n 19 -p "$BASHPID" >/dev/null 2>&1
     ionice -c2 -n7 -p "$BASHPID" >/dev/null 2>&1
+    if ! in_steps test-flash; then
+        rc="0 (not needed)"
+    elif [[ -s $FLASH_MTP ]]; then
+        rc=0
+    else
+        mkdir -p "$(dirname "$FLASH_MTP")"
+        curl -fL --retry 5 -C - -o "$FLASH_MTP.part" "$FLASH_MTP_URL" && mv "$FLASH_MTP.part" "$FLASH_MTP"
+        rc=$?
+    fi
+    echo "mtp $rc"
+    echo "$rc" >"$NIGHT/mtp.done"
     if ! in_steps mtp-head-q8; then
         rc="0 (not needed)"
     elif [[ -s $M9_Q8 ]]; then
@@ -441,6 +529,7 @@ in_steps() { # any of the steps named is in STEPS
 for s in $STEPS; do
     case $s in
     mtp-head-q8) wait_for q8.done ;;
+    test-flash) wait_for mtp.done ;;
     residency | auto | soak | docker-gpu) wait_for pulls.done ;;
     esac
     run "$s"
