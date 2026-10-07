@@ -140,6 +140,7 @@ Rationale: any long-pole CUDA build can take 30 min – 1h depending on cache st
 | Linux CUDA | ~18 min | ~3-5 min |
 | **Windows CUDA** (long-pole) | **~50 min** (cold) | **~10-15 min** (warm) |
 | Windows Vulkan | ~9 min (build 7m17s, 7 October 2026) | not measured yet |
+| Windows ROCm (dispatch only) | ~30 min (build 26 min, 7 October 2026, no sccache) | — |
 
 **Windows Vulkan's shader generator is a CMake project of its own**
 (`vulkan-shaders-gen`, an ExternalProject inside ggml-vulkan), and it gets
@@ -156,6 +157,30 @@ dispatch of `build-windows-vulkan` failed in its configure step on both:
   260. The job builds in `CARGO_TARGET_DIR=D:\t` without `--target`: 233.
 
 Any job that adds the Vulkan backend on Windows needs both.
+
+**Windows ROCm (`build-windows-rocm`, run by hand with `job: windows-rocm`,
+not part of a release yet) differs from every other Windows job in three
+ways**, each found by a failed or incomplete run on 7 October 2026:
+
+- **ROCm's clang builds all of llama.cpp**, not cl.exe: ggml-hip compiles its
+  HIP sources as C++ on Windows. llama-cpp-sys-2's build.rs sets the
+  compilers and clang-syntax flags itself when `rocm` targets MSVC.
+- **No OpenMP.** That clang's `-fopenmp` calls LLVM's libomp (`__kmpc_*`),
+  which link.exe is never given: the first run compiled for 36 minutes and
+  failed at the final link. build.rs turns `GGML_OPENMP` off there.
+- **The libraries' GPU code ships apart, per card**, since ROCm 10:
+  `rocm[...,device-gfxNNNN]` installs kernel packs in `.kpack\` beside
+  `bin\` and rocBLAS/hipBLASLt kernel folders under `bin\`. Each library
+  opens its pack at `..\.kpack\<name>_@GFXARCH@.kpack` from its own DLL, so
+  the ZIP keeps ROCm's layout (`bin\eullm.exe` + DLLs + kernel folders,
+  `.kpack\` beside it), and the job bundles the packs the bundled DLLs name
+  (blas_lib, and solver_lib for rocsolver, which hipBLAS imports). For two
+  cards the ZIP is 330 MB (608 MB unpacked: amd_comgr 117, hipBLASLt kernels
+  175, eullm.exe 150). `rocm_kpack.dll` reads `ROCM_KPACK_PATH_PREFIX` and
+  `ROCM_KPACK_DEBUG` with the shared UCRT's `getenv`.
+
+Its layout is not what `install.ps1` and `eullm update` handle yet: both
+copy the top-level files of a ZIP only.
 
 **A llama.cpp bump makes the next release cold.** sccache keys on the C++/CUDA
 sources, so a new pin misses on every kernel. v0.7.30 moved the pin
