@@ -35,16 +35,26 @@ def build_report(
 def to_markdown(report: dict) -> str:
     """Render a report dict as a compact Markdown summary."""
     qa = report.get("qa", {})
+    # Coverage is measured over the items that have keywords, not over all of
+    # them -- say so, in the same words legal_eval.py prints ("over K of N
+    # items"). Without the denominator "Items: 2" next to "Coverage: 100%"
+    # reads as the whole set scoring full marks, when one of the two was not
+    # measured at all.
+    n_items = report.get("n_items", 0)
+    keyword_items = qa.get("keyword_items", n_items)
+    coverage = f"- Keyword coverage: **{_pct(qa.get('keyword_coverage'))}**"
+    if keyword_items != n_items:
+        coverage += f" (over {keyword_items} of {n_items} items)"
     lines = [
         f"# Eval report — {report.get('model') or '(model)'}",
         "",
-        f"- Items: **{report.get('n_items', 0)}**",
+        f"- Items: **{n_items}**",
         f"- Domains: {', '.join(report.get('domains', [])) or '—'}",
         f"- Languages: {', '.join(report.get('languages', [])) or '—'}",
         "",
         "## QA metrics",
         f"- Exact match: **{_pct(qa.get('exact_match'))}**",
-        f"- Keyword coverage: **{_pct(qa.get('keyword_coverage'))}**",
+        coverage,
     ]
     if report.get("perplexity") is not None:
         lines.append(f"- Perplexity (held-out): **{report['perplexity']:.2f}**")
