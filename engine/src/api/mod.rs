@@ -185,6 +185,9 @@ pub struct AppState {
     /// in RAM and pinned gets the slots (see `fit::prefetch_slots`), and an
     /// expert cache keeps their VRAM out of its own where it can.
     pub moe_prefetch: u32,
+    /// `--load-threads`: readers of the model file ahead of every load this
+    /// server makes (see `crate::readahead`).
+    pub load_threads: crate::readahead::LoadThreads,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -675,6 +678,7 @@ impl AppState {
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
+                load_threads: self.load_threads,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -2822,6 +2826,8 @@ pub struct ServeConfig {
     pub mmap: bool,
     /// `--moe-prefetch` (see `AppState::moe_prefetch`).
     pub moe_prefetch: u32,
+    /// `--load-threads` (see `AppState::load_threads`).
+    pub load_threads: crate::readahead::LoadThreads,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3140,6 +3146,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         no_mmap: cfg.no_mmap,
         mmap: cfg.mmap,
         moe_prefetch: cfg.moe_prefetch,
+        load_threads: cfg.load_threads,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3317,6 +3324,7 @@ impl AppState {
             no_mmap: false,
             mmap: false,
             moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,
+            load_threads: crate::readahead::LoadThreads::default(),
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

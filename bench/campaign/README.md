@@ -41,6 +41,7 @@ field. The ones that matter:
 | `gcds` | devices the point uses: 1, 2, 4, 8 |
 | `replica_gcds` | devices per server; `gcds / replica_gcds` servers (replicas) |
 | `exclusive` | alone on the node: the control for neighbour interference |
+| `cold` | drop the model's files from the node's page cache before the server starts, so the load reads the file system whatever ran before (`load.cache` is then `evicted`); needs the runner of 07-10-2026 |
 | `batch`, `slot_ctx` / `ctx`, `kv` | the server's `--batch-size`, KV pool, `--cache-type-k/v` |
 | `concurrency` | requests in flight; default fills every slot of every server |
 | `prompt_tokens` | a synthetic prompt of about this many tokens, prefix cache defeated |
