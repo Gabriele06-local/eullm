@@ -2132,6 +2132,18 @@ diligenza manuale.
   applicata dal template DeepSeek-R1 hardcoded. Da validare su rc17 che i
   due Qwen3.6 mostrino il box Reasoning dal web come già fa gemma-4.
 
+  **Rivisto dopo 0.7.40 (ottobre)**: togliere il tag funziona solo con i
+  modelli che lo riscrivono da sé. Spark-X2.5 non lo fa: senza il tag salta
+  il ragionamento o perde il filo (a temperatura 0, "What is 2 + 3?"
+  rispondeva `2 + 3 = 5` senza ragionare; "ciao come ti chiami?" ha avuto
+  una risposta in cinese). Ora il prompt resta quello del template, col tag
+  aperto, e la risposta parte dal tag: `DynamicChatTemplate::preopened` →
+  `GenerateRequest::response_prefix`, che fa da contenuto iniziale del
+  buffer di hold-back in tutti i loop di generazione (sequenziale,
+  streaming, multimodale, scheduler), quindi passa per stop e filtri come
+  se l'avesse scritto il modello. Test su modello reale:
+  `real_model_a_reasoning_block_the_template_opens_reaches_the_client_whole`.
+
 - [ ] **H3-Y · Bump di `llama.cpp` a `b10405`: ri-vendorizzazione pulita di
   `llama-cpp-rs`, senza patch a mano — in attesa di validazione su hardware
   reale** *(P2)*

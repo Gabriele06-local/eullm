@@ -968,9 +968,10 @@ fn with_media_markers(
 /// `<start_of_turn>` tokens it has never seen. A wrong template does not
 /// error; it degrades the answer quietly, which is the worst way to be wrong.
 ///
-/// Returns the prompt together with the stop sequences that belong to it:
+/// Returns the prompt together with the stop sequences that belong to it —
 /// none when the embedded template rendered (its EOG token ends generation,
-/// the contract `build_chat_prompt` already uses), Gemma's when we fell back.
+/// the contract `build_chat_prompt` already uses), Gemma's when we fell back
+/// — and the response prefix, as `build_chat_prompt` does.
 ///
 /// The whole conversation is rendered. Only the latest user turn used to be,
 /// so every turn after the one carrying a picture reached the model without
@@ -980,12 +981,16 @@ fn multimodal_chat_prompt(
     engine: &InferenceEngine,
     messages: &[(&str, &str)],
     think: bool,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, String) {
     if let Some(dynamic) = engine.apply_jinja_chat_template(messages, think) {
-        return (dynamic.prompt, Vec::new());
+        return (dynamic.prompt, Vec::new(), dynamic.preopened);
     }
     let gemma = crate::chat_template::ChatTemplate::Gemma;
-    (gemma.build_prompt(messages, think), gemma.stop_sequences())
+    (
+        gemma.build_prompt(messages, think),
+        gemma.stop_sequences(),
+        String::new(),
+    )
 }
 
 /// Background mtmd-aware generation, mirroring `sequential_to_channel`.
@@ -1206,12 +1211,17 @@ mod chat_media_tests {
 /// the dynamic path — the model's own end-of-generation token ends the turn
 /// regardless of which template built the prompt, and a marker like
 /// `<|end|>` belongs to a different template, not this one.
+///
+/// The third element is what the answer is sent starting with
+/// ([`GenerateRequest::response_prefix`]): the reasoning block the dynamic
+/// template opened at the end of the prompt, if it opened one. The
+/// hardcoded templates never do.
 fn build_chat_prompt(
     snap: &SlotSnapshot,
     messages: &[Value],
     think: bool,
     model_name: &str,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, String) {
     {
         let pairs: Vec<(&str, &str)> = messages
             .iter()
@@ -1229,7 +1239,7 @@ fn build_chat_prompt(
             None
         };
         if let Some(dynamic) = dynamic {
-            return (dynamic.prompt, Vec::new());
+            return (dynamic.prompt, Vec::new(), dynamic.preopened);
         }
     }
 
@@ -1237,7 +1247,7 @@ fn build_chat_prompt(
     let prompt = format_chat_prompt(messages, think, model_name);
     let mut stop_sequences = template.stop_sequences();
     stop_sequences.push("<|end|>".to_string());
-    (prompt, stop_sequences)
+    (prompt, stop_sequences, String::new())
 }
 
 /// Format chat messages into a prompt string using the model-appropriate template.
@@ -2500,7 +2510,7 @@ async fn chat_with(
             .iter()
             .map(|(role, content)| (role.as_str(), content.as_str()))
             .collect();
-        let (mm_prompt, mm_stops) = multimodal_chat_prompt(&engine, &pairs, mm_think);
+        let (mm_prompt, mm_stops, mm_prefix) = multimodal_chat_prompt(&engine, &pairs, mm_think);
         let mm_request = GenerateRequest {
             prompt: mm_prompt,
             max_tokens: sp.max_tokens,
@@ -2523,6 +2533,7 @@ async fn chat_with(
             filter_sequences: crate::inference::default_filters(mm_think),
             grammar: None,
             cache_prompt: sp.cache_prompt,
+            response_prefix: mm_prefix,
         };
         if is_streaming(&body) {
             let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
@@ -2579,7 +2590,8 @@ async fn chat_with(
 
     let think = body.get("think").and_then(|v| v.as_bool()).unwrap_or(true);
     let model_name_ref: &str = &model;
-    let (prompt, stop_sequences) = build_chat_prompt(&snap, &messages, think, model_name_ref);
+    let (prompt, stop_sequences, response_prefix) =
+        build_chat_prompt(&snap, &messages, think, model_name_ref);
     let sp = parse_generate_params(&body);
     let grammar = parse_format_grammar(&body);
 
@@ -2601,6 +2613,7 @@ async fn chat_with(
         grammar,
         raw: false,
         cache_prompt: sp.cache_prompt,
+        response_prefix,
     };
 
     if let Some(ref sched) = snap.scheduler {
@@ -3119,8 +3132,8 @@ async fn chat_completions_with(
         );
     }
 
-    let (prompt, stop_sequences) = match &oai_template {
-        Some(tmpl) => (tmpl.prompt.clone(), Vec::new()),
+    let (prompt, stop_sequences, response_prefix) = match &oai_template {
+        Some(tmpl) => (tmpl.prompt.clone(), Vec::new(), String::new()),
         None => build_chat_prompt(&snap, &messages, think, model_name_ref),
     };
     let sp = parse_chat_completions_params(&body);
@@ -3150,6 +3163,7 @@ async fn chat_completions_with(
         grammar,
         raw: false,
         cache_prompt: sp.cache_prompt,
+        response_prefix,
     };
 
     // ── Tool calling (issue #334): buffered, format-aware path ──────────

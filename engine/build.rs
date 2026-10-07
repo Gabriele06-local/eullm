@@ -45,6 +45,13 @@ fn main() {
     let suffix = if dirty { "-dirty" } else { "" };
     println!("cargo:rustc-env=EULLM_GIT_HASH={hash}{suffix}");
 
+    // The release asset this binary is published as, which each build job in
+    // release-engine.yml sets: `eullm update` downloads the same one. Empty
+    // for a build from source, which `eullm update` then declines to replace.
+    println!("cargo:rerun-if-env-changed=EULLM_RELEASE_ASSET");
+    let asset = std::env::var("EULLM_RELEASE_ASSET").unwrap_or_default();
+    println!("cargo:rustc-env=EULLM_RELEASE_ASSET={}", asset.trim());
+
     emit_git_rerun_triggers();
 }
 

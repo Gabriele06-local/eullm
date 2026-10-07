@@ -13,6 +13,15 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Added
+- **`eullm update`: install the latest release in place of this one.** `eullm update --check` says whether a newer release exists; `eullm update` downloads the same build as the one running (CPU, CUDA, Vulkan or ROCm, for the same system), checks it against the release's checksums, makes sure the new binary starts, and puts it in place of the old one, which is put back if any step fails. It keeps the binary's file name and folder, so it updates an install made by the installers as well as an unpacked ZIP. EuLLM asks github.com only when the command is typed: it never checks for updates by itself. A build from source, a Docker image and the Microsoft Store package are not replaced, and the command says so. 0.7.40 and earlier do not have it: update those once more with the installer.
+
+### Fixed
+- **A model whose chat template opens the reasoning block reasons again, and clients still get the whole block.** Some chat templates end the prompt with the reasoning block already open, on `<think>` (Spark-X2.5's, Qwen3.6's, DeepSeek-R1's), for the model to reason from there. EuLLM cut that tag from the prompt for the model to write it, so that the reasoning would reach clients between its tags. Qwen3.6 writes it; Spark-X2.5 does not (not once in 12 answers), and without it mostly skips its reasoning or loses its way: at temperature 0, "What is 2 + 3?" got `2 + 3 = 5` with no reasoning; over six seeds, "What is the capital of Italy?" was reasoned about before 2 answers, and "ciao come ti chiami?" got 4 answers in Chinese. With the tag kept, all six English answers came after their reasoning, and none of the answers was in Chinese. The prompt now ends as the template wrote it, and the answer is sent starting with the tag the template opened, so the reasoning still arrives between `<think>` and `</think>` (in `thinking`, with `think: true`) on `/api/chat`, on `/v1/chat/completions` and in `eullm run`.
+- **The catalog lists Spark-X2.5 1.7B and 4B for English and Chinese, the languages their model cards name.** It listed Italian, German, French, Spanish, Portuguese and Dutch too, and tagged both as multilingual. Asked in Italian, the 1.7B reasons in English even with the fix above, and one of its answers came in Polish.
+
 ## 0.7.40 — 2026-10-07
 
 ### Performance

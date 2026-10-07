@@ -1178,6 +1178,47 @@ fn main() {
                  EULLM_AMDGPU_TARGETS=gfx90a for MI250X."
             ),
         }
+
+        // EuLLM: on Windows the whole of llama.cpp is built by ROCm's clang.
+        // CMake has no HIP language there, so ggml-hip compiles its HIP sources
+        // as C++ with the C++ compiler (`CXX_IS_HIPCC` in its CMakeLists), and
+        // cl.exe cannot compile them. The flags are given in clang's own
+        // syntax for the same reason: defining CMAKE_<LANG>_FLAGS keeps out the
+        // MSVC ones the cmake crate and this script add for cl.exe (`/O2`,
+        // `/MD`, `-march` passes through), which clang would read as file
+        // names. The C runtime is the DLL one, as rustc links on this target.
+        if matches!(target_os, TargetOs::Windows(WindowsVariant::Msvc)) {
+            let rocm = env::var("HIP_PATH")
+                .or_else(|_| env::var("ROCM_PATH"))
+                .expect("rocm on Windows needs HIP_PATH (or ROCM_PATH) set to the ROCm root");
+            let rocm = Path::new(&rocm);
+            // ROCm's own pip packages put clang in lib\llvm\bin, the HIP SDK
+            // installer in bin.
+            let clang_dir = [rocm.join("lib").join("llvm").join("bin"), rocm.join("bin")]
+                .into_iter()
+                .find(|d| d.join("clang++.exe").is_file())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no clang++.exe under {} (lib\\llvm\\bin or bin)",
+                        rocm.display()
+                    )
+                });
+            config.define("CMAKE_C_COMPILER", clang_dir.join("clang.exe"));
+            config.define("CMAKE_CXX_COMPILER", clang_dir.join("clang++.exe"));
+            let march = target_cpu
+                .as_deref()
+                .filter(|cpu| *cpu != "native")
+                .map(|cpu| format!("-march={cpu}"))
+                .unwrap_or_default();
+            config.define(
+                "CMAKE_C_FLAGS",
+                format!("-Wno-error=incompatible-pointer-types {march}"),
+            );
+            config.define("CMAKE_CXX_FLAGS", &march);
+            config.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
+            println!("cargo:rerun-if-env-changed=HIP_PATH");
+            println!("cargo:rerun-if-env-changed=ROCM_PATH");
+        }
     }
 
     if cfg!(feature = "opencl") {
@@ -1457,10 +1498,21 @@ fn main() {
 
         println!("cargo:rustc-link-search=native={}", rocm_lib.display());
 
-        // Link ROCm libraries
-        println!("cargo:rustc-link-lib=dylib=amdhip64");
-        println!("cargo:rustc-link-lib=dylib=rocblas");
-        println!("cargo:rustc-link-lib=dylib=hipblas");
+        // Link ROCm libraries. EuLLM: on Windows an import library may carry a
+        // `lib` prefix, depending on how that ROCm was packaged (the HIP SDK
+        // has shipped `libhipblas`): link the name that is there.
+        for name in ["amdhip64", "rocblas", "hipblas"] {
+            let prefixed = format!("lib{name}");
+            let name = if matches!(target_os, TargetOs::Windows(_))
+                && !rocm_lib.join(format!("{name}.lib")).is_file()
+                && rocm_lib.join(format!("{prefixed}.lib")).is_file()
+            {
+                prefixed.as_str()
+            } else {
+                name
+            };
+            println!("cargo:rustc-link-lib=dylib={name}");
+        }
     }
 
     if cfg!(feature = "mkl") && !build_shared_libs {
