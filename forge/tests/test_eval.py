@@ -272,3 +272,26 @@ def test_build_report_and_markdown():
     sheet = spotcheck_markdown(items, answers)
     assert sheet.startswith("# Human spot-check sheet")
     assert items[0].id in sheet
+
+
+def test_markdown_names_the_coverage_denominator_when_items_are_unmeasured():
+    """Coverage is over the items with keywords, not over all of them.
+
+    legal_eval.py prints "over K of N items" for the same report; the
+    markdown printed "Items: 2" next to "Coverage: 100%" with no denominator,
+    reading as the whole set scoring full marks when one item was not
+    measured at all.
+    """
+    from eullm_forge.eval.report import build_report, to_markdown
+
+    items = [
+        EvalItem(id="a", domain="legal", lang="it", question="q1",
+                 reference="la risoluzione", keywords=["risoluzione"]),
+        EvalItem(id="b", domain="legal", lang="it", question="q2",
+                 reference="tutto il testo", keywords=[]),
+    ]
+    md = to_markdown(build_report(items, {"a": "chiede la risoluzione", "b": "x"}))
+    assert "- Keyword coverage: **100.0%** (over 1 of 2 items)" in md
+    # ...while a fully measured set stays exactly as it was.
+    full = to_markdown(build_report(items[:1], {"a": "chiede la risoluzione"}))
+    assert "- Keyword coverage: **100.0%**\n" in full
