@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from eullm_forge.datasets.anonymize import (
@@ -707,3 +709,41 @@ def test_url_retention_is_opt_in_for_corpus_building():
 def test_records_without_text_pass_through_untouched():
     rec = {"url": "https://example.invalid/x.pdf", "metadata": {}}
     assert anonymize_record(rec) is rec
+
+
+def test_the_script_ignores_the_files_the_pipeline_wrote_next_to_the_slices(tmp_path):
+    """*.chunks.jsonl and *.dedup.jsonl live in the corpus directory too.
+
+    chunk_corpus.py and dedup_corpus.py write them there by design, so the
+    anonymiser's own glob matched them and emitted a .anon.jsonl beside each.
+    chunk_corpus.py globs italgiure_*.anon.jsonl, so the next stage then read
+    the same ruling once per intermediate -- and exact dedup, which is per-file
+    by design, could not catch it.
+    """
+    import importlib.util
+    import json
+
+    script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "anonymize_italgiure.py"
+    spec = importlib.util.spec_from_file_location("anonymize_italgiure", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    rulings = [{"id": f"snciv/2023000{i}", "court": "snciv", "year": 2023, "number": i,
+                "date": "2023-03-01", "text": f"Rulingsn body {i}.",
+                "sections": {"fatto": f"Fatto {i}.", "motivo": f"Motivo {i}."}}
+               for i in range(1, 5)]
+    line = json.dumps(rulings[0], ensure_ascii=False) + "\n"
+    # the downloaded slice, and the intermediates a previous full run left
+    (tmp_path / "italgiure_snciv_2023.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rulings), encoding="utf-8")
+    (tmp_path / "italgiure_snciv_2023.chunks.jsonl").write_text(line, encoding="utf-8")
+    (tmp_path / "italgiure_snciv_2023.dedup.jsonl").write_text(line, encoding="utf-8")
+
+    assert mod.main([str(tmp_path), "--no-ner"]) == 0
+
+    # one anonymised slice out, not three
+    assert sorted(p.name for p in tmp_path.glob("*.anon.jsonl")) == [
+        "italgiure_snciv_2023.anon.jsonl"]
+    # and the derived files are untouched, not deleted
+    assert (tmp_path / "italgiure_snciv_2023.chunks.jsonl").exists()
+    assert (tmp_path / "italgiure_snciv_2023.dedup.jsonl").exists()
