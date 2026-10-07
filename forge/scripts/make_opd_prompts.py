@@ -14,7 +14,8 @@ carded TRAINING ruling, up to ``--per-ruling`` of its research questions:
 
 * the student's prompt is the question with the ``-k`` passages the
   case-law index retrieves for it (`eullm_forge.caselaw.index`, chunks with
-  their card prefix), as it will be asked in use;
+  their card prefix and the cards themselves, ``--index``), as it will be
+  asked in use;
 * the teacher's is the same with the ruling the question came from in
   front (`caselaw.prompts.privileged_prompt`).
 
@@ -82,6 +83,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-k", type=int, default=3, help="passages in the student's prompt")
     ap.add_argument("--exclude-oggetto", default=SENSITIVE,
                     help="regex on OGGETTO_RICORSO: rulings never used as a source")
+    ap.add_argument("--index", choices=["prefix", "prefix+cards"], default="prefix+cards",
+                    help="units of the case-law index: chunks with their card prefix, and the "
+                         "cards as units of their own besides (the retrieval check of "
+                         "2026-10-07: recall@3 +5.4 and +7.2 points over plain chunks)")
     ap.add_argument("--embedder", help="retrieve with embeddings too (as cds_retrieval.py)")
     ap.add_argument("--reranker")
     ap.add_argument("--cache-dir", type=Path)
@@ -115,7 +120,8 @@ def main(argv: list[str] | None = None) -> int:
 
     chunks = [c for c in read_jsonl(args.chunks)
               if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds"]
-    units = build_units(rulings, chunks, cards=cards, prefix_chunks=True)
+    units = build_units(rulings, chunks, cards=cards, prefix_chunks=True,
+                        card_units=args.index == "prefix+cards")
     index = RulingIndex(units, bm25=SparseBM25([u.text for u in units]))
     if args.embedder:
         from eullm_forge.caselaw.index import shard_vectors, units_key
