@@ -52,6 +52,11 @@ def test_the_teacher_sees_the_source_ruling_and_the_student_does_not():
     assert s.endswith("Domanda: Da quando decorre il termine?")
     assert " […]" in s and "TESTO DELLA SENTENZA" not in s
     assert t.startswith("Sentenza da cui proviene la domanda") and t.endswith(s)
+    hidden = privileged_prompt("Da quando decorre il termine?", passages,
+                               (lab, "TESTO DELLA SENTENZA"), citable=False)
+    head = hidden.split("\n", 1)[0]
+    assert "202301234" not in head and "non citarla" in head
+    assert "TESTO DELLA SENTENZA" in hidden and hidden.endswith(s)
 
 
 def _corpus(tmp_path: Path):
@@ -101,6 +106,7 @@ def test_prompts_leave_out_dev_and_sensitive_rulings_and_mix_statutes(tmp_path, 
     assert r["teacher"][0]["content"].endswith(r["student"][0]["content"])
     printed = capsys.readouterr().out
     assert "1 development and 1 sensitive" in printed and "principio" not in printed
+    assert "source among the passages in 8)" in printed
 
 
 def test_cited_numbers_reads_both_forms():
