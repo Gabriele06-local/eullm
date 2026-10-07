@@ -576,6 +576,11 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
                 expert_bytes_per_layer[layer as usize] += size;
                 largest_expert_tensor_bytes = largest_expert_tensor_bytes.max(size);
             }
+            // llama.cpp keeps a model's input embeddings in host memory and reads
+            // them a row at a time, whatever is offloaded; Qwen3.8-Flash-Next
+            // carries a 28.8 GB one per layer (`per_layer_token_embd`), which
+            // counted as VRAM left no room for the expert cache at all.
+            _ if is_host_only_tensor_name(name) => {}
             _ => non_expert_bytes += size,
         }
     }
@@ -585,6 +590,12 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
         expert_bytes_per_layer,
         largest_expert_tensor_bytes,
     })
+}
+
+/// Tensors that stay in host memory however many layers are offloaded: the
+/// per-layer input embedding, a lookup table (Gemma 3n, Qwen3.8-Flash-Next).
+fn is_host_only_tensor_name(name: &str) -> bool {
+    name == "per_layer_token_embd.weight"
 }
 
 /// Every file of a model on disk, in order: all the parts of a split GGUF
@@ -4283,6 +4294,24 @@ mod moe_layout_tests {
         ] {
             assert_eq!(split_gguf_name(not_split), None, "{not_split}");
         }
+    }
+
+    // Qwen3.8-Flash-Next's second part is one 28.8 GB table, read from host
+    // memory: it is no VRAM cost, and counting it left `--moe-cache` no room.
+    #[test]
+    fn the_per_layer_embedding_table_is_not_a_vram_cost() {
+        let (bytes, size) = make_gguf_with_tensors(
+            None,
+            &[
+                ("token_embd.weight", 1000),
+                ("blk.0.attn_q.weight", 100),
+                ("blk.0.ffn_up_exps.weight", 3000),
+                ("per_layer_token_embd.weight", 90000),
+            ],
+        );
+        let layout = parse_gguf_moe_layout(&bytes, size, 1).expect("parses");
+        assert_eq!(layout.non_expert_bytes, 1000 + 100);
+        assert_eq!(layout.expert_bytes_per_layer, vec![3000]);
     }
 
     #[test]
