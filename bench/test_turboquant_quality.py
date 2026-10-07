@@ -11,6 +11,10 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("aiohttp")  # the script exits at import without it
+
 SPEC = importlib.util.spec_from_file_location(
     "turboquant_quality", Path(__file__).resolve().parent / "turboquant_quality.py")
 _mod = importlib.util.module_from_spec(SPEC)
