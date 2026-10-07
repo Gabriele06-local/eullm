@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass, asdict
@@ -293,6 +294,19 @@ def extract_last_line(s: str) -> str:
     return lines[-1] if lines else s
 
 
+def contains_word(text: str, word: str) -> bool:
+    """Whether `word` occurs in `text` as a whole word, not inside one.
+
+    A plain `in` passes a wrong answer that merely contains the letters:
+    expected 'W' passed "I don't know" (the w in "know") and expected 'a'
+    passed "span", inflating the quality score of a model that answered
+    neither. The mode is called contains_word, so the match requires no word
+    character on either side; a right answer in any case or punctuation
+    ("W.", "(W)", "Use the <a> tag.", "4%") still matches.
+    """
+    return re.search(rf"(?<!\w){re.escape(word)}(?!\w)", text) is not None
+
+
 def check_answer(test: dict, response: str) -> tuple[bool, str]:
     """Check if the response matches the expected answer. Returns (pass, detail)."""
     mode = test["check"]
@@ -314,7 +328,7 @@ def check_answer(test: dict, response: str) -> tuple[bool, str]:
 
     elif mode == "contains_word":
         expected = test["expected"].lower()
-        ok = expected in resp.lower() or expected in resp_last.lower()
+        ok = contains_word(resp.lower(), expected) or contains_word(resp_last.lower(), expected)
         return ok, f"expected='{expected}' in response={resp_last[:80]}"
 
     elif mode == "contains_any":
