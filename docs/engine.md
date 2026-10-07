@@ -291,7 +291,7 @@ EuLLM never looks for a new version by itself: this command is the only time it 
 
 A running `eullm serve` or `eullm run` keeps the old version until it is restarted.
 
-It declines, saying why, for a binary built from source or in a Docker image (no release file is known to match it), and for the Microsoft Store package, which the Store updates. A system-wide install (`/usr/local/bin`) needs `sudo eullm update`. Versions up to 0.7.40 do not have the command: update them once more with the installer or a download from the releases page.
+It declines, saying why, for a binary built from source or in a Docker image (no release file is known to match it), for the Microsoft Store package, which the Store updates, and for the Windows ROCm build, whose ZIP keeps ROCm's folder layout (`bin\` and `.kpack\`): extract the new ZIP over the folder that holds `bin\` instead. A system-wide install (`/usr/local/bin`) needs `sudo eullm update`. Versions up to 0.7.40 do not have the command: update them once more with the installer or a download from the releases page.
 
 ### `eullm forge`
 

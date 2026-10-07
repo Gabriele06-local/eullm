@@ -140,7 +140,7 @@ Rationale: any long-pole CUDA build can take 30 min – 1h depending on cache st
 | Linux CUDA | ~18 min | ~3-5 min |
 | **Windows CUDA** (long-pole) | **~50 min** (cold) | **~10-15 min** (warm) |
 | Windows Vulkan | ~9 min (build 7m17s, 7 October 2026) | not measured yet |
-| Windows ROCm (dispatch only) | ~30 min (build 26 min, 7 October 2026, no sccache) | — |
+| Windows ROCm (experimental) | ~30 min (build 26 min, 7 October 2026, no sccache) | — |
 
 **Windows Vulkan's shader generator is a CMake project of its own**
 (`vulkan-shaders-gen`, an ExternalProject inside ggml-vulkan), and it gets
@@ -158,9 +158,10 @@ dispatch of `build-windows-vulkan` failed in its configure step on both:
 
 Any job that adds the Vulkan backend on Windows needs both.
 
-**Windows ROCm (`build-windows-rocm`, run by hand with `job: windows-rocm`,
-not part of a release yet) differs from every other Windows job in three
-ways**, each found by a failed or incomplete run on 7 October 2026:
+**Windows ROCm (`build-windows-rocm`: on every tag since it joined the
+release, marked experimental there, and by hand with `job: windows-rocm`)
+differs from every other Windows job in three ways**, each found by a failed
+or incomplete run on 7 October 2026:
 
 - **ROCm's clang builds all of llama.cpp**, not cl.exe: ggml-hip compiles its
   HIP sources as C++ on Windows. llama-cpp-sys-2's build.rs sets the
@@ -180,7 +181,8 @@ ways**, each found by a failed or incomplete run on 7 October 2026:
   `ROCM_KPACK_DEBUG` with the shared UCRT's `getenv`.
 
 Its layout is not what `install.ps1` and `eullm update` handle yet: both
-copy the top-level files of a ZIP only.
+copy the top-level files of a ZIP only, so both refuse it with a message
+saying to extract the ZIP by hand (`EULLM_VARIANT=rocm`, `keeps_rocm_layout`).
 
 **A llama.cpp bump makes the next release cold.** sccache keys on the C++/CUDA
 sources, so a new pin misses on every kernel. v0.7.30 moved the pin

@@ -68,6 +68,15 @@ fn checksum_for(checksums: &str, asset: &str) -> Option<String> {
     })
 }
 
+/// Whether `asset` is a release ZIP in ROCm's own layout, which the update
+/// below cannot install: the Windows ROCm build keeps eullm.exe and the DLLs
+/// in `bin\`, with kernel folders under it, and its libraries' GPU code in
+/// `.kpack\` beside it, while the update replaces the files next to the
+/// running exe.
+fn keeps_rocm_layout(asset: &str) -> bool {
+    asset == "eullm-windows-x64-rocm.zip"
+}
+
 /// A client that does not follow redirects, for reading where
 /// `releases/latest` points.
 fn no_redirect_client() -> Result<reqwest::Client, String> {
@@ -132,6 +141,15 @@ pub async fn run(check_only: bool) -> Result<(), String> {
              or in a container), so there is no release download it is known to match. \
              Download {latest_str} from https://github.com/{REPO}/releases/latest, or \
              rebuild from the {tag} tag."
+        ));
+    }
+    // Said before a download of a few hundred MB rather than after it.
+    if keeps_rocm_layout(RELEASE_ASSET) {
+        return Err(format!(
+            "{RELEASE_ASSET} keeps ROCm's own layout (eullm.exe in bin\\, its libraries' \
+             GPU code in .kpack\\ beside it), which `eullm update` cannot replace yet. \
+             Download it from https://github.com/{REPO}/releases/latest and extract it \
+             over the folder that holds bin\\."
         ));
     }
 
@@ -457,6 +475,21 @@ fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The Windows ROCm ZIP is the one asset in ROCm's folder layout; every
+    // other release asset is flat and stays updatable.
+    #[test]
+    fn only_the_windows_rocm_zip_keeps_rocms_layout() {
+        assert!(keeps_rocm_layout("eullm-windows-x64-rocm.zip"));
+        for asset in [
+            "eullm-windows-x64.zip",
+            "eullm-windows-x64-vulkan.zip",
+            "eullm-windows-x64-cuda-13.1.zip",
+            "eullm-linux-x64-rocm-consumer",
+        ] {
+            assert!(!keeps_rocm_layout(asset), "{asset}");
+        }
+    }
 
     #[test]
     fn versions_parse_as_the_tags_write_them() {
