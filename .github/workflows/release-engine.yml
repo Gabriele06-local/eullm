@@ -2214,13 +2214,13 @@ jobs:
 
             LLM inference engine in Rust: one binary, any GGUF model, on CPU or GPU. Continuous batching, quantized KV cache, zero telemetry, and an AI Act-ready audit trail.
 
-            ### This release: the Microsoft Store package, and a Windows installer that checks the GPU
+            ### This release: AMD and Intel GPUs on Windows, and MoE prompts read faster
 
-            The engine is the same code as 0.7.10; there is no reason to upgrade an install that works.
+            **`eullm-windows-x64-vulkan.zip`** is new: a Windows build that runs on the GPU through Vulkan, for AMD Radeon cards and Ryzen integrated graphics, Intel Arc, and the NVIDIA cards the CUDA build does not cover (GTX 1000, RTX 2000, or a driver older than 580). Until now those machines ran models on the CPU. `install.ps1` picks it by itself for those GPUs. It has not yet been run on an AMD or Intel GPU under Windows: reports are welcome.
 
-            **`eullm-windows-x64-store.msix`** is on this page for the first time. 0.7.10 announced it, but the job that builds it skipped itself. It is the package submitted to the Microsoft Store, which signs it, and it is **not for installing directly**: EuLLM is not in the Store yet. For Windows use `install.ps1` or the ZIPs.
+            **MoE models with their experts in RAM read long prompts faster, with nothing to set.** The next experts are now copied to the GPU while the current ones compute (`--moe-prefetch`, on by default), and those the expert cache already holds come from VRAM instead of over PCIe. On an RTX 5070 Ti, Qwen3.8-Flash-Next read a 33,200-token prompt 42% faster with the prefetch (1,373 tokens/s against 968), and 10% faster again with the copies from VRAM (1,509 against 1,368).
 
-            **The Windows installer no longer downloads a CUDA build the GPU cannot run.** `install.ps1` used to choose the CUDA ZIP for any NVIDIA card on driver 580+, although that build only covers RTX 3000, 4000 and 5000 cards; it now checks the card, as `install.sh` already did, and installs the CPU build with an explanation otherwise. Reported and fixed by Gabriele Pau.
+            **`--fit` sizes a model split into several GGUF files from all of them.** The 0.7.30 notes listed this fix, but it was merged after that release was built: it is in this one.
 
             ### Quick install
 
