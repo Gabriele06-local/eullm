@@ -732,6 +732,7 @@ COLUMNS = (
     "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
+    "extra_args", "trial",
 )
 
 
@@ -746,7 +747,8 @@ def row_of(r: dict) -> dict:
                neighbours_at_start=r.get("neighbours_at_start"),
                load_cache=load.get("cache"), load_storage=load.get("storage"),
                load_wall_s=load.get("wall_s"),
-               engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"))
+               engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"),
+               extra_args=" ".join(p.get("extra_args", [])))
     t = r.get("throughput")
     if t:
         reps = t.get("repeats") or [{}]
