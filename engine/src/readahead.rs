@@ -1,26 +1,28 @@
 //! Reading a model's GGUF ahead of llama.cpp's load, with several threads
-//! (`--load-threads`).
+//! (`--load-threads`). Off unless asked for.
 //!
-//! llama.cpp reads the file it loads in a single stream. From a local disk
-//! that is fast enough; from a network file system it is not, because one
-//! stream waits on every request it makes, and many do not wait on each
-//! other. Measured on a LUMI-G compute node on 06-10-2026, reading a part of
-//! a Lustre-stored model through the page cache (`tools/lumi/sbatch_lustre_probe.slurm`):
-//! one stream 178 MB/s, four 681 MB/s, sixteen 2,283 MB/s in all. At the
-//! single-stream rate the Coder-480B (290 GB) had not finished loading after
-//! an hour.
+//! The idea: as a load starts, readers go over the model's parts in file
+//! order and bring them into the page cache, and llama.cpp, a step behind,
+//! reads them from memory. It came from a measurement that turned out not to
+//! describe llama.cpp: on a LUMI-G compute node, `dd` reading 2 GiB pieces of
+//! a Lustre-stored model through the page cache went at 178 MB/s with one
+//! stream and 2,283 MB/s with sixteen (`tools/lumi/sbatch_lustre_probe.slurm`,
+//! 06-10-2026).
 //!
-//! So as a load starts, readers go over the model's parts in file order and
-//! bring them into the page cache; llama.cpp, a step behind, then reads them
-//! from memory. Nothing is kept by the readers themselves: the cache is the
-//! kernel's, and its pages are given back as soon as anything needs the
-//! memory. That is also the limit of the idea: a model larger than the memory
-//! free for it would push its own first pages out before llama.cpp reached
-//! them, and be read twice, so it is then read in one stream as before.
+//! llama.cpp's own load is not that single slow stream. Measured cold (the
+//! model dropped from the page cache first) on the same nodes on 07-10-2026
+//! (`tools/lumi/campaigns/c09-load.json`): Qwen3.8-27B Q8 (29 GiB, one GCD)
+//! loaded in 45.9 s without readers, 102.7 s with 4, 49.5 s with 16 and
+//! 40.9 s with 32 (three loads each); Qwen3-235B Q4_K_M (132 GiB, four GCDs)
+//! in 110.3 s without and 128.3 s with 16 (two each). Readers competing with
+//! llama.cpp's sequential reads slowed it down, so the default is 0: the flag
+//! stays, for file systems where it has yet to be measured (NFS, SMB).
 //!
-//! `auto`, the default, reads ahead only from a network file system (Lustre,
-//! NFS, SMB, GPFS, BeeGFS, CephFS, 9p): a local disk is not where the time
-//! went, and keeps the load it always had until measured otherwise.
+//! Nothing is kept by the readers themselves: the cache is the kernel's. A
+//! model larger than the memory free for the cache would push its own first
+//! pages out before llama.cpp reached them, and is never read ahead.
+//! `auto` reads ahead only from a network file system (Lustre, NFS, SMB,
+//! GPFS, BeeGFS, CephFS, 9p).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -30,8 +32,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::time::Instant;
 
-/// Readers for `auto` on a network file system: the point where the LUMI
-/// measurement above stopped, and still rising there.
+/// Readers for `auto` on a network file system: where `dd` alone peaked on
+/// LUMI. Not a load measured faster.
 pub const AUTO_THREADS: u32 = 16;
 /// Upper bound for an explicit `--load-threads N`.
 pub const MAX_THREADS: u32 = 64;
@@ -42,13 +44,19 @@ const CHUNK: u64 = 64 << 20;
 /// The share of the memory free for the file that it may fill.
 const MEMORY_SHARE: f64 = 0.9;
 
-/// `--load-threads`: `auto` (network file systems only) or a number of
-/// readers, 0 for none.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+/// `--load-threads`: a number of readers (0, the default, for none) or
+/// `auto` (network file systems only).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadThreads {
-    #[default]
     Auto,
     Fixed(u32),
+}
+
+impl Default for LoadThreads {
+    /// Off: on Lustre, readers made llama.cpp's load slower (see above).
+    fn default() -> Self {
+        LoadThreads::Fixed(0)
+    }
 }
 
 impl std::fmt::Display for LoadThreads {

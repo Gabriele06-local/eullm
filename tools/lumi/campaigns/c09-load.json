@@ -8,8 +8,9 @@
     "alone on the node (exclusive), so no other point's reads share the node's link meanwhile.",
     "On a LUMI-G node on 06-10-2026 (sbatch_lustre_probe.slurm) one stream read 178 MB/s and",
     "sixteen 2,283 MB/s through the page cache; at one stream the Coder-480B had not loaded after",
-    "the runner's hour (c02), so --load-threads 0 is left out for it and for DeepSeek-V3.1.",
-    "--load-threads auto is 16 on Lustre; the 32 rows say whether more readers still pay.",
+    "the runner's hour (c02). On 07-10-2026 the 27B and 235B loads showed llama.cpp alone",
+    "reading at 0.7-1.3 GB/s and readers slowing it (235B: 110 s without, 128 s with 16), so",
+    "--load-threads 0 was added to the 480B and 671B groups and made the engine's default.",
     "trial repeats a load: each is its own point, run on whatever node is free."
   ],
   "pull": ["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL", "hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
@@ -33,12 +34,14 @@
     {"name": "load-480b", "priority": 90, "est_s": 2400,
      "set": {"model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m", "gcds": 8},
      "axes": {"trial": [1, 2],
-              "extra_args": [["--fit-strict", "--load-threads", "16"],
+              "extra_args": [["--fit-strict", "--load-threads", "0"],
+                             ["--fit-strict", "--load-threads", "16"],
                              ["--fit-strict", "--load-threads", "32"]]}},
     {"name": "load-671b", "priority": 90, "est_s": 3000,
      "set": {"model": "deepseek-v3.1-gguf-q4_k_m", "gcds": 8},
      "axes": {"trial": [1],
-              "extra_args": [["--fit-strict", "--load-threads", "16"],
+              "extra_args": [["--fit-strict", "--load-threads", "0"],
+                             ["--fit-strict", "--load-threads", "16"],
                              ["--fit-strict", "--load-threads", "32"]]}}
   ]
 }
