@@ -14,6 +14,7 @@ mod readahead;
 mod registry;
 mod tools;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -772,6 +773,22 @@ enum Commands {
         #[arg(long)]
         ollama_dir: Option<String>,
     },
+    /// Update EuLLM to the latest release
+    ///
+    /// Asks github.com which release is the latest: the only time EuLLM
+    /// looks, since it never checks on its own. When there is a newer one,
+    /// downloads the same build as this one (CPU, CUDA, Vulkan, ROCm),
+    /// checks it against the release's checksums, makes sure it starts, and
+    /// puts it in place of this one. A build from source is not replaced.
+    ///
+    /// Examples:
+    ///   eullm update --check    (only say whether a newer release exists)
+    ///   eullm update
+    Update {
+        /// Only say whether a newer release exists; change nothing
+        #[arg(long)]
+        check: bool,
+    },
     /// Train a model's weights on a text, on this machine's CPU or GPU
     ///
     /// llama.cpp's own trainer, so its limits: an F32 GGUF, flash attention
@@ -1289,6 +1306,12 @@ async fn main() {
         Commands::Unload { port, model } => cmd_unload(port, model.as_deref()).await,
         Commands::ImportOllama { model, ollama_dir } => {
             cmd_import_ollama(&store, &model, ollama_dir.as_deref())
+        }
+        Commands::Update { check } => {
+            if let Err(e) = update::run(check).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Finetune { opts } => {
             let Some(path) = resolve_model_path(&opts.model, &store) else {
@@ -4206,21 +4229,25 @@ impl ChatBackend {
 /// model's own embedded chat template first — on both backends, the batched
 /// one via the scheduler's weak model reference (see `SharedModel`); falls
 /// back to the hardcoded per-family `template` otherwise, exactly as
-/// `--cli` always has.
+/// `--cli` always has. The third element is the response prefix, as there.
 fn build_cli_prompt(
     backend: &ChatBackend,
     template: &chat_template::ChatTemplate,
     pairs: &[(&str, &str)],
     think_arg: bool,
-) -> (String, Vec<String>) {
+) -> (String, Vec<String>, String) {
     let dynamic = match backend {
         ChatBackend::Sequential(engine) => engine.apply_jinja_chat_template(pairs, think_arg),
         ChatBackend::Batched(scheduler) => scheduler.apply_jinja_chat_template(pairs, think_arg),
     };
     if let Some(dynamic) = dynamic {
-        return (dynamic.prompt, Vec::new());
+        return (dynamic.prompt, Vec::new(), dynamic.preopened);
     }
-    (template.build_prompt(pairs, think_arg), template.stop_sequences())
+    (
+        template.build_prompt(pairs, think_arg),
+        template.stop_sequences(),
+        String::new(),
+    )
 }
 
 async fn interactive_chat(
@@ -4433,7 +4460,7 @@ async fn interactive_chat(
         // TEMPORARY message list — web content is NOT stored in history so it
         // doesn't accumulate across turns and bloat the context.
         let template = crate::chat_template::ChatTemplate::detect(model_name);
-        let (prompt, stop_sequences) = if web_enabled {
+        let (prompt, stop_sequences, response_prefix) = if web_enabled {
             let urls = crate::tools::extract_urls(&input);
             if !urls.is_empty() {
                 let existing_chars: usize = history.iter().map(|m| m.content.len()).sum();
@@ -4529,6 +4556,9 @@ async fn interactive_chat(
             max_tokens: max_tokens.min(max_reply_tokens),
             temperature,
             stop_sequences,
+            // Starts the answer with the reasoning block the template
+            // opened, so the history below can strip the block whole.
+            response_prefix,
             ..Default::default()
         };
 
@@ -4973,15 +5003,17 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
     let marker = mtmd_default_marker();
     let marked = format!("{marker}\n{user_prompt}");
     let pairs: [(&str, &str); 1] = [("user", marked.as_str())];
-    let (templated, stop_sequences) = match engine.apply_jinja_chat_template(&pairs, true) {
-        // The model's own template ends generation on its EOG token, so there
-        // is no stop sequence to add on top.
-        Some(dynamic) => (dynamic.prompt, Vec::new()),
-        None => (
-            format!("<start_of_turn>user\n{marked}<end_of_turn>\n<start_of_turn>model\n"),
-            vec!["<end_of_turn>".to_string()],
-        ),
-    };
+    let (templated, stop_sequences, response_prefix) =
+        match engine.apply_jinja_chat_template(&pairs, true) {
+            // The model's own template ends generation on its EOG token, so
+            // there is no stop sequence to add on top.
+            Some(dynamic) => (dynamic.prompt, Vec::new(), dynamic.preopened),
+            None => (
+                format!("<start_of_turn>user\n{marked}<end_of_turn>\n<start_of_turn>model\n"),
+                vec!["<end_of_turn>".to_string()],
+                String::new(),
+            ),
+        };
 
     // 4. Build the request and stream the answer to stdout.
     let request = inference::GenerateRequest {
@@ -4990,6 +5022,7 @@ async fn run_multimodal_oneshot(engine: Arc<InferenceEngine>, image_path: PathBu
         temperature: 0.7,
         raw: true, // already templated, no extra BOS / formatting
         stop_sequences,
+        response_prefix,
         ..Default::default()
     };
 

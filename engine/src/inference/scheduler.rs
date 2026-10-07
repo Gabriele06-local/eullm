@@ -1761,7 +1761,9 @@ fn run_scheduler_loop(
                         tx: scheduled.tx,
                         sampler,
                         decoder: encoding_rs::UTF_8.new_decoder(),
-                        pending: String::new(),
+                        // The response prefix goes out with the first
+                        // piece, as if the model had written it.
+                        pending: scheduled.request.response_prefix.clone(),
                         tokens_prompt: 0,
                         tokens_generated: 0,
                         max_tokens: scheduled.request.max_tokens,

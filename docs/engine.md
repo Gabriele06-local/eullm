@@ -271,6 +271,28 @@ ollama run llama3.2       # Same model on Ollama — identical comparison
 
 **GGUF compatibility:** Some Ollama GGUF files contain metadata arrays with fewer elements than upstream llama.cpp expects (e.g. `qwen35.rope.dimension_sections` with 3 elements instead of 4). The import command automatically patches these during copy. Models with hybrid architectures (e.g. Qwen3.5 with SSM/Mamba2 layers) may have incompatible tensor layouts — use the HuggingFace GGUF instead.
 
+### `eullm update [--check]`
+
+Install the latest stable release in place of the binary that runs the command.
+
+```bash
+eullm update --check    # only say whether a newer release exists
+eullm update            # download it and put it in place
+```
+
+EuLLM never looks for a new version by itself: this command is the only time it asks github.com, and only when it is typed.
+
+**What it does:**
+
+1. Reads the latest release's tag from `https://github.com/eullm/eullm/releases/latest` and compares it with its own version.
+2. Downloads the same build as the one running: each release binary carries the name of the file it was published as (`eullm-linux-x64-cuda-13.1`, `eullm-windows-x64-vulkan.zip`, ...), so a CUDA build is replaced by the CUDA build, a Vulkan one by the Vulkan one.
+3. Checks the download against the release's `checksums.txt`, unpacks a Windows ZIP, and runs the new binary's `--version` before anything is replaced: a download this machine cannot start changes nothing.
+4. Puts the new files in place of the old ones in the binary's own directory, keeping the binary's file name. Each old file is renamed to `*.old` first and put back if any step fails. On Windows the running `eullm.exe` and the DLLs it loaded cannot be deleted while it runs, so they stay as `*.old` until the next update removes them.
+
+A running `eullm serve` or `eullm run` keeps the old version until it is restarted.
+
+It declines, saying why, for a binary built from source or in a Docker image (no release file is known to match it), and for the Microsoft Store package, which the Store updates. A system-wide install (`/usr/local/bin`) needs `sudo eullm update`. Versions up to 0.7.40 do not have the command: update them once more with the installer or a download from the releases page.
+
 ### `eullm forge`
 
 Delegate to the EULLM Forge Python pipeline for model verticalizzazione.

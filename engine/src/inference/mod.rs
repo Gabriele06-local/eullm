@@ -1077,6 +1077,13 @@ pub struct GenerateRequest {
     /// slower, but an answer that reproduces. Engines that build a context
     /// per request (multimodal, `--batch-size 0`) reuse nothing anyway.
     pub cache_prompt: bool,
+    /// Text the answer is sent starting with, ahead of what the model
+    /// generates: the reasoning block a chat template opened at the end of
+    /// the prompt ([`DynamicChatTemplate::preopened`]), which the model
+    /// writes on from but never writes itself. It goes through the stop
+    /// sequences and filters as if the model had written it, and counts as
+    /// no generated token. Empty: the answer is the generated text alone.
+    pub response_prefix: String,
 }
 
 impl Default for GenerateRequest {
@@ -1100,6 +1107,7 @@ impl Default for GenerateRequest {
             grammar: None,
             raw: false,
             cache_prompt: true,
+            response_prefix: String::new(),
         }
     }
 }
@@ -1224,21 +1232,27 @@ pub enum StreamEvent {
 /// llama.cpp's own rendering also reports `thinking_start_tag`/
 /// `thinking_end_tag` (the template's reasoning-block delimiters, when it
 /// declares any) via `llama_cpp_2::model::JinjaChatTemplateResult`. The
-/// start tag is consumed by [`strip_preopened_thinking`] below; stripping a
+/// start tag is what [`preopened_thinking`] below looks for; stripping a
 /// reasoning block from the *response* on this path is separate,
 /// not-yet-done work.
 pub struct DynamicChatTemplate {
     /// The rendered prompt, ready to generate from as-is (`raw: true`).
     pub prompt: String,
+    /// The reasoning block the template opened at the end of `prompt` — its
+    /// start tag and the whitespace after it — or empty when it opened none.
+    /// The model writes on from inside that block, so its answer starts
+    /// mid-think: pass this as [`GenerateRequest::response_prefix`] and the
+    /// client gets the block whole. See [`preopened_thinking`].
+    pub preopened: String,
 }
 
 /// A chat prompt rendered from OpenAI-format request JSON (messages plus
 /// optional tools), carrying the output-format descriptor needed to parse
 /// the model's raw output back into structured content, reasoning and tool
-/// calls. Unlike [`DynamicChatTemplate`], the pre-opened thinking tag is
-/// NOT stripped here: the parser this descriptor builds was derived from
-/// the prompt exactly as rendered, and expects the output shape that prompt
-/// produces.
+/// calls. Unlike [`DynamicChatTemplate`], a pre-opened thinking tag is not
+/// handed back as a response prefix here: the parser this descriptor builds
+/// was derived from the prompt exactly as rendered (`generation_prompt`),
+/// knows the output starts inside the block, and expects it that way.
 pub struct DynamicOaiTemplate {
     /// The rendered prompt, ready to generate from as-is.
     pub prompt: String,
@@ -1457,34 +1471,39 @@ pub(crate) fn render_oai_chat_template(
     })
 }
 
-/// If `prompt` ends with the template's thinking start tag (ignoring
-/// trailing whitespace), remove it — tag and trailing whitespace both — so
-/// the model emits the opening tag itself as its first output tokens.
+/// The reasoning block `prompt` ends by opening: the template's thinking
+/// start tag, when the prompt ends with it, together with the whitespace
+/// after it — or `""` when the prompt leaves no block open.
 ///
 /// Some reasoning templates pre-open the thinking block in the prompt so
-/// the model cannot skip reasoning (Qwen3.6 does; DeepSeek-R1's official
-/// template does too). Generating from such a prompt means the response
-/// starts mid-think and carries only the *closing* tag, so every client
-/// that renders reasoning sections — the bundled web UI included — shows
-/// the reasoning as plain leaked text with a dangling `</think>`. This is
-/// the same deliberate deviation the hardcoded DeepSeek template documents
-/// (see `build_deepseek_r1`): Ollama leaves the tag out of the prompt, the
-/// model emits it on its own, and the full block stays in the output where
-/// clients key on it. Found on real hardware the day the dynamic template
-/// reached the batching path: both Qwen3.6 models answered with their
-/// reasoning as body text ending in a bare `</think>`.
+/// the model cannot skip reasoning (Qwen3.6 does; so do DeepSeek-R1's
+/// official template and Spark-X2.5's). The model was trained to write on
+/// from there, so the prompt keeps the tag, and the answer starts mid-think
+/// with only the *closing* tag in it. Handed to a client as it is, every
+/// client that renders reasoning sections — the bundled web UI included —
+/// shows the reasoning as plain leaked text with a dangling `</think>`
+/// (found on real hardware the day the dynamic template reached the
+/// batching path: both Qwen3.6 models answered that way). So the caller
+/// puts what this returns in front of the answer
+/// ([`GenerateRequest::response_prefix`]), and the client gets the block
+/// whole, as if the model had written the tag itself.
 ///
-/// Returns `true` when a tag was stripped (exposed for tests).
-fn strip_preopened_thinking(prompt: &mut String, start_tag: &str) -> bool {
+/// Up to 0.7.40 the tag was cut from the prompt instead, so that the model
+/// would write it — what Ollama's own templates do, and what the hardcoded
+/// DeepSeek template still does (see `build_deepseek_r1`). Qwen3.6 wrote
+/// it; Spark-X2.5 does not, and without the tag it skips its reasoning or
+/// loses its way: at temperature 0, "What is 2 + 3?" got `2 + 3 = 5` with
+/// no reasoning, and "ciao come ti chiami?" an answer in Chinese about a
+/// name nobody had asked for.
+fn preopened_thinking<'a>(prompt: &'a str, start_tag: &str) -> &'a str {
     if start_tag.is_empty() {
-        return false;
+        return "";
     }
-    let content_len = prompt.trim_end().len();
-    if !prompt[..content_len].ends_with(start_tag) {
-        return false;
+    let content = prompt.trim_end();
+    if !content.ends_with(start_tag) {
+        return "";
     }
-    prompt.truncate(content_len - start_tag.len());
-    true
+    &prompt[content.len() - start_tag.len()..]
 }
 
 /// Shared implementation behind [`InferenceEngine::apply_jinja_chat_template`]
@@ -1527,16 +1546,22 @@ pub(crate) fn render_jinja_chat_template(
         return None;
     }
 
-    let mut prompt = result.prompt;
-    if let Some(start_tag) = result.thinking_start_tag.as_deref()
-        && strip_preopened_thinking(&mut prompt, start_tag)
-    {
+    let preopened = result
+        .thinking_start_tag
+        .as_deref()
+        .map(|start_tag| preopened_thinking(&result.prompt, start_tag).to_string())
+        .unwrap_or_default();
+    if !preopened.is_empty() {
         tracing::debug!(
-            "template pre-opened a {start_tag} reasoning block; stripped so the model emits the tag itself"
+            "template pre-opened a {} reasoning block; the answer is sent starting with it",
+            preopened.trim_end()
         );
     }
 
-    Some(DynamicChatTemplate { prompt })
+    Some(DynamicChatTemplate {
+        prompt: result.prompt,
+        preopened,
+    })
 }
 
 /// The loaded inference engine, holding the model and backend.
@@ -2258,7 +2283,9 @@ impl InferenceEngine {
         // Trailing text that could still grow into a stop or filter sequence.
         // Dropped on EOG (it is a partial turn delimiter), flushed into
         // `output` when the token budget ends the loop (it is real text).
-        let mut pending = String::new();
+        // It starts as the response prefix, which then goes out with the
+        // first piece, through the same stops and filters.
+        let mut pending = request.response_prefix.clone();
         let mut n_cur = tokens_prompt as i32;
         let mut tokens_generated: u32 = 0;
         let mut batch = LlamaBatch::new(1, 1);
@@ -2489,8 +2516,9 @@ impl InferenceEngine {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut full_output = String::new();
         // See the non-streaming path: held-back tail, dropped on EOG, flushed
-        // to the client when the token budget is what ended the loop.
-        let mut pending = String::new();
+        // to the client when the token budget is what ended the loop; it
+        // starts as the response prefix.
+        let mut pending = request.response_prefix.clone();
         let mut n_cur = tokens_prompt as i32;
         let mut tokens_generated: u32 = 0;
         let mut batch = LlamaBatch::new(1, 1);
@@ -2948,8 +2976,9 @@ impl InferenceEngine {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut full_output = String::new();
         // See the non-streaming path: held-back tail, dropped on EOG, flushed
-        // to the client when the token budget is what ended the loop.
-        let mut pending = String::new();
+        // to the client when the token budget is what ended the loop; it
+        // starts as the response prefix.
+        let mut pending = request.response_prefix.clone();
         let mut n_cur = new_n_past;
         let mut tokens_generated: u32 = 0;
         let mut batch = LlamaBatch::new(1, 1);
@@ -3501,34 +3530,40 @@ mod stop_reason_tests {
         assert_eq!(r.stop_reason.as_api_str(), "length");
     }
 
-    // ── strip_preopened_thinking ────────────────────────────────────────────
+    // ── preopened_thinking ──────────────────────────────────────────────────
 
     #[test]
-    fn strips_preopened_think_tag_and_trailing_whitespace() {
+    fn a_preopened_think_tag_is_returned_with_the_whitespace_after_it() {
         // Qwen3.6's template shape: generation prompt then a forced-open block.
-        let mut p = "<|im_start|>assistant\n<think>\n".to_string();
-        assert!(super::strip_preopened_thinking(&mut p, "<think>"));
-        assert_eq!(p, "<|im_start|>assistant\n");
+        let p = "<|im_start|>assistant\n<think>\n";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "<think>\n");
+        // Spark-X2.5's: the tag with nothing after it.
+        let p = "<｜start▁of▁sentence｜><|Bot|><think>";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "<think>");
     }
 
     #[test]
-    fn leaves_prompts_without_a_preopened_block_alone() {
-        // Plain ChatML generation prompt — nothing to strip.
-        let mut p = "<|im_start|>assistant\n".to_string();
-        assert!(!super::strip_preopened_thinking(&mut p, "<think>"));
-        assert_eq!(p, "<|im_start|>assistant\n");
+    fn a_prompt_without_an_open_block_has_nothing_to_send() {
+        // Plain ChatML generation prompt.
+        let p = "<|im_start|>assistant\n";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "");
+
+        // The suppressed forms: Qwen3's pre-closed empty block, and
+        // Spark-X2.5's bare closing tag.
+        let p = "<|im_start|>assistant\n<think>\n\n</think>\n\n";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "");
+        let p = "<｜start▁of▁sentence｜><|Bot|></think>";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "");
 
         // A think tag somewhere in history is not a pre-opened block.
-        let mut p = "<|im_start|>user\nsay <think> back<|im_end|>\n<|im_start|>assistant\n".to_string();
-        assert!(!super::strip_preopened_thinking(&mut p, "<think>"));
+        let p = "<|im_start|>user\nsay <think> back<|im_end|>\n<|im_start|>assistant\n";
+        assert_eq!(super::preopened_thinking(p, "<think>"), "");
     }
 
     #[test]
-    fn empty_tag_never_strips() {
-        // A template that declares no tag must not truncate whitespace.
-        let mut p = "<|im_start|>assistant\n".to_string();
-        assert!(!super::strip_preopened_thinking(&mut p, ""));
-        assert_eq!(p, "<|im_start|>assistant\n");
+    fn a_template_that_declares_no_tag_opens_nothing() {
+        let p = "<|im_start|>assistant\n";
+        assert_eq!(super::preopened_thinking(p, ""), "");
     }
 
     // ── DynamicOaiTemplate::parse_output ────────────────────────────────────

@@ -15,6 +15,15 @@
 //! EULLM_MTP_TEST_MODEL=/path/to/Qwen3.5-0.8B-MTP-Q4_K_M.gguf \
 //!     cargo test -p eullm-engine -- --ignored real_model_mtp --test-threads=1
 //! ```
+//!
+//! The reasoning test needs a model whose chat template opens the reasoning
+//! block at the end of the prompt, such as Spark-X2.5-1.7B (about a minute
+//! on four CPU cores):
+//!
+//! ```text
+//! EULLM_PREOPENED_THINKING_TEST_MODEL=/path/to/Spark-X2.5-1.7B-Q4_K_M.gguf \
+//!     cargo test -p eullm-engine -- --ignored real_model_a_reasoning_block --test-threads=1
+//! ```
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -40,6 +49,14 @@ fn test_model() -> PathBuf {
 fn mtp_test_model() -> PathBuf {
     std::env::var("EULLM_MTP_TEST_MODEL")
         .expect("set EULLM_MTP_TEST_MODEL to a GGUF with MTP layers")
+        .into()
+}
+
+/// The GGUF the reasoning test runs on: one whose chat template opens the
+/// reasoning block at the end of the prompt, such as Spark-X2.5-1.7B.
+fn preopened_thinking_test_model() -> PathBuf {
+    std::env::var("EULLM_PREOPENED_THINKING_TEST_MODEL")
+        .expect("set EULLM_PREOPENED_THINKING_TEST_MODEL to a GGUF whose template opens <think>")
         .into()
 }
 
@@ -168,6 +185,27 @@ impl TestServer {
             .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
             .collect();
         (status, lines)
+    }
+
+    /// POST `body` to `path`; the status and every JSON object of the answer
+    /// — one for a plain response, one per NDJSON line or SSE event for a
+    /// stream (`data: [DONE]` left out).
+    async fn post(&self, path: &str, body: Value) -> (reqwest::StatusCode, Vec<Value>) {
+        let response = reqwest::Client::new()
+            .post(format!("{}{path}", self.base))
+            .json(&body)
+            .send()
+            .await
+            .expect("request");
+        let status = response.status();
+        let text = response.text().await.expect("body");
+        let objects = text
+            .lines()
+            .map(|l| l.strip_prefix("data:").unwrap_or(l).trim())
+            .filter(|l| !l.is_empty() && *l != "[DONE]")
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+            .collect();
+        (status, objects)
     }
 }
 
@@ -1395,4 +1433,75 @@ async fn real_model_a_prompt_read_in_chunks_answers_as_one_read_whole() {
     assert_finished(&a);
     assert_finished(&b);
     assert_eq!(answer(&a), answer(&b));
+}
+
+/// A chat template that opens the reasoning block at the end of the prompt
+/// (Spark-X2.5's, Qwen3.6's, DeepSeek-R1's) leaves the model writing from
+/// inside it: the opening tag is in the prompt, never in what the model
+/// writes. The answer is sent starting with it, so that the client gets the
+/// block whole — on both backends, streamed or not, on `/api/chat` and on
+/// `/v1/chat/completions`. Asked with `think`, the reasoning then goes to
+/// `thinking`, and none of it, nor a dangling `</think>`, to `content`.
+///
+/// Up to 0.7.40 the tag was cut from the prompt instead, for the model to
+/// write it, and Spark-X2.5 does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF whose template opens <think> in EULLM_PREOPENED_THINKING_TEST_MODEL"]
+async fn real_model_a_reasoning_block_the_template_opens_reaches_the_client_whole() {
+    let messages = json!([{ "role": "user", "content": "What is 2 + 3?" }]);
+    // 1 slot: the scheduler; 0: the sequential engine.
+    for slots in [1, 0] {
+        let server = start_on(&preopened_thinking_test_model(), &["reasoner"], |state| {
+            state.batch_size = slots;
+            state.threads = 4;
+        })
+        .await;
+        for stream in [false, true] {
+            let case = format!("{slots} slot(s), stream {stream}");
+
+            // Without `think`, the reasoning stays in the answer, tags and all.
+            for path in ["/api/chat", "/v1/chat/completions"] {
+                let body = json!({
+                    "model": "reasoner", "messages": messages, "stream": stream,
+                    "options": { "temperature": 0, "seed": 1, "num_predict": 24 },
+                    "temperature": 0, "seed": 1, "max_tokens": 24,
+                });
+                let (status, objects) = server.post(path, body).await;
+                assert_eq!(status, 200, "{case}, {path}: {objects:?}");
+                let content: String = objects
+                    .iter()
+                    .filter_map(|o| {
+                        o["message"]["content"]
+                            .as_str()
+                            .or(o["choices"][0]["message"]["content"].as_str())
+                            .or(o["choices"][0]["delta"]["content"].as_str())
+                    })
+                    .collect();
+                assert!(
+                    content.starts_with("<think>"),
+                    "{case}, {path}: {content:?}"
+                );
+            }
+
+            // With it, the reasoning goes apart.
+            let body = json!({
+                "model": "reasoner", "messages": messages, "stream": stream, "think": true,
+                "options": { "temperature": 0, "seed": 1, "num_predict": 24 },
+            });
+            let (status, objects) = server.post("/api/chat", body).await;
+            assert_eq!(status, 200, "{case}: {objects:?}");
+            let part = |field: &str| -> String {
+                objects
+                    .iter()
+                    .filter_map(|o| o["message"][field].as_str())
+                    .collect()
+            };
+            let (thinking, content) = (part("thinking"), part("content"));
+            assert!(!thinking.trim().is_empty(), "{case}: no thinking");
+            assert!(
+                !thinking.contains("think>") && !content.contains("think>"),
+                "{case}: a tag left in {thinking:?} / {content:?}"
+            );
+        }
+    }
 }

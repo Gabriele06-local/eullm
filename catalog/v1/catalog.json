@@ -95,19 +95,12 @@
       "vram_gb": 2,
       "languages": [
         "en",
-        "zh",
-        "it",
-        "de",
-        "fr",
-        "es",
-        "pt",
-        "nl"
+        "zh"
       ],
       "domain": "general",
       "license": "Apache-2.0",
       "tags": [
         "instruct",
-        "multilingual",
         "long-context",
         "agent"
       ],
@@ -203,19 +196,12 @@
       "vram_gb": 4,
       "languages": [
         "en",
-        "zh",
-        "it",
-        "de",
-        "fr",
-        "es",
-        "pt",
-        "nl"
+        "zh"
       ],
       "domain": "general",
       "license": "Apache-2.0",
       "tags": [
         "instruct",
-        "multilingual",
         "long-context",
         "agent",
         "code"
