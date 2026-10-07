@@ -5,9 +5,10 @@
 #
 #     export SBATCH_ACCOUNT=project_465003366
 #     export EULLM_BIN=$PWD/target-next2/release/eullm
-#     sbatch tools/lumi/sbatch_load_watch.slurm [MODEL_ID] [LOAD_THREADS]
+#     sbatch tools/lumi/sbatch_load_watch.slurm [MODEL_ID] [LOAD_THREADS] [SERVE_FLAG ...]
 #
-# Default: the Coder-480B, --load-threads 0. The output is
+# Default: the Coder-480B, --load-threads 0; flags after the third argument go
+# to `eullm serve` as they are (--no-mmap, for one). The output is
 # eullm-load-watch-<job>.out beside where it was submitted, the server's own
 # log next to it.
 #
@@ -40,18 +41,22 @@ source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh"
 
 MODEL="${1:-qwen3-coder-480b-a35b-instruct-gguf-q4_k_m}"
 LOAD_THREADS="${2:-0}"
+EXTRA=("${@:3}")
 PORT=$((18500 + ${SLURM_JOB_ID:-0} % 400))
 OUT="eullm-load-watch-${SLURM_JOB_ID:-local}"
 
-echo "=== load watch: $MODEL, --load-threads $LOAD_THREADS, on $(hostname), $(date -Is) ==="
+echo "=== load watch: $MODEL, --load-threads $LOAD_THREADS ${EXTRA[*]}, on $(hostname), $(date -Is) ==="
 echo "  engine $("$EULLM_BIN" --version 2>&1 | head -1)"
 grep -E "MemTotal|MemAvailable" /proc/meminfo | sed 's/^/  /'
 cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup | head -1)/memory.max" 2>/dev/null |
     sed 's/^/  cgroup memory.max /'
+# The Lustre client's own cap on cached file data: a model larger than what is
+# left of it is evicted by Lustre while it is still being loaded.
+lctl get_param llite.*.max_cached_mb 2>/dev/null | grep -E "max_cached_mb|users|used_mb" | sed 's/^/  /'
 echo
 
 "$EULLM_BIN" serve --port "$PORT" --batch-size 1 --ctx-size 4096 --fit-strict \
-    --load-threads "$LOAD_THREADS" >"$OUT.server.log" 2>&1 &
+    --load-threads "$LOAD_THREADS" "${EXTRA[@]}" >"$OUT.server.log" 2>&1 &
 server=$!
 for _ in $(seq 1 60); do
     curl -s "localhost:$PORT/api/version" >/dev/null 2>&1 && break
