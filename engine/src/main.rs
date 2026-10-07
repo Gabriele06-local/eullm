@@ -13,6 +13,7 @@ mod picker;
 mod registry;
 mod tools;
 mod ui;
+mod update;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -755,6 +756,22 @@ enum Commands {
         #[arg(long)]
         ollama_dir: Option<String>,
     },
+    /// Update EuLLM to the latest release
+    ///
+    /// Asks github.com which release is the latest: the only time EuLLM
+    /// looks, since it never checks on its own. When there is a newer one,
+    /// downloads the same build as this one (CPU, CUDA, Vulkan, ROCm),
+    /// checks it against the release's checksums, makes sure it starts, and
+    /// puts it in place of this one. A build from source is not replaced.
+    ///
+    /// Examples:
+    ///   eullm update --check    (only say whether a newer release exists)
+    ///   eullm update
+    Update {
+        /// Only say whether a newer release exists; change nothing
+        #[arg(long)]
+        check: bool,
+    },
     /// Train a model's weights on a text, on this machine's CPU or GPU
     ///
     /// llama.cpp's own trainer, so its limits: an F32 GGUF, flash attention
@@ -1268,6 +1285,12 @@ async fn main() {
         Commands::Unload { port, model } => cmd_unload(port, model.as_deref()).await,
         Commands::ImportOllama { model, ollama_dir } => {
             cmd_import_ollama(&store, &model, ollama_dir.as_deref())
+        }
+        Commands::Update { check } => {
+            if let Err(e) = update::run(check).await {
+                eprintln!("Error: {e}");
+                std::process::exit(1);
+            }
         }
         Commands::Finetune { opts } => {
             let Some(path) = resolve_model_path(&opts.model, &store) else {

@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Added
+- **`eullm update`: install the latest release in place of this one.** `eullm update --check` says whether a newer release exists; `eullm update` downloads the same build as the one running (CPU, CUDA, Vulkan or ROCm, for the same system), checks it against the release's checksums, makes sure the new binary starts, and puts it in place of the old one, which is put back if any step fails. It keeps the binary's file name and folder, so it updates an install made by the installers as well as an unpacked ZIP. EuLLM asks github.com only when the command is typed: it never checks for updates by itself. A build from source, a Docker image and the Microsoft Store package are not replaced, and the command says so. 0.7.40 and earlier do not have it: update those once more with the installer.
+
 ## 0.7.40 — 2026-10-07
 
 ### Performance

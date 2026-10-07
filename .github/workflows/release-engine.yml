@@ -227,6 +227,10 @@ jobs:
             features: metal,multimodal
 
     runs-on: ${{ matrix.os }}
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: ${{ matrix.artifact }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -345,6 +349,10 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: rockylinux:8
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-linux-x64
     steps:
       # The rockylinux:8 image ships without git. actions/checkout then
       # falls back to a REST API tarball download, which cannot fetch
@@ -475,6 +483,10 @@ jobs:
           || inputs.job == 'all'
           || inputs.job == 'vulkan' }}
     runs-on: ubuntu-22.04
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-linux-x64-vulkan
     steps:
       - uses: actions/checkout@v5
         with:
@@ -602,6 +614,10 @@ jobs:
           - gpu_targets: "gfx1100;gfx1101;gfx1102;gfx1150;gfx1151;gfx1200;gfx1201"
             rocm_tag: "7.2.4"
             artifact: eullm-linux-x64-rocm-consumer
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: ${{ matrix.artifact }}
     steps:
       # Same reason as build-cuda's identical first step: without git,
       # actions/checkout falls back to a REST tarball, which cannot fetch the
@@ -846,6 +862,10 @@ jobs:
     runs-on: ubuntu-22.04
     container:
       image: nvidia/cuda:${{ matrix.cuda_tag }}
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: ${{ matrix.artifact }}
     steps:
       # The nvidia/cuda image ships without git. actions/checkout then falls
       # back to a REST API tarball download, which cannot fetch submodules
@@ -1114,6 +1134,10 @@ jobs:
     runs-on: ubuntu-24.04-arm
     container:
       image: nvidia/cuda:${{ matrix.cuda_tag }}
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: ${{ matrix.artifact }}
     steps:
       - name: Install git (container has none; required for submodule checkout)
         run: |
@@ -1267,6 +1291,10 @@ jobs:
           - artifact: eullm-linux-arm64-cix-p1
 
     runs-on: ubuntu-24.04-arm
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: ${{ matrix.artifact }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1334,6 +1362,10 @@ jobs:
   build-windows:
     if: ${{ github.event_name == 'push' }}
     runs-on: windows-2022
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-windows-x64.zip
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1455,6 +1487,10 @@ jobs:
   build-windows-cuda:
     if: ${{ github.event_name == 'push' }}
     runs-on: windows-2022
+    env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-windows-x64-cuda-13.1.zip
     steps:
       - uses: actions/checkout@v5
         with:
@@ -1835,6 +1871,9 @@ jobs:
           || inputs.job == 'windows-vulkan' }}
     runs-on: windows-2022
     env:
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-windows-x64-vulkan.zip
       # The newest SDK on 7 October 2026 (vulkan.lunarg.com/sdk/latest.json).
       # Its installer carries glslc, which ggml-vulkan compiles its shaders
       # with, and the SPIRV-Headers CMake package ggml-vulkan asks for.
