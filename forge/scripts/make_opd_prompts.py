@@ -136,22 +136,25 @@ def main(argv: list[str] | None = None) -> int:
         r = rulings.get(rid)
         return {"sezione": getattr(r, "section", ""), "numero": rid.split("/", 1)[-1]}
 
-    rows = []
+    rows, n_citable = [], 0
     for rid in chosen:
         qs = list(cards[rid].get("domande_ricerca", []))
         rng.shuffle(qs)
         for q in qs[:args.per_ruling]:
-            passages = []
+            passages, found = [], set()
             for i in index.ranked_units(q):
                 u = units[i]
                 passages.append((ruling_label(meta_of(u.ruling)), u.text))
+                found.add(u.ruling)
                 if len(passages) >= args.k:
                     break
             source = (ruling_label(meta_of(rid)), ruling_view(rulings[rid].text, 12000))
+            n_citable += rid in found
             rows.append({"id": f"{rid}#{len(rows)}", "kind": "caselaw", "ruling": rid,
                          "student": [{"role": "user", "content": caselaw_prompt(q, passages)}],
                          "teacher": [{"role": "user",
-                                      "content": privileged_prompt(q, passages, source)}]})
+                                      "content": privileged_prompt(
+                                          q, passages, source, citable=rid in found)}]})
     n_case = len(rows)
     if args.statutes and args.mix > 0:
         stat = read_jsonl([args.statutes])
@@ -168,8 +171,8 @@ def main(argv: list[str] | None = None) -> int:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
     tmp.replace(args.out)
     print(f"[opd-prompts] {len(rows):,} rows ({n_case:,} case-law from {len(chosen):,} rulings, "
-          f"{len(rows) - n_case:,} statute); left out {n_dev:,} development and {n_sens:,} "
-          f"sensitive rulings -> {args.out}")
+          f"{len(rows) - n_case:,} statute; source among the passages in {n_citable:,}); "
+          f"left out {n_dev:,} development and {n_sens:,} sensitive rulings -> {args.out}")
     return 0
 
 
