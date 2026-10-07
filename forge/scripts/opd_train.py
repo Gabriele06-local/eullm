@@ -122,7 +122,12 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     done = args.out / "adapter" / "adapter_config.json"
-    if done.is_file():
+    # Size, not existence, as in grpo_train.py and stage3_sft.py: a 0-byte
+    # adapter_config.json -- an interrupted save, not a finished adapter --
+    # used to count as done and exit 0, skipping the whole run. The run's own
+    # log then said "nothing left to do", which is what a finished adapter
+    # says too, so a killed link looked exactly like a completed one.
+    if done.is_file() and done.stat().st_size > 0:
         print(f"[opd] adapter already at {done.parent}: nothing left to do", flush=True)
         return 0
     rows = load_rows(args.prompts)
