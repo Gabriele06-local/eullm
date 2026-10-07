@@ -109,6 +109,43 @@ def test_prompts_leave_out_dev_and_sensitive_rulings_and_mix_statutes(tmp_path, 
     assert "source among the passages in 8)" in printed
 
 
+def test_no_prompt_contains_a_development_ruling_text_anywhere(tmp_path, capsys):
+    """Dev rulings are kept out of the sources but used to stay in the index.
+
+    The chosen-source loop skips them, and the assert at the end of main only
+    looks at each row's source ruling, so a dev ruling's verbatim text was
+    retrieved into a train row's student prompt while the log said "left out
+    1 development". The docstring promises no prompt is written from one.
+    """
+    mark = "DEV-MARKER-ZZZ"
+    rows = [{"text": f"Sentenza {num}. Il ricorso riguarda appalto {num} {extra}",
+             "sentence_id": f"cds/{num}", "source_id": f"cds/{num}",
+             "year": 2020, "kind": "cds", "chunk_index": 0}
+            for num, extra in (("202000001", ""), ("202000002", mark))]
+    (tmp_path / "train.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    (tmp_path / "schede.jsonl").write_text("".join(json.dumps(
+        {"id": f"cds/{num}", "principi": [f"Il principio vale in appalto {num}."],
+         "norme": ["art. 120 c.p.a."], "esito": "rigetto", "materia": "appalto",
+         "oggetto": f"APPALTO {num}",
+         "domande_ricerca": [f"Quando si applica appalto {num}?"]},
+        ensure_ascii=False) + "\n" for num in ("202000001", "202000002")))
+    (tmp_path / "dev.txt").write_text("cds/202000002\n")
+    out = tmp_path / "prompts.jsonl"
+    mod = _load("make_opd_prompts")
+    # -k 10 so every retrieved unit lands in the prompt: with the default 3
+    # the dev chunk might simply not rank, which would prove nothing.
+    assert mod.main(["--chunks", str(tmp_path / "train.jsonl"),
+                     "--cards", str(tmp_path / "schede.jsonl"),
+                     "--dev-ids", str(tmp_path / "dev.txt"), "-k", "10",
+                     "--out", str(out)]) == 0
+    prompts = [json.loads(line) for line in out.read_text().splitlines()]
+    assert len(prompts) == 1 and prompts[0]["ruling"] == "cds/202000001"
+    assert mark not in json.dumps(prompts[0]["student"], ensure_ascii=False)
+    assert mark not in json.dumps(prompts[0]["teacher"], ensure_ascii=False)
+    assert "left out 1 development" in capsys.readouterr().out
+
+
 def test_cited_numbers_reads_both_forms():
     mod = _load("cds_answer")
     text = ("Come chiarito da Cons. Stato, Sez. V, n. 202301234 e dalla sentenza n. 45/2021, "

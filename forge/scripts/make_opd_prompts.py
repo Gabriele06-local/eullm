@@ -120,9 +120,15 @@ def main(argv: list[str] | None = None) -> int:
 
     chunks = [c for c in read_jsonl(args.chunks)
               if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds"]
+    # Development rulings never reach a prompt, as a source or as a retrieved
+    # passage. Their units are skipped when ranked rather than left out of the
+    # index, so the index stays the one the exam and the retrieval check use,
+    # and its cached embeddings (keyed on the units) still apply.
     units = build_units(rulings, chunks, cards=cards, prefix_chunks=True,
                         card_units=args.index == "prefix+cards")
     index = RulingIndex(units, bm25=SparseBM25([u.text for u in units]))
+    rank_all = index.ranked_units
+    index.ranked_units = lambda q: [i for i in rank_all(q) if units[i].ruling not in dev]
     if args.embedder:
         from eullm_forge.caselaw.index import shard_vectors, units_key
         from eullm_forge.eval.dense import Embedder, Reranker
