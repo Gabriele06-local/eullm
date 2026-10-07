@@ -18,7 +18,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License" />
   <img src="https://img.shields.io/badge/EU%20AI%20Act-Designed%20for%20compliance-gold" alt="EU AI Act" />
-  <img src="https://img.shields.io/badge/Engine-v0.7.30-2ea44f" alt="Engine status" />
+  <img src="https://img.shields.io/badge/Engine-v0.7.40-2ea44f" alt="Engine status" />
   <img src="https://img.shields.io/badge/Forge%20%2B%20Hub-Early%20development-orange" alt="Forge/Hub status" />
   <a href="https://github.com/eullm/eullm/actions/workflows/ci.yml"><img src="https://github.com/eullm/eullm/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://doi.org/10.5281/zenodo.20412979"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20412979.svg" alt="DOI" /></a>
@@ -167,7 +167,7 @@ is next. **Want one for your domain?** We build them as a service:
 
 | | Status |
 |---|---|
-| **Engine**: inference, Ollama and OpenAI APIs, continuous batching, quantized KV cache, audit trail, chat UI | ✅ Ready, v0.7.30 |
+| **Engine**: inference, Ollama and OpenAI APIs, continuous batching, quantized KV cache, audit trail, chat UI | ✅ Ready, v0.7.40 |
 | **Decisions** (`/v1/systemone`) | ✅ Since v0.7.20 |
 | **Large MoE models on small GPUs** (`--moe-cache`), **MTP drafts** (`--mtp`), **several models at once**, **`model: "auto"`** | ✅ New in v0.7.30; the expert cache is experimental and needs one CUDA GPU |
 | **Multimodal**: images and audio as input | ✅ Vision ready; audio experimental upstream |

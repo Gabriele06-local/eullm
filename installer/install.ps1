@@ -8,16 +8,18 @@
         irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex
 
     Picks the CUDA build when an NVIDIA GPU the CUDA build covers (compute
-    capability 8.6, 8.9 or 12.0) is present on driver 580+, and the CPU build
-    otherwise, verifies the download against the release's checksums.txt,
-    installs into a per-user directory and adds it to the user PATH. No
-    administrator rights are needed.
+    capability 8.6, 8.9 or 12.0) is present on driver 580+; the Vulkan build
+    for another GPU Vulkan serves (an AMD Radeon, an Intel Arc, an NVIDIA card
+    outside the CUDA build) when the graphics driver installed the Vulkan
+    loader; and the CPU build otherwise. It verifies the download against the
+    release's checksums.txt, installs into a per-user directory and adds it to
+    the user PATH. No administrator rights are needed.
 
     Environment variables (all optional):
 
         EULLM_VERSION      Release to install, e.g. 0.7.9 (default: latest stable)
         EULLM_INSTALL_DIR  Install directory (default: %LOCALAPPDATA%\Programs\EuLLM)
-        EULLM_VARIANT      cpu or cuda, to skip GPU detection
+        EULLM_VARIANT      cpu, cuda or vulkan, to skip GPU detection
         EULLM_UNINSTALL    Set to 1 to remove EuLLM and its PATH entry
 
     The Linux/macOS counterpart is installer/install.sh.
@@ -57,15 +59,18 @@ function Install-EuLLM {
     }
 
     $variant = $env:EULLM_VARIANT
-    if (-not $variant) { $variant = Get-EuLLMVariant }
+    $detected = -not $variant
+    if ($detected) { $variant = Get-EuLLMVariant }
     # Candidates in order of preference; the first one the release lists
     # in checksums.txt is installed. The CPU ZIP carries the Visual C++
     # runtime next to the exe, so it runs on a Windows without the VC++
     # Redistributable; releases up to 0.7.9 only have the bare exe.
+    $cpuCandidates = @('eullm-windows-x64.zip', 'eullm-windows-x64.exe')
     switch ($variant) {
-        'cpu'  { $candidates = @('eullm-windows-x64.zip', 'eullm-windows-x64.exe') }
-        'cuda' { $candidates = @('eullm-windows-x64-cuda-13.1.zip') }
-        default { throw "Unknown EULLM_VARIANT '$variant' (expected cpu or cuda)." }
+        'cpu'    { $candidates = $cpuCandidates }
+        'cuda'   { $candidates = @('eullm-windows-x64-cuda-13.1.zip') }
+        'vulkan' { $candidates = @('eullm-windows-x64-vulkan.zip') }
+        default { throw "Unknown EULLM_VARIANT '$variant' (expected cpu, cuda or vulkan)." }
     }
 
     $base = if ($env:EULLM_VERSION) {
@@ -90,6 +95,16 @@ function Install-EuLLM {
             if ($parts.Count -eq 2) { $listed[($parts[1] -split '/')[-1]] = $parts[0] }
         }
         $asset = $candidates | Where-Object { $listed.ContainsKey($_) } | Select-Object -First 1
+        # A detected GPU build the release does not carry: releases before
+        # the Vulkan one have no Vulkan ZIP, and a release whose GPU build
+        # failed publishes without it. The CPU build still runs; a variant
+        # asked for by name still fails below, since it was asked for.
+        if (-not $asset -and $detected -and $variant -ne 'cpu') {
+            Write-Warning "This release has no $variant build for Windows; installing the CPU build."
+            $variant = 'cpu'
+            $candidates = $cpuCandidates
+            $asset = $candidates | Where-Object { $listed.ContainsKey($_) } | Select-Object -First 1
+        }
         if (-not $asset) { throw "None of $($candidates -join ', ') is listed in checksums.txt, refusing to install an unverified binary." }
         $expected = $listed[$asset]
 
@@ -134,34 +149,77 @@ function Install-EuLLM {
     }
 }
 
-# cuda when nvidia-smi reports a GPU the CUDA 13.1 build can actually run,
-# cpu otherwise.
+# What Select-EuLLMVariant decides from, read off this machine: nvidia-smi's
+# driver version and compute capability, the display adapters' names, and
+# whether the graphics driver installed the Vulkan loader.
 function Get-EuLLMVariant {
+    $smiLine = ''
     $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
-    if (-not $smi) { return 'cpu' }
+    if ($smi) {
+        try {
+            # compute_cap needs a driver from 2021 on; older ones print an
+            # error there, which Select-EuLLMVariant does not take for one.
+            $smiLine = [string](& $smi.Source --query-gpu=driver_version,compute_cap --format=csv,noheader 2>$null |
+                Select-Object -First 1)
+        } catch {
+            $smiLine = ''
+        }
+    }
+    $gpus = @()
     try {
-        # compute_cap needs a driver from 2021 on; older ones print an error
-        # there, which fails the match below and lands in the cpu branch.
-        $out = & $smi.Source --query-gpu=driver_version,compute_cap --format=csv,noheader 2>$null |
-            Select-Object -First 1
+        $gpus = @(Get-CimInstance -ClassName Win32_VideoController -ErrorAction Stop | ForEach-Object { $_.Name })
     } catch {
-        return 'cpu'
+        $gpus = @()
     }
-    if ($out -notmatch '^\s*(\d+)\.\d+\s*,\s*(\d+\.\d+)\s*$') { return 'cpu' }
-    $major = [int]$Matches[1]
-    $cap = $Matches[2]
-    # The Windows CUDA bundle is built for 8.6;89;120 with no PTX, so a card
-    # outside that set cannot run it: the driver version says nothing about
-    # the architecture, and the A100/H100 have no Windows build at all.
-    if ($cap -notin '8.6', '8.9', '12.0') {
-        Write-Warning "NVIDIA GPU with compute capability $cap is not covered by the CUDA build (8.6, 8.9, 12.0); installing the CPU build. Set `$env:EULLM_VARIANT='cuda' to install the CUDA build anyway."
-        return 'cpu'
+    # Every AMD, Intel and NVIDIA driver installs vulkan-1.dll here, and
+    # without it the Vulkan build cannot start at all, so it is the test for
+    # a driver that serves Vulkan.
+    $hasVulkan = Test-Path -LiteralPath "$([Environment]::SystemDirectory)\vulkan-1.dll"
+    Select-EuLLMVariant -Smi $smiLine -Gpus $gpus -HasVulkan $hasVulkan
+}
+
+# cuda when nvidia-smi reports a GPU the CUDA 13.1 build can run; vulkan for
+# a GPU the Vulkan build serves, when the Vulkan loader is installed; cpu
+# otherwise. Kept apart from the queries above so CI can test it without the
+# hardware.
+function Select-EuLLMVariant {
+    param(
+        [string]$Smi,
+        [string[]]$Gpus = @(),
+        [bool]$HasVulkan
+    )
+    # AMD and NVIDIA adapters of any kind, and Intel's Arc (the cards, and the
+    # integrated graphics of Core Ultra chips, which carry the same name).
+    # Older Intel integrated graphics (UHD, Iris Xe) stay on the CPU build,
+    # which is rarely slower there and has no driver of its own to go wrong.
+    $vulkanGpu = $null
+    if ($HasVulkan) {
+        $vulkanGpu = $Gpus | Where-Object { $_ -match 'AMD|Radeon|NVIDIA|GeForce|Intel.*\bArc\b' } |
+            Select-Object -First 1
     }
-    if ($major -lt 580) {
-        Write-Warning "NVIDIA driver $major is older than 580, which the CUDA build needs; installing the CPU build. Update the driver and run the installer again for GPU support."
-        return 'cpu'
+    $other = if ($vulkanGpu) { 'vulkan' } else { 'cpu' }
+    $otherName = if ($vulkanGpu) { 'Vulkan' } else { 'CPU' }
+
+    if ($Smi -match '^\s*(\d+)\.\d+\s*,\s*(\d+\.\d+)\s*$') {
+        $major = [int]$Matches[1]
+        $cap = $Matches[2]
+        # The Windows CUDA bundle is built for 8.6;89;120 with no PTX, so a
+        # card outside that set cannot run it: the driver version says nothing
+        # about the architecture, and the A100/H100 have no Windows build at
+        # all. The Vulkan build serves the consumer cards among them (GTX
+        # 1000, RTX 2000) and drivers older than 580.
+        if ($cap -notin '8.6', '8.9', '12.0') {
+            Write-Warning "NVIDIA GPU with compute capability $cap is not covered by the CUDA build (8.6, 8.9, 12.0); installing the $otherName build. Set `$env:EULLM_VARIANT='cuda' to install the CUDA build anyway."
+            return $other
+        }
+        if ($major -lt 580) {
+            Write-Warning "NVIDIA driver $major is older than 580, which the CUDA build needs; installing the $otherName build. Update the driver and run the installer again for the CUDA build."
+            return $other
+        }
+        return 'cuda'
     }
-    return 'cuda'
+    if ($vulkanGpu) { Write-Host "GPU: $vulkanGpu, installing the Vulkan build" }
+    return $other
 }
 
 function Set-EuLLMUserPath {

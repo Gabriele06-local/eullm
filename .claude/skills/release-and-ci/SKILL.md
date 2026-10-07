@@ -139,6 +139,23 @@ Rationale: any long-pole CUDA build can take 30 min – 1h depending on cache st
 | Windows standard | ~10 min | ~3-5 min |
 | Linux CUDA | ~18 min | ~3-5 min |
 | **Windows CUDA** (long-pole) | **~50 min** (cold) | **~10-15 min** (warm) |
+| Windows Vulkan | ~9 min (build 7m17s, 7 October 2026) | not measured yet |
+
+**Windows Vulkan's shader generator is a CMake project of its own**
+(`vulkan-shaders-gen`, an ExternalProject inside ggml-vulkan), and it gets
+neither the compiler nor the short paths the rest of the build has. The first
+dispatch of `build-windows-vulkan` failed in its configure step on both:
+
+- **Compiler.** Without `CC`/`CXX` it searches PATH, and the folders that the
+  LLVM and Vulkan SDK steps add come before Visual Studio's, so it took LLVM's
+  clang 17, whose C++ feature check failed ("no known features for CXX
+  compiler"). The job sets `CC`/`CXX` to cl.exe; cargo's own compiler is the
+  same cl.exe, so nothing else changes.
+- **Path length.** CMake's compiler checks there wrote objects 275 characters
+  deep under `target\x86_64-pc-windows-msvc\`, past CMake's 250 and Windows'
+  260. The job builds in `CARGO_TARGET_DIR=D:\t` without `--target`: 233.
+
+Any job that adds the Vulkan backend on Windows needs both.
 
 **A llama.cpp bump makes the next release cold.** sccache keys on the C++/CUDA
 sources, so a new pin misses on every kernel. v0.7.30 moved the pin
