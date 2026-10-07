@@ -34,7 +34,7 @@ import re
 from dataclasses import dataclass, field
 
 from ..eval.norm_exam import CODE_LABELS, articles_from_records
-from ..eval.retrieval import NormIndex, open_book_prompt, record_articles
+from ..eval.retrieval import NormIndex, open_book_prompt
 from .instruct_gen import GenConfig, Rejected, _check_clean, _extract_json, italian_ratio
 
 TEACHER_SYSTEM = (
@@ -183,8 +183,15 @@ def _context(index: NormIndex, question: str, job: OpenBookJob, k: int,
     found = index.search(question, k)
     note = index.missing_article_note(question)
     if job.kind == "grounded":
+        # articles_of, as in absent_context_pair: a continuation chunk carries
+        # no header, so record_articles did not see it as the article. When
+        # retrieval had found only the continuation -- where a long article's
+        # answer usually is -- the article looked absent, the last passage
+        # was dropped to make room for the header chunk, and that passage
+        # could be the continuation itself: a grounded pair whose context no
+        # longer held its answer.
         mine = [r for r in index.records if r.get("code") == job.code
-                and job.number in record_articles(r)]
+                and job.number in index.articles_of(r)]
         if mine and not any(r in found for r in mine):
             found = found[:k - 1]
             found.insert(rng.randrange(len(found) + 1), mine[0])

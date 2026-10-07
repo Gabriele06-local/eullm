@@ -290,3 +290,32 @@ def test_the_raft_script_keeps_every_original_and_adds_the_share(tmp_path, index
     assert len(rows) == 5 + 2
     assert sum(r["task"] == "openbook_absent" for r in rows) == 2
     assert mod.main([str(src), "--norms", str(norms), "--out", str(src)]) == 2
+
+
+def test_a_grounded_context_keeps_the_continuation_retrieval_found():
+    """The answer of a long article is in its continuation chunk.
+
+    _context asked record_articles whether the article was among the
+    passages; a continuation has no header of its own, so the article looked
+    absent, and the header chunk was put in place of the last passage -- the
+    continuation itself, here -- leaving a grounded pair without its answer.
+    """
+    import random
+
+    from eullm_forge.datasets.openbook_gen import OpenBookJob, _context
+    from eullm_forge.eval.retrieval import NormIndex
+
+    records = [
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 41. \n \n (Rubrica quarantuno). \n \n Il creditore e il debitore."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+         "text": "Il creditore agisce entro sessanta giorni dalla notifica."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 42. \n \n (Rubrica quarantadue). \n \n Il debitore paga."},
+    ]
+    index = NormIndex(records)
+    job = OpenBookJob(key="ob-g-codice_civile-41", kind="grounded", code="codice_civile",
+                      number="41", named=False)
+    found, _ = _context(index, "Entro quanti giorni agisce il creditore dalla notifica?", job,
+                        1, random.Random(0))
+    assert any("sessanta giorni" in r["text"] for r in found)
