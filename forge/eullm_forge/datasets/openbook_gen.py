@@ -258,8 +258,14 @@ def absent_context_pair(pair: dict, index: NormIndex, k: int = 3) -> dict | None
     code, _, number = key[len("ob-g-"):].partition("-")
     number = re.sub(r"-v\d+$", "", number)
     question = pair["instruction"].rsplit("Domanda: ", 1)[-1].strip()
+    # articles_of, not record_articles: a chunk that continues the article
+    # carries no header of its own, so record_articles reports no article at
+    # all for it. The pair below teaches "the texts do not contain the
+    # answer", and the continuation is where most of a long article's text --
+    # the answer included -- actually sits. articles_of says so itself: any
+    # caller asking "is this chunk the article I am removing?" has to use it.
     found = [r for r in index.search(question, k + 6)
-             if not (r.get("code") == code and number in record_articles(r))][:k]
+             if not (r.get("code") == code and number in index.articles_of(r))][:k]
     of, _ = CODE_LABELS.get(code, ("della norma", "nella norma"))
     return {"instruction": open_book_prompt(question, found),
             "output": ABSENT_ANSWER.format(of=of),

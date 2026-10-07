@@ -241,6 +241,36 @@ def test_a_question_that_names_its_article_is_never_turned(index):
     assert absent_context_pair(_topic_pair(index, named=True), index) is None
 
 
+def test_an_absent_pair_removes_the_continuation_chunks_too():
+    """The pair teaches "the texts do not contain the answer".
+
+    A chunk that continues the removed article carries no header of its own,
+    so record_articles reported no article at all for it and it stayed in the
+    context -- with most of a long article's text, the answer included. The
+    index resolves continuations in articles_of, and says itself that any
+    caller removing an article has to use it.
+    """
+    from eullm_forge.datasets.openbook_gen import absent_context_pair
+    from eullm_forge.eval.retrieval import NormIndex
+
+    records = [
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 41. \n \n (Rubrica quarantuno). \n \n Il creditore e il debitore."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+         "text": "Il creditore agisce entro sessanta giorni dalla notifica."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 42. \n \n (Rubrica quarantadue). \n \n "
+                 "Il debitore deve dare preavviso al creditore nel codice civile."},
+    ]
+    index = NormIndex(records)
+    pair = {"task": "openbook_grounded", "named": False, "key": "ob-g-codice_civile-41",
+            "instruction": "Domanda: Nel codice civile, entro quanto deve agire il creditore?"}
+    absent = absent_context_pair(pair, index)
+    assert absent["task"] == "openbook_absent"
+    assert "sessanta giorni" not in absent["instruction"]
+    assert "Art. 42" in absent["instruction"]  # the other article stays
+
+
 def test_the_raft_script_keeps_every_original_and_adds_the_share(tmp_path, index):
     import importlib.util
     norms = tmp_path / "legislazione_x.chunks.jsonl"
