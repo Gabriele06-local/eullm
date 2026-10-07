@@ -164,7 +164,15 @@ def main(argv: list[str] | None = None) -> int:
                   f"recall@3 {a3 / n:.3f}  recall@10 {a10 / n:.3f}", flush=True)
             rows.append([name, how, kind, n, f"{a1 / n:.4f}", f"{a3 / n:.4f}", f"{a10 / n:.4f}"])
         if args.csv and rows:
-            new = not args.csv.exists()
+            # Size, not existence, for the same reason judge_answers.py and
+            # legal_eval.py test it that way: a link killed between `open("a")`,
+            # which creates the file, and the buffered write leaves a 0-byte
+            # CSV. The re-submitted link then sees a file that exists, skips
+            # the header, and the first recall row is read *as* the header --
+            # `csv.DictReader` sees one row fewer and names its columns
+            # `chunks`, `bm25`, `esame`, `1`, `1.0000`, so the recall table
+            # that came out of a whole run is silently wrong.
+            new = not (args.csv.exists() and args.csv.stat().st_size > 0)
             args.csv.parent.mkdir(parents=True, exist_ok=True)
             with args.csv.open("a", newline="", encoding="utf-8") as f:
                 w = csv.writer(f)

@@ -356,6 +356,19 @@ def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, t
         ("chunks", "ricerca"), ("chunks", "esame"),
         ("prefix+cards", "ricerca"), ("prefix+cards", "esame")}
     assert all(float(r["recall3"]) == 1.0 for r in rows)
+    # A CSV a killed link left at 0 bytes still gets its header: existence was
+    # the test, so the first recall row was read *as* the header and the whole
+    # table came out one row short and mislabelled. judge_answers.py and
+    # legal_eval.py test size for this reason.
+    fresh = tmp_path / "ret-empty.csv"
+    fresh.touch()
+    assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--cards", str(cards),
+                     "--questions", str(questions), "--dev-ids", str(dev),
+                     "--setting", "chunks", "--csv", str(fresh)]) == 0
+    rows = list(csv.DictReader(fresh.open(encoding="utf-8")))
+    assert {(r["setting"], r["kind"]) for r in rows} == {
+        ("chunks", "ricerca"), ("chunks", "esame")}
+    assert all(float(r["recall3"]) == 1.0 for r in rows)
     printed = capsys.readouterr().out
     assert "fatto0_3" not in printed and "recall@3 1.000" in printed
     # a later link skips what is measured and measures only what is not
