@@ -2139,16 +2139,22 @@ jobs:
         run: choco install ninja --no-progress --yes
         shell: pwsh
 
-      # The same package set llama.cpp's Windows release installs, in a venv
-      # on D:, which has the room. `rocm-sdk init` unpacks the development
-      # tree; `rocm-sdk path` then says where everything is.
+      # The package set llama.cpp's Windows release installs, in a venv on D:,
+      # which has the room, plus the device package of each card: since ROCm
+      # 10 the libraries' GPU code is no longer inside their DLLs but in
+      # per-card packages (`rocm-sdk-device-gfxNNNN`): kernel packs in
+      # `.kpack\` beside `bin\`, and rocBLAS's and hipBLASLt's kernel folders
+      # under `bin\`. Without them every rocBLAS call fails on the card.
+      # `rocm-sdk init` unpacks the development tree; `rocm-sdk path` then
+      # says where everything is.
       - name: Install ROCm
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           python -m venv D:\rocm
           D:\rocm\Scripts\python.exe -m pip install --upgrade pip
-          D:\rocm\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries,devel]==$env:ROCM_VERSION"
+          $devices = ($env:EULLM_AMDGPU_TARGETS -split ';' | ForEach-Object { "device-$_" }) -join ','
+          D:\rocm\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries,devel,$devices]==$env:ROCM_VERSION"
           if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
           & D:\rocm\Scripts\rocm-sdk.exe init
           if ($LASTEXITCODE -ne 0) { throw "rocm-sdk init failed with exit code $LASTEXITCODE" }
@@ -2165,14 +2171,22 @@ jobs:
           "CMAKE_PREFIX_PATH=$cmake" | Add-Content -Path $env:GITHUB_ENV
           "ROCM_BIN=$bin" | Add-Content -Path $env:GITHUB_ENV
           $bin | Add-Content -Path $env:GITHUB_PATH
+          # Where the libraries package and the device packages unpack: the
+          # layout the bundle copies (`bin\`, `.kpack\`).
+          $libs = (& D:\rocm\Scripts\python.exe -c "import os, _rocm_sdk_libraries as m; print(os.path.dirname(m.__file__))").Trim()
+          if (-not (Test-Path "$libs\.kpack")) { throw "no .kpack folder in ${libs}: the device packages did not install" }
+          Write-Host "libraries: $libs"
+          "ROCM_LIBS=$libs" | Add-Content -Path $env:GITHUB_ENV
           # What the first runs are for: names and sizes to build and
           # package against, rather than guesses.
           Write-Host "--- import libraries in $root\lib"
           Get-ChildItem "$root\lib" -Filter *.lib | Select-Object -ExpandProperty Name | Sort-Object | Write-Host
           Write-Host "--- DLLs in $bin"
           Get-ChildItem $bin -Filter *.dll | ForEach-Object { "{0,-40} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) } | Write-Host
-          Write-Host "--- kernel library folders"
-          Get-ChildItem $root -Recurse -Directory -Filter library -ErrorAction SilentlyContinue |
+          Write-Host "--- kernel packs in $libs\.kpack"
+          Get-ChildItem "$libs\.kpack" -File | ForEach-Object { "{0,-40} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) } | Write-Host
+          Write-Host "--- kernel library folders in $libs\bin"
+          Get-ChildItem "$libs\bin" -Recurse -Directory -Filter library -ErrorAction SilentlyContinue |
             ForEach-Object { "{0}  {1:N0} MB" -f $_.FullName, ((Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) } | Write-Host
           Write-Host ("--- ROCm total: {0:N0} MB" -f ((Get-ChildItem $root -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))
 
@@ -2208,22 +2222,28 @@ jobs:
           CMAKE_GENERATOR: Ninja
         run: cargo build --release --features "rocm,multimodal" -p eullm-engine -vv
 
-      # The exe, every DLL it needs that ROCm provides (found by walking the
-      # import tables from eullm.exe down, so a dependency of a dependency is
-      # not missed), the kernel libraries of the two cards, and the Visual C++
-      # runtime. Then the exe is started from the folder: a DLL left out stops
-      # it before `--version` can answer.
+      # ROCm's own layout, because that is where its libraries look for their
+      # GPU code: the exe and every DLL in `bin\`, rocBLAS's and hipBLASLt's
+      # kernel folders under it, and the kernel packs in `.kpack\` beside it
+      # (each library opens its pack at `..\.kpack\` from its own DLL, so a
+      # flat folder would send them looking outside it). The DLLs are every
+      # one ROCm provides that the exe needs, found by walking the import
+      # tables from eullm.exe down, so a dependency of a dependency is not
+      # missed, plus those the HIP runtime loads at run time. Then the exe is
+      # started from `bin\`: a DLL left out stops it before `--version` can
+      # answer.
       - name: Package binary + bundle ROCm and MSVC runtime DLLs
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $bundle = "eullm-windows-x64-rocm"
-          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-          Copy-Item "$env:CARGO_TARGET_DIR\release\eullm.exe" -Destination "$bundle\eullm.exe"
+          $bin = "$bundle\bin"
+          New-Item -ItemType Directory -Path $bin -Force | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\release\eullm.exe" -Destination "$bin\eullm.exe"
 
           $seen = @{}
           $queue = [System.Collections.Generic.Queue[string]]::new()
-          $queue.Enqueue((Resolve-Path "$bundle\eullm.exe").Path)
+          $queue.Enqueue((Resolve-Path "$bin\eullm.exe").Path)
           while ($queue.Count -gt 0) {
             $file = $queue.Dequeue()
             $deps = & dumpbin /dependents $file | Out-String
@@ -2234,57 +2254,82 @@ jobs:
               $seen[$name.ToLower()] = $true
               $src = Join-Path $env:ROCM_BIN $name
               if (Test-Path $src) {
-                Copy-Item $src -Destination $bundle
+                Copy-Item $src -Destination $bin
                 Write-Host "bundled $name (imported by $(Split-Path $file -Leaf))"
-                $queue.Enqueue((Resolve-Path (Join-Path $bundle $name)).Path)
+                $queue.Enqueue((Resolve-Path (Join-Path $bin $name)).Path)
               }
             }
           }
           # Loaded at run time rather than imported, so the walk above cannot
-          # see them: the code-object manager and the kernel pack the HIP
-          # runtime loads, and hipBLASLt, which rocBLAS loads.
+          # see them: the code-object manager and the kernel pack reader the
+          # HIP runtime loads, and hipBLASLt, which rocBLAS loads.
           foreach ($pattern in 'amd_comgr*.dll', 'rocm_kpack*.dll', '*hipblaslt*.dll') {
             Get-ChildItem $env:ROCM_BIN -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
-              if (-not (Test-Path (Join-Path $bundle $_.Name))) {
-                Copy-Item $_.FullName -Destination $bundle
+              if (-not (Test-Path (Join-Path $bin $_.Name))) {
+                Copy-Item $_.FullName -Destination $bin
                 Write-Host "bundled $($_.Name) (loaded at run time)"
               }
             }
           }
 
-          # The kernels rocBLAS and hipBLASLt load from `<lib>\library` next to
-          # their DLL: those of the two cards, and the ones no card is named
-          # in (fallbacks, manifests).
+          # rocBLAS's and hipBLASLt's kernels, which they read from
+          # `<lib>\library` beside their DLL. The device packages installed
+          # hold those of the cards built for, and nothing else.
           $targets = $env:EULLM_AMDGPU_TARGETS -split ';'
           foreach ($lib in 'rocblas', 'hipblaslt') {
-            $src = Get-ChildItem $env:HIP_PATH -Recurse -Directory -Filter library -ErrorAction SilentlyContinue |
-                   Where-Object { (Split-Path $_.Parent.FullName -Leaf) -eq $lib } | Select-Object -First 1
-            if (-not $src) { Write-Host "::warning::no $lib\library folder under $env:HIP_PATH"; continue }
-            $dst = Join-Path $bundle "$lib\library"
-            New-Item -ItemType Directory -Path $dst -Force | Out-Null
-            $kept = 0; $dropped = 0
-            foreach ($f in Get-ChildItem $src.FullName -File) {
-              $gfx = [regex]::Matches($f.Name, 'gfx[0-9a-f]+') | ForEach-Object { $_.Value }
-              if (-not $gfx -or ($gfx | Where-Object { $targets -contains $_ })) {
-                Copy-Item $f.FullName -Destination $dst; $kept++
-              } else { $dropped++ }
+            $src = "$env:ROCM_LIBS\bin\$lib\library"
+            if (-not (Test-Path $src)) { throw "no ${src}: the device packages did not install it" }
+            New-Item -ItemType Directory -Path "$bin\$lib" -Force | Out-Null
+            Copy-Item $src -Destination "$bin\$lib" -Recurse
+            $files = Get-ChildItem "$bin\$lib\library" -Recurse -File
+            Write-Host ("{0}\library: {1} files, {2:N0} MB" -f $lib, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB))
+            foreach ($t in $targets) {
+              if (-not ($files | Where-Object { $_.FullName -match $t })) { throw "$lib\library has nothing for $t" }
             }
-            Write-Host ("{0}\library: {1} files kept, {2} for other cards left out, {3:N0} MB" -f $lib, $kept, $dropped,
-              ((Get-ChildItem $dst -File | Measure-Object Length -Sum).Sum / 1MB))
           }
 
-          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bundle\eullm.exe" -Destination $bundle
+          # The kernel packs: those the bundled DLLs name, for every card.
+          # Each library carries the path it opens its pack from,
+          # `../.kpack/<name>_@GFXARCH@.kpack`, in plain text.
+          New-Item -ItemType Directory -Path "$bundle\.kpack" -Force | Out-Null
+          $packs = @{}
+          foreach ($dll in Get-ChildItem $bin -Filter *.dll) {
+            $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($dll.FullName))
+            foreach ($m in [regex]::Matches($text, '\.kpack[/\\]([A-Za-z0-9_\-]+)_@GFXARCH@\.kpack')) {
+              if (-not $packs.ContainsKey($m.Groups[1].Value)) { Write-Host "$($dll.Name) opens $($m.Value)" }
+              $packs[$m.Groups[1].Value] = $true
+            }
+          }
+          if ($packs.Count -eq 0) {
+            Write-Host "::warning::no bundled DLL names a kernel pack in plain text; bundling blas_lib, rocBLAS's and hipBLASLt's"
+            $packs['blas_lib'] = $true
+          }
+          foreach ($name in $packs.Keys) {
+            foreach ($t in $targets) {
+              $pack = "$env:ROCM_LIBS\.kpack\${name}_$t.kpack"
+              if (Test-Path $pack) { Copy-Item $pack -Destination "$bundle\.kpack" }
+              else { Write-Host "::warning::$name is named by a bundled DLL but $pack does not exist" }
+            }
+          }
+          Get-ChildItem "$bundle\.kpack" -File | ForEach-Object { "{0,-40} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) } | Write-Host
+
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bin\eullm.exe" -Destination $bin
 
           # The device code of each card is in the exe; reported, not
           # enforced, while this is an experiment: a compressed offload bundle
           # may not show its target names as plain text.
-          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("$bundle\eullm.exe"))
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("$bin\eullm.exe"))
           foreach ($t in $targets) {
             if ($text.Contains("amdhsa--$t")) { Write-Host "device code for ${t}: present" }
             else { Write-Host "::warning::no plain amdhsa--$t marker in eullm.exe (compressed bundle, or missing)" }
           }
 
-          Push-Location $bundle
+          # The C runtime the kernel pack reader reads its environment with:
+          # ROCM_KPACK_PATH_PREFIX and ROCM_KPACK_DEBUG, which the README
+          # names for a GPU on which kernels are not found.
+          & dumpbin /imports "$bin\rocm_kpack.dll" | Select-String -Pattern 'getenv|api-ms-win-crt-environment|ucrtbase|vcruntime|msvcp' | ForEach-Object { Write-Host "rocm_kpack: $($_.Line.Trim())" }
+
+          Push-Location $bin
           $version = & .\eullm.exe --version
           $code = $LASTEXITCODE
           Pop-Location
@@ -2294,23 +2339,46 @@ jobs:
           Write-Host "Started from the bundle: $version"
 
           @(
+            'EuLLM for AMD Radeon GPUs on Windows, through ROCm (experimental build)'
+            ''
+            'Run bin\eullm.exe, for example:'
+            '  bin\eullm.exe run hf.co/Qwen/Qwen3-8B-GGUF:Q4_K_M'
+            ''
+            'Keep bin\ and .kpack\ side by side: bin\ holds eullm.exe and the ROCm'
+            'libraries it needs, .kpack\ the GPU code those libraries look for there.'
+            ''
+            "Built for: $($targets -join ', ') (gfx1100: Radeon RX 7900 XTX and XT;"
+            'gfx1201: Radeon RX 9070 XT and 9070, Radeon AI PRO R9700). Needs the'
+            'AMD Software: Adrenalin Edition for ROCm 10.1 driver (26.10.41.05) or newer.'
+            ''
+            'If the GPU is found but an answer fails on a missing kernel, run once'
+            'with ROCM_KPACK_DEBUG=1 set and send the output.'
+          ) | Set-Content -Path "$bundle\README.txt" -Encoding utf8
+
+          @(
             'EuLLM Engine - third-party components in this archive'
             ''
-            'eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
+            'bin\eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
             '  https://github.com/eullm/eullm/blob/main/LICENSE'
             ''
             'The AMD ROCm runtime and math libraries (HIP runtime, rocBLAS, hipBLAS,'
-            'hipBLASLt, their kernel libraries) are distributed unmodified under'
-            'their own licenses: https://github.com/ROCm'
+            'hipBLASLt, their kernel libraries and kernel packs) are distributed'
+            'unmodified under their own licenses: https://github.com/ROCm'
             ''
             'The Microsoft Visual C++ runtime DLLs are distributed unmodified as'
             'Visual Studio Distributable Code.'
           ) | Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
 
-          Get-ChildItem $bundle -File | Sort-Object Length -Descending | Format-Table Name, Length
-          Write-Host ("Bundle: {0:N0} MB" -f ((Get-ChildItem $bundle -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))
+          Get-ChildItem $bin -File | Sort-Object Length -Descending | Format-Table Name, Length
+          Write-Host ("Bundle: {0:N0} MB" -f ((Get-ChildItem $bundle -Recurse -File -Force | Measure-Object Length -Sum).Sum / 1MB))
           Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
-          Write-Host ("ZIP: {0:N0} MB" -f ((Get-Item "$bundle.zip").Length / 1MB))
+          # Compress-Archive leaves out hidden items; make sure `.kpack\` went in.
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path "$bundle.zip").Path)
+          $kpacks = @($zip.Entries | Where-Object { $_.FullName -match '^\.kpack[/\\].+\.kpack$' }).Count
+          $zip.Dispose()
+          if ($kpacks -lt $targets.Count) { throw "the ZIP holds $kpacks kernel packs, fewer than the $($targets.Count) cards" }
+          Write-Host ("ZIP: {0:N0} MB, {1} kernel packs" -f ((Get-Item "$bundle.zip").Length / 1MB), $kpacks)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
