@@ -242,40 +242,26 @@ written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
 changes. There is no command-line flag for it on purpose: a token on the
 command line is visible to every local user in `ps`.
 
-### Models on a network file system (`--load-threads`)
+### Reading the model ahead of its load (`--load-threads`, experimental)
 
-llama.cpp reads the model it loads in a single stream. From a local disk that
-is fast enough; from a network file system it is not, because a single stream
-waits for every request it makes. On a LUMI-G compute node, reading a model
-from Lustre through the page cache went at 178 MB/s with one stream and
-2,283 MB/s with sixteen at once (`tools/lumi/sbatch_lustre_probe.slurm`), and
-at the single-stream rate a 270 GiB model had not loaded after an hour.
+`--load-threads N` has N threads read the model file, every part of a split
+one, in file order into the page cache while llama.cpp loads it, so that
+llama.cpp finds it in memory. `--load-threads auto` uses 16 on a network file
+system (Lustre, NFS, SMB, GPFS, BeeGFS, CephFS, 9p) and none on a local disk.
+**It is off by default**, because where it was measured it did not help:
 
-So when a load starts, threads read the model file, every part of a split
-one, in file order and ahead of llama.cpp, into the page cache; llama.cpp
-then finds it in memory. The threads keep nothing themselves: the cache is
-the kernel's, and it gives the memory back whenever something else needs it.
+| LUMI-G, Lustre, cold load | no readers | 4 | 16 | 32 |
+|---|---:|---:|---:|---:|
+| Qwen3.8-27B Q8, 29 GiB, 1 GCD (3 loads each) | 45.9 s | 102.7 s | 49.5 s | 40.9 s |
+| Qwen3-235B Q4_K_M, 132 GiB, 4 GCDs (2 loads each) | 110.3 s | — | 128.3 s | — |
 
-| `--load-threads` | what it does |
-|---|---|
-| `auto` (default) | 16 threads on Lustre, NFS, SMB, GPFS, BeeGFS, CephFS and 9p; none on a local disk |
-| `N` (1-64) | N threads, wherever the file is |
-| `0` | off: llama.cpp alone, in one stream |
-
-A model larger than the memory free for the page cache (the RAM, or a Slurm
-job's `--mem`, whichever is smaller) is read in one stream anyway: read ahead,
-it would push its own first pages out before llama.cpp reached them, and be
-read twice. Models under 1 GiB are not read ahead either. The log says how
-many threads read how much and at what rate:
-
-```
---load-threads: 16 threads read the model (270.0 GiB, on Lustre) ahead of the load
---load-threads: 270.0 GiB of 270.0 GiB read ahead by 16 threads in ... s (... MB/s)
-```
-
-On a local disk `auto` changes nothing: a 2.2 GiB model loaded in about 2 s
-from ext4 with or without 8 threads. How much sooner a whole load ends on
-Lustre is what `tools/lumi/campaigns/c09-load.json` measures.
+The flag came from `dd` reading 2 GiB pieces of a model at 178 MB/s with one
+stream and 2,283 MB/s with sixteen (`tools/lumi/sbatch_lustre_probe.slurm`);
+llama.cpp's own load turned out not to be that slow stream, reading the whole
+file at 0.7 to 1.3 GB/s alone. It stays for file systems where it has not been
+measured (NFS, SMB). A model larger than the memory free for the page cache
+(the RAM, or a Slurm job's `--mem`) is never read ahead, models under 1 GiB
+neither, and the log says how many threads read how much and at what rate.
 
 ## Security
 

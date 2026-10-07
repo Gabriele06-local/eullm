@@ -317,17 +317,18 @@ struct RuntimeOpts {
     moe_prefetch: u32,
 
     /// Threads that read the model file ahead of the load, into the page
-    /// cache, so the load finds it in memory. llama.cpp reads in a single
-    /// stream, which a network file system serves slowly: on a LUMI-G node,
-    /// Lustre gave one stream 178 MB/s and sixteen 2,283 MB/s together.
-    /// `auto` (the default) uses 16 on Lustre, NFS, SMB, GPFS, BeeGFS,
-    /// CephFS and 9p and none on a local disk; 0 turns it off. Never for a
-    /// model larger than the memory free for the page cache (the RAM, or a
-    /// Slurm job's --mem), which would push its own first pages out.
+    /// cache, so the load finds it in memory. Off by default (0): on Lustre
+    /// it made loads slower, not faster (LUMI-G, cold: a 132 GiB model 110 s
+    /// without readers, 128 s with 16): llama.cpp alone read the file at
+    /// 0.7-1.3 GB/s there.
+    /// Kept for file systems where it has not been measured. `auto` uses 16
+    /// on Lustre, NFS, SMB, GPFS, BeeGFS, CephFS and 9p and none on a local
+    /// disk. Never for a model larger than the memory free for the page cache
+    /// (the RAM, or a Slurm job's --mem).
     #[arg(
         long,
-        value_name = "auto|N",
-        default_value = "auto",
+        value_name = "N|auto",
+        default_value = "0",
         value_parser = readahead::parse_load_threads
     )]
     load_threads: readahead::LoadThreads,
@@ -5213,14 +5214,14 @@ mod cli_default_parity_tests {
     }
 
     #[test]
-    fn the_model_is_read_ahead_on_network_file_systems_unless_told_otherwise() {
+    fn the_model_is_read_ahead_only_when_asked() {
         use readahead::LoadThreads;
         assert_eq!(
             runtime_opts(&["eullm", "serve"]).load_threads,
-            LoadThreads::Auto
+            LoadThreads::Fixed(0)
         );
         assert_eq!(
-            runtime_opts(&["eullm", "run", "x"]).load_threads,
+            runtime_opts(&["eullm", "run", "x", "--load-threads", "auto"]).load_threads,
             LoadThreads::Auto
         );
         assert_eq!(
