@@ -1403,7 +1403,12 @@ fn run_scheduler_loop(
     }
 
     tracing::info!("Loading model: {}", config.model_path.display());
-    let model = match LlamaModel::load_from_file(&backend, &config.model_path, &model_params) {
+    let ahead = crate::readahead::start(&config.model_path, config.load_threads);
+    let model = LlamaModel::load_from_file(&backend, &config.model_path, &model_params);
+    if let Some(ahead) = ahead {
+        ahead.finish();
+    }
+    let model = match model {
         Ok(m) => m,
         Err(e) => {
             let msg = format!("Failed to load model: {e}");

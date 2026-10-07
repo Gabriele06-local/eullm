@@ -19,6 +19,12 @@
 #   ROCM_PATH             where ROCm lives (default: /opt/rocm)
 #   EULLM_AMDGPU_TARGETS  GPU architecture (default: gfx90a = MI250X)
 #   EULLM_REPO            repository root (default: inferred from this script)
+#   CARGO_TARGET_DIR      where cargo builds (default: <repo>/target). Another
+#                         directory leaves the binary that running campaign
+#                         jobs start their servers from untouched: a job
+#                         records the engine it found when it started, and a
+#                         binary rebuilt under it would run its later points
+#                         with a different one than it reports.
 
 set -euo pipefail
 
@@ -113,7 +119,7 @@ HIPCXX="${HIPCXX:-$ROCM_PATH/llvm/bin/clang++}" \
 EULLM_AMDGPU_TARGETS="$EULLM_AMDGPU_TARGETS" \
     cargo build --release --features rocm -p eullm-engine
 
-BIN="$EULLM_REPO/target/release/eullm"
+BIN="${CARGO_TARGET_DIR:-$EULLM_REPO/target}/release/eullm"
 [ -x "$BIN" ] || err "the build reported success but $BIN is not there"
 
 # ── Verify what the binary actually contains ──────────────────────────────

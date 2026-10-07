@@ -242,6 +242,41 @@ written to a log, a manifest or the audit trail. Without `HF_TOKEN` nothing
 changes. There is no command-line flag for it on purpose: a token on the
 command line is visible to every local user in `ps`.
 
+### Models on a network file system (`--load-threads`)
+
+llama.cpp reads the model it loads in a single stream. From a local disk that
+is fast enough; from a network file system it is not, because a single stream
+waits for every request it makes. On a LUMI-G compute node, reading a model
+from Lustre through the page cache went at 178 MB/s with one stream and
+2,283 MB/s with sixteen at once (`tools/lumi/sbatch_lustre_probe.slurm`), and
+at the single-stream rate a 270 GiB model had not loaded after an hour.
+
+So when a load starts, threads read the model file, every part of a split
+one, in file order and ahead of llama.cpp, into the page cache; llama.cpp
+then finds it in memory. The threads keep nothing themselves: the cache is
+the kernel's, and it gives the memory back whenever something else needs it.
+
+| `--load-threads` | what it does |
+|---|---|
+| `auto` (default) | 16 threads on Lustre, NFS, SMB, GPFS, BeeGFS, CephFS and 9p; none on a local disk |
+| `N` (1-64) | N threads, wherever the file is |
+| `0` | off: llama.cpp alone, in one stream |
+
+A model larger than the memory free for the page cache (the RAM, or a Slurm
+job's `--mem`, whichever is smaller) is read in one stream anyway: read ahead,
+it would push its own first pages out before llama.cpp reached them, and be
+read twice. Models under 1 GiB are not read ahead either. The log says how
+many threads read how much and at what rate:
+
+```
+--load-threads: 16 threads read the model (270.0 GiB, on Lustre) ahead of the load
+--load-threads: 270.0 GiB of 270.0 GiB read ahead by 16 threads in ... s (... MB/s)
+```
+
+On a local disk `auto` changes nothing: a 2.2 GiB model loaded in about 2 s
+from ext4 with or without 8 threads. How much sooner a whole load ends on
+Lustre is what `tools/lumi/campaigns/c09-load.json` measures.
+
 ## Security
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)

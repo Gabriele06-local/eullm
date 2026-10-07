@@ -320,7 +320,11 @@ def test_new_fields_leave_old_ids_alone_and_mark_their_points():
     dec = normalize({"kind": "decision", "model": "jev"})
     assert dec["runner"] == 2 and dec["decision_mode"] == "shared_prefix"
     assert dec["mode"] == "single" and dec["questions"] == 8
+    cold = normalize({"model": "m", "cold": True})
+    assert cold["runner"] == 3 and cold["cold"] is True
+    assert normalize({"kind": "decision", "model": "jev", "cold": 1})["runner"] == 3
     for bad in ({"model": "m", "runtime": "vllm-maybe"},
+                {"kind": "finetune", "model": "m", "data": "d", "cold": True},
                 {"kind": "finetune", "model": "m", "data": "d", "runtime": "ollama"},
                 {"kind": "decision", "model": "jev", "questions": 65},
                 {"kind": "decision", "model": "jev", "decision_mode": "fast"}):
@@ -368,3 +372,25 @@ def test_a_load_records_the_file_system_its_model_is_on_through_links(tmp_path, 
     monkeypatch.setenv("OLLAMA_MODELS", str(flash))
     assert point.model_storage({"model": "absent", "runtime": "ollama"}) == root
     assert point.mount_root("/scratch/project_1/someone/eullm-models/x.gguf") == "/scratch"
+
+
+def test_a_cold_point_drops_every_part_of_its_model_from_the_page_cache(tmp_path, monkeypatch):
+    import point
+
+    d = tmp_path / "store" / "m"
+    d.mkdir(parents=True)
+    for i, size in ((1, 10), (2, 7)):
+        (d / f"M-0000{i}-of-00002.gguf").write_bytes(b"x" * size)
+    (d / "manifest.json").write_text('{"gguf_file": "M-00001-of-00002.gguf"}')
+    monkeypatch.setenv("EULLM_MODELS_DIR", str(tmp_path / "store"))
+    files = point.model_files({"model": "m"})
+    assert [os.path.basename(f) for f in files] == ["M-00001-of-00002.gguf",
+                                                    "M-00002-of-00002.gguf"]
+    assert point.model_files({"model": "m", "runtime": "ollama"}) == []
+    assert point.evict(files + [str(tmp_path / "gone.gguf")]) == 17
+
+    ctx = point.Context("/bin/eullm", "rocm", "none", ["0"], 0, str(tmp_path))
+    assert point.cache_state({"model": "m"}, ctx) == "cold"
+    ctx.model_seen.add("m")
+    assert point.cache_state({"model": "m"}, ctx) == "warm"
+    assert point.cache_state({"model": "m", "cold": True}, ctx) == "evicted"
