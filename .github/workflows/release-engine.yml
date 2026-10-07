@@ -28,6 +28,7 @@ on:
           - rocm
           - vulkan
           - windows-vulkan
+          - windows-rocm
           - arm-cix-p1
 
 permissions:
@@ -2084,6 +2085,238 @@ jobs:
         with:
           name: eullm-windows-x64-vulkan
           path: eullm-windows-x64-vulkan.zip
+
+  # ── Windows ROCm: EXPERIMENTAL, run by hand only ───────────────────────────
+  #
+  # Radeon RX 7000 / RX 9000 on Windows through HIP, for whoever finds the
+  # Vulkan ZIP above slower on their card. Not part of a release yet: nothing
+  # here has run on a Radeon, and the first runs are for finding out what the
+  # build needs. Dispatch it with `windows-rocm` in the `job` dropdown.
+  #
+  # What differs from the Linux ROCm job:
+  # - ROCm comes from AMD's own pip packages (`rocm[libraries,devel]`), the
+  #   way llama.cpp's Windows release installs it, into a venv on D:.
+  # - llama.cpp is built by ROCm's clang, not cl.exe: CMake has no HIP
+  #   language on Windows, so ggml-hip compiles its sources as C++ (see the
+  #   rocm block in llama-cpp-sys-2/build.rs).
+  # - The ZIP carries the HIP runtime and the math libraries with their
+  #   kernels, as the CUDA ZIP carries cuBLAS: the Adrenalin driver ships an
+  #   amdhip64 of its own in System32, which may not be the version this was
+  #   built against, and a DLL next to the exe is found before it.
+  #
+  # Two cards only while this is an experiment, the ones it will be tried on:
+  # gfx1100 (RX 7900 XTX) and gfx1201 (Radeon AI PRO R9700). Every
+  # architecture added multiplies the device-code compile.
+  build-windows-rocm:
+    if: ${{ inputs.job == 'windows-rocm' }}
+    runs-on: windows-2022
+    env:
+      # The newest ROCm for Windows on 7 October 2026 (released 5 October).
+      ROCM_VERSION: "10.1.0"
+      EULLM_AMDGPU_TARGETS: gfx1100;gfx1201
+      # Short paths, as in build-windows-vulkan, and for the same reason.
+      CARGO_TARGET_DIR: D:\t
+      # The asset this build is published as, baked into the binary (engine/
+      # build.rs): `eullm update` downloads the same one again.
+      EULLM_RELEASE_ASSET: eullm-windows-x64-rocm.zip
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # llama.cpp submodule under engine/vendor/llama-cpp-rs/llama-cpp-sys-2/
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install LLVM (libclang for bindgen)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "17.0"
+
+      - name: Install Ninja
+        run: choco install ninja --no-progress --yes
+        shell: pwsh
+
+      # The same package set llama.cpp's Windows release installs, in a venv
+      # on D:, which has the room. `rocm-sdk init` unpacks the development
+      # tree; `rocm-sdk path` then says where everything is.
+      - name: Install ROCm
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m venv D:\rocm
+          D:\rocm\Scripts\python.exe -m pip install --upgrade pip
+          D:\rocm\Scripts\python.exe -m pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries,devel]==$env:ROCM_VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "pip install failed with exit code $LASTEXITCODE" }
+          & D:\rocm\Scripts\rocm-sdk.exe init
+          if ($LASTEXITCODE -ne 0) { throw "rocm-sdk init failed with exit code $LASTEXITCODE" }
+          $root = (& D:\rocm\Scripts\rocm-sdk.exe path --root).Trim()
+          $bin = (& D:\rocm\Scripts\rocm-sdk.exe path --bin).Trim()
+          $cmake = (& D:\rocm\Scripts\rocm-sdk.exe path --cmake).Trim()
+          Write-Host "ROCm root: $root"
+          Write-Host "bin:       $bin"
+          Write-Host "cmake:     $cmake"
+          "HIP_PATH=$root" | Add-Content -Path $env:GITHUB_ENV
+          "ROCM_PATH=$root" | Add-Content -Path $env:GITHUB_ENV
+          "HIP_PLATFORM=amd" | Add-Content -Path $env:GITHUB_ENV
+          "HIP_DEVICE_LIB_PATH=$root\lib\llvm\amdgcn\bitcode" | Add-Content -Path $env:GITHUB_ENV
+          "CMAKE_PREFIX_PATH=$cmake" | Add-Content -Path $env:GITHUB_ENV
+          "ROCM_BIN=$bin" | Add-Content -Path $env:GITHUB_ENV
+          $bin | Add-Content -Path $env:GITHUB_PATH
+          # What the first runs are for: names and sizes to build and
+          # package against, rather than guesses.
+          Write-Host "--- import libraries in $root\lib"
+          Get-ChildItem "$root\lib" -Filter *.lib | Select-Object -ExpandProperty Name | Sort-Object | Write-Host
+          Write-Host "--- DLLs in $bin"
+          Get-ChildItem $bin -Filter *.dll | ForEach-Object { "{0,-40} {1,8:N1} MB" -f $_.Name, ($_.Length / 1MB) } | Write-Host
+          Write-Host "--- kernel library folders"
+          Get-ChildItem $root -Recurse -Directory -Filter library -ErrorAction SilentlyContinue |
+            ForEach-Object { "{0}  {1:N0} MB" -f $_.FullName, ((Get-ChildItem $_.FullName -Recurse -File | Measure-Object Length -Sum).Sum / 1MB) } | Write-Host
+          Write-Host ("--- ROCm total: {0:N0} MB" -f ((Get-ChildItem $root -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))
+
+      # For link.exe, and for ROCm's clang to find the MSVC headers and
+      # libraries; the same activation as build-windows-cuda's.
+      - name: Activate MSVC x64 dev environment
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -property installationPath
+          if (-not $installPath) { throw "vswhere did not find a Visual Studio install" }
+          $vcvars = "$installPath\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "Activating: $vcvars"
+          $envBefore = @{}
+          foreach ($e in (Get-ChildItem env:)) { $envBefore[$e.Name] = $e.Value }
+          $output = cmd /c "`"$vcvars`" >NUL 2>&1 && set"
+          foreach ($line in $output) {
+              if ($line -match "^([^=]+)=(.*)$") {
+                  $name = $matches[1]
+                  $value = $matches[2]
+                  if ($envBefore[$name] -ne $value) {
+                      "$name=$value" | Add-Content -Path $env:GITHUB_ENV
+                  }
+              }
+          }
+          Write-Host "MSVC env activated."
+
+      - name: Build engine with ROCm + multimodal (mtmd)
+        shell: pwsh
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+          CMAKE_GENERATOR: Ninja
+        run: cargo build --release --features "rocm,multimodal" -p eullm-engine -vv
+
+      # The exe, every DLL it needs that ROCm provides (found by walking the
+      # import tables from eullm.exe down, so a dependency of a dependency is
+      # not missed), the kernel libraries of the two cards, and the Visual C++
+      # runtime. Then the exe is started from the folder: a DLL left out stops
+      # it before `--version` can answer.
+      - name: Package binary + bundle ROCm and MSVC runtime DLLs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = "eullm-windows-x64-rocm"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Copy-Item "$env:CARGO_TARGET_DIR\release\eullm.exe" -Destination "$bundle\eullm.exe"
+
+          $seen = @{}
+          $queue = [System.Collections.Generic.Queue[string]]::new()
+          $queue.Enqueue((Resolve-Path "$bundle\eullm.exe").Path)
+          while ($queue.Count -gt 0) {
+            $file = $queue.Dequeue()
+            $deps = & dumpbin /dependents $file | Out-String
+            $head = ($deps -split 'Image has the following delay load dependencies')[0]
+            foreach ($m in [regex]::Matches($head, '(?im)^\s+(\S+\.dll)\s*$')) {
+              $name = $m.Groups[1].Value
+              if ($seen.ContainsKey($name.ToLower())) { continue }
+              $seen[$name.ToLower()] = $true
+              $src = Join-Path $env:ROCM_BIN $name
+              if (Test-Path $src) {
+                Copy-Item $src -Destination $bundle
+                Write-Host "bundled $name (imported by $(Split-Path $file -Leaf))"
+                $queue.Enqueue((Resolve-Path (Join-Path $bundle $name)).Path)
+              }
+            }
+          }
+          # Loaded at run time rather than imported, so the walk above cannot
+          # see them: the code-object manager and the kernel pack the HIP
+          # runtime loads, and hipBLASLt, which rocBLAS loads.
+          foreach ($pattern in 'amd_comgr*.dll', 'rocm_kpack*.dll', '*hipblaslt*.dll') {
+            Get-ChildItem $env:ROCM_BIN -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+              if (-not (Test-Path (Join-Path $bundle $_.Name))) {
+                Copy-Item $_.FullName -Destination $bundle
+                Write-Host "bundled $($_.Name) (loaded at run time)"
+              }
+            }
+          }
+
+          # The kernels rocBLAS and hipBLASLt load from `<lib>\library` next to
+          # their DLL: those of the two cards, and the ones no card is named
+          # in (fallbacks, manifests).
+          $targets = $env:EULLM_AMDGPU_TARGETS -split ';'
+          foreach ($lib in 'rocblas', 'hipblaslt') {
+            $src = Get-ChildItem $env:HIP_PATH -Recurse -Directory -Filter library -ErrorAction SilentlyContinue |
+                   Where-Object { (Split-Path $_.Parent.FullName -Leaf) -eq $lib } | Select-Object -First 1
+            if (-not $src) { Write-Host "::warning::no $lib\library folder under $env:HIP_PATH"; continue }
+            $dst = Join-Path $bundle "$lib\library"
+            New-Item -ItemType Directory -Path $dst -Force | Out-Null
+            $kept = 0; $dropped = 0
+            foreach ($f in Get-ChildItem $src.FullName -File) {
+              $gfx = [regex]::Matches($f.Name, 'gfx[0-9a-f]+') | ForEach-Object { $_.Value }
+              if (-not $gfx -or ($gfx | Where-Object { $targets -contains $_ })) {
+                Copy-Item $f.FullName -Destination $dst; $kept++
+              } else { $dropped++ }
+            }
+            Write-Host ("{0}\library: {1} files kept, {2} for other cards left out, {3:N0} MB" -f $lib, $kept, $dropped,
+              ((Get-ChildItem $dst -File | Measure-Object Length -Sum).Sum / 1MB))
+          }
+
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bundle\eullm.exe" -Destination $bundle
+
+          # The device code of each card is in the exe; reported, not
+          # enforced, while this is an experiment: a compressed offload bundle
+          # may not show its target names as plain text.
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("$bundle\eullm.exe"))
+          foreach ($t in $targets) {
+            if ($text.Contains("amdhsa--$t")) { Write-Host "device code for ${t}: present" }
+            else { Write-Host "::warning::no plain amdhsa--$t marker in eullm.exe (compressed bundle, or missing)" }
+          }
+
+          Push-Location $bundle
+          $version = & .\eullm.exe --version
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0 -or $version -notmatch '\(ROCm\)') {
+            throw "eullm.exe did not start from the bundle (exit $code, said: $version): a DLL it needs is missing"
+          }
+          Write-Host "Started from the bundle: $version"
+
+          @(
+            'EuLLM Engine - third-party components in this archive'
+            ''
+            'eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
+            '  https://github.com/eullm/eullm/blob/main/LICENSE'
+            ''
+            'The AMD ROCm runtime and math libraries (HIP runtime, rocBLAS, hipBLAS,'
+            'hipBLASLt, their kernel libraries) are distributed unmodified under'
+            'their own licenses: https://github.com/ROCm'
+            ''
+            'The Microsoft Visual C++ runtime DLLs are distributed unmodified as'
+            'Visual Studio Distributable Code.'
+          ) | Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
+
+          Get-ChildItem $bundle -File | Sort-Object Length -Descending | Format-Table Name, Length
+          Write-Host ("Bundle: {0:N0} MB" -f ((Get-ChildItem $bundle -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))
+          Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
+          Write-Host ("ZIP: {0:N0} MB" -f ((Get-Item "$bundle.zip").Length / 1MB))
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: eullm-windows-x64-rocm
+          path: eullm-windows-x64-rocm.zip
 
   # Microsoft Store package: both Windows builds in one MSIX, each with its
   # own terminal command (`eullm` = CPU, `eullm-cuda` = NVIDIA). Built from
