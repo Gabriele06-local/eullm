@@ -244,3 +244,23 @@ def test_the_comparison_carries_the_judge_free_split(tmp_path, capsys):
     assert "8/8" in out and "0/8" in out
     # the judge saw no difference; the check without a judge sees all of it
     assert "no judge (deadlines, absent articles; n=8): 8:0 p=0.008" in out
+
+
+def test_questions_of_excluded_rulings_are_left_out_of_every_model(tmp_path, capsys):
+    """2026-10-07: 158 development rulings had passages in the OPD prompts."""
+    d = tmp_path / "cds-exam"
+    d.mkdir()
+    for label, grades in (("base", "wwww"), ("opd", "ccww")):
+        (d / f"answers-{label}.graded.jsonl").write_text("".join(
+            json.dumps({"id": f"cds-20200000{i}-0", "ruling": f"cds/20200000{i}",
+                        "answer": "x", "grade": {"c": "correct", "w": "wrong"}[g]}) + "\n"
+            for i, g in enumerate(grades)))
+    seen = tmp_path / "seen.txt"
+    seen.write_text("cds/202000000\ncds/202000001\n")
+    compare_graded = _script("compare_graded")
+    assert compare_graded.main([str(d), "--baseline", "base"]) == 0
+    assert "2:0" in capsys.readouterr().out
+    assert compare_graded.main([str(d), "--baseline", "base",
+                                "--exclude-rulings", str(seen)]) == 0
+    out = capsys.readouterr().out
+    assert "leaving out the questions of 2 rulings" in out and "n=2" in out and "0:0" in out

@@ -123,13 +123,23 @@ def label_of(path: Path) -> str:
     return name[len("answers-"):] if name.startswith("answers-") else name
 
 
-def load_graded(path: Path) -> Graded:
+def load_graded(path: Path, exclude_rulings: frozenset[str] = frozenset()) -> Graded:
+    """One model's grades; items about a ruling in ``exclude_rulings`` are left out.
+
+    The case-law exam's items carry the ``ruling`` they were written from.
+    Leaving some out compares the models on the rest only: on 2026-10-07 the
+    OPD prompts of the 4B run were found to hold passages of 158 of the 1,300
+    development rulings, and a gain that holds without their questions is
+    not owed to having seen them.
+    """
     out = Graded(label_of(path))
     with path.open(encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
             r = json.loads(line)
+            if exclude_rulings and r.get("ruling") in exclude_rulings:
+                continue
             out.grades[r["id"]] = r.get("grade", "unparsed")
             out.lengths[r["id"]] = len(r.get("answer") or "")
             v = verifiable(r)

@@ -60,12 +60,21 @@ def main(argv: list[str] | None = None) -> int:
                     "only the per-model table and --human)")
     ap.add_argument("--csv", type=Path, help="write one row per comparison here")
     ap.add_argument("--human", type=Path, help="filled review sheet (export_grade_review.py)")
+    ap.add_argument("--exclude-rulings", type=Path,
+                    help="file of ruling ids (cds/NNN, one a line): their case-law questions "
+                         "are left out of every model, e.g. rulings seen in training prompts")
     args = ap.parse_args(argv)
 
     files = []
     for p in args.graded:
         files.extend(sorted(p.glob("*.graded.jsonl")) if p.is_dir() else [p])
-    models = {g.label: g for g in map(load_graded, files)}
+    exclude = frozenset()
+    if args.exclude_rulings:
+        exclude = frozenset(ln.strip() for ln in args.exclude_rulings.open(encoding="utf-8")
+                            if ln.strip())
+        print(f"[paired] leaving out the questions of {len(exclude):,} rulings "
+              f"({args.exclude_rulings.name})")
+    models = {g.label: g for g in (load_graded(f, exclude) for f in files)}
     if args.baseline and args.baseline not in models:
         print(f"[paired] no graded answers for baseline {args.baseline!r}; have: "
               f"{', '.join(sorted(models)) or 'none'}", file=sys.stderr)
