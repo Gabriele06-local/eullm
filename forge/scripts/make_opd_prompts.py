@@ -69,11 +69,6 @@ def read_jsonl(paths) -> list[dict]:
     return out
 
 
-def ruling_of(chunk: dict) -> str:
-    """The ruling a chunk belongs to, the same id dev-ids are written in."""
-    return str(chunk.get("sentence_id") or chunk.get("source_id") or "")
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
