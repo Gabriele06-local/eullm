@@ -5,11 +5,11 @@ on:
     tags:
       - "engine-v*"
       - "EuLLM-v*"
-  # Manual dispatch runs only build-arm-cix-p1, build-vulkan and build-rocm, so
-  # any of them can be iterated on from the Actions tab without a real tag,
-  # without paying for the rest of the release matrix (Windows CUDA alone is a
-  # ~50 min cold build), and without ever creating a GitHub Release (the
-  # `release` job only runs on an actual tag push).
+  # Manual dispatch runs only build-arm-cix-p1, build-vulkan, build-rocm and
+  # build-windows-vulkan, so any of them can be iterated on from the Actions
+  # tab without a real tag, without paying for the rest of the release matrix
+  # (Windows CUDA alone is a ~50 min cold build), and without ever creating a
+  # GitHub Release (the `release` job only runs on an actual tag push).
   #
   # `job` narrows that further to the single build being worked on. Iterating
   # on the AMD toolchain used to drag Vulkan and the ARM CIX-P1 build along
@@ -27,6 +27,7 @@ on:
           - all
           - rocm
           - vulkan
+          - windows-vulkan
           - arm-cix-p1
 
 permissions:
@@ -1813,6 +1814,217 @@ jobs:
           name: eullm-windows-x64-cuda-13.1
           path: eullm-windows-x64-cuda-13.1.zip
 
+  # ── Windows Vulkan: AMD, Intel and older NVIDIA GPUs on Windows ───────────
+  #
+  # Before this job a Windows machine got the CPU build unless it had an RTX
+  # 3000/4000/5000: a Radeon, an Intel Arc or a GTX 1000/RTX 2000 ran on the
+  # CPU. Vulkan is the one GPU interface every Windows graphics driver carries
+  # (AMD, Intel and NVIDIA all install the Vulkan loader, vulkan-1.dll, into
+  # System32), so one ZIP covers all of them with nothing GPU-side bundled: the
+  # loader belongs to the driver, and a copy next to eullm.exe would shadow the
+  # one the driver keeps up to date. It is also why this, and not a Windows
+  # ROCm build, is the answer for consumer Radeons: see build-rocm's header.
+  #
+  # Runs on a manual workflow_dispatch as well as on a tag — pick
+  # `windows-vulkan` (or `all`) in the `job` dropdown — so the Windows
+  # toolchain can be iterated without cutting a release.
+  build-windows-vulkan:
+    if: >-
+      ${{ github.event_name == 'push'
+          || inputs.job == 'all'
+          || inputs.job == 'windows-vulkan' }}
+    runs-on: windows-2022
+    env:
+      # The newest SDK on 7 October 2026 (vulkan.lunarg.com/sdk/latest.json).
+      # Its installer carries glslc, which ggml-vulkan compiles its shaders
+      # with, and the SPIRV-Headers CMake package ggml-vulkan asks for.
+      VULKAN_VERSION: "1.4.363.0"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # llama.cpp submodule under engine/vendor/llama-cpp-rs/llama-cpp-sys-2/
+          submodules: recursive
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install LLVM (libclang for bindgen)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "17.0"
+
+      # Ninja for the reason build-windows-cuda gives: the default Visual
+      # Studio generator ignores CMAKE_*_COMPILER_LAUNCHER, so without it
+      # sccache never sees a C++ compile.
+      - name: Install Ninja
+        run: choco install ninja --no-progress --yes
+        shell: pwsh
+
+      # LunarG's installer, unattended, the way llama.cpp's own Windows release
+      # runs it. Start-Process -Wait rather than `&`: PowerShell does not wait
+      # for a GUI-subsystem program it starts with `&`, and the build must not
+      # begin while the SDK is still being unpacked.
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkansdk.exe'
+          curl.exe -fsSL --retry 3 -o $installer "https://sdk.lunarg.com/sdk/download/$env:VULKAN_VERSION/windows/vulkansdk-windows-X64-$env:VULKAN_VERSION.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK download failed with exit code $LASTEXITCODE" }
+          $p = Start-Process -FilePath $installer -ArgumentList '--accept-licenses', '--default-answer', '--confirm-command', 'install' -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0) { throw "Vulkan SDK installer failed with exit code $($p.ExitCode)" }
+          # VULKAN_SDK is what build.rs reads to link vulkan-1.lib, and Bin on
+          # PATH is where CMake's FindVulkan finds glslc.
+          $sdk = "C:\VulkanSDK\$env:VULKAN_VERSION"
+          if (-not (Test-Path "$sdk\Bin\glslc.exe")) { throw "no glslc.exe in $sdk\Bin after the install" }
+          "VULKAN_SDK=$sdk" | Add-Content -Path $env:GITHUB_ENV
+          "$sdk\Bin" | Add-Content -Path $env:GITHUB_PATH
+          & "$sdk\Bin\glslc.exe" --version
+
+      # For Ninja to find cl.exe, and for dumpbin in the packaging step; the
+      # same activation as build-windows-cuda's, which explains it.
+      - name: Activate MSVC x64 dev environment
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $installPath = & $vswhere -latest -property installationPath
+          if (-not $installPath) { throw "vswhere did not find a Visual Studio install" }
+          $vcvars = "$installPath\VC\Auxiliary\Build\vcvars64.bat"
+          if (-not (Test-Path $vcvars)) { throw "vcvars64.bat not found at $vcvars" }
+          Write-Host "Activating: $vcvars"
+          $envBefore = @{}
+          foreach ($e in (Get-ChildItem env:)) { $envBefore[$e.Name] = $e.Value }
+          $output = cmd /c "`"$vcvars`" >NUL 2>&1 && set"
+          foreach ($line in $output) {
+              if ($line -match "^([^=]+)=(.*)$") {
+                  $name = $matches[1]
+                  $value = $matches[2]
+                  if ($envBefore[$name] -ne $value) {
+                      "$name=$value" | Add-Content -Path $env:GITHUB_ENV
+                  }
+              }
+          }
+          Write-Host "MSVC env activated."
+
+      # continue-on-error for the reason build-windows-cuda gives: a blip of
+      # the Actions cache service should cost a cold build, not the artifact.
+      - uses: Swatinem/rust-cache@v2
+        continue-on-error: true
+        with:
+          key: x86_64-pc-windows-msvc-vulkan
+
+      - name: Install sccache
+        shell: pwsh
+        run: |
+          $SCCACHE_VER = "0.8.0"
+          $url = "https://github.com/mozilla/sccache/releases/download/v$SCCACHE_VER/sccache-v$SCCACHE_VER-x86_64-pc-windows-msvc.tar.gz"
+          $tmp = New-Item -ItemType Directory -Path "$env:TEMP\sccache-install" -Force
+          Invoke-WebRequest -Uri $url -OutFile "$tmp\sccache.tar.gz"
+          tar -xzf "$tmp\sccache.tar.gz" -C "$tmp"
+          $exe = Get-ChildItem -Path $tmp -Recurse -Filter sccache.exe | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination "C:\Windows\System32\sccache.exe"
+          sccache --version
+          # Only route compilers through sccache if the S3 backend is actually
+          # reachable. A backend outage must degrade to a cache-less (slower)
+          # build, never fail it (cf. v0.5.5: endpoint gone mid-build → exit 101).
+          $reachable = $false
+          try {
+              Invoke-WebRequest -Uri "${env:SCCACHE_ENDPOINT}/minio/health/live" -UseBasicParsing -TimeoutSec 10 | Out-Null
+              $reachable = $true
+          } catch { $reachable = $false }
+          if ($reachable) {
+              "RUSTC_WRAPPER=sccache" | Add-Content -Path $env:GITHUB_ENV
+              "CMAKE_C_COMPILER_LAUNCHER=sccache" | Add-Content -Path $env:GITHUB_ENV
+              "CMAKE_CXX_COMPILER_LAUNCHER=sccache" | Add-Content -Path $env:GITHUB_ENV
+              sccache --start-server
+              Write-Host "sccache: S3 backend reachable — caching enabled."
+          } else {
+              Write-Host "::warning::sccache S3 backend (${env:SCCACHE_ENDPOINT}) unreachable — building WITHOUT cache (slower, but the build will not fail)."
+          }
+
+      - name: Build engine with Vulkan + multimodal (mtmd)
+        shell: pwsh
+        env:
+          # Same x86-64-v3 baseline as eullm-windows-x64 and the Linux Vulkan
+          # binary: the CPU still runs everything the GPU does not. See
+          # docs/x86-64-baseline.md.
+          RUSTFLAGS: "-C target-cpu=x86-64-v3"
+          CMAKE_GENERATOR: Ninja
+        run: cargo build --release --target x86_64-pc-windows-msvc --features "vulkan,multimodal" -p eullm-engine
+
+      - name: sccache stats (visibility into S3 hit/miss)
+        if: always()
+        shell: pwsh
+        run: |
+          if (Get-Command sccache -ErrorAction SilentlyContinue) {
+            sccache --show-stats
+          } else {
+            Write-Host "sccache not on PATH (an earlier step failed) — no stats to show"
+          }
+
+      - name: Package binary + bundle MSVC runtime DLLs
+        shell: pwsh
+        run: |
+          $bundle = "eullm-windows-x64-vulkan"
+          New-Item -ItemType Directory -Path $bundle -Force | Out-Null
+          Copy-Item "target\x86_64-pc-windows-msvc\release\eullm.exe" -Destination "$bundle\eullm.exe"
+
+          # Two checks on what the exe contains rather than on what the build
+          # was asked for, as build-vulkan does on Linux.
+          #
+          # 1. The backend is inside: ggml-vulkan logs with "ggml_vulkan: ",
+          #    and no other backend does.
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes("$bundle\eullm.exe"))
+          if (-not $text.Contains('ggml_vulkan: ')) {
+            Write-Host "::error::eullm.exe has no ggml_vulkan strings — the Vulkan backend was not compiled in"
+            exit 1
+          }
+          # 2. The only Vulkan DLL it needs to start is the loader, which the
+          #    graphics driver installs. Anything else from the SDK (shaderc,
+          #    SPIRV-Tools, glslang) exists on this runner only, and importing
+          #    it would stop eullm.exe from starting on any other machine, with
+          #    a dialog box and no log line. Delay-loaded imports are listed
+          #    after the marker and are not needed at start-up.
+          $deps = & dumpbin /dependents "$bundle\eullm.exe" | Out-String
+          $head = ($deps -split 'Image has the following delay load dependencies')[0]
+          $vk = [regex]::Matches($head, '(?im)^\s+((?:vulkan|shaderc|spirv|glslang)[\w-]*\.dll)\s*$') |
+                ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
+          $stray = $vk | Where-Object { $_ -ine 'vulkan-1.dll' }
+          if ($stray) {
+            Write-Host $deps
+            Write-Host "::error::eullm.exe imports Vulkan SDK DLLs that no user machine has: $($stray -join ', ')"
+            exit 1
+          }
+          Write-Host "Vulkan backend present; Vulkan imports: $(if ($vk) { $vk -join ', ' } else { 'none' })"
+
+          & .github\scripts\bundle-vc-runtime.ps1 -Exe "$bundle\eullm.exe" -Destination $bundle
+          if (Test-Path "$bundle\vulkan-1.dll") { throw "vulkan-1.dll is in the bundle; it must come from the driver" }
+          @(
+            'EuLLM Engine - third-party components in this archive'
+            ''
+            'eullm.exe is EuLLM Engine, licensed AGPL-3.0-or-later:'
+            '  https://github.com/eullm/eullm/blob/main/LICENSE'
+            ''
+            'The following files are the Microsoft Visual C++ runtime, copyright'
+            'Microsoft Corporation, distributed unmodified as Visual Studio'
+            'Distributable Code:'
+            ''
+          ) + ((Get-ChildItem $bundle -Filter *.dll).Name | ForEach-Object { "  $_" }) + @(
+            ''
+            'vulkan-1.dll, through which eullm.exe reaches the GPU, is not in'
+            'this archive: it is installed with the graphics driver.'
+          ) |
+            Set-Content -Path "$bundle\THIRD-PARTY-NOTICES.txt" -Encoding utf8
+          Get-ChildItem $bundle | Format-Table Name, Length
+          Compress-Archive -Path "$bundle\*" -DestinationPath "$bundle.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: eullm-windows-x64-vulkan
+          path: eullm-windows-x64-vulkan.zip
+
   # Microsoft Store package: both Windows builds in one MSIX, each with its
   # own terminal command (`eullm` = CPU, `eullm-cuda` = NVIDIA). Built from
   # the two ZIPs the jobs above published, so it holds exactly the files
@@ -1882,6 +2094,7 @@ jobs:
       - build-arm-cix-p1
       - build-windows
       - build-windows-cuda
+      - build-windows-vulkan
       - build-windows-msix
     # Run as long as at least one upstream job built something. We never
     # want a single failing build to nuke a release after CI on the others.
@@ -2023,7 +2236,7 @@ jobs:
             ```
 
             ```powershell
-            # Windows — one line, picks CPU or CUDA, adds eullm to PATH
+            # Windows — one line, picks CPU, CUDA or Vulkan, adds eullm to PATH
             irm https://raw.githubusercontent.com/eullm/eullm/main/installer/install.ps1 | iex
 
             # Windows x64 (CPU only) — ZIP: eullm.exe + the Visual C++ runtime,
@@ -2039,6 +2252,13 @@ jobs:
             # Run eullm.exe from inside the extracted folder (the DLLs must
             # stay next to it).
             .\eullm-cuda\eullm.exe run model.gguf
+
+            # Windows x64 with an AMD or Intel GPU, or an NVIDIA card the CUDA
+            # build does not cover (Vulkan). A ZIP: eullm.exe + the Visual C++
+            # runtime; the Vulkan loader comes with the graphics driver.
+            Invoke-WebRequest -Uri https://github.com/eullm/eullm/releases/download/${{ github.ref_name }}/eullm-windows-x64-vulkan.zip -OutFile eullm-vulkan.zip
+            Expand-Archive eullm-vulkan.zip -DestinationPath eullm-vulkan
+            .\eullm-vulkan\eullm.exe run model.gguf
             ```
 
             ### Which binary to download?
@@ -2059,6 +2279,7 @@ jobs:
             | `eullm-windows-x64.zip` | CPU only | Windows 10/11 x64. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
             | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 with the Visual C++ Redistributable already installed (otherwise it fails with "MSVCP140.dll was not found" — take the ZIP) |
             | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA and Visual C++ runtime DLLs — run from the extracted folder |
+            | `eullm-windows-x64-vulkan.zip` | Any GPU with a Vulkan driver: AMD Radeon (cards and Ryzen integrated graphics), Intel Arc, and NVIDIA cards the CUDA build does not cover (GTX 1000, RTX 2000) | Windows 10/11 x64 and a current graphics driver, which installs the Vulkan loader. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
             | `eullm-windows-x64-store.msix` | CPU + NVIDIA GPU | **Not for direct install**: the unsigned package submitted to the Microsoft Store, which signs it. Use the ZIPs or `install.ps1` instead |
 
             ### Pick a model interactively
@@ -2133,6 +2354,7 @@ jobs:
       - build-arm-cix-p1
       - build-windows
       - build-windows-cuda
+      - build-windows-vulkan
       - release
     if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-22.04
