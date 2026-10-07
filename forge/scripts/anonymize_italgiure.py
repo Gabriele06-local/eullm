@@ -45,6 +45,10 @@ from eullm_forge.datasets.anonymize import (  # noqa: E402
 
 PROGRESS_FILE = "_anon_progress.json"
 
+# The suffixes this pipeline writes into the corpus directory, none of which is
+# a downloaded slice. A source is italgiure_<court>_<year>.jsonl.
+_DERIVED_SUFFIXES = (".anon.jsonl", ".chunks.jsonl", ".dedup.jsonl")
+
 
 def _iter_jsonl(path: Path) -> Iterator[tuple[int, dict]]:
     with path.open(encoding="utf-8") as f:
@@ -163,8 +167,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"{corpus} is not a directory")
 
     sources = sorted(corpus.glob("italgiure_*.jsonl"))
-    # Skip already-anonymised files (in case of *.anon.jsonl naming).
-    sources = [p for p in sources if not p.name.endswith(".anon.jsonl")]
+    # Skip everything this pipeline has already produced, not just *.anon.jsonl.
+    # chunk_corpus.py writes *.chunks.jsonl and dedup_corpus.py writes
+    # *.dedup.jsonl into this same directory by design, so a re-run -- which is
+    # what an incremental download invites -- picked those up as sources and
+    # emitted a .anon.jsonl beside each: chunk_corpus.py, which globs
+    # italgiure_*.anon.jsonl, then read the same ruling once per intermediate.
+    # Exact dedup cannot catch it, being per-file by design, so train.jsonl
+    # tripled while every count the run printed stayed healthy.
+    sources = [p for p in sources if not p.name.endswith(_DERIVED_SUFFIXES)]
     if not sources:
         parser.error(f"No italgiure_*.jsonl files under {corpus}")
 
