@@ -143,7 +143,7 @@ extern "C" llama_rs_status llama_rs_chat_parse(
         // OpenAI-compatible clients cannot render.
         params.reasoning_format = COMMON_REASONING_FORMAT_DEEPSEEK;
         if (generation_prompt && generation_prompt[0] != '\0') {
-            params.generation_prompt = generation_prompt;
+            params.generation_prompt = common_chat_input(std::string(generation_prompt));
         }
         if (parser && parser[0] != '\0') {
             params.parser.load(parser);
@@ -151,7 +151,7 @@ extern "C" llama_rs_status llama_rs_chat_parse(
 
         common_chat_msg msg;
         try {
-            msg = common_chat_parse(input, is_partial, params);
+            msg = common_chat_parse(common_chat_input(std::string(input)), is_partial, params);
         } catch (const std::exception &) {
             if (is_partial) {
                 return LLAMA_RS_STATUS_EXCEPTION;
@@ -163,7 +163,7 @@ extern "C" llama_rs_status llama_rs_chat_parse(
             // did not expect. The partial path extracts whatever AST nodes
             // were recognized instead of throwing, which salvages the calls;
             // only if that also fails is the output truly unparseable.
-            msg = common_chat_parse(input, /* is_partial */ true, params);
+            msg = common_chat_parse(common_chat_input(std::string(input)), /* is_partial */ true, params);
             if (msg.empty()) {
                 // The salvage captured nothing; let the caller fall back to
                 // the raw text rather than returning an empty message.
