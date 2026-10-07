@@ -1268,7 +1268,16 @@ fn main() {
     // Android doesn't have OpenMP support AFAICT and openmp is a default feature. Do this here
     // rather than modifying the defaults in Cargo.toml just in case someone enables the OpenMP feature
     // and tries to build for Android anyway.
-    if cfg!(feature = "openmp") && !matches!(target_os, TargetOs::Android) {
+    //
+    // Nor ROCm on Windows (EuLLM): ROCm's clang builds the whole of llama.cpp there (see the
+    // `rocm` block), and its `-fopenmp` calls LLVM's OpenMP runtime (`__kmpc_*`, libomp), not
+    // the `vcomp` that cl.exe's `/openmp` brings in by itself. rustc's link.exe is never told
+    // about libomp, so the first build stopped at the final link on 12 unresolved `__kmpc_*`
+    // symbols; linking it would mean shipping its DLL as well. ggml's own thread pool, which
+    // every build without OpenMP uses, does the work instead.
+    let windows_rocm =
+        cfg!(feature = "rocm") && matches!(target_os, TargetOs::Windows(WindowsVariant::Msvc));
+    if cfg!(feature = "openmp") && !matches!(target_os, TargetOs::Android) && !windows_rocm {
         config.define("GGML_OPENMP", "ON");
     } else {
         config.define("GGML_OPENMP", "OFF");
