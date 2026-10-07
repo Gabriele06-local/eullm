@@ -85,9 +85,27 @@ fi
 OUTPUT_DIR="${OUTPUT_DIR/#\~/$HOME}"
 
 if [ -d "$OUTPUT_DIR" ]; then
-    LATEST_CKPT=$(find "$OUTPUT_DIR" -maxdepth 1 -type d -name 'checkpoint-*' \
-        -printf '%T@ %p\n' 2>/dev/null \
-        | sort -rn | awk 'NR==1{print $2}')
+    # Highest step number, not newest mtime. Anything that touches a
+    # checkpoint directory without writing one -- a touch, an rsync, the copy
+    # of $WORK that runs between links -- reorders an mtime list, and the
+    # resume then reloads a checkpoint thousands of steps old and redoes them.
+    # distill.py ranks by step number (_checkpoint_step, whose comment says
+    # exactly this) and the test pins the mtime fragments out of distill.sh;
+    # this is the same chained-resume pattern one directory over, so it ranks
+    # the same way. Directories whose suffix is not a number are not
+    # checkpoints and are skipped, as _checkpoint_step does with -1.
+    LATEST_CKPT=""
+    LATEST_STEP=-1
+    for d in "$OUTPUT_DIR"/checkpoint-*/; do
+        [ -d "$d" ] || continue
+        step=${d%/}
+        step=${step##*-}
+        case $step in ''|*[!0-9]*) continue;; esac
+        if [ "$step" -gt "$LATEST_STEP" ]; then
+            LATEST_STEP=$step
+            LATEST_CKPT=${d%/}
+        fi
+    done
     if [ -n "$LATEST_CKPT" ]; then
         log "found existing checkpoint: $LATEST_CKPT — resuming"
         echo "resume_from_checkpoint: $LATEST_CKPT" >> "$TMP_YAML"
