@@ -35,3 +35,10 @@ Resume: `cd ~/work/eullm && git checkout feat/prefetch-reads-moe-cache`; rerun `
 
 ## Update (8 October, afternoon)
 Six rounds of stock vs patched llama-server finished (table in `docs/moe-offload-plan.md`): reading 1,010.7 stock, 1,387.9 with `0003`, 1,544.8 with `0003`+`0004`; writing the same in all; the same answer in 18 of 18. A Radeon RX 6700 XT now drives the desktop (the RTX 5070 Ti idles at 15 MiB, 16 W); a 5-minute load before and after showed the same temperatures (75/76 C max, fans 48/49%). Linux Vulkan build 0.7.40 downloaded to `~/work/vulkan-test`, not yet run. Next: a long answer with and without the cache (a report on the merged PR says the cache loops on long texts), the Vulkan test on the 6700 XT, then the PR text for the prefetch (the PR author removed the scheduler changes from #29887: expect that to be the hard part).
+
+## Update (8 October, evening) — Vulkan on the RX 6700 XT
+Release 0.7.40 Linux Vulkan build (`~/work/vulkan-test`, `GGML_VK_VISIBLE_DEVICES=0` picks the Radeon, RADV, no matrix cores), Qwen3-14B Q4_K_M (9.3 GB, all layers on the card), a 3,000-token prompt:
+- flash attention on (the engine's default, `auto-detect`): 12.5 tokens/s writing, **29 reading**;
+- `--no-flash-attn`: 18.6 writing, **345 reading**.
+Qwen3.5-9B Q4_K_M with flash attention on: 5.0 / 38. So on RDNA 2 under Vulkan the flash-attention path costs most of the prompt-reading speed. To decide: turn flash attention off by default on Vulkan where there are no cooperative matrices (needs a check on a newer llama.cpp than 0.7.40's, and on another Vulkan card), or at least say it in `docs/platforms.md`.
+Also found: the board's second long slot (the chipset's) negotiates PCIe 3.0 x2 here, not x4; the card in it measures the same as in x16 once the model is loaded. Long-text check of the MoE cache (reports of looping on the merged PR): 4,000 tokens, temperature 0, with and without the cache on Flash-Next IQ2_XS, neither loops; they diverge after 230 characters at a near tie, as greedy runs do when the numerics move.
