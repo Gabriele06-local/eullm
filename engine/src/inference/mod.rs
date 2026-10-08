@@ -2316,7 +2316,6 @@ impl InferenceEngine {
                 );
                 return Err(corrupt_logits_message().into());
             }
-            sampler.accept(token);
 
             // End of generation?
             if self.model.is_eog_token(token) {
@@ -2545,7 +2544,6 @@ impl InferenceEngine {
                 let _ = tx.blocking_send(StreamEvent::Error(corrupt_logits_message()));
                 return;
             }
-            sampler.accept(token);
 
             if self.model.is_eog_token(token) {
                 stop_reason = StopReason::Stop;
@@ -3010,7 +3008,6 @@ impl InferenceEngine {
                 let _ = tx.blocking_send(StreamEvent::Error(corrupt_logits_message()));
                 return;
             }
-            sampler.accept(token);
             if self.model.is_eog_token(token) {
                 stop_reason = StopReason::Stop;
                 break;

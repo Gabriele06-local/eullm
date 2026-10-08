@@ -1009,11 +1009,13 @@ fn begin_generation(
     if sched_config.debug_logit_check {
         warn_if_logits_corrupt(ctx, -1, seq.seq_id);
     }
+    // `sample` also accepts the token into the sampler's history (penalties,
+    // grammar): see `build_sampler`.
     let token = seq.sampler.sample(ctx, -1);
 
-    // Always-on O(1) guard, before the token is accepted into the sampler's
-    // history: a NaN here means the whole forward pass produced nothing
-    // usable, and continuing would stream garbage that reads as a real answer.
+    // Always-on O(1) guard: a NaN here means the whole forward pass produced
+    // nothing usable, and continuing would stream garbage that reads as a
+    // real answer.
     if sampled_token_is_corrupt(ctx, -1, token) {
         tracing::error!(
             "Seq {}: sampled token {} has a NaN/Inf logit — \
@@ -1028,7 +1030,6 @@ fn begin_generation(
         finish_wiped(ctx, seq.seq_id, idle_slots);
         return None;
     }
-    seq.sampler.accept(token);
 
     match emit_token(
         model,
@@ -1262,7 +1263,6 @@ fn mtp_step(
             finish_wiped(ctx, seq.seq_id, idle_slots);
             return Emitted::Finished;
         }
-        seq.sampler.accept(token);
         picks.push(token);
         // Past an end-of-generation token nothing is read, and a grammar
         // sampler must not be fed tokens after the end it accepted.
@@ -2098,7 +2098,6 @@ fn run_scheduler_loop(
                 });
                 continue;
             }
-            seq.sampler.accept(token);
 
             if emit_token(
                 model,
