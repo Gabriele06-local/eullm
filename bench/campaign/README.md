@@ -101,6 +101,15 @@ the job. Several jobs can drain one queue: a claim is an atomic rename.
 At the walltime Slurm's SIGTERM stops the servers at once and puts the
 interrupted points back; the next job takes them up.
 
+No point starts on a device that already holds VRAM with nothing running on
+it (more than 2 GiB): the device is set aside, the servers of this job that
+no running point owns are killed (Ollama's model process can outlive
+`ollama serve`), and the device comes back once it is empty. Every result
+records what its devices held as it started (`vram_at_start_mib`, the
+`vram0` column of `report`). Points measured before 08-10-2026 have no such
+record; a peak VRAM far above the model's size with the device nearly idle
+marks the ones that shared their GCD with a leftover.
+
 ## Outcomes
 
 | state | when |

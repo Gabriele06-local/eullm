@@ -85,6 +85,14 @@ LOAD_ALLOWANCE_S = 1200
 STALE_CLAIM_S = 50 * 3600
 # How often an otherwise idle scheduler looks at the queue again.
 REPLAN_S = 120
+# VRAM a device may hold with no point on it before it is set aside: an idle
+# MI250X GCD holds megabytes. c07 and c08 on 06-10-2026 have points that
+# started on a GCD already holding 40-60 GB (a server left over from an
+# earlier point), measured at a fraction of their speed beside it.
+DIRTY_MIB = 2048
+# Servers a point may leave behind. Ollama loads a model in a child process
+# of its own, which can outlive `ollama serve`.
+SERVER_NAMES = ("eullm", "llama-server", "ollama")
 PARAM_SKIP = ("id", "group", "campaign", "priority", "est_s", "attempts", "notes")
 
 
@@ -99,6 +107,35 @@ def sh(cmd, timeout=60) -> str:
     except (OSError, subprocess.TimeoutExpired):
         return ""
     return out.stdout if out.returncode == 0 else ""
+
+
+def orphan_servers(ps_text: str, keep_pgids, job: str, cgroup_of) -> list:
+    """(pid, name) of every server process in `ps_text` (`ps -o
+    pid=,pgid=,comm=`) that belongs to this Slurm job but to no running
+    point: the leftovers that hold a device after their point ended.
+    `cgroup_of(pid)` is that process's /proc/<pid>/cgroup text; only
+    processes in this job's cgroup are candidates, so a runner started by
+    hand next to someone's own server never touches it."""
+    out = []
+    for line in ps_text.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+            continue
+        pid, pgid, name = int(parts[0]), int(parts[1]), parts[2].strip()
+        if pgid in keep_pgids or not name.startswith(SERVER_NAMES):
+            continue
+        if f"job_{job}" not in (cgroup_of(pid) or ""):
+            continue
+        out.append((pid, name))
+    return out
+
+
+def read_cgroup(pid: int) -> str:
+    try:
+        with open(f"/proc/{pid}/cgroup") as f:
+            return f.read()
+    except OSError:
+        return ""
 
 
 def parse_time_left(text: str):
@@ -185,6 +222,7 @@ class Runner:
         self.running = {}
         self.finished = []
         self.draining = []  # (servers that outlived their kill, their devices)
+        self.quarantined = {}  # device: MiB it held with no point on it
         self.lock = threading.Lock()
         self.stop = threading.Event()
         # Set when a point finishes or a stop arrives, so the next point
@@ -280,7 +318,7 @@ class Runner:
 
     # ── execution ────────────────────────────────────────────────────────
 
-    def launch(self, p, use, reserved, duration):
+    def launch(self, p, use, reserved, duration, held=None):
         physical = [self.physical[d] for d in use]
         cores = cores_for(self.args.bind, physical)
         if cores and not cores_set(cores) <= self.allowed_cores:
@@ -293,6 +331,7 @@ class Runner:
         )
         run = Running(dict(p, duration_s=duration), use, reserved, duration, ctx,
                       self.expected_end(p, duration, time.time()))
+        run.held = {self.physical[d]: m for d, m in (held or {}).items()}
         neighbours = len(self.running)
         busy = len(self.devices) - len(self.free)
         with self.lock:
@@ -321,6 +360,9 @@ class Runner:
             "cores": cores,
             "neighbours_at_start": neighbours,
             "devices_busy_at_start": busy,
+            # VRAM each device held as the point started: what makes a point
+            # that shared its GCD with a leftover recognisable afterwards.
+            "vram_at_start_mib": getattr(run, "held", {}),
             "engine": self.engine,
             "bench_rev": self.revision,
             "runtime": self.runtime,
@@ -362,9 +404,55 @@ class Runner:
             self.finished.append((run, state, note, ended))
         self.wake.set()
 
+    def held_mib(self, devices) -> dict:
+        """MiB of VRAM each of `devices` holds now, where the sampler says."""
+        reading = self.sampler.latest()
+        out = {}
+        for d in devices:
+            used = reading.get(self.physical[d], {}).get("used")
+            if used is not None:
+                out[d] = round(used / 2**20)
+        return out
+
+    def quarantine(self, dirty: dict) -> None:
+        """Set aside devices that hold VRAM with no point on them, and kill
+        the leftover servers of this job that may be holding it."""
+        with self.lock:
+            self.free -= set(dirty)
+            self.quarantined.update(dirty)
+        print(f"[{now_iso()}] devices {sorted(dirty)} hold "
+              f"{', '.join(f'{m} MiB' for m in dirty.values())} with no point on them: "
+              f"set aside until they are clean", flush=True)
+        self.kill_orphans()
+
+    def kill_orphans(self) -> None:
+        job = os.environ.get("SLURM_JOB_ID")
+        if not job:
+            return  # outside a job there is no telling whose a server is
+        with self.lock:
+            keep = {s.proc.pid for run in self.running.values()
+                    for s in getattr(run.ctx, "servers", [])}
+        ps = sh(["ps", "-u", str(os.getuid()), "-o", "pid=,pgid=,comm="])
+        for pid, name in orphan_servers(ps, keep, job, read_cgroup):
+            try:
+                os.kill(pid, signal.SIGKILL)
+                print(f"[{now_iso()}] killed {name} {pid}, left over by an earlier point",
+                      flush=True)
+            except OSError:
+                pass
+
     def reap(self) -> int:
         with self.lock:
             finished, self.finished = self.finished, []
+        if self.quarantined:
+            clean = [d for d, m in self.held_mib(list(self.quarantined)).items()
+                     if m <= DIRTY_MIB]
+            if clean:
+                with self.lock:
+                    for d in clean:
+                        self.quarantined.pop(d, None)
+                    self.free |= set(clean)
+                print(f"[{now_iso()}] devices {sorted(clean)} clean again", flush=True)
         # Devices whose server outlived its kill come back when it is gone.
         freed = 0
         for straggler in list(self.draining):
@@ -446,10 +534,15 @@ class Runner:
                     if choice is None:
                         break
                     p, use, reserved, duration = choice
+                    held = self.held_mib(reserved)
+                    dirty = {d: m for d, m in held.items() if m > DIRTY_MIB}
+                    if dirty:
+                        self.quarantine(dirty)
+                        continue  # planned again on the devices left
                     todo.remove(p)
                     claimed = self.queue.claim(p["id"], owner)
                     if claimed is not None:
-                        self.launch(claimed, use, reserved, duration)
+                        self.launch(claimed, use, reserved, duration, held)
                 replan_at = time.time() + REPLAN_S
             if not self.running and not self.draining:
                 break
@@ -732,7 +825,7 @@ COLUMNS = (
     "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
-    "extra_args", "trial",
+    "extra_args", "trial", "vram_start_mib_max",
 )
 
 
@@ -748,7 +841,9 @@ def row_of(r: dict) -> dict:
                load_cache=load.get("cache"), load_storage=load.get("storage"),
                load_wall_s=load.get("wall_s"),
                engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"),
-               extra_args=" ".join(p.get("extra_args", [])))
+               extra_args=" ".join(p.get("extra_args", [])),
+               vram_start_mib_max=max((r.get("vram_at_start_mib") or {}).values(),
+                                      default=None))
     t = r.get("throughput")
     if t:
         reps = t.get("repeats") or [{}]

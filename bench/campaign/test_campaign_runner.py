@@ -455,3 +455,43 @@ def test_stop_does_not_raise_when_the_server_outlives_the_wait(tmp_path):
     s.proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     assert s.stop(kill_wait_s=5) is True  # SIGTERM is enough for sleep
     assert s.stop() is True  # already gone
+
+
+def test_a_device_holding_vram_with_no_point_on_it_is_set_aside(tmp_path, engine, capsys,
+                                                                monkeypatch):
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    qdir = str(tmp_path / "q")
+    q = Queue(qdir)
+    spec = {"campaign": "c-dirty", "defaults": {"repeats": 1, "num_predict": 4},
+            "groups": [{"name": "g", "est_s": 60, "set": {"gcds": 1},
+                        "axes": {"model": ["qwen3-8b", "qwen3-4b", "qwen3-1.7b"]}}]}
+    for p in expand(spec):
+        q.add(p)
+    r = campaign.Runner(run_args(qdir, engine, devices="0-1", port_base=free_port_base()))
+    calls = {"n": 0}
+
+    def reader():
+        # Device 1 holds 40 GiB, a leftover's, for the first few readings.
+        calls["n"] += 1
+        held = 40 * 2**30 if calls["n"] < 8 else 50 * 2**20
+        return {"0": {"used": 100 * 2**20, "total": 64 * 2**30, "use": 0},
+                "1": {"used": held, "total": 64 * 2**30, "use": 0}}
+
+    r.sampler.reader = reader
+    r.loop()
+    out = capsys.readouterr().out
+    assert "devices [1] hold 40960 MiB with no point on them" in out
+    results = [json.loads(line.split(" ", 1)[1]) for line in out.splitlines()
+               if line.startswith("BENCH_RESULT ")]
+    assert len(results) == 3
+    for res in results:
+        assert res["vram_at_start_mib"] and max(res["vram_at_start_mib"].values()) <= 2048
+
+    # Once the device holds nothing again it goes back to the free ones.
+    r.free, r.quarantined = {0}, {1: 40960}
+    r.sampler.samples.clear()  # the next reading is a fresh, clean one
+    calls["n"] = 100
+    r.reap()
+    assert r.free == {0, 1} and not r.quarantined
+    assert "devices [1] clean again" in capsys.readouterr().out

@@ -22,8 +22,8 @@ PARAMS = ("model", "runtime", "gcds", "replicas", "batch", "concurrency", "slot_
 # Every kind that runs on the GPUs also shows the most VRAM a device held and
 # how busy the devices were: a server that silently ran on the CPU, or shared
 # its GCD with a stranger, shows there before anywhere else.
-DEVICE = (("vram_peak_mib_max", "vram MiB"), ("use_mean", "use%"),
-          ("neighbours_at_start", "neigh"))
+DEVICE = (("vram_start_mib_max", "vram0"), ("vram_peak_mib_max", "vram MiB"),
+          ("use_mean", "use%"), ("neighbours_at_start", "neigh"))
 METRICS = {
     "throughput": (("agg_tok_s_mean", "tok/s"), ("agg_tok_s_cv_pct", "cv%"),
                    ("decode_tok_s", "decode"), ("prefill_tok_s", "prefill"),
