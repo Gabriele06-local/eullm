@@ -9,6 +9,7 @@ import pytest
 from eullm_forge.eval import (
     EvalItem,
     Judgement,
+    LLMJudge,
     MockJudge,
     aggregate,
     blind_pairwise,
@@ -257,6 +258,31 @@ def test_mock_judge_prefers_rubric_overlap():
     v = j.compare("q", "contiene risoluzione e risarcimento", "vuoto",
                   rubric="cita risoluzione risarcimento danno")
     assert v.winner == "A"
+
+
+def test_the_llm_judge_reads_every_compliant_verdict_form():
+    judge = lambda raw: LLMJudge(chat_fn=lambda prompt: raw).compare("q", "A", "B")
+    assert judge("Verdict: 1\nFirst is best.").winner == "A"
+    assert judge("Verdict: 2\nSecond is best.").winner == "B"
+    assert judge("verdict: tie\nEven.").winner == "tie"
+    assert judge("verdict=A\nFirst.").winner == "A"
+    assert judge("Verdict: B wins.").winner == "B"
+
+
+def test_a_non_compliant_verdict_is_a_tie_not_a_win():
+    """`Verdict: both` matched `b`, `Verdict: abstain` matched `a` and
+    `Verdict: 10` matched `1`, scoring three non-compliant replies as wins
+    and moving the win rate. A reply that names no winner is unparseable,
+    and unparseable is a tie.
+    """
+    judge = lambda raw: LLMJudge(chat_fn=lambda prompt: raw).compare("q", "A", "B")
+    for raw in ("Verdict: both are good, tie? no, both",
+                "Verdict: abstain, cannot decide",
+                "Verdict: 10\nFirst is best",
+                "Verdict: tiebreaker, call it even"):
+        v = judge(raw)
+        assert v.winner == "tie", raw
+        assert "unparseable" in v.rationale
 
 
 # --- report ----------------------------------------------------------------

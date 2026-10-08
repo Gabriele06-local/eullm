@@ -75,7 +75,12 @@ Respond with exactly one line: "Verdict: 1", "Verdict: 2", or "Verdict: tie".
 Then, on a new line, a one-sentence justification.
 """
 
-_VERDICT_RE = re.compile(r"verdict\s*[:=]?\s*(1|2|tie|a|b)", re.IGNORECASE)
+# The token needs a word boundary after it: without one `Verdict: both`
+# scores as a B win, `Verdict: abstain` as an A win and `Verdict: 10` as an
+# A win, turning three non-compliant replies into phantom wins that move the
+# win rate. With it they fall through to the unparseable-verdict tie below,
+# where a reply that names no winner belongs.
+_VERDICT_RE = re.compile(r"verdict\s*[:=]?\s*(1|2|tie|a|b)\b", re.IGNORECASE)
 
 
 class LLMJudge:
