@@ -263,6 +263,36 @@ measured (NFS, SMB). A model larger than the memory free for the page cache
 (the RAM, or a Slurm job's `--mem`) is never read ahead, models under 1 GiB
 neither, and the log says how many threads read how much and at what rate.
 
+### Where a busy server's time goes (`eullm::steps`)
+
+With several requests at once, every step of the scheduler decodes one token
+of each answer on the GPU and then chooses each answer's next token on the
+CPU, one after the other. To see how a step's time splits between the two,
+start the server with
+
+```bash
+RUST_LOG=eullm=info,eullm::steps=debug eullm serve --batch-size 4 --ctx-size 8192
+```
+
+and, every ten seconds while it works, it logs one line:
+
+```text
+steps: 10.1 s, 87 steps, 4.0 seqs/step, 35 tok/s | decode 90.4% (104.48 ms/step),
+  sample 9.4% (2.719 ms/token), emit 0.2% (0.059 ms/token), prefill 0.0% (0 tok),
+  idle 0.0%, other 0.0%
+```
+
+`decode` is the forward pass (waited for, so it is the GPU's time), `sample`
+choosing each answer's token from its logits, `emit` turning it into text and
+sending it, `prefill` the prompts read between steps, `idle` waiting for
+requests. Without the setting nothing is timed.
+
+The line above is Qwen3.5-0.8B on four CPU cores with Ollama's default
+sampling: sampling took 2.7 ms per token, and 1.1 ms with
+`"repeat_penalty": 1.0`. llama.cpp's repeat penalty looks up each of the
+vocabulary's candidates (about 248,000 here) in its table of recent tokens,
+for every token of every answer.
+
 ## Security
 
 ### Restricting who can reach the engine (`EULLM_ALLOWED_IPS`, new in v0.6.29)

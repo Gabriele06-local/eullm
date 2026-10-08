@@ -171,6 +171,112 @@ struct PendingPrefill {
     effective_max: u32,
 }
 
+/// Where the scheduler's time goes, summed over ten seconds and logged as one
+/// `steps:` line at the end of them, while it works. Only when asked for,
+/// with `RUST_LOG=eullm=info,eullm::steps=debug`: otherwise nothing is timed.
+///
+/// c07 measured EuLLM 11-36% below llama-server with 16 requests at once,
+/// and level with it at one. The parts of a step say why: `decode` is the
+/// GPU's forward pass, `sample` choosing each sequence's token on the CPU,
+/// one after the other, `emit` its text and the reply channel, `prefill`
+/// the prompts read between steps. To part the GPU's time from the CPU's,
+/// a timed decode waits for the GPU before sampling starts, which sampling
+/// did anyway.
+struct StepTimes {
+    on: bool,
+    since: std::time::Instant,
+    steps: u64,
+    /// Tokens decoded by those steps: one per answering sequence each.
+    tokens: u64,
+    decode: std::time::Duration,
+    sample: std::time::Duration,
+    emit: std::time::Duration,
+    prefill: std::time::Duration,
+    prefill_tokens: u64,
+    idle: std::time::Duration,
+}
+
+/// The target of the `steps:` lines.
+const STEPS_TARGET: &str = "eullm::steps";
+const STEPS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+impl StepTimes {
+    fn new(on: bool) -> Self {
+        Self {
+            on,
+            since: std::time::Instant::now(),
+            steps: 0,
+            tokens: 0,
+            decode: Default::default(),
+            sample: Default::default(),
+            emit: Default::default(),
+            prefill: Default::default(),
+            prefill_tokens: 0,
+            idle: Default::default(),
+        }
+    }
+
+    /// Now, when timing; nothing to take the time from otherwise.
+    fn start(&self) -> Option<std::time::Instant> {
+        self.on.then(std::time::Instant::now)
+    }
+
+    /// Log the window and start the next, once it is `STEPS_EVERY` long. A
+    /// window in which the scheduler only waited is not logged.
+    fn log_if_due(&mut self) {
+        if !self.on {
+            return;
+        }
+        let wall = self.since.elapsed();
+        if wall < STEPS_EVERY {
+            return;
+        }
+        if self.steps > 0 || self.prefill_tokens > 0 {
+            tracing::debug!(target: STEPS_TARGET, "steps: {}", self.summary(wall));
+        }
+        *self = Self::new(true);
+    }
+
+    /// One line: the window, the steps and their tokens, and each part's
+    /// share of the window with its time per step or per token.
+    fn summary(&self, wall: std::time::Duration) -> String {
+        let s = wall.as_secs_f64().max(1e-9);
+        let pct = |d: std::time::Duration| 100.0 * d.as_secs_f64() / s;
+        let ms_per = |d: std::time::Duration, n: u64| {
+            if n == 0 {
+                0.0
+            } else {
+                1e3 * d.as_secs_f64() / n as f64
+            }
+        };
+        let parts = self.decode + self.sample + self.emit + self.prefill + self.idle;
+        let other = wall.saturating_sub(parts);
+        format!(
+            "{:.1} s, {} steps, {:.1} seqs/step, {:.0} tok/s | decode {:.1}% ({:.2} ms/step), \
+             sample {:.1}% ({:.3} ms/token), emit {:.1}% ({:.3} ms/token), \
+             prefill {:.1}% ({} tok), idle {:.1}%, other {:.1}%",
+            s,
+            self.steps,
+            if self.steps == 0 {
+                0.0
+            } else {
+                self.tokens as f64 / self.steps as f64
+            },
+            self.tokens as f64 / s,
+            pct(self.decode),
+            ms_per(self.decode, self.steps),
+            pct(self.sample),
+            ms_per(self.sample, self.tokens),
+            pct(self.emit),
+            ms_per(self.emit, self.tokens),
+            pct(self.prefill),
+            self.prefill_tokens,
+            pct(self.idle),
+            pct(other),
+        )
+    }
+}
+
 /// An idle sequence slot together with the exact token history currently
 /// resident in its KV cache, reused across requests via longest-common-prefix
 /// matching, mirroring upstream llama.cpp server's slot model
@@ -1636,7 +1742,12 @@ fn run_scheduler_loop(
     // Signal that the model is loaded and ready.
     let _ = ready_tx.send(Ok((kv_info, Arc::downgrade(&model_owner))));
 
+    let timed = tracing::enabled!(target: STEPS_TARGET, tracing::Level::DEBUG);
+    let mut times = StepTimes::new(timed);
+
     loop {
+        times.log_if_due();
+
         // ── 0. Check shutdown flag ────────────────────────────────────
         if shutdown.load(Ordering::SeqCst) {
             tracing::info!(
@@ -1934,8 +2045,12 @@ fn run_scheduler_loop(
         // ── 2. If nothing active, wait for new work ─────────────────────
         if active.is_empty() && prefilling.is_empty() {
             let lock = notify_mutex.lock().unwrap();
+            let t = times.start();
             // Wait with a timeout so we can check for channel disconnect.
             let _ = notify.wait_timeout(lock, std::time::Duration::from_millis(100));
+            if let Some(t) = t {
+                times.idle += t.elapsed();
+            }
             continue;
         }
 
@@ -2006,7 +2121,17 @@ fn run_scheduler_loop(
                 decode_batch.n_tokens(),
                 active.len(),
             );
-            if let Err(e) = ctx.decode(&mut decode_batch) {
+            let t = times.start();
+            let decoded = ctx.decode(&mut decode_batch);
+            if let Some(t) = t {
+                // The decode only queues the work on a GPU: wait for it here,
+                // as the first sample would, so that its time is the GPU's.
+                ctx.synchronize();
+                times.decode += t.elapsed();
+                times.steps += 1;
+                times.tokens += decode_batch.n_tokens() as u64;
+            }
+            if let Err(e) = decoded {
                 tracing::error!("Batch decode failed: {e}");
                 // Send errors to all active sequences and clear. This is a
                 // hard error potentially affecting every active sequence
@@ -2075,7 +2200,11 @@ fn run_scheduler_loop(
             if sched_config.debug_logit_check {
                 warn_if_logits_corrupt(&ctx, logit_idx, seq.seq_id);
             }
+            let t = times.start();
             let token = seq.sampler.sample(&ctx, logit_idx);
+            if let Some(t) = t {
+                times.sample += t.elapsed();
+            }
 
             // Always-on O(1) guard — see `sampled_token_is_corrupt`.
             if sampled_token_is_corrupt(&ctx, logit_idx, token) {
@@ -2099,7 +2228,8 @@ fn run_scheduler_loop(
                 continue;
             }
 
-            if emit_token(
+            let t = times.start();
+            let emitted = emit_token(
                 model,
                 &mut ctx,
                 seq,
@@ -2108,8 +2238,11 @@ fn run_scheduler_loop(
                 &mut checkpoints,
                 &sched_config,
                 false,
-            ) == Emitted::Finished
-            {
+            );
+            if let Some(t) = t {
+                times.emit += t.elapsed();
+            }
+            if emitted == Emitted::Finished {
                 to_remove.push(i);
                 continue;
             }
@@ -2154,14 +2287,21 @@ fn run_scheduler_loop(
                 ctx.n_ubatch()
             } as usize;
             let chunk_end = (pending.cursor + chunk_size).min(n_prompt);
-            match prefill_chunk(
+            let t = times.start();
+            let read = prefill_chunk(
                 &mut ctx,
                 seq_id,
                 &pending.seq.prompt_tokens,
                 pending.cursor,
                 chunk_end,
                 None,
-            ) {
+            );
+            if let Some(t) = t {
+                ctx.synchronize();
+                times.prefill += t.elapsed();
+                times.prefill_tokens += (chunk_end - pending.cursor) as u64;
+            }
+            match read {
                 Ok(()) if chunk_end < n_prompt => {
                     pending.cursor = chunk_end;
                     prefilling.push_front(pending);
@@ -2709,12 +2849,46 @@ mod tests {
     use super::super::output::stop_prefix_holdback;
     use super::{
         CachedSlot, GenerateRequest, NotQueued, PieceOutcome, PromptCheckpoint, SchedulerHandle,
-        SendOutcome, StreamEvent, best_checkpoint, common_prefix_len, drafts_kept, mtp_drafts,
-        pick_slot, process_piece, text_prefix_match, try_send_piece,
+        SendOutcome, StepTimes, StreamEvent, best_checkpoint, common_prefix_len, drafts_kept,
+        mtp_drafts, pick_slot, process_piece, text_prefix_match, try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
     use tokio::sync::mpsc;
+
+    /// A `steps:` line splits its window into the parts of a step, each with
+    /// its time per step (decode) or per token (sample, emit), and says what
+    /// none of them account for.
+    #[test]
+    fn a_steps_line_splits_the_window_into_its_parts() {
+        let mut times = StepTimes::new(true);
+        times.steps = 400;
+        times.tokens = 6400;
+        times.decode = Duration::from_millis(6000);
+        times.sample = Duration::from_millis(3200);
+        times.emit = Duration::from_millis(64);
+        times.prefill = Duration::from_millis(500);
+        times.prefill_tokens = 2048;
+        let line = times.summary(Duration::from_secs(10));
+        assert_eq!(
+            line,
+            "10.0 s, 400 steps, 16.0 seqs/step, 640 tok/s | decode 60.0% (15.00 ms/step), \
+             sample 32.0% (0.500 ms/token), emit 0.6% (0.010 ms/token), \
+             prefill 5.0% (2048 tok), idle 0.0%, other 2.4%"
+        );
+    }
+
+    /// Off, nothing is timed: there is no clock to take a part's time from,
+    /// and a window is never logged nor reset.
+    #[test]
+    fn steps_are_not_timed_unless_asked_for() {
+        let mut times = StepTimes::new(false);
+        assert!(times.start().is_none());
+        let since = times.since;
+        times.log_if_due();
+        assert_eq!(times.since, since);
+        assert!(StepTimes::new(true).start().is_some());
+    }
 
     fn gemma_stops() -> Vec<String> {
         vec!["<end_of_turn>".to_string()]
