@@ -242,7 +242,7 @@ def test_a_tiny_run_saves_the_adapter_and_a_stopped_run_carries_on(tiny_model, t
     assert mod.main(base + ["--steps", "2", "--stop-after", "1e-9"]) == 0
     assert (out / "ckpt" / "state.pt").is_file() and not (out / "adapter").exists()
     assert mod.main(base + ["--steps", "2", "--save-every", "1",
-                            "--teacher-note", "Rispondi in breve."]) == 0
+                            "--teacher-note", "Rispondi in breve.", "--anchor-statutes"]) == 0
     assert (out / "adapter" / "adapter_config.json").is_file()
     printed = capsys.readouterr().out
     assert "resuming at step 0" in printed and "step 2/2 kl" in printed
@@ -285,3 +285,36 @@ def test_a_teacher_with_another_vocabulary_is_refused(tiny_model, tmp_path):
         mod.main(["--student", str(path), "--teacher", str(other), "--prompts", str(prompts),
                   "--out", str(tmp_path / "r"), "--student-device", "cpu",
                   "--teacher-devices", "cpu"])
+
+
+def test_statute_rows_are_anchored_to_the_student_before_the_run(tiny_model, tmp_path, capsys):
+    """2026-10-07: the case-law teacher on statute rows cost the 4B 15:71 on statutes.
+
+    Anchored, a statute row is taught by the student itself with its adapter
+    off: on the first step the adapter is still zero, so the KL is exactly 0,
+    whatever the teacher. Without the anchor the teacher -- here one whose
+    output layer is scaled, so that it disagrees -- teaches it.
+    """
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    path, prompts = tiny_model
+    other = tmp_path / "other"
+    model = transformers.AutoModelForCausalLM.from_pretrained(path)
+    with torch.no_grad():
+        model.lm_head.weight.mul_(50)
+    model.save_pretrained(other)
+    transformers.AutoTokenizer.from_pretrained(path).save_pretrained(other)
+    rows = [dict(json.loads(line), kind="statute") for line in prompts.read_text().splitlines()]
+    prompts.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    mod = _load("opd_train")
+    base = ["--student", str(path), "--teacher", str(other), "--prompts", str(prompts),
+            "--student-device", "cpu", "--teacher-devices", "cpu", "--batch", "2",
+            "--max-new-tokens", "4", "--rank", "4", "--steps", "1"]
+
+    def first_kl(out, *extra):
+        assert mod.main(base + ["--out", str(tmp_path / out), *extra]) == 0
+        line = next(ln for ln in capsys.readouterr().out.splitlines() if "step 1/1 kl" in ln)
+        return float(line.split(" kl ")[1].split()[0])
+
+    assert first_kl("anchored", "--anchor-statutes") == 0.0
+    assert first_kl("taught") > 1.0
