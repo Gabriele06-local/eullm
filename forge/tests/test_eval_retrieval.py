@@ -43,6 +43,13 @@ def index():
     ("Cosa stabilisce l'art. 27 della Costituzione italiana?", "costituzione", ["27"]),
     ("Cosa dice l'art. 327 c.p.c.?", "codice_procedura_civile", ["327"]),
     ("Cosa dice l'art. 2043-bis c.c.?", "codice_civile", ["2043-bis"]),
+    # the record side always read nine Latin suffixes; the question side
+    # stopped at quinquies, so "art. 12-sexies" was heard as "art. 12".
+    ("Cosa prevede l'art. 12-sexies del codice penale?", "codice_penale", ["12-sexies"]),
+    ("Cosa prevede l'art. 12-septies del codice penale?", "codice_penale", ["12-septies"]),
+    ("Cosa prevede l'art. 12-octies del codice penale?", "codice_penale", ["12-octies"]),
+    ("Cosa prevede l'art. 12-novies del codice penale?", "codice_penale", ["12-novies"]),
+    ("Cosa prevede l'art. 12-decies del codice penale?", "codice_penale", ["12-decies"]),
 ])
 def test_a_named_article_and_code_are_read_out_of_the_question(question, code, nums):
     assert named_code(question) == code
@@ -56,6 +63,21 @@ def test_procedura_civile_is_not_read_as_codice_civile():
 def test_a_named_article_is_looked_up_in_the_named_code_only(index):
     found = index.search("Cosa stabilisce l'art. 27 della Costituzione?", k=1)
     assert found[0]["code"] == "costituzione"
+
+
+def test_a_suffixed_article_retrieves_itself_not_its_plain_sibling():
+    """"art. 12-sexies" was heard as "art. 12", so the model was handed Art.
+    12 for a 12-sexies question. The records spelled all nine suffixes; only
+    the question side stopped at quinquies."""
+    from eullm_forge.eval.retrieval import NormIndex
+
+    records = [
+        rec("codice_penale", "12", "Art. 12. Testo dell'articolo dodici."),
+        rec("codice_penale", "12-sexies", "Art. 12-sexies. Testo del dodici sexies."),
+    ]
+    index = NormIndex(records)
+    found = index.by_article("Che cosa prevede l'art. 12-sexies del codice penale?")
+    assert [r["text"] for r in found] == ["Art. 12-sexies. Testo del dodici sexies."]
 
 
 def test_a_question_without_an_article_goes_to_bm25(index):
