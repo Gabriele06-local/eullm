@@ -78,6 +78,9 @@ while IFS='|' read -r id name state elapsed; do
                 # ends in seconds every time it is run. Neither resumes a
                 # chain, so there is no work for them to have failed to do.
                 eullm-p3-gguf|eullm-probe) ;;
+                # eullm-opd-prompts builds the OPD prompts file and trains
+                # nothing: a few minutes is all it ever takes.
+                eullm-opd-prompts) ;;
                 # eullm-s3-*: stage-3 chains submitted under a name of their
                 # own (-J), one per experiment.
                 eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*|eullm-opd*)
