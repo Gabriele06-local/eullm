@@ -1,0 +1,247 @@
+#!/usr/bin/env python3
+"""Ask an exam through RAG Enterprise's API, as a user would: the product end to end.
+
+    # 1. once: load the LEGAL_PACK's article files into RAG Enterprise
+    RAG_PASSWORD=... python forge/scripts/rag_enterprise_eval.py upload \\
+        --url http://localhost:8000 --user admin --pack legal-pack/articoli
+
+    # 2. per configuration (model, prompt, version): ask every question
+    RAG_PASSWORD=... python forge/scripts/rag_enterprise_eval.py ask \\
+        --url http://localhost:8000 --user admin --label community-qwen3-14b \\
+        --items norm-exam-devbig.jsonl --out answers-community-qwen3-14b.jsonl
+
+    # 3. after judge_answers.py has graded the answers (on Leonardo)
+    python forge/scripts/rag_enterprise_eval.py summary answers-*.graded.jsonl
+
+The models were measured until 2026-10-08 only outside the product, and the
+product was never measured at all: asked in a plain chat with no texts,
+legal-it-8b invented articles. This measures what a user gets, with the
+release thresholds of the LEGAL_PACK (eullm-priv docs/legal-pack-spec.md, §2):
+
+* **precision**: correct answers over answers given (abstentions left out);
+* **coverage**: answers given over questions, on questions about articles
+  that exist;
+* **sources**: answers citing a file that was not among the retrieved
+  sources -- with the pack's one-article-per-file names, a citation outside
+  them is an invented article;
+* **abstention** where the article does not exist (the exam's
+  ``inesistente`` items).
+
+Standard library only, so it runs on the machine RAG Enterprise runs on,
+Windows included. The password comes from ``RAG_PASSWORD``, never the
+command line. ``ask`` appends one line per answer and skips the ids already
+in ``--out``, so an interrupted run carries on. It prints counts only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+from pathlib import Path
+
+ABSTAIN = re.compile(
+    r"non ho trovato|non (?:è|sono) present|non contengono|non dispongo|non risulta|"
+    r"non (?:è|sono) (?:indicat|previst|riportat)[oaie] nei (?:testi|documenti)|"
+    r"nei (?:testi|documenti) (?:forniti|disponibili) non|no relevant information|"
+    r"informazioni rilevanti", re.IGNORECASE)
+_BRACKETS = re.compile(r"\[([^\[\]]{3,200})\]")
+_ART = re.compile(r"\bart(?:icolo|\.)?\s*(\d+(?:[- ]?(?:bis|ter|quater|quinquies|sexies|"
+                  r"septies|octies|novies|decies))?)", re.IGNORECASE)
+
+
+def _norm_number(n: str) -> str:
+    return re.sub(r"[- ]+", "-", n.strip().lower())
+
+
+def abstained(answer: str) -> bool:
+    return bool(ABSTAIN.search(answer or ""))
+
+
+def check_sources(answer: str, sources: list[str]) -> dict:
+    """Which files the answer cites, and whether each is among the sources.
+
+    Two kinds of citation: ``[file name]``, RAG Enterprise's own, which must
+    be one of the retrieved files (with or without ``.txt``); and ``art. N``
+    in the text, whose number must be the article of some retrieved file --
+    the pack's file names carry it ("..., art. 54 - ...").
+    """
+    names = {s.lower().removesuffix(".txt") for s in sources}
+    numbers = set()
+    for s in sources:
+        numbers.update(_norm_number(m) for m in _ART.findall(s))
+    cited = [c.strip() for c in _BRACKETS.findall(answer or "")]
+    bad = [c for c in cited if c.lower().removesuffix(".txt") not in names]
+    arts = sorted({_norm_number(m) for m in _ART.findall(_BRACKETS.sub(" ", answer or ""))})
+    bad_arts = [a for a in arts if a not in numbers]
+    return {"cited_files": cited, "cited_articles": arts,
+            "sources_ok": not bad and not bad_arts,
+            "outside_sources": bad + [f"art. {a}" for a in bad_arts]}
+
+
+class Api:
+    """The few RAG Enterprise endpoints this needs, with a bearer token."""
+
+    def __init__(self, url: str, timeout: float = 600.0):
+        self.url = url.rstrip("/")
+        self.timeout = timeout
+        self.token = ""
+
+    def _call(self, method: str, path: str, body: bytes | None = None,
+              ctype: str = "application/json") -> dict | list:
+        req = urllib.request.Request(self.url + path, data=body, method=method)
+        if body is not None:
+            req.add_header("Content-Type", ctype)
+        if self.token:
+            req.add_header("Authorization", f"Bearer {self.token}")
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                    raw = r.read()
+                    return json.loads(raw) if raw else {}
+            except urllib.error.HTTPError as e:
+                # 503: a document is being ingested and the model is unloaded
+                if e.code == 503 and attempt < 2:
+                    time.sleep(10)
+                    continue
+                raise SystemExit(f"[rag-eval] {method} {path}: HTTP {e.code} "
+                                 f"{e.read()[:200].decode('utf-8', 'replace')}") from None
+        raise SystemExit(f"[rag-eval] {method} {path}: still busy")
+
+    def login(self, user: str, password: str) -> None:
+        r = self._call("POST", "/api/auth/login",
+                       json.dumps({"username": user, "password": password}).encode())
+        self.token = r["access_token"]
+
+    def documents(self) -> list[str]:
+        r = self._call("GET", "/api/documents")
+        rows = r.get("documents", r) if isinstance(r, dict) else r
+        return [d.get("filename") or d.get("name") or "" for d in rows]
+
+    def upload(self, path: Path) -> None:
+        boundary = uuid.uuid4().hex
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                f"filename=\"{path.name}\"\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+                ).encode() + path.read_bytes() + f"\r\n--{boundary}--\r\n".encode()
+        self._call("POST", "/api/documents/upload", body,
+                   f"multipart/form-data; boundary={boundary}")
+
+    def query(self, question: str, top_k: int | None) -> dict:
+        payload = {"query": question}
+        if top_k:
+            payload["top_k"] = top_k
+        return self._call("POST", "/api/query", json.dumps(payload).encode())
+
+
+def _api(args) -> Api:
+    password = os.environ.get("RAG_PASSWORD")
+    if not password:
+        raise SystemExit("[rag-eval] set RAG_PASSWORD (the password is never taken from "
+                         "the command line)")
+    api = Api(args.url)
+    api.login(args.user, password)
+    return api
+
+
+def cmd_upload(args) -> int:
+    api = _api(args)
+    have = {n.lower() for n in api.documents()}
+    files = sorted(p for p in args.pack.glob("*.txt"))
+    todo = [p for p in files if p.name.lower() not in have]
+    print(f"[rag-eval] {len(files):,} article files, {len(files) - len(todo):,} already loaded",
+          flush=True)
+    t0 = time.monotonic()
+    for i, p in enumerate(todo, 1):
+        api.upload(p)
+        if i % 100 == 0 or i == len(todo):
+            print(f"[rag-eval] uploaded {i:,}/{len(todo):,} "
+                  f"({(time.monotonic() - t0) / i:.1f} s each)", flush=True)
+    return 0
+
+
+def cmd_ask(args) -> int:
+    items = [json.loads(ln) for ln in args.items.open(encoding="utf-8") if ln.strip()]
+    if args.limit:
+        items = items[:args.limit]
+    done = set()
+    if args.out.exists():
+        done = {json.loads(ln)["id"] for ln in args.out.open(encoding="utf-8") if ln.strip()}
+    todo = [it for it in items if it["id"] not in done]
+    print(f"[rag-eval] {args.label}: {len(items):,} questions, {len(done):,} already answered",
+          flush=True)
+    api = _api(args)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    t0 = time.monotonic()
+    with args.out.open("a", encoding="utf-8") as f:
+        for i, it in enumerate(todo, 1):
+            r = api.query(it["question"], args.top_k)
+            answer = r.get("answer", "")
+            sources = sorted({s.get("filename", "") for s in r.get("sources", [])})
+            row = {**it, "label": args.label, "answer": answer, "sources": sources,
+                   "abstained": abstained(answer), **check_sources(answer, sources)}
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            f.flush()
+            if i % 25 == 0 or i == len(todo):
+                print(f"[rag-eval] {i:,}/{len(todo):,} ({(time.monotonic() - t0) / i:.1f} s each)",
+                      flush=True)
+    return 0
+
+
+def summarize(rows: list[dict]) -> dict:
+    """The LEGAL_PACK's release figures from graded answers (judge_answers.py output)."""
+    absent = [r for r in rows if (r.get("metadata") or {}).get("tipo") == "inesistente"]
+    real = [r for r in rows if r not in absent]
+    answered = [r for r in real if not r.get("abstained")]
+    correct = [r for r in answered if r.get("grade") == "correct"]
+    return {
+        "questions": len(rows),
+        "coverage": len(answered) / len(real) if real else 0.0,
+        "precision": len(correct) / len(answered) if answered else 0.0,
+        "answered": len(answered), "correct": len(correct),
+        "outside_sources": sum(not r.get("sources_ok", True) for r in rows),
+        "absent_items": len(absent),
+        "absent_abstained": sum(bool(r.get("abstained")) for r in absent),
+    }
+
+
+def cmd_summary(args) -> int:
+    for p in args.graded:
+        rows = [json.loads(ln) for ln in p.open(encoding="utf-8") if ln.strip()]
+        s = summarize(rows)
+        print(f"{p.name}: {s['questions']} questions | precision {s['precision']:.3f} "
+              f"({s['correct']}/{s['answered']} answered) | coverage {s['coverage']:.3f} | "
+              f"citing outside the sources {s['outside_sources']} | "
+              f"absent articles abstained {s['absent_abstained']}/{s['absent_items']}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    for name in ("upload", "ask"):
+        p = sub.add_parser(name)
+        p.add_argument("--url", default="http://localhost:8000")
+        p.add_argument("--user", default="admin")
+    sub.choices["upload"].add_argument("--pack", type=Path, required=True,
+                                       help="the pack's articoli/ folder")
+    a = sub.choices["ask"]
+    a.add_argument("--label", required=True, help="the configuration: model, prompt, version")
+    a.add_argument("--items", type=Path, required=True, help="exam items (EvalItem JSONL)")
+    a.add_argument("--out", type=Path, required=True)
+    a.add_argument("--top-k", type=int, default=0, help="0: RAG Enterprise's own default")
+    a.add_argument("--limit", type=int, default=0)
+    s = sub.add_parser("summary")
+    s.add_argument("graded", nargs="+", type=Path)
+    args = ap.parse_args(argv)
+    return {"upload": cmd_upload, "ask": cmd_ask, "summary": cmd_summary}[args.cmd](args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
