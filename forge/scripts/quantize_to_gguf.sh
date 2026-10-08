@@ -198,6 +198,12 @@ fi
 
 F16_FILE="$OUT_DIR/${GGUF_NAME}-f16.gguf"
 QUANT_FILE="$OUT_DIR/${GGUF_NAME}-${QUANT_TYPE}.gguf"
+# Whether the F16 below is (re)built by this run. The QUANT skip only sees
+# "the file exists", so a fresh F16 beside a Q4 built from an older one
+# would ship the stale file: F16 deleted to save space, HF re-exported,
+# script re-run -- conversion rebuilds F16 from the new export, and the
+# untouched Q4 still describes the old one.
+F16_BUILT=0
 
 # "Already there, skipping" is the right default and also the way a fix
 # silently fails to apply. Re-exporting the HF directory and re-running this
@@ -229,6 +235,7 @@ fi
 if [ -f "$F16_FILE" ]; then
     log "F16 GGUF already at $F16_FILE — skipping conversion"
 else
+    F16_BUILT=1
     rm -f "$F16_FILE.partial"
     log "converting HF → GGUF F16 ($F16_FILE)"
     log "8 GB of tensors through a CPU: this wants the serial partition, not a"
@@ -244,6 +251,13 @@ fi
 # 4. Quantize F16 → Q4_K_M
 # ---------------------------------------------------------------------------
 
+# A Q4 beside a rebuilt F16 is stale by construction: it was quantized from
+# whatever F16 stood here before. Re-quantize rather than reuse it, the same
+# staleness the F16 block above handles against HF. When the F16 is reused,
+# the Q4 beside it derives from exactly that file and the skip below stands.
+if [ "${F16_BUILT}" = 1 ]; then
+    rm -f "$QUANT_FILE"
+fi
 if [ -f "$QUANT_FILE" ]; then
     log "$QUANT_TYPE GGUF already at $QUANT_FILE — skipping quantization"
 else
