@@ -179,8 +179,14 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    MB/s with sixteen (`sbatch_lustre_probe.slurm`). Threads reading the model
    ahead of llama.cpp did not pay: cold, a 132 GiB model loaded in 110 s
    without them and 128 s with 16, since llama.cpp alone reads at 0.7-1.3
-   GB/s. The flag is off by default; the hour lost on the 480B came from
-   something else, looked for in c09's 480B and 671B loads without readers.
+   GB/s. The flag is off by default. The hour lost on the 480B was the file
+   being mapped: watched on a whole node (`sbatch_load_watch.slurm`, 07-10 and
+   08-10-2026), Lustre read it at about 2 GB/s and the VRAM was reserved
+   after 3 minutes, then one thread at 95% of a core copied it to the GPUs at
+   about 90 MB/s, still unfinished after 70 minutes, the page cache stuck near
+   half the RAM. With `--no-mmap` the same model loaded in 151.8 s. c09's
+   `load-nommap` groups measure it on every model before the engine reads a
+   large model into memory by itself.
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 
