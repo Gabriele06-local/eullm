@@ -315,3 +315,44 @@ having work worth running, not by the scheduler.
 - **`crontab` refused, `scrontab: fatal: scrontab is disabled`** — expected,
   neither is available. Use the self-resubmitting job pattern in
   `sbatch_queue_stats.slurm`.
+
+## Inference-engine bench: the prefetch on an A100 (not part of legal-it-4b)
+
+A short check, one job of at most two hours, three GPUs, about 1.5 node hours at
+most (elapsed time is what is billed): does `--moe-prefetch` (patches 0003 and
+0004 of `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches/`) read a long prompt
+faster than plain llama-server, with a model whose experts do not fit the card?
+The reference machine is an RTX 5070 Ti on PCIe 4.0; this is a second GPU
+architecture and a quantization four times larger (Qwen3.8-Flash-Next IQ4_NL,
+96 GiB), the file the llama.cpp maintainers measure. The job also runs all three
+GPUs visible, where the prefetch must switch itself off and the answer stay the
+same.
+
+It runs from its own checkout, so the pipelines running from `$WORK/eullm` are
+not touched. On a login node:
+
+```bash
+# 1. the checkout (own tree, never a pull on $WORK/eullm)
+git clone --branch feat/prefetch-reads-moe-cache https://github.com/eullm/eullm.git "$WORK/eullm-prefetch"
+grep -c "moe-prefetch" "$WORK/eullm-prefetch/forge/scripts/leonardo/sbatch_prefetch_bench.slurm"   # expect >= 1
+
+# 2. space (the model is 96 GiB, the builds a few GB) -- cindata lags by hours
+cindata
+
+# 3. the model, in tmux (no network on compute nodes)
+source "$WORK/eullm-prefetch/forge/scripts/leonardo/env.sh"
+python -c "from huggingface_hub import snapshot_download as d; d('ggml-org/Qwen3.8-Flash-Next-GGUF', allow_patterns=['*IQ4_NL*'], local_dir='$WORK/prefetch-bench/models')"
+
+# 4. the two llama-server binaries (stock, and with the prefetch), built on the login node
+bash "$WORK/eullm-prefetch/forge/scripts/leonardo/build_prefetch_bench.sh"
+
+# 5. the job
+cd "$WORK/eullm-prefetch" && mkdir -p logs && sbatch forge/scripts/leonardo/sbatch_prefetch_bench.slurm
+```
+
+The results are in `$WORK/prefetch-bench/results/<job id>/` and as a table at the
+end of the job's log: per configuration, tokens/s reading a 33,200-token prompt
+and writing, and the hash of two answers (they must match across configurations).
+The expert cache is 16,000 MiB, about a sixth of the experts, as on the reference
+machine. `mmap` is plain llama-server with the page cache; `pinned` is the
+cache with the experts in pinned memory; `prefetch` is the prefetch on top.
