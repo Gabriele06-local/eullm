@@ -260,8 +260,8 @@ The server starts on `http://localhost:11434` with streaming support.
 eullm list
 
 # Pull and run a model
-eullm pull legal-it-4b
-eullm run legal-it-4b
+eullm pull qwen3-4b
+eullm run qwen3-4b
 ```
 
 ### Option C: Start the API server only

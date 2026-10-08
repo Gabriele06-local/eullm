@@ -71,7 +71,7 @@ Load a model and start the API server. Supports local GGUF files and catalog mod
 eullm run ./qwen3-7b-q4_k_m.gguf
 
 # Run a catalog model (auto-downloads from HuggingFace)
-eullm run legal-it-4b
+eullm run qwen3-4b
 
 # With options
 eullm run ./model.gguf --port 8080
@@ -178,8 +178,7 @@ is not waste, it is what the next token's compute buffer is allocated from.
 Download a model from HuggingFace (or the EU registry when available).
 
 ```bash
-eullm pull legal-it-4b
-eullm pull eullm/legal-it-4b     # Full name works too
+eullm pull qwen3-4b
 ```
 
 The model is stored in `~/.eullm/models/<model>/` with a GGUF file and manifest.
@@ -203,7 +202,7 @@ eullm list
 Display detailed information about a model (local or from catalog).
 
 ```bash
-eullm show legal-it-4b
+eullm show qwen3-4b
 ```
 
 ### `eullm serve [--port PORT]`
@@ -1965,8 +1964,8 @@ made, stored next to its trace when decision traces are on. See
 
 ## Model Catalog
 
-The engine ships with a catalog of 27 open models (Qwen, Mistral, DeepSeek,
-Gemma and others, among them EuLLM's own `legal-it-4b` and `legal-it-8b`),
+The engine ships with a catalog of 25 open models (Qwen, Mistral, DeepSeek,
+Gemma and others),
 downloaded from Hugging Face by `eullm pull NAME`. `eullm list` shows them, and
 the chat UI's model browser says whether each fits your hardware and under
 which licence it comes. 24 are Apache 2.0 or MIT; two Gemma models come under

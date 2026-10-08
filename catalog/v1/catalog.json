@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "updated_at": "2026-10-05",
-  "notes": "Catalog of permissively-licensed open-weight models, curated June 2026. Each entry's hf_repo + hf_filename has been HEAD-verified on huggingface.co at the time of update. unsloth/* is the preferred GGUF source (dynamic-quant, kept current); bartowski/* is the fallback when an unsloth repo is gated or absent. Models older than the listed entries (Qwen3-72B which never shipped, Mixtral-8x7B v1, Mistral-7B-v0.3, Mistral-Small-22B-2409, granite-3.1) were removed as either non-existent, gated, or superseded by the entries below. SHA256 digests are the HuggingFace LFS object id of the exact file, which is the sha256 of its contents — no download is needed to fill one in. The engine treats an empty digest as 'skip verification with a warning', so an entry can ship without one, but every entry currently has one. EuLLM/* are this project's own verticals, published from the Forge pipeline; their digests were checked against the files on huggingface.co on 2026-10-05.",
+  "updated_at": "2026-10-08",
+  "notes": "Catalog of permissively-licensed open-weight models, curated June 2026. Each entry's hf_repo + hf_filename has been HEAD-verified on huggingface.co at the time of update. unsloth/* is the preferred GGUF source (dynamic-quant, kept current); bartowski/* is the fallback when an unsloth repo is gated or absent. Models older than the listed entries (Qwen3-72B which never shipped, Mixtral-8x7B v1, Mistral-7B-v0.3, Mistral-Small-22B-2409, granite-3.1) were removed as either non-existent, gated, or superseded by the entries below. SHA256 digests are the HuggingFace LFS object id of the exact file, which is the sha256 of its contents — no download is needed to fill one in. The engine treats an empty digest as 'skip verification with a warning', so an entry can ship without one, but every entry currently has one. EuLLM/legal-it-4b and legal-it-8b were removed on 2026-10-08: they answer from the legal texts placed in the prompt, and in a plain chat with no texts they invent articles and confirm false premises. They come back when the engine supplies the texts.",
   "models": [
     {
       "id": "qwen3-0.6b",
@@ -162,31 +162,6 @@
       "recommended": true
     },
     {
-      "id": "legal-it-4b",
-      "name": "EuLLM legal-it 4B",
-      "description": "EuLLM vertical for Italian law, fine-tuned from Qwen3-4B-Instruct-2507. Open book: answers from the legal texts placed in the prompt, so use it with retrieval over the legislation (see the model card). 85.1% correct on 429 held-out questions.",
-      "params_b": 4.0,
-      "quantization": "Q4_K_M",
-      "size_bytes": 2497278752,
-      "vram_gb": 4,
-      "languages": [
-        "it"
-      ],
-      "domain": "legal",
-      "license": "Apache-2.0",
-      "tags": [
-        "instruct",
-        "legal",
-        "italian",
-        "rag",
-        "eullm"
-      ],
-      "hf_repo": "EuLLM/legal-it-4b",
-      "hf_filename": "legal-it-4b-Q4_K_M.gguf",
-      "digest": "sha256:877ca41ce029a4c264bfcd39e87e35cb8ab253d5fde130ab6eb5b6b5e9daebc6",
-      "recommended": false
-    },
-    {
       "id": "spark-x2.5-4b",
       "name": "Spark-X2.5 4B",
       "description": "Hybrid attention with a 1M-token native context, tuned for tool use and agent harnesses. Strong coding for its size, in ~2.6 GB.",
@@ -295,31 +270,6 @@
       "hf_repo": "unsloth/Qwen3-8B-GGUF",
       "hf_filename": "Qwen3-8B-Q4_K_M.gguf",
       "digest": "sha256:120307ba529eb2439d6c430d94104dabd578497bc7bfe7e322b5d9933b449bd4",
-      "recommended": false
-    },
-    {
-      "id": "legal-it-8b",
-      "name": "EuLLM legal-it 8B",
-      "description": "EuLLM vertical for Italian law, fine-tuned from Ministral-3-8B-Instruct-2512. Open book: answers from the legal texts placed in the prompt, so use it with retrieval over the legislation (see the model card). 89.0% correct on 429 held-out questions.",
-      "params_b": 8.0,
-      "quantization": "Q4_K_M",
-      "size_bytes": 5198390496,
-      "vram_gb": 8,
-      "languages": [
-        "it"
-      ],
-      "domain": "legal",
-      "license": "Apache-2.0",
-      "tags": [
-        "instruct",
-        "legal",
-        "italian",
-        "rag",
-        "eullm"
-      ],
-      "hf_repo": "EuLLM/legal-it-8b",
-      "hf_filename": "legal-it-8b-Q4_K_M.gguf",
-      "digest": "sha256:61a5a477990e5fa15f2a83d520f2df8b03807e5f4f7ea3b794f480e5d8470fa0",
       "recommended": false
     },
     {
