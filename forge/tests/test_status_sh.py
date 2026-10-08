@@ -168,6 +168,32 @@ def test_a_named_stage3_link_that_did_nothing_is_flagged(tmp_path, runs):
     assert "61 eullm-s3-q35-9b-v04 ended COMPLETED after only 00:03:00" in out
 
 
+def test_an_opd_link_is_watched_like_the_other_training_links(tmp_path):
+    """OPD is the third training chain with the same two short endings, and
+    the watchdog knew neither: eullm-opd* was not among the names checked,
+    and the training-finished escape only matched the stage-3/grpo prefixes.
+    A 21-second link that did nothing was silently counted; a link that saved
+    the adapter or found nothing left would have been flagged next, once the
+    name was added without the prefix.
+    """
+    opd = tmp_path / "runs" / "opd" / "logs"
+    opd.mkdir(parents=True)
+    (opd / "eullm-opd-11.out").write_text(
+        "[opd] resuming at step 40\n"
+        "[opd] adapter /w/eullm_runs/opd/v01/adapter\n")
+    (opd / "eullm-opd-12.out").write_text(
+        "[opd] adapter already at /w/eullm_runs/opd/v01/adapter: nothing left to do\n")
+    (opd / "eullm-opd-13.out").write_text(
+        "[opd] resuming at step 0\nTraceback (most recent call last):\n")
+    out = run_status(tmp_path, queue=[],
+                     ended=[("11", "eullm-opd", "COMPLETED", "00:04:31"),
+                            ("12", "eullm-opd", "COMPLETED", "00:00:12"),
+                            ("13", "eullm-opd", "COMPLETED", "00:00:21")])
+    assert "11 eullm-opd: ended in 00:04:31, training finished (fine)" in out
+    assert "12 eullm-opd: ended in 00:00:12 with nothing left to do" in out
+    assert "13 eullm-opd ended COMPLETED after only 00:00:21" in out
+
+
 def test_jobs_that_are_short_on_purpose_are_not_stalled_links(tmp_path, runs):
     """Two jobs the eullm-p* glob took, and both are short on purpose.
 

@@ -78,9 +78,12 @@ while IFS='|' read -r id name state elapsed; do
                 # ends in seconds every time it is run. Neither resumes a
                 # chain, so there is no work for them to have failed to do.
                 eullm-p3-gguf|eullm-probe) ;;
+                # eullm-opd-prompts builds the OPD prompts file and trains
+                # nothing: a few minutes is all it ever takes.
+                eullm-opd-prompts) ;;
                 # eullm-s3-*: stage-3 chains submitted under a name of their
                 # own (-J), one per experiment.
-                eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*)
+                eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*|eullm-opd*)
                     if [ "$(secs "$elapsed")" -lt 600 ]; then
                         # The last link of a chain finds nothing left and
                         # exits in seconds, which is correct. So does a
@@ -90,11 +93,12 @@ while IFS='|' read -r id name state elapsed; do
                         # grpo_train.py prints the same line with its own
                         # prefix when it saves, so a GRPO link that resumed
                         # at the last step is the same case and was flagged
-                        # as one that did no work.
+                        # as one that did no work. opd_train.py is the third
+                        # of the shape: its save line wears the [opd] prefix.
                         log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
                         if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
                             echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
-                        elif [ -n "$log" ] && grep -qE "^\[(stage3|grpo)\] adapter /" "$log"; then
+                        elif [ -n "$log" ] && grep -qE "^\[(stage3|grpo|opd)\] adapter /" "$log"; then
                             echo "   $id $name: ended in $elapsed, training finished (fine)"
                         else
                             flag "$id $name ended $state after only $elapsed — a link that short did no work"
