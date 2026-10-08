@@ -37,6 +37,15 @@ use super::{GenerateRequest, random_seed_fallback};
 /// The grammar sampler must see the full distribution before anything has
 /// truncated it, and `dist` must be last because it is what actually draws the
 /// token; anything after it would have no effect.
+///
+/// The chain is used through `LlamaSampler::sample`, which draws the token
+/// *and accepts it*: when it returns, every sampler with a history (the
+/// penalties' window, the grammar's parse state) has already taken the token.
+/// Never call `accept` after `sample`. Every caller used to, so each token was
+/// taken twice: the repeat penalty counted it twice over half its window, and
+/// with a grammar (`format: "json"`) the second `{` left the grammar nowhere
+/// to go and llama.cpp aborted the whole server (`GGML_ASSERT(!stacks.empty())`
+/// in llama-grammar.cpp, found 08-10-2026).
 pub(crate) fn build_sampler(
     model: &LlamaModel,
     request: &GenerateRequest,

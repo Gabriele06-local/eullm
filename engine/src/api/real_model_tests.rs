@@ -262,6 +262,30 @@ async fn real_model_keep_alive_zero_with_a_prompt_answers_then_unloads() {
     }
 }
 
+/// `format: "json"` constrains the answer with a grammar. Every token used to
+/// reach the sampler chain twice (`sample` accepts the token it draws, and
+/// the scheduler accepted it again), so the grammar advanced twice per token
+/// and llama.cpp aborted the whole server on the first one:
+/// `GGML_ASSERT(!stacks.empty())`. The answer is JSON now, finished or cut
+/// short, and the server answers the next request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_a_json_answer_keeps_the_server_up() {
+    let server = start(&["tiny-a"], |state| state.batch_size = 2).await;
+    for stream in [false, true] {
+        let (status, lines) = server
+            .generate(json!({
+                "model": "tiny-a", "prompt": "Once upon a time", "format": "json",
+                "stream": stream, "options": { "num_predict": 32, "temperature": 0 },
+            }))
+            .await;
+        assert_eq!(status, 200, "{lines:?}");
+        assert_finished(&lines);
+        let text = answer(&lines);
+        assert!(text.trim_start().starts_with('{'), "not JSON: {text:?}");
+    }
+}
+
 /// keep_alive counts from the end of the answer. It used to count from its
 /// start, so an answer longer than keep_alive lost its model halfway: the
 /// idle-unload loop shut the scheduler down under it. A short request that
