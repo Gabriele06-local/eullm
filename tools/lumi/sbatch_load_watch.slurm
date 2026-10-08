@@ -52,7 +52,10 @@ cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup | head -1)/memory.max" 2>/dev
     sed 's/^/  cgroup memory.max /'
 # The Lustre client's own cap on cached file data: a model larger than what is
 # left of it is evicted by Lustre while it is still being loaded.
-lctl get_param llite.*.max_cached_mb 2>/dev/null | grep -E "max_cached_mb|users|used_mb" | sed 's/^/  /'
+# lctl is not on a compute node's PATH; the same file is readable under /proc.
+{ lctl get_param -n llite.*.max_cached_mb 2>/dev/null || /usr/sbin/lctl get_param -n llite.*.max_cached_mb 2>/dev/null ||
+    cat /proc/fs/lustre/llite/*/max_cached_mb /sys/fs/lustre/llite/*/max_cached_mb 2>/dev/null; } |
+    grep -E "max_cached_mb|used_mb" | sed 's/^/  lustre /'
 echo
 
 "$EULLM_BIN" serve --port "$PORT" --batch-size 1 --ctx-size 4096 --fit-strict \
