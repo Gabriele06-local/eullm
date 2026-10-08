@@ -19,15 +19,21 @@ PARAMS = ("model", "runtime", "gcds", "replicas", "batch", "concurrency", "slot_
           "trial", "round")
 
 # What each kind is read by: (column in summary.csv, heading).
+# Every kind that runs on the GPUs also shows the most VRAM a device held and
+# how busy the devices were: a server that silently ran on the CPU, or shared
+# its GCD with a stranger, shows there before anywhere else.
+DEVICE = (("vram_peak_mib_max", "vram MiB"), ("use_mean", "use%"),
+          ("neighbours_at_start", "neigh"))
 METRICS = {
     "throughput": (("agg_tok_s_mean", "tok/s"), ("agg_tok_s_cv_pct", "cv%"),
                    ("decode_tok_s", "decode"), ("prefill_tok_s", "prefill"),
-                   ("ttft_ms_p50", "ttft ms"), ("load_wall_s", "load s")),
+                   ("ttft_ms_p50", "ttft ms"), ("load_wall_s", "load s")) + DEVICE,
     "workload": (("accuracy", "accuracy"), ("agg_tok_s_mean", "tok/s"),
-                 ("consistency", "consist"), ("requests", "requests")),
+                 ("consistency", "consist"), ("requests", "requests"),
+                 ("duration_s", "dur s")) + DEVICE,
     "decision": (("dec_per_s", "dec/s"), ("dec_client_ms_p50", "p50 ms"),
                  ("dec_client_ms_p99", "p99 ms"), ("dec_wait_ms_p50", "wait ms"),
-                 ("dec_decode_ms_p50", "decode ms"), ("dec_consistency", "consist")),
+                 ("dec_decode_ms_p50", "decode ms"), ("dec_consistency", "consist")) + DEVICE,
     "finetune": (("ft_loss_before", "loss0"), ("ft_loss_after", "loss1"),
                  ("ft_tok_s", "tok/s")),
 }
