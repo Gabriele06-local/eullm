@@ -127,8 +127,15 @@ def compare(reference, candidate, tokenizer, texts: list[str], seq_len: int) -> 
 
         ref_top5 = ref.topk(5, dim=-1).indices
         cand_top1 = cand.argmax(dim=-1)
+        # The reference top-1 kept in the candidate's top-5 -- the direction
+        # the docstring promises ("the quantized model's top-5 set match[ing]
+        # the reference"). The reverse -- the candidate's top-1 inside the
+        # reference top-5 -- scores 1.0 for a candidate that demoted the true
+        # token to rank 6 on every position, so the >= 0.99 check could never
+        # fire on exactly the demotion it exists to catch.
+        cand_top5 = cand.topk(5, dim=-1).indices
         top1_hits += int((cand_top1 == ref_top5[:, 0]).sum())
-        top5_hits += int((cand_top1.unsqueeze(-1) == ref_top5).any(dim=-1).sum())
+        top5_hits += int((ref_top5[:, 0].unsqueeze(-1) == cand_top5).any(dim=-1).sum())
         positions += ref.shape[0]
 
         if i % 25 == 0:
