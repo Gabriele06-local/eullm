@@ -222,20 +222,17 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - **Writing 1.5 tokens/s slower** (54.8 → 53.3) in both orders, with no share for the order. Nothing of this change runs while an answer is written: a decode step stages no expert. One guess is the GPU's clock after a prompt read harder, the speed_check's writing following its long questions; a writing test on a server that has read no long prompt yet tells.
 - What is left for reading: fewer, larger copies over the bus, or the larger micro-batch with the cache's VRAM lent while a prompt is read (Strata §3.5), the larger change of the two.
 
-**Against a stock llama-server, 8 October** (`bench/llama_server_compare.sh`): the same pin (b86d2f0) built twice with CUDA, once as it is and once with `0003` and `0004` and a `--moe-prefetch` flag in `common/arg.cpp`; Qwen3.8-Flash-Next IQ2_XS, `--cpu-moe --moe-cache-mib 5500 --load-mode none -ub 2048`, the 33,200-token prompt, the three variants run in both orders, all giving the same answer (68b329da).
+**Against a stock llama-server, 8 October** (`bench/llama_server_compare.sh`): the same pin (b86d2f0) built twice with CUDA, once as it is and once with `0003` and `0004` and a `--moe-prefetch` flag in `common/arg.cpp`; Qwen3.8-Flash-Next IQ2_XS, `--cpu-moe --moe-cache-mib 5500 --load-mode none -ub 2048`, the 33,200-token prompt. Six rounds, the three variants in a rotated order in each (every variant twice in each position), 18 servers, every one giving the same answer (68b329da). The first round ran with the desktop on the GPU; from the second a second card drives it.
 
-| order | variant | read tokens/s | write tokens/s |
-|---|---|---|---|
-| stock first | stock | 999.0 | 53.1 |
-| | `0003` (copies over the bus) | 1,299.2 | 48.5 |
-| | `0003` + `0004` (6% from VRAM) | 1,468.9 | 52.3 |
-| patched first | `0003` + `0004` | 1,292.6 | 47.9 |
-| | `0003` | 1,323.6 | 47.8 |
-| | stock | 953.1 | 49.9 |
+| variant | read tokens/s (mean, sd, range) | write tokens/s (mean, sd) |
+|---|---|---|
+| stock | 1,010.7, 28.2, 950-1,031 | 52.6, 1.8 |
+| `0003` (every expert over the bus) | 1,387.9, 8.3, 1,379-1,398 | 53.6, 0.4 |
+| `0003` + `0004` (6% of the bytes from VRAM) | 1,544.8, 8.0, 1,534-1,557 | 53.4, 0.3 |
 
-- **The prefetch reads a long prompt 30-39% faster than stock** (1,299 against 999; 1,324 against 953), the answers the same.
-- **`0004` is not settled here:** +13% in one order, −2% in the other, with 6% of the bytes from VRAM (17% in EuLLM, whose cache is sized by `--fit`). Its gain is a few percent at most with a cache this size, and the run-to-run spread is as large.
-- **Writing 2-5 tokens/s slower with the patches** in four of the five runs, 53.1 → 48.5 and 49.9 → 47.8; the stock server's own two runs differ by 3. Nothing of the patches runs while an answer is written; to be checked before it is claimed either way.
+- **The prefetch reads a long prompt 37% faster than stock** (1,010.7 → 1,387.9), in every round and every order.
+- **`0004` adds 11%** (1,387.9 → 1,544.8) with only 6% of the bytes taken from VRAM at this cache size, in every round.
+- **Writing is the same** in the three (the spread is larger than the differences): the dip seen in the first pass was noise.
 
 ## 3. Upstream
 
