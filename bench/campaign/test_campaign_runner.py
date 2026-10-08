@@ -122,6 +122,10 @@ def test_runner_drains_a_campaign(tmp_path, engine, capsys):
     # What the engine was asked to do is in the row: the --load-threads of a
     # c09 point, the --fit-strict of the shipped specs.
     assert "extra_args" in rows[0] and "load_storage" in rows[0]
+    capsys.readouterr()
+    assert campaign.main(["report", "--queue", qdir]) == 0
+    text = capsys.readouterr().out
+    assert "=== c-e2e / one (throughput," in text and "tok/s" in text
 
 
 def test_workload_stretches_to_the_time_it_is_given(tmp_path, engine):

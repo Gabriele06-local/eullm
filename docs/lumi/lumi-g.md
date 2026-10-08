@@ -146,7 +146,11 @@ recorded in the final report and remembered at the next call.
 
 The practical consequence is a two-track plan. Single-GCD work on `small-g` and
 `dev-g` costs 0.125 node-hours per hour and is where iteration belongs; it will
-never consume the allocation. Full-node `standard-g` campaigns are what actually
+never consume the allocation. `dev-g` is for debugging and quick tests only,
+one job at a time: LUMI reminded every user on 08-10-2026 that production runs
+there are terminated without warning and repeated misuse can suspend the
+account. Here that means the smoke test and checks of minutes; anything that
+measures, however small, goes to `small-g`. Full-node `standard-g` campaigns are what actually
 spends it, and they have to be queued deliberately rather than as an
 afterthought. The work packages, budget and month-by-month calendar are in
 [`allocation-plan.md`](allocation-plan.md).

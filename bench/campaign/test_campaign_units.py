@@ -394,3 +394,32 @@ def test_a_cold_point_drops_every_part_of_its_model_from_the_page_cache(tmp_path
     ctx.model_seen.add("m")
     assert point.cache_state({"model": "m"}, ctx) == "warm"
     assert point.cache_state({"model": "m", "cold": True}, ctx) == "evicted"
+
+
+def test_the_report_puts_what_a_group_varies_beside_what_it_measured():
+    import report
+
+    rows = [
+        {"campaign": "c06", "group": "mtp", "kind": "throughput", "outcome": "measured",
+         "model": "m", "batch": "1", "extra_args": "--fit-strict", "agg_tok_s_mean": "100"},
+        {"campaign": "c06", "group": "mtp", "kind": "throughput", "outcome": "measured",
+         "model": "m", "batch": "1", "extra_args": "--fit-strict --mtp 2",
+         "agg_tok_s_mean": "130"},
+        {"campaign": "c06", "group": "mtp", "kind": "throughput", "outcome": "measured",
+         "model": "m", "batch": "1", "extra_args": "--fit-strict --mtp 2",
+         "agg_tok_s_mean": "134"},
+        {"campaign": "c06", "group": "mtp", "kind": "throughput", "outcome": "does-not-fit",
+         "model": "m", "batch": "1", "extra_args": "--fit-strict --mtp 3"},
+        {"campaign": "c08", "group": "dec", "kind": "decision", "outcome": "measured",
+         "model": "jev", "concurrency": "4", "dec_per_s": "12.5"},
+    ]
+    text = report.report(rows, {("c06", "mtp"): 2}, {"c06"})
+    assert "=== c06 / mtp (throughput, 3 measured) ===" in text
+    lines = text.splitlines()
+    head = next(line for line in lines if "tok/s" in line)
+    assert head.split()[0] == "extra_args"  # model and batch do not vary
+    assert any("--mtp 2" in line and "132" in line and line.rstrip().endswith("2")
+               for line in lines)  # the two results averaged, counted
+    assert any("(none)" in line and "100" in line for line in lines)
+    assert "not measured: does-not-fit 1, failed 2" in text
+    assert "c08" not in text
