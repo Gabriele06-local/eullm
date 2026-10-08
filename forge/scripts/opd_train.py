@@ -20,6 +20,15 @@ vocabulary (checked on 2026-10-06). The student's own weights can teach it
 too (self-distillation), but the pilot of 2026-10-06 showed why not to: its
 KL stayed at 0.04 for 60 steps, with nothing to learn.
 
+``--anchor-statutes`` gives the statute rows (make_opd_prompts.py's
+``--mix``) a teacher of their own: the student before the run, its adapter
+switched off, so they cost no memory. With the case-law teacher on them too,
+the 4B pilot of 2026-10-06 fell from the published model's answers on the
+472-question statute exam, 15 against 71 where only one of the two was right:
+Qwen3-30B-A3B answers statutes its own way, and the student had been trained
+past that. The rows were meant to hold what the model already does; only
+the model itself can.
+
 ``--teacher-note`` goes into the teacher's prompt only. Without one, the
 4B pilot of 2026-10-06 learnt to write 2.3 times longer: the teacher, with
 the whole ruling in front of it, always has more to say, and the student's
@@ -118,6 +127,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--teacher-note", default="",
                     help="text added to the teacher's prompt only, e.g. how long to answer: "
                          "the teacher holds the source and, unprompted, never stops writing")
+    ap.add_argument("--anchor-statutes", action="store_true",
+                    help="statute rows are taught by the student itself as it was before the "
+                         "run (its adapter off), not by --teacher: what it already does on "
+                         "statutes is held in place")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -222,11 +235,16 @@ def main(argv: list[str] | None = None) -> int:
 
         student.train()
         total, n = 0.0, 0
-        for sp, tp, ans in zip(s_prompts, t_prompts, answers):
+        for r, sp, tp, ans in zip(batch, s_prompts, t_prompts, answers):
             if not ans:
                 continue
             with torch.no_grad():
-                t_logits = answer_logits(teacher, tp, ans, tdev).to(sdev)
+                if args.anchor_statutes and r.get("kind") == "statute":
+                    # the student as it was before this run: its adapter off
+                    with student.disable_adapter():
+                        t_logits = answer_logits(student, sp, ans, sdev)
+                else:
+                    t_logits = answer_logits(teacher, tp, ans, tdev).to(sdev)
             s_logits = answer_logits(student, sp, ans, sdev)
             loss = reverse_kl(s_logits, t_logits)
             if not math.isfinite(loss.item()):
