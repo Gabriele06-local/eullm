@@ -34,6 +34,9 @@ set -uo pipefail
 source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh"
 : "${EULLM_BIN:?set EULLM_BIN to the ROCm eullm binary}"
 : "${LLAMA_SERVER_BIN:?set LLAMA_SERVER_BIN (install_runtimes.sh builds it)}"
+for bin in "$EULLM_BIN" "$LLAMA_SERVER_BIN"; do
+    [ -x "$bin" ] || { echo "[err] $bin is not there: build it first"; exit 1; }
+done
 
 MODEL="${1:-qwen3-8b}"
 shift || true
@@ -52,9 +55,10 @@ echo "  llama-server $("$LLAMA_SERVER_BIN" --version 2>&1 | grep -m1 version)"
 echo "  gguf         $GGUF"
 echo
 
-wait_ready() {  # PATH: up to five minutes for the server to answer on it
+wait_ready() {  # PATH PID: up to five minutes for the server to answer, while it lives
     for _ in $(seq 1 300); do
         curl -sf "localhost:$PORT$1" >/dev/null 2>&1 && return 0
+        kill -0 "$2" 2>/dev/null || return 1
         sleep 1
     done
     return 1
@@ -74,7 +78,7 @@ for n in "${LEVELS[@]}"; do
         "$EULLM_BIN" serve --port "$PORT" --batch-size "$n" --ctx-size "$ctx" \
         --cache-type-k f16 --cache-type-v f16 >"$OUT.eullm-$n.log" 2>&1 &
     server=$!
-    if wait_ready /api/version; then
+    if wait_ready /api/version "$server"; then
         $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label eullm \
             --concurrency "$n" --profiles none,ollama,llama,greedy
     else
@@ -87,7 +91,7 @@ for n in "${LEVELS[@]}"; do
     "$LLAMA_SERVER_BIN" --host 127.0.0.1 --port "$PORT" -m "$GGUF" --alias "$MODEL" \
         -c "$ctx" -np "$n" -ngl 999 -ctk f16 -ctv f16 >"$OUT.llama-$n.log" 2>&1 &
     server=$!
-    if wait_ready /health; then
+    if wait_ready /health "$server"; then
         $PROBE --url "http://127.0.0.1:$PORT" --api llama --model "$MODEL" --label llama-server \
             --concurrency "$n" --profiles none,ollama,llama,greedy
     else
