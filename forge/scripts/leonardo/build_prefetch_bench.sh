@@ -6,8 +6,10 @@
 #
 #   bash forge/scripts/leonardo/build_prefetch_bench.sh
 #
-# Everything goes under $WORK/prefetch-bench: src (the checkout), stock/ and patched/
-# (worktrees, each with build/bin/llama-server), modules.txt (what they were built with).
+# Everything goes under $BENCH_ROOT (default: the project's fast scratch, /leonardo_scratch/fast/<project>/
+# prefetch-bench, NOT $WORK, which is nearly full and holds the pipelines' checkpoints; scratch is purged,
+# which suits a bench): src (the checkout), stock/ and patched/ (worktrees, each with
+# build/bin/llama-server), models/, results/, modules.txt (what the binaries were built with).
 # It builds for the A100 (sm_80) and loads the modules docs/cineca/leonardo.md found to
 # work: gcc/12.2.0, because the system gcc 8.5 breaks std::filesystem, and cuda/12.2.
 # Idempotent: a checkout and a binary that exist are kept.
@@ -19,7 +21,7 @@ set -euo pipefail
 : "${WORK:?WORK is not set: run this on Leonardo}"
 BENCH_REPO="${BENCH_REPO:-$WORK/eullm-prefetch}"
 PIN="${PIN:-b86d2f0}"
-ROOT="$WORK/prefetch-bench"
+ROOT="${BENCH_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/prefetch-bench}"
 PATCHES="$BENCH_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/patches"
 FLAG_PATCH="$BENCH_REPO/bench/llama-server-moe-prefetch-flag.patch"
 MODULES="${LCPP_MODULES:-gcc/12.2.0 cuda/12.2}"

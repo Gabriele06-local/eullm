@@ -6,10 +6,11 @@
 # the answer unchanged (the case a similar open llama.cpp PR gets wrong).
 #
 # Model: ggml-org/Qwen3.8-Flash-Next-GGUF IQ4_NL, 96 GiB, the file the maintainers measure.
-# Prepare it and the binaries on a login node first (see docs/leonardo-runbook.md,
-# "Inference-engine bench"):
+# Prepare it and the binaries on a login node first: prepare_prefetch_bench.sh does the model, the
+# binaries and this submission in one go (docs/leonardo-runbook.md, "Inference-engine bench").
+# BENCH_ROOT defaults to the project's fast scratch, not $WORK (nearly full).
 #   bash forge/scripts/leonardo/build_prefetch_bench.sh
-#   source forge/scripts/leonardo/env.sh && python -c "from huggingface_hub import snapshot_download as d; d('ggml-org/Qwen3.8-Flash-Next-GGUF', allow_patterns=['*IQ4_NL*'], local_dir='$WORK/prefetch-bench/models')"
+#   source forge/scripts/leonardo/env.sh && python -c "from huggingface_hub import snapshot_download as d; d('ggml-org/Qwen3.8-Flash-Next-GGUF', allow_patterns=['*IQ4_NL*'], local_dir='$BENCH_ROOT/models')"
 #
 # Submit from $WORK/eullm-prefetch (the branch with these files), account from env.sh:
 #   cd $WORK/eullm-prefetch && sbatch forge/scripts/leonardo/sbatch_prefetch_bench.slurm
@@ -19,7 +20,7 @@
 # Elapsed time is what is billed: about 1.5 node hours at most. A variant that cannot finish
 # before the limit is skipped, and what ran is in the log, one line per run.
 #
-# Results: $WORK/prefetch-bench/results/<job id>/, and the table at the end of the log.
+# Results: $BENCH_ROOT/results/<job id>/, and the table at the end of the log.
 #
 #SBATCH --job-name=eullm-prefetch-bench
 #SBATCH --partition=boost_usr_prod
@@ -37,7 +38,7 @@ BENCH_REPO="${BENCH_REPO:-$WORK/eullm-prefetch}"
 # shellcheck disable=SC1091
 source "$BENCH_REPO/forge/scripts/leonardo/env.sh"
 
-ROOT="$WORK/prefetch-bench"
+ROOT="${BENCH_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/prefetch-bench}"
 MODEL="${MODEL:-$ROOT/models/Qwen3.8-Flash-Next-IQ4_NL-00001-of-00002.gguf}"
 CACHE_MIB="${CACHE_MIB:-16000}"
 BUDGET=$((2 * 3600 - 600))   # seconds; the last ten minutes are left for the log
