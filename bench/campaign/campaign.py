@@ -795,20 +795,43 @@ def row_of(r: dict) -> dict:
     return row
 
 
-def cmd_collect(args):
-    results = args.results or os.path.join(args.queue, "results")
+def result_rows(results: str) -> list:
+    """A summary row for every result kept under `results` (failed ones,
+    in `<campaign>/failed/`, are not results)."""
     rows = []
     for path in sorted(glob.glob(os.path.join(results, "*", "*.json"))):
         with open(path) as f:
             r = json.load(f)
         if r.get("schema") == SCHEMA:
             rows.append(row_of(r))
+    return rows
+
+
+def cmd_collect(args):
+    results = args.results or os.path.join(args.queue, "results")
+    rows = result_rows(results)
     out = args.out or os.path.join(results, "summary.csv")
     with open(out, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
         w.writerows(rows)
     print(f"{len(rows)} results → {out}")
+    return 0
+
+
+def cmd_report(args):
+    """One table per group of what was measured (report.py)."""
+    import report
+
+    results = args.results or os.path.join(args.queue, "results")
+    failed = {}
+    # The points still failed in the queue, by group: a failed result file
+    # stays behind after a retry that succeeds.
+    for pid in Queue(args.queue).ids("failed"):
+        p = Queue(args.queue).load("failed", pid)
+        key = (p.get("campaign"), p.get("group"))
+        failed[key] = failed.get(key, 0) + 1
+    print(report.report(result_rows(results), failed, set(args.campaign or []) or None))
     return 0
 
 
@@ -884,6 +907,10 @@ def main(argv=None):
     p = with_queue(sub.add_parser("retry"))
     p.add_argument("--group", help="only points whose id starts with this, e.g. moe-671b")
 
+    p = with_queue(sub.add_parser("report"))
+    p.add_argument("--results")
+    p.add_argument("--campaign", action="append",
+                   help="only this campaign (repeatable), e.g. c06-mtp")
     p = with_queue(sub.add_parser("collect"))
     p.add_argument("--results")
     p.add_argument("--out")
@@ -898,7 +925,7 @@ def main(argv=None):
     args = ap.parse_args(argv)
     commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,
                 "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock, "retry": cmd_retry,
-                "collect": cmd_collect, "budget": cmd_budget}
+                "collect": cmd_collect, "report": cmd_report, "budget": cmd_budget}
     if args.cmd not in commands:
         ap.print_help()
         return 2

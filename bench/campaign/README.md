@@ -136,7 +136,11 @@ version, devices, cores, how many other points shared the node), load time
 Each job also leaves `<job>.summary.json` — the share of the job each GCD had
 a point, which is the node-usage evidence for the final report — and
 `<job>.node.jsonl`, the raw device samples. `campaign.py collect` flattens
-everything into `results/summary.csv`.
+everything into `results/summary.csv`, and `campaign.py report [--campaign
+c06-mtp]` prints a table per group: the parameters the group varies, the
+metrics that fit its kind (tok/s, accuracy, decisions/s and latencies...)
+averaged over the results of a configuration, and how many points failed or
+did not fit.
 
 ## Tests
 
