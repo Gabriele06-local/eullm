@@ -130,11 +130,18 @@ measure() {
 # stale base perplexity does not look wrong: it produces a plausible delta
 # against a corpus it was never measured on, and nothing downstream can tell.
 # The corpus is keyed by size as well as name, so regenerating it with a
-# different seed invalidates the entry rather than silently reusing it.
+# different seed invalidates the entry rather than silently reusing it. The
+# base is keyed by name, size AND mtime -- the same name:size:mtime shape
+# files_fingerprint() uses for its own cache. Name alone reuses a stale
+# number after the base file is rewritten in place (re-quantized to the same
+# path, the documented way to build it), and a same-size rewrite would slip
+# past a size-only key too, since same-shape tensors quantize to the same
+# byte count. A touch without a rewrite invalidates as well -- one needless
+# twenty-minute re-measurement, in the safe direction.
 cache_key() {
-    printf '%s|%s|%s|%s|%s' \
-        "$(basename "$BASE")" "$(basename "$CORPUS")" \
-        "$(wc -c < "$CORPUS" | tr -d ' ')" "$CHUNKS" "$CTX"
+    printf '%s|%s|%s|%s|%s|%s|%s' \
+        "$(basename "$BASE")" "$(wc -c < "$BASE" | tr -d ' ')" "$(stat -c %Y "$BASE")" \
+        "$(basename "$CORPUS")" "$(wc -c < "$CORPUS" | tr -d ' ')" "$CHUNKS" "$CTX"
 }
 
 ppl_base=""
