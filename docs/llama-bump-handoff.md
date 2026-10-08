@@ -23,3 +23,12 @@ Measured with the fit fix (`bench/prefetch_check.sh`, `SETTINGS="0 4"`): prefetc
 
 ## Resuming
 On the PC, in `~/work/eullm`: `claude --continue` reopens the last session with this conversation, or `claude --resume` to pick it. A new session can start from this file.
+
+## Update (8 October, evening) — stopped for a storm
+Branches, all pushed: `feat/llama-moe-cache` (bump to the merged MoE cache, PR), `feat/llama-cpp-rs-0.1.159` (re-vendor, CI green), `feat/prefetch-reads-moe-cache` (patch `0004` ported: 1,516 vs 1,387 tokens/s reading; stacked on the re-vendor branch).
+
+Validated on the re-vendor build: Flash-Next prefetch 0 and 4, `--mtp 2` on Qwen3.5-9B (68% of drafts kept), bge-m3 embeddings (1024), chat on three endpoints, multimodal. `deepseek-math-7b-instruct.Q8_0` aborts the server at its first prompt (an uncaught `std::out_of_range` from `llama_vocab::byte_to_token`, through the C API); it does the same on release 0.7.6, so it is not from the bump.
+
+Stock llama-server against the patched one (`bench/llama_server_compare.sh`, builds in `~/work/llama-compare/{stock,patched}`, same pin, patched = 0003+0004 + a `--moe-prefetch` flag in `common/arg.cpp`): first pass, one run per variant in two orders, was too noisy to settle `0004`. A second pass of six rotated rounds (`~/work/llama-compare/rep1..6`) was stopped after two rounds: stock 950 read; 0003 alone 1,395 and 1,408; 0003+0004 1,534 and 1,572 (+10%); writing 53-54 for both patched variants (the earlier dip was noise). Rounds 3-6 are still to run, with the desktop closed (Chrome, Thunderbird and gnome-shell were using the GPU). Before any PR to llama.cpp: those rounds, a second model, the flag and the code cleaned for upstream; the PR text goes to the user first, nothing is posted without them.
+
+Resume: `cd ~/work/eullm && git checkout feat/prefetch-reads-moe-cache`; rerun `bench/llama_server_compare.sh` with `ORDER=...` as in `~/work/llama-compare/rep.sh`.
