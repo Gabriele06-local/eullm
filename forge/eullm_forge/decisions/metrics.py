@@ -41,7 +41,12 @@ def class_result(logprobs: list[float], label: int, kind: str, temperature: floa
     exps = [math.exp(lp - top_lp) for lp in scaled]
     total = sum(exps)
     probabilities = [e / total for e in exps]
-    top = max(range(len(probabilities)), key=probabilities.__getitem__)
+    # Ties go to the later class: the engine answers them that way
+    # (systemone.rs most_likely: "Of two as likely, the later one
+    # (Iterator::max_by keeps the last maximum)"), and this re-derives the
+    # server's answer, so first-max here marked a correct server answer
+    # wrong. max() keeps the first maximum, hence the reversed range.
+    top = max(range(len(probabilities) - 1, -1, -1), key=probabilities.__getitem__)
     return {
         "kind": kind,
         "label": label,

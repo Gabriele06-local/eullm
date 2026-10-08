@@ -693,6 +693,20 @@ def test_the_answers_are_read_as_the_engine_reads_them():
     assert (s["n"], s["accuracy"], s["ece"]) == (2, 0.5, pytest.approx(0.25))
 
 
+def test_a_tied_choice_goes_to_the_later_class_like_the_engine():
+    """Uniform logits tie every class: the engine answers with the last
+    maximum (systemone.rs most_likely), and so does logged_index, so the
+    eval re-deriving the server's answer must too -- first-max marked a
+    correct server answer wrong."""
+    from eullm_forge.decisions.metrics import class_result
+
+    r = class_result([0.0, 0.0], 1, "choice")
+    assert r["probabilities"] == pytest.approx([0.5, 0.5])
+    assert (r["answer"], r["correct"]) == (1, True)
+    three = class_result([0.0, 0.0, 0.0], 0, "choice")
+    assert (three["answer"], three["correct"]) == (2, False)
+
+
 def test_a_fitted_temperature_undoes_overconfidence():
     import math
     import random
