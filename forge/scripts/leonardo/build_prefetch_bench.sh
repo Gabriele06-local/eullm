@@ -15,7 +15,7 @@
 # Idempotent: a checkout and a binary that exist are kept.
 #
 # Settable: BENCH_REPO (the eullm checkout holding the patches, default $WORK/eullm-prefetch),
-# PIN (the llama.cpp commit, default b86d2f0), LCPP_MODULES, JOBS (default 8).
+# PIN (the llama.cpp commit, default b86d2f0), LCPP_MODULES, JOBS (default 8), BENCH_NO_VMM.
 set -euo pipefail
 
 : "${WORK:?WORK is not set: run this on Leonardo}"
@@ -41,6 +41,27 @@ export CC=gcc CXX=g++
 echo "[build] $(g++ --version | head -1); $(nvcc --version | tail -1)"
 
 mkdir -p "$ROOT"
+
+# A login node has no GPU driver, so CMake finds no libcuda and the link of llama-server stops at
+# "undefined reference to cuMemGetAllocationGranularity" (8 October). The toolkit ships a stub for
+# exactly this; it is named libcuda.so, and ld wants libcuda.so.1 when it follows libggml-cuda's
+# own dependencies, so a directory of ours holds the stub under both names. The stub is used at
+# link time only (rpath-link): the job loads the driver's own libcuda on the compute node.
+# BENCH_NO_VMM=1 builds without the driver's virtual memory API instead, if the stub is not enough.
+CUDA_LINK_FLAGS=()
+stub=$(ls -d "${CUDA_HOME:-/nonexistent}"/targets/x86_64-linux/lib/stubs "${CUDA_HOME:-/nonexistent}"/lib64/stubs 2>/dev/null | head -1 || true)
+if [ -n "$stub" ] && [ -e "$stub/libcuda.so" ]; then
+    mkdir -p "$ROOT/stubs"
+    ln -sf "$stub/libcuda.so" "$ROOT/stubs/libcuda.so"
+    ln -sf "$stub/libcuda.so" "$ROOT/stubs/libcuda.so.1"
+    CUDA_LINK_FLAGS+=("-DCUDA_CUDA_LIB=$ROOT/stubs/libcuda.so"
+        "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-rpath-link,$ROOT/stubs"
+        "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-rpath-link,$ROOT/stubs")
+    echo "[build] libcuda stub: $stub"
+else
+    echo "[build] no libcuda stub under \$CUDA_HOME: the link may fail without a GPU driver" >&2
+fi
+[ "${BENCH_NO_VMM:-0}" = 1 ] && CUDA_LINK_FLAGS+=(-DGGML_CUDA_NO_VMM=ON)
 if [ ! -d "$ROOT/src/.git" ]; then
     git clone -q --filter=blob:none https://github.com/ggml-org/llama.cpp "$ROOT/src"
 fi
@@ -64,7 +85,7 @@ for variant in stock patched; do
     echo "[build] $variant: configuring"
     cmake -S "$tree" -B "$tree/build" -DCMAKE_BUILD_TYPE=Release -DGGML_CUDA=ON \
         -DCMAKE_CUDA_ARCHITECTURES=80 -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF \
-        -DLLAMA_BUILD_EXAMPLES=OFF >"$tree/configure.log" 2>&1 ||
+        -DLLAMA_BUILD_EXAMPLES=OFF "${CUDA_LINK_FLAGS[@]}" >"$tree/configure.log" 2>&1 ||
         { tail -20 "$tree/configure.log" >&2; echo "[build] $variant: configure failed" >&2; exit 1; }
     echo "[build] $variant: building (a few minutes)"
     cmake --build "$tree/build" --config Release --target llama-server -j "$JOBS" \
