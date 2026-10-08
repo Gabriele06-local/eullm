@@ -72,7 +72,12 @@ CODE_NAMES: list[tuple[str, str]] = [
     ("2024 1689", "ai_act"),
 ]
 
-_ARTICLE = re.compile(r"\bart(?:icolo|icoli|t)?\s+(\d+)(?:\s*(bis|ter|quater|quinquies))?\b")
+_SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
+# The question side reads the same nine Latin suffixes the record side does
+# (_HEADER/_NUMBER below). It read only the first four, so "art. 12-sexies"
+# was heard as "art. 12" and by_article handed the model Art. 12 for a
+# 12-sexies question -- five suffixes of wrong-article retrieval.
+_ARTICLE = re.compile(rf"\bart(?:icolo|icoli|t)?\s+(\d+)(?:\s*({_SUFFIXES}))?\b")
 
 
 def tokens(text: str) -> list[str]:
@@ -90,7 +95,6 @@ def named_code(text: str) -> str | None:
     return None
 
 
-_SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
 # An article's own header, at the start of a line: "Art. 2043.", "Art. Art. 1."
 # (the XML parser writes the number with its own "Art." prefix), "Art. 29 -".
 # Anchored to a line start so "ai sensi dell'art. 2043" in the body of another
