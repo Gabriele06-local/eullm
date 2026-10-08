@@ -19,7 +19,9 @@
 #   ROCM_PATH             where ROCm lives (default: /opt/rocm)
 #   EULLM_AMDGPU_TARGETS  GPU architecture (default: gfx90a = MI250X)
 #   EULLM_REPO            repository root (default: inferred from this script)
-#   CARGO_TARGET_DIR      where cargo builds (default: <repo>/target). Another
+#   CARGO_TARGET_DIR      where cargo builds (default: <repo>/target, or
+#                         /scratch/<account>/$USER/eullm-target/main for a
+#                         checkout in /projappl; never /projappl). Another
 #                         directory leaves the binary that running campaign
 #                         jobs start their servers from untouched: a job
 #                         records the engine it found when it started, and a
@@ -107,6 +109,19 @@ fi
 
 [ -f "$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp/CMakeLists.txt" ] \
     || err "the llama.cpp submodule is missing — run: git -C '$EULLM_REPO' submodule update --init --recursive"
+
+# Not in /projappl: a release build is several GB in tens of thousands of
+# files, and the project's /projappl quota (50 GB and 100,000 files unless
+# raised; `lumi-quota` shows it) was full at the fourth target directory, ten
+# minutes into the build ("Disk quota exceeded", 08-10-2026). /scratch has the
+# room, and compute nodes read it.
+SCRATCH_TARGET="/scratch/${SBATCH_ACCOUNT:-project_465003366}/${USER}/eullm-target"
+if [ -z "${CARGO_TARGET_DIR:-}" ] && [[ "$(realpath -m "$EULLM_REPO")" == */projappl/* ]]; then
+    export CARGO_TARGET_DIR="$SCRATCH_TARGET/main"
+    log "building in $CARGO_TARGET_DIR (not under the checkout: /projappl's quota)"
+fi
+[[ "$(realpath -m "${CARGO_TARGET_DIR:-$EULLM_REPO/target}")" != */projappl/* ]] \
+    || err "CARGO_TARGET_DIR is under /projappl, whose quota a build fills — use /scratch, e.g. export CARGO_TARGET_DIR=$SCRATCH_TARGET/next3"
 
 # ── Build ─────────────────────────────────────────────────────────────────
 # EULLM_AMDGPU_TARGETS is not optional here even though the build script treats
