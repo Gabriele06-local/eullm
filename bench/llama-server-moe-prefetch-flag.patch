@@ -1,0 +1,41 @@
+common : a --moe-prefetch flag for llama-server, to run the prefetch (EuLLM patches 0003 and 0004) from the command line in benchmarks. Bench-only: the engine does not apply it.
+
+--- a/common/arg.cpp
++++ b/common/arg.cpp
+@@ -2787,6 +2787,16 @@
+         }
+     ).set_env("LLAMA_ARG_MOE_CACHE_MIB"));
+     add_opt(common_arg(
++        {"--moe-prefetch"}, "N",
++        "VRAM slots (2 to 8) to copy the experts kept in the CPU of a large batch ahead on a second stream (default: 0, disabled)",
++        [](common_params & params, int value) {
++            if (value != 0 && (value < 2 || value > 8)) {
++                throw std::invalid_argument("invalid value, 0 or 2 to 8");
++            }
++            params.moe_prefetch_slots = value;
++        }
++    ).set_env("LLAMA_ARG_MOE_PREFETCH"));
++    add_opt(common_arg(
+         {"-ncffn", "--n-cpu-ffn"}, "N",
+         "keep the dense FFN weights of the first N layers in the CPU\n"
+         "(dense models; for MoE expert weights use --n-cpu-moe)",
+--- a/common/common.cpp
++++ b/common/common.cpp
+@@ -1723,6 +1723,7 @@
+     cparams.type_v = params.cache_type_v;
+ 
+     cparams.moe_cache_size = params.moe_cache_size;
++    cparams.moe_prefetch_slots = params.moe_prefetch_slots;
+ 
+     return cparams;
+ }
+--- a/common/common.h
++++ b/common/common.h
+@@ -594,6 +594,7 @@
+     ggml_type cache_type_v = GGML_TYPE_F16; // KV cache data type for the V
+ 
+     size_t moe_cache_size = 0; // GPU cache size in bytes for the MoE experts kept in the CPU
++    int32_t moe_prefetch_slots = 0; // VRAM slots (2 to 8) for the experts of a large batch copied ahead on a second stream, 0 = off
+ 
+     common_conversation_mode conversation_mode = COMMON_CONVERSATION_MODE_AUTO;
+ 

@@ -74,7 +74,7 @@ for name in ${ORDER:-${names[*]}}; do
     fi
     log="$OUT/llama-server-$name.log"
     # shellcheck disable=SC2086
-    "$bin" -m "$MODEL" --port "$PORT" -c "$CTX" -np 1 -b "$N_UBATCH" -ub "$N_UBATCH" ${flags[$name]} >"$log" 2>&1 &
+    $bin -m "$MODEL" --port "$PORT" -c "$CTX" -np 1 -b "$N_UBATCH" -ub "$N_UBATCH" ${flags[$name]} >"$log" 2>&1 &
     pid=$!
     for _ in $(seq 1 1200); do
         curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && break
