@@ -423,3 +423,16 @@ def test_the_report_puts_what_a_group_varies_beside_what_it_measured():
     assert any("(none)" in line and "100" in line for line in lines)
     assert "not measured: does-not-fit 1, failed 2" in text
     assert "c08" not in text
+
+
+def test_leftover_servers_are_those_of_this_job_outside_every_running_point():
+    import campaign
+
+    ps = ("  101   101 eullm\n  202   202 eullm\n  303   300 ollama\n"
+          "  404   404 python3\n  505   505 llama-server\n  606   606 eullm\n")
+    cgroups = {101: "0::/job_7/step_batch", 202: "0::/job_7/step_batch",
+               303: "0::/job_7/step_batch", 404: "0::/job_7/step_batch",
+               505: "0::/job_7/step_batch", 606: "0::/job_8/step_batch"}
+    got = campaign.orphan_servers(ps, keep_pgids={101}, job="7", cgroup_of=cgroups.get)
+    # 101 is a running point's server, 404 is no server, 606 is another job's.
+    assert got == [(202, "eullm"), (303, "ollama"), (505, "llama-server")]
