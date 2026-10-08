@@ -282,6 +282,33 @@ In order:
    scheduler and batching add or cost is the difference. vLLM after a
    like-for-like design (it does not serve GGUF) and a check that its ROCm
    container runs on gfx90a.
+
+   What it found (07-10-2026): level at one request, 8-10% behind at four,
+   11% (the MoE) to 36% (8B, 14B) behind at sixteen. The cause, found on
+   08-10-2026 with the scheduler's `steps:` lines and
+   `tools/lumi/sbatch_concurrency_diag.slurm` (both servers on one GCD, the
+   same sampling options): EuLLM's default repeat penalty 1.1 made llama.cpp
+   look up all 151,936 tokens of Qwen3's vocabulary for every token of every
+   answer, 0.7 ms each on LUMI's CPU, so 11 ms of every step at sixteen;
+   llama-server's default has the penalty off. llama.cpp patch 0005 penalizes
+   the recent tokens in place (1,196 to 2 µs per token). Qwen3-8B Q4_K_M, one
+   GCD, 256 tokens per answer, tokens/s, after the patch (job 22653307):
+
+   | requests | profile | EuLLM | llama-server |
+   |---:|---|---:|---:|
+   | 1 | each server's defaults | 111 | 112 |
+   | 4 | each server's defaults | 221 | 228 |
+   | 16 | each server's defaults | 621 | 676 |
+   | 16 | penalty 1.1 on both | 630 | 476 |
+   | 16 | penalty off on both | 631 | 666 |
+   | 16 | greedy | 636 | 701 |
+
+   What is left at sixteen (5-9%): the steps carried 14.9-15.4 sequences on
+   average, not 16, because EuLLM reads one waiting prompt per step and a
+   round of sixteen starts over sixteen steps, where llama-server reads them
+   in one batch; sampling is 12% of a step (0.19 ms per token, on one
+   thread). The graded workload's distance (14B 99 against 315 tokens/s) is
+   larger than either explains and is still to be read.
 3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
    engine runs one decision at a time per server; `c08` measures the queueing
    that causes as concurrency grows, and replicas as today's way round it.
