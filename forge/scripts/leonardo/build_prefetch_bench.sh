@@ -94,8 +94,11 @@ done
 
 module -t list 2>&1 | grep -E "^(gcc|cuda)(/|$)" >"$ROOT/modules.txt" || echo "$MODULES" | tr ' ' '\n' >"$ROOT/modules.txt"
 echo "[build] modules: $(tr '\n' ' ' <"$ROOT/modules.txt")"
-"$ROOT/patched/build/bin/llama-server" --help 2>&1 | grep -q -- --moe-prefetch ||
-    { echo "[build] the patched binary has no --moe-prefetch" >&2; exit 1; }
-"$ROOT/patched/build/bin/llama-server" --help 2>&1 | grep -q -- --moe-cache-mib ||
-    { echo "[build] the pin has no --moe-cache-mib: not a commit with the MoE cache" >&2; exit 1; }
+# The binaries cannot run here (a login node has no GPU driver, so --help does not start): look for
+# the flags' text in what was built.
+has_flag() { grep -rlaF -- "$1" "$ROOT/patched/build/bin" 2>/dev/null | grep -q .; }
+has_flag "--moe-prefetch" || { echo "[build] the patched build has no --moe-prefetch" >&2; exit 1; }
+has_flag "--moe-cache-mib" || { echo "[build] the pin has no --moe-cache-mib: not a commit with the MoE cache" >&2; exit 1; }
+grep -rlaF -- "--moe-prefetch" "$ROOT/stock/build/bin" 2>/dev/null | grep -q . &&
+    { echo "[build] the stock build has --moe-prefetch: it is not stock" >&2; exit 1; }
 echo "[build] ok: $ROOT/stock and $ROOT/patched"
