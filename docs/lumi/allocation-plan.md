@@ -124,7 +124,7 @@ workloads.
 | rounds on engine milestones, ~1 every 9 days (~14 × ~250) | ~3,500 |
 | c03: row and tensor split, replicas × split, once the engine exposes them | ~300 |
 | c04: multi-node exploration, 2-4 nodes, bounded | ~300 |
-| iteration on small-g/dev-g, reserve | ~150 |
+| iteration on small-g (dev-g for smoke tests of minutes only), reserve | ~150 |
 | **total** | **4,500** |
 
 A round needs a reason: a release, a merged branch that touches inference, a
