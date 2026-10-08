@@ -110,6 +110,15 @@ fi
 [ -f "$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp/CMakeLists.txt" ] \
     || err "the llama.cpp submodule is missing — run: git -C '$EULLM_REPO' submodule update --init --recursive"
 
+# `git checkout` and `git pull` move the commit the checkout wants for
+# llama.cpp, not the submodule itself; EuLLM's patches are diffs against the
+# wanted one, and against an older llama.cpp the build stops minutes in with
+# "0002-...patch does not apply" (08-10-2026). git marks a submodule at
+# another commit with a leading '+'.
+LCPP_STATUS=$(git -C "$EULLM_REPO" submodule status engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp)
+[[ "$LCPP_STATUS" != +* ]] \
+    || err "llama.cpp is not at the commit this checkout wants (${LCPP_STATUS:1:12}) — run: git -C '$EULLM_REPO' submodule update --init --recursive"
+
 # Not in /projappl: a release build is several GB in tens of thousands of
 # files, and the project's /projappl quota (50 GB and 100,000 files unless
 # raised; `lumi-quota` shows it) was full at the fourth target directory, ten
