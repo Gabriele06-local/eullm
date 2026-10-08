@@ -16,7 +16,8 @@
 
 use std::path::Path;
 
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use crate::model_tokens::{AddBos, ModelTokens};
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 use serde_json::Value;
 

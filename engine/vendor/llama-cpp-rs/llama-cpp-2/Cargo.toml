@@ -1,5 +1,6 @@
-# Vendored at utilityai/llama-cpp-rs 0.1.156 @ 63e5497 (2026-09-22), replacing
-# the 0.1.154 vendoring at 09fc815d (2026-08-18) and, before that, the
+# Vendored at utilityai/llama-cpp-rs 0.1.159 @ 3cfdd72 (2026-10-06), replacing
+# the 0.1.156 vendoring at 63e5497 (2026-09-22), the 0.1.154 one at 09fc815d
+# (2026-08-18) and, before that, the
 # 2026-07-31 one at 8625c7c4 (see H3-P/H3-R/H3-Y in
 # docs/backlog-fix-e-hardening.md).
 #
@@ -9,17 +10,18 @@
 # the Rust crate and not the C++ tree, so read the pin from `git ls-tree HEAD
 # engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`, never from here.
 #
-# The 2026-10-03 bump to b11370 left this crate at 0.1.156. The latest
-# release, 0.1.158 (2026-09-30), pins llama.cpp b11074, older than our pin,
-# and its changes are a redesign rather than an adaptation: the token methods
-# leave `LlamaModel` for a new `LlamaVocab` with other names, which the engine
-# would have to follow everywhere it tokenizes. That move is its own change;
-# the one b11370 break is carried below (`llama_rs_mtp_speculative_process`).
+# 0.1.159 is the redesign the 2026-10-03 bump held off: the token methods
+# left `LlamaModel` for `LlamaVocab` (`model.vocab()`), pointers became a
+# `Ptr` wrapper that keeps C++'s `const`, and `eval_chunks` takes its contexts
+# mutably. The engine keeps its call sites through `engine/src/model_tokens.rs`,
+# an extension trait over `LlamaModel` that is the old methods, one line each.
+# Upstream's pin (llama.cpp 26394b4, 21 September) is older than ours, so the
+# submodule did not move with it: the crate builds against the newer C API.
 #
-# The submodule is pinned to 6b7b03a, llama.cpp PR #29887 (the MoE expert
-# cache) as a single commit on top of b11370, anchored on the mirror as
-# refs/eullm/pinned/<sha> because the mirror carries no PR refs. When upstream
-# merges it, move the pin to the release that contains it.
+# The submodule is pinned to the llama.cpp commit that carries PR #29887 (the
+# MoE expert cache, merged upstream on 7 October); read the exact commit from
+# `git ls-tree HEAD engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp`.
+# It is anchored on the mirror as refs/eullm/pinned/<sha>.
 #
 # Upstream has caught up past and superseded the three API patches the
 # 2026-07-31 base needed (load_mode, mtmd_input_text.text_len,
@@ -59,12 +61,6 @@
 #     upstream never exposed the raw struct's `n_outputs_max` field, and its
 #     n_batch default costs ~300 MiB of compute buffer per loaded model for
 #     callers that read one logit per sequence per step (see the method doc).
-#   - `mtmd.rs`: the `opt` argument threaded into
-#     `mtmd_helper_bitmap_init_from_file` and `_from_buf`, filled from
-#     `mtmd_helper_init_opt_default()`. Upstream llama-cpp-rs has never
-#     adapted to that signature, so this is the one API-compat patch still
-#     load-bearing: without it the crate does not compile against any
-#     llama.cpp from b10818 on.
 #   - `llama-cpp-sys-2/build.rs`: three CMake defines that are EuLLM policy
 #     rather than upstream behaviour, each with its reasoning inline —
 #     `GGML_METAL=OFF` whenever the `metal` feature is absent (ggml defaults it
@@ -74,17 +70,9 @@
 #     `EULLM_AMDGPU_TARGETS` (without it the HIP architecture is detected from
 #     the build host's own GPUs, which is wrong on an HPC login node).
 #   - `llama-cpp-sys-2/build.rs`: `-Wno-unused-function` on the wrapper and
-#     mtmd compiles — llama.cpp's headers (clip-impl.h, miniaudio.h, jinja)
+#     compiles (the mtmd ones are CMake now) — llama.cpp's headers (clip-impl.h, miniaudio.h, jinja)
 #     define static helpers most translation units never call, 700+ warnings
 #     that cargo replayed on every build.
-#   - `model.rs`: `str_to_token_plain`, tokenization with special-token text
-#     left as text (`parse_special = false`) — what text a request sends must
-#     be tokenized as; the decision layer relies on it.
-#   - `model.rs`: `#[allow(deprecated)]` on the five deprecated token-to-text
-#     methods that take the deprecated `Special`, and the unused
-#     `use std::slice` removed — upstream's own compile warnings.
-#   - `context.rs`: `LlamaContext::synchronize` (`llama_synchronize`), so a
-#     timing taken after an asynchronous GPU decode measures the decode.
 #   - `context/params/get_set.rs`: `with_non_causal_attention` /
 #     `non_causal_attention` (`attention_type`), for the block-causal
 #     attention of the Jev-Style 2B decision model.
@@ -96,10 +84,9 @@
 #     `LlamaModel::meta_val_str` prints any float to six decimals. A decision
 #     model's calibration temperature (`eullm.decision.temperature`) is read
 #     with them; the engine's tests on that read cover both.
-#   - `model/params.rs`: `with_load_mtp` / `load_mtp` (`load_mtp`), and
-#     `model.rs`: `LlamaModel::n_layer_nextn` (`llama_model_n_layer_nextn`) —
-#     loading a model's multi-token prediction layers, off by default in
-#     llama.cpp, and telling whether it has any.
+#   - `model.rs`: `LlamaModel::n_layer_nextn` (`llama_model_n_layer_nextn`):
+#     whether a model has multi-token prediction layers (`with_load_mtp`,
+#     which loads them, is upstream's since 0.1.158).
 #   - `speculative.rs`: `MtpDrafter`, upstream's MTP drafter
 #     (`llama_rs_mtp_speculative_*`) without `MtpSpeculative`'s ownership of
 #     the two contexts — the engine's scheduler owns, decodes with and trims
@@ -109,10 +96,8 @@
 #     `llama_batch`; the target's batch is copied into one the wrapper keeps.
 #     An API-compat patch: upstream llama-cpp-rs still targets b11074.
 #   - `context/params/get_set.rs`: `with_moe_cache_size` / `moe_cache_size`
-#     (`moe_cache_size`), the GPU cache for MoE experts kept in host memory.
-#     The field comes from llama.cpp PR #29887, which the submodule carries
-#     on top of b11370 until upstream merges it; drop both with that commit
-#     if upstream renames the field.
+#     (`moe_cache_size`), the GPU cache for MoE experts kept in host memory:
+#     the field of llama.cpp PR #29887, merged upstream on 7 October.
 #   - `context/params/get_set.rs`: `with_moe_prefetch_slots` /
 #     `moe_prefetch_slots` (`moe_prefetch_slots`), the VRAM slots the experts
 #     of a long prompt are copied into ahead of their layer. The field is
@@ -130,7 +115,7 @@
 [package]
 name = "llama-cpp-2"
 description = "llama.cpp bindings for Rust"
-version = "0.1.156"
+version = "0.1.159"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/utilityai/llama-cpp-rs"
@@ -139,11 +124,11 @@ repository = "https://github.com/utilityai/llama-cpp-rs"
 
 [dependencies]
 enumflags2 = "0.7.12"
-llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.156" }
+llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.159" }
 # EuLLM vendoring: this crate lives under the workspace root (so Cargo treats
 # it as a member) but the EuLLM root defines no [workspace.dependencies]; the
 # upstream `{ workspace = true }` inheritance is de-inlined to upstream's exact
-# values (utilityai/llama-cpp-rs 0.1.156 @ 63e5497 [workspace.dependencies],
+# values (utilityai/llama-cpp-rs 0.1.159 [workspace.dependencies],
 # unchanged since 0.1.154).
 thiserror = "2"
 tracing = "0.1"
@@ -155,6 +140,7 @@ toktrie = { version = "1.7.5", optional = true }
 [dev-dependencies]
 encoding_rs = "0.8.35"
 tracing-subscriber = { version = "0.3", features = ["json"] }
+static_assertions = "1.1.0"
 
 [features]
 default = ["openmp", "android-shared-stdcxx", "common"]
@@ -190,7 +176,7 @@ dynamic-backends = ["llama-cpp-sys-2/dynamic-backends"]
 
 
 [target.'cfg(all(target_os = "macos", any(target_arch = "aarch64", target_arch = "arm64")))'.dependencies]
-llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.156", features = [
+llama-cpp-sys-2 = { path = "../llama-cpp-sys-2", version = "0.1.159", features = [
     "metal",
 ] }
 

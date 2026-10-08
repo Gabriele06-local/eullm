@@ -35,12 +35,14 @@ pub mod model;
 #[cfg(feature = "mtmd")]
 pub mod mtmd;
 pub mod opt;
+mod ptr;
 pub mod sampling;
 #[cfg(feature = "common")]
 pub mod speculative;
 pub mod timing;
 pub mod token;
 pub mod token_type;
+pub mod vocab;
 
 pub use crate::context::session::{LlamaStateSeqFlags, SeqState};
 
@@ -178,19 +180,15 @@ pub enum EncodeError {
     Unknown(c_int),
 }
 
-/// When embedding related functions fail
+/// Fetching embeddings failed.
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
-pub enum EmbeddingsError {
-    /// Embeddings weren't enabled in the context options
-    #[error("Embeddings weren't enabled in the context options")]
-    NotEnabled,
-    /// Logits weren't enabled for the given token
-    #[error("Logits were not enabled for the given token")]
-    LogitsNotEnabled,
-    /// The given sequence index exceeds the max sequence id
-    #[error("Can't use sequence embeddings with a model supporting only LLAMA_POOLING_TYPE_NONE")]
-    NonePoolType,
-}
+#[error("Embeddings or logits weren't enabled")]
+pub struct EmbeddingsError(());
+
+/// Retrieving embeddings sequences failed.
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
+#[error("Embeddings or logits weren't enabled, or the model was configured with LLAMA_POOLING_TYPE_NONE")]
+pub struct EmbeddingsSeqError(());
 
 /// Errors that can occur when initializing a grammar sampler
 #[derive(Debug, Eq, PartialEq, thiserror::Error)]
@@ -372,32 +370,6 @@ mod tests {
 
         assert!(grammar.contains("root ::="));
     }
-}
-
-/// An error that can occur when converting a token to a string.
-#[derive(Debug, thiserror::Error, Clone)]
-#[non_exhaustive]
-pub enum TokenToStringError {
-    /// the token type was unknown
-    #[error("Unknown Token Type")]
-    UnknownTokenType,
-    /// There was insufficient buffer space to convert the token to a string.
-    #[error("Insufficient Buffer Space {0}")]
-    InsufficientBufferSpace(c_int),
-    /// The token was not valid utf8.
-    #[error("FromUtf8Error {0}")]
-    FromUtf8Error(#[from] FromUtf8Error),
-}
-
-/// Failed to convert a string to a token sequence.
-#[derive(Debug, thiserror::Error)]
-pub enum StringToTokenError {
-    /// the string contained a null byte and thus could not be converted to a c string.
-    #[error("{0}")]
-    NulError(#[from] NulError),
-    #[error("{0}")]
-    /// Failed to convert a provided integer to a [`c_int`].
-    CIntConversionError(#[from] std::num::TryFromIntError),
 }
 
 /// Failed to apply model chat template.

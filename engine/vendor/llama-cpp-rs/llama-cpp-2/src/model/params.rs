@@ -406,6 +406,7 @@ impl LlamaModelParams {
                 self.buft_overrides.as_mut_ptr(),
                 margins.as_mut_ptr(),
                 n_ctx_min,
+                std::ptr::null_mut(),
                 log_level,
             )
         };
@@ -538,23 +539,6 @@ impl LlamaModelParams {
         self
     }
 
-    /// EuLLM addition: sets `load_mtp`, whether the model's multi-token
-    /// prediction (MTP, "nextn") layers are loaded. Off by default in
-    /// llama.cpp: a GGUF that carries them loads without them, and an MTP
-    /// draft context on such a model has nothing to draft with.
-    #[must_use]
-    pub fn with_load_mtp(mut self, load_mtp: bool) -> Self {
-        self.params.load_mtp = load_mtp;
-        self
-    }
-
-    /// EuLLM addition: whether the model's MTP layers are loaded (see
-    /// [`Self::with_load_mtp`]).
-    #[must_use]
-    pub fn load_mtp(&self) -> bool {
-        self.params.load_mtp
-    }
-
     /// sets `use_mmap`
     #[must_use]
     pub fn with_use_mmap(mut self, use_mmap: bool) -> Self {
@@ -632,6 +616,19 @@ impl LlamaModelParams {
         self.params.no_alloc
     }
 
+    /// Sets whether to load bundled multi-token prediction (MTP) tensors.
+    #[must_use]
+    pub fn with_load_mtp(mut self, load_mtp: bool) -> Self {
+        self.params.load_mtp = load_mtp;
+        self
+    }
+
+    /// Returns whether bundled multi-token prediction (MTP) tensors are loaded.
+    #[must_use]
+    pub fn load_mtp(&self) -> bool {
+        self.params.load_mtp
+    }
+
     /// Sets a callback invoked during loading with progress in `0.0..=1.0`.
     /// Returning `false` aborts the load (it then fails with `NullResult`).
     #[must_use]
@@ -666,6 +663,7 @@ impl LlamaModelParams {
 /// assert_eq!(params.split_mode(), Ok(LlamaSplitMode::Layer), "split_mode should be LAYER");
 /// assert_eq!(params.devices().len(), 0, "devices should be empty");
 /// assert_eq!(params.no_alloc(), false, "no_alloc should be false");
+/// assert_eq!(params.load_mtp(), false, "load_mtp should be false");
 /// ```
 impl Default for LlamaModelParams {
     fn default() -> Self {
@@ -693,6 +691,7 @@ impl Default for LlamaModelParams {
 
 #[cfg(test)]
 mod tests {
+    use super::kv_overrides::ParamOverrideValue;
     use super::{LlamaModelParams, LlamaSplitMode};
     use std::pin::pin;
 
@@ -746,6 +745,25 @@ mod tests {
     }
 
     #[test]
+    fn kv_override_appends_on_second_call() {
+        // Same [filled, null-terminator] layout as the buffer overrides: the second call has to
+        // write into the terminator, not back into slot 0.
+        let mut params = pin!(LlamaModelParams::default());
+        params
+            .as_mut()
+            .append_kv_override(c"first", ParamOverrideValue::Int(1));
+        params
+            .as_mut()
+            .append_kv_override(c"second", ParamOverrideValue::Int(2));
+
+        let kv_overrides = params.kv_overrides().into_iter().collect::<Vec<_>>();
+        assert_eq!(kv_overrides.len(), 2);
+        assert_eq!(kv_overrides[0].0.to_bytes(), b"first");
+        assert_eq!(kv_overrides[1].0.to_bytes(), b"second");
+        assert_eq!(kv_overrides[1].1, ParamOverrideValue::Int(2));
+    }
+
+    #[test]
     fn tensor_split_mode_round_trips() {
         assert_eq!(
             LlamaSplitMode::try_from(llama_cpp_sys_2::LLAMA_SPLIT_MODE_TENSOR),
@@ -759,6 +777,18 @@ mod tests {
             i32::from(LlamaSplitMode::Tensor),
             llama_cpp_sys_2::LLAMA_SPLIT_MODE_TENSOR as i32
         );
+    }
+
+    #[test]
+    fn load_mtp_round_trips() {
+        let params = LlamaModelParams::default();
+        assert!(!params.load_mtp());
+
+        let params = params.with_load_mtp(true);
+        assert!(params.load_mtp());
+
+        let params = params.with_load_mtp(false);
+        assert!(!params.load_mtp());
     }
 
     #[test]

@@ -25,7 +25,8 @@ use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use crate::model_tokens::{AddBos, ModelTokens};
+use llama_cpp_2::model::LlamaModel;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
@@ -1581,7 +1582,10 @@ pub struct InferenceEngine {
     /// supplied in the config. Wrapped in `Option` so the same struct
     /// definition works in text-only mode; the field exists but stays None.
     #[cfg(feature = "multimodal")]
-    mtmd_ctx: Option<llama_cpp_2::mtmd::MtmdContext>,
+    // Behind a mutex since llama-cpp-rs 0.1.158: `eval_chunks` takes the
+    // context mutably. Every user already holds `ctx_mutex`, so it is never
+    // waited for.
+    mtmd_ctx: Option<std::sync::Mutex<llama_cpp_2::mtmd::MtmdContext>>,
 }
 
 // SAFETY: LlamaBackend and LlamaModel are safe to share across threads.
@@ -1832,7 +1836,7 @@ impl InferenceEngine {
         tracing::info!("Model loaded successfully.");
 
         #[cfg(feature = "multimodal")]
-        let mtmd_ctx = Self::init_mtmd_optional(&config, &model)?;
+        let mtmd_ctx = Self::init_mtmd_optional(&config, &model)?.map(std::sync::Mutex::new);
 
         // Prove the configured context actually allocates before declaring the
         // load successful, and shrink it automatically if it does not.
@@ -2661,12 +2665,17 @@ impl InferenceEngine {
         // images still degrade identically — so the cause is upstream in the
         // Gemma 4 projector/encoder, not shared mtmd state. Back to the
         // long-lived, load-once projector.)
-        let Some(mtmd_ctx) = self.mtmd_ctx.as_ref() else {
+        let Some(mtmd_cell) = self.mtmd_ctx.as_ref() else {
             let _ = tx.blocking_send(StreamEvent::Error(
                 "Multimodal not configured: load the model with a valid mmproj_path".into(),
             ));
             return;
         };
+        let mut mtmd_guard = match mtmd_cell.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let mtmd_ctx = &mut *mtmd_guard;
         // No M-RoPE guard here any more, and the reason is in upstream's own
         // code. The guard assumed a model with multi-dimensional positions
         // needed four positions per token in the decode batch, and that our
@@ -2719,7 +2728,7 @@ impl InferenceEngine {
             // llama-cpp-2 0.1.151 added a `placeholder` flag to from_buffer:
             // false = decode and load the actual media (what we need for inference).
             match MtmdBitmap::from_buffer(mtmd_ctx, bytes, false) {
-                Ok(b) => {
+                Ok(mut b) => {
                     // The index as id: mtmd copies it onto every chunk made
                     // from this bitmap, which is how step 3 learns what each
                     // attachment costs. Digits never hold the NUL that is
@@ -2931,7 +2940,7 @@ impl InferenceEngine {
         let prefill_start = std::time::Instant::now();
         let new_n_past = match chunks.eval_chunks(
             mtmd_ctx,
-            &ctx,
+            &mut ctx,
             0,
             0,
             // `mm_batch`, NOT `config.n_batch`: this is the size mtmd splits

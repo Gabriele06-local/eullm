@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use llama_cpp_2::EmbeddingsError;
 use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::context::params::{LlamaContextParams, LlamaPoolingType};
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -39,7 +38,8 @@ use llama_cpp_2::llama_backend::LlamaBackend;
 pub const DEFAULT_EMBEDDING_CTX: u32 = 2048;
 use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use crate::model_tokens::{AddBos, ModelTokens};
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 
 /// A loaded embedding model: a `LlamaModel` bound to the process-wide shared
@@ -439,12 +439,12 @@ impl<'m> Kept<'m> {
         // safe wrapper reports "this model's pooling resolved to NONE"
         // is that specific error coming back from the call itself (it
         // does not expose `llama_pooling_type(ctx)` to read up front —
-        // see `EmbeddingsError::NonePoolType`), so that is the branch
+        // see `EmbeddingsSeqError`, which is all the call reports when there is no pooled
+        // embedding), so that is the branch
         // this falls back on rather than predicting it beforehand.
         match ctx.embeddings_seq_ith(0) {
             Ok(v) => Ok(v.to_vec()),
-            Err(EmbeddingsError::NonePoolType) => mean_pool(ctx, tokens.len(), n_embd),
-            Err(e) => Err(format!("Failed to read embedding: {e}")),
+            Err(_) => mean_pool(ctx, tokens.len(), n_embd),
         }
     }
 }
