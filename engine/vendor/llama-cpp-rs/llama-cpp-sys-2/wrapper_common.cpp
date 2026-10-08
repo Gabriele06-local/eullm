@@ -11,6 +11,7 @@
 #include "llama.cpp/common/chat.h"
 #include "llama.cpp/common/common.h"
 #include "llama.cpp/common/fit.h"
+#include "llama.cpp/common/json.h"
 #include "llama.cpp/common/json-schema-to-grammar.h"
 #include "llama.cpp/common/log.h"
 #include "llama.cpp/common/speculative.h"
@@ -325,6 +326,7 @@ extern "C" int llama_rs_fit_params(
     struct llama_model_tensor_buft_override * tensor_buft_overrides,
     size_t * margins,
     uint32_t n_ctx_min,
+    const void * extra,
     enum ggml_log_level log_level) {
     // extra: a second model fit alongside the main one (e.g. an MTP draft
     // context). We don't drive that path through this wrapper yet, so
@@ -337,7 +339,7 @@ extern "C" int llama_rs_fit_params(
         tensor_buft_overrides,
         margins,
         n_ctx_min,
-        nullptr,
+        static_cast<const common_fit_extra_model *>(extra),
         log_level));
 }
 

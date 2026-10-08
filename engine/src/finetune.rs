@@ -22,7 +22,8 @@ use std::time::Instant;
 use llama_cpp_2::context::params::{KvCacheType, LlamaContextParams};
 use llama_cpp_2::gguf::GgufContext;
 use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use crate::model_tokens::{AddBos, ModelTokens};
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::opt::{
     LrSchedule, NEVER_TRAINED, OptDataset, Optimizer, Pass, TensorFilter, Trainer,
 };

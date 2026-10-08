@@ -49,7 +49,8 @@ use std::time::Instant;
 use llama_cpp_2::gguf::GgufContext;
 use llama_cpp_2::llama_backend::LlamaBackend;
 use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
+use crate::model_tokens::{AddBos, ModelTokens};
+use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::token::LlamaToken;
 use llama_cpp_2::token_type::LlamaTokenAttr;
 
@@ -471,9 +472,7 @@ fn model_tokenizer(
 fn control_texts(model: &LlamaModel, texts: &[&str]) -> Vec<String> {
     let mut found: Vec<String> = Vec::new();
     for text in texts {
-        let Ok(tokens) = model.str_to_token(text, AddBos::Never) else {
-            continue;
-        };
+        let Ok(tokens) = model.str_to_token(text, AddBos::Never);
         for token in tokens {
             if !model
                 .token_attr(token)
@@ -481,12 +480,7 @@ fn control_texts(model: &LlamaModel, texts: &[&str]) -> Vec<String> {
             {
                 continue;
             }
-            let bytes = match model.token_to_piece_bytes(token, 64, true, None) {
-                Err(llama_cpp_2::TokenToStringError::InsufficientBufferSpace(needed)) => {
-                    model.token_to_piece_bytes(token, needed.unsigned_abs() as usize, true, None)
-                }
-                other => other,
-            };
+            let bytes = model.token_to_piece_bytes(token, 64, true, None);
             if let Ok(bytes) = bytes
                 && let Ok(piece) = String::from_utf8(bytes)
                 && !piece.is_empty()

@@ -585,7 +585,8 @@ impl<'c, 'm> Trainer<'c, 'm> {
         // reference this crate otherwise treats as shared — the price of the
         // C API, and why a trained context should not go on to serve.
         unsafe {
-            llama_cpp_sys_2::llama_opt_init(ctx.context.as_ptr(), ctx.model.model.as_ptr(), params);
+            let model = llama_cpp_sys_2::llama_get_model(ctx.context.as_ptr()).cast_mut();
+            llama_cpp_sys_2::llama_opt_init(ctx.context.as_mut_ptr_unsound(), model, params);
         }
         Ok(Self {
             ctx,
@@ -672,7 +673,7 @@ impl<'c, 'm> Trainer<'c, 'm> {
         // both results outlive the call.
         unsafe {
             llama_cpp_sys_2::llama_opt_epoch(
-                self.ctx.context.as_ptr(),
+                self.ctx.context.as_mut_ptr_unsound(),
                 data.ptr.as_ptr(),
                 result_train.0.as_ptr(),
                 result_eval.0.as_ptr(),

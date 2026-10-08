@@ -3,6 +3,7 @@ mod audit;
 mod banner;
 mod chat_template;
 mod finetune;
+mod model_tokens;
 mod fit;
 mod gguf_patch;
 mod inference;

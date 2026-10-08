@@ -1182,12 +1182,13 @@ checksum = "6373607a59f0be73a39b6fe456b8192fcc3585f602af20751600e974dd455e77"
 
 [[package]]
 name = "llama-cpp-2"
-version = "0.1.156"
+version = "0.1.159"
 dependencies = [
  "encoding_rs",
  "enumflags2",
  "llama-cpp-sys-2",
  "llguidance",
+ "static_assertions",
  "thiserror",
  "toktrie",
  "tracing",
@@ -1197,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "llama-cpp-sys-2"
-version = "0.1.156"
+version = "0.1.159"
 dependencies = [
  "bindgen",
  "cc",
@@ -1995,6 +1996,12 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "static_assertions"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
 name = "strsim"
