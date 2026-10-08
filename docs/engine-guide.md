@@ -1037,14 +1037,14 @@ Built on llama.cpp (MIT, EU-developed) with the standard set of quantized KV cac
 eullm run ./model.gguf                    # Local GGUF file
 eullm run ./model.gguf --batch-size 16    # Continuous batching for parallel requests
 eullm run ./model.gguf --web              # Transparent web browsing (URLs in messages auto-fetched)
-eullm run legal-it-4b                     # From the catalog (downloaded from Hugging Face)
+eullm run qwen3-4b                        # From the catalog (downloaded from Hugging Face)
 eullm run big-moe-model.gguf --cpu-moe --fit  # MoE: all experts on CPU RAM, rest on GPU
 eullm run big-moe-model.gguf --n-cpu-moe 12   # MoE: only first 12 layers' experts on CPU RAM
 eullm run ./model.gguf --rust-debug           # Diagnostics: NaN/Inf logit check (see below), off by default
 
 # CLI
 eullm list                                # Show local and available models
-eullm show legal-it-4b                    # Model details and metadata
+eullm show qwen3-4b                       # Model details and metadata
 eullm serve                               # Start API server without loading a model
 eullm serve --daemon                      # Same, detached in the background (PID + log file)
 eullm unload                              # Free the loaded model's VRAM without restarting the server
@@ -1218,8 +1218,8 @@ cargo build --release --features metal    # macOS Apple Silicon
 Or pull from the EU catalog (coming soon):
 
 ```bash
-eullm pull legal-it-4b          # Downloads from EU servers (Hetzner DE, OVH FR)
-eullm run legal-it-4b           # Runs locally — on your laptop, 8GB RAM
+eullm pull qwen3-4b             # Downloads from EU servers (Hetzner DE, OVH FR)
+eullm run qwen3-4b              # Runs locally — on your laptop, 8GB RAM
 ```
 
 ### Point your existing tools at it
