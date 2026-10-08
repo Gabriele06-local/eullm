@@ -2,38 +2,38 @@ llama : MoE cache - pin the host experts, and report where a step goes
 
 Pinning (phase 2 of docs/moe-offload-plan.md in EuLLM). The experts the cache
 copies from are registered with the GPU backend when the cache is created, so
-that a miss is copied by DMA at the bus's full speed instead of being staged
+that a miss is uploaded by DMA at the bus's full speed instead of being staged
 through a driver buffer from pageable memory; the large-batch copies the
-scheduler makes from the same tensors gain the same way. Only the expert pages
-are pinned, in page-aligned ranges merged where tensors share a page, and only
-if they leave a quarter of the RAM and at least 8 GiB to everything else.
-LLAMA_MOE_CACHE_PIN=0 leaves them pageable. Experts loaded without mmap are
-in the backend's pinned host buffer already and are left alone. One line on
-stderr says what was pinned, or why not; a failure suggests loading without
-mmap, since some drivers refuse to pin a read-only file mapping ("operation
-not supported" on the reference PC).
+copy callback makes from the same tensors gain the same way. Only the expert
+pages are pinned, in page-aligned ranges merged where tensors share a page,
+and only if they leave a quarter of the RAM and at least 8 GiB to everything
+else. LLAMA_MOE_CACHE_PIN=0 leaves them pageable. Experts loaded without mmap
+are in the backend's pinned host buffer already and are left alone. One line
+on stderr says what was pinned, or why not; a failure suggests loading
+without mmap, since some drivers refuse to pin a read-only file mapping
+("operation not supported" on the reference PC).
 
 Statistics (phase 1). LLAMA_MOE_CACHE_STATS=N prints to stderr, every N steps
 of up to 8 tokens that went through the cache, the time per step split into
 the time until each layer's router was read back, the time in the cache
-(planning and issuing the copies) and the rest; the MiB copied and the share
-of experts found in VRAM; and, from one step in 8 that waits for its copies,
-how long copying takes and at what rate. The cache's totals at exit go to
-stderr as well while the statistics are on.
+(planning and issuing the uploads) and the rest; the MiB uploaded and the
+share of experts found in VRAM; and, from one step in 8 that waits for its
+uploads, how long uploading takes and at what rate. The cache's totals at
+exit go to stderr as well while the statistics are on.
 
-EuLLM patch on llama.cpp 6b7b03a (b11370 + PR #29887). Needs 0001 to pin.
+EuLLM patch on llama.cpp b86d2f0 (master with PR #29887). Needs 0001 to pin.
 
 diff --git a/src/llama-moe-cache.cpp b/src/llama-moe-cache.cpp
-index 7708aeb..3c225d3 100644
+index 7292a1e57..16e5e51d7 100644
 --- a/src/llama-moe-cache.cpp
 +++ b/src/llama-moe-cache.cpp
-@@ -6,11 +6,19 @@
+@@ -6,10 +6,19 @@
  #include "ggml-cpp.h"
  
  #include <algorithm>
 +#include <cstdio>
 +#include <cstdlib>
- #include <cstring>
++#include <cstring>
  #include <stdexcept>
 +#include <string>
  #include <unordered_map>
@@ -46,8 +46,8 @@ index 7708aeb..3c225d3 100644
 +
  namespace {
  
- // LRU map from (layer, expert) to a cache slot
-@@ -152,6 +160,14 @@ static bool llama_moe_cache_is_host_weight(const ggml_tensor * t) {
+ // LRU of the experts of a group of layers, the slot of each expert is kept in the slot map of its layer
+@@ -148,6 +157,14 @@ static bool llama_moe_cache_is_host_weight(const ggml_tensor * t) {
          ggml_backend_buffer_is_host(t->buffer);
  }
  
@@ -62,19 +62,20 @@ index 7708aeb..3c225d3 100644
  }
  
  struct llama_moe_cache::impl {
-@@ -186,8 +202,44 @@ struct llama_moe_cache::impl {
+@@ -179,8 +196,45 @@ struct llama_moe_cache::impl {
          size_t bytes  = 0;
      };
  
-+    // one step, from begin() to the next begin()
++    // one step, from its first layer's copy to the first layer's copy of the next
 +    struct step_timing {
 +        int64_t t_begin  = 0;
-+        int64_t t_hook   = 0; // when the last callback returned
-+        int64_t wait_us  = 0; // from a callback's return to the next prepare: the GPU computing up to a router, and the read-back
-+        int64_t cache_us = 0; // in prepare: planning and issuing the copies
-+        int64_t copy_us  = 0; // in prepare, waiting for the copies to finish: sampled steps only
++        int64_t t_hook   = 0; // when the last copy returned
++        int64_t wait_us  = 0; // from a copy's return to the next copy's start: the GPU computing up to a router, and the read-back
++        int64_t cache_us = 0; // in a copy: planning and issuing the uploads
++        int64_t copy_us  = 0; // in a copy, waiting for the uploads to finish: sampled steps only
 +        int64_t n_ids    = 0; // expert ids of one layer
 +        int32_t n_layers = 0;
++        int32_t last_il  = -1;
 +        stats   st;
 +        bool    sampled  = false;
 +    };
@@ -82,8 +83,8 @@ index 7708aeb..3c225d3 100644
 +    // the steps since the last report
 +    struct step_window {
 +        int32_t n_steps   = 0;
-+        int32_t n_timed   = 0; // steps that did not wait for their copies
-+        int32_t n_sampled = 0; // steps that waited for their copies to time them
++        int32_t n_timed   = 0; // steps that did not wait for their uploads
++        int32_t n_sampled = 0; // steps that waited for their uploads to time them
 +        int64_t step_us   = 0;
 +        int64_t wait_us   = 0;
 +        int64_t cache_us  = 0;
@@ -101,15 +102,15 @@ index 7708aeb..3c225d3 100644
 +
      static constexpr int64_t max_batch = 32;
  
-+    // one step in this many waits for its copies, to time them
++    // one step in this many waits for its uploads, to time them
 +    static constexpr uint64_t sample_every = 8;
 +
      ggml_backend_t backend;
-     bool no_alloc;
      int32_t n_expert_used;
-@@ -196,6 +248,16 @@ struct llama_moe_cache::impl {
-     stats stats_small; // up to 8 tokens per ubatch
+ 
+@@ -188,6 +242,16 @@ struct llama_moe_cache::impl {
      stats stats_large;
+     stats stats_copy;  // experts copied from the cache for large batches
  
 +    // LLAMA_MOE_CACHE_STATS=N: every N steps of up to 8 tokens, print to stderr where they went
 +    int32_t     stats_every = 0;
@@ -117,19 +118,19 @@ index 7708aeb..3c225d3 100644
 +    step_timing cur;
 +    step_window win;
 +
-+    // host experts pinned for the copies, unpinned on destruction
++    // host experts pinned for the uploads, unpinned on destruction
 +    std::vector<pinned_range> pinned;
 +    void (*unpin_host_buffer)(void * buffer) = nullptr;
 +
      std::vector<group> groups;
-     std::vector<moe_cache_lru::fill> fills;
- 
-@@ -333,10 +395,108 @@ struct llama_moe_cache::impl {
+     std::vector<layer> layers;
+     std::unordered_map<const ggml_tensor *, binding> bindings; // host experts -> cached experts
+@@ -369,10 +433,161 @@ struct llama_moe_cache::impl {
              LLAMA_LOG_INFO("%s: %2zu layers, %s: %5d slots (%.1f%%)\n", __func__,
-                 g.layers.size(), ggml_type_name(g.ref.back()->type), g.n_slots, 100.0*g.n_slots/(g.layers.size()*n_expert));
+                 g.layers.size(), ggml_type_name(g.ref.back()->type), g.n_slots, 100.0*g.n_slots/(g.layers.size()*g.ref[0]->ne[2]));
          }
 +
-+        if (!no_alloc) {
++        if (!model.hparams.no_alloc) {
 +            if (const char * env = getenv("LLAMA_MOE_CACHE_STATS")) {
 +                stats_every = std::max(0, atoi(env));
 +            }
@@ -140,27 +141,32 @@ index 7708aeb..3c225d3 100644
      ~impl() {
          log_stats();
 +
-+        // llama_context synchronizes its backends before it frees anything, no copy is still reading these
++        // llama_context synchronizes its backends before it frees anything, no upload is still reading these
 +        for (const pinned_range & r : pinned) {
 +            unpin_host_buffer(r.ptr);
 +        }
 +    }
 +
-+    // pin the host experts, so that the copies run at the full bus speed instead of being staged by the driver
++    // pin the host experts, so that the uploads run at the full bus speed instead of being staged by the driver
 +    void pin_experts(ggml_backend_dev_t dev) {
 +        // the pages of the experts the cache copies from; tensors that share a page share a range
 +        const uintptr_t page = llama_moe_cache_page_size();
 +        ggml_backend_buffer_type_t pinned_buft = ggml_backend_dev_host_buffer_type(dev);
 +        std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
 +        size_t already = 0;
-+        for (const binding & b : bindings) {
-+            if (pinned_buft != nullptr && ggml_backend_buffer_get_type(b.src->buffer) == pinned_buft) {
-+                already += ggml_nbytes(b.src); // loaded without mmap into memory the backend pinned
++        for (const layer & l : layers) {
++            if (l.ig < 0) {
 +                continue;
 +            }
-+            const uintptr_t first = (uintptr_t) b.src->data & ~(page - 1);
-+            const uintptr_t last  = ((uintptr_t) b.src->data + ggml_nbytes(b.src) + page - 1) & ~(page - 1);
-+            ranges.emplace_back(first, last);
++            for (const ggml_tensor * w : l.experts) {
++                if (pinned_buft != nullptr && ggml_backend_buffer_get_type(w->buffer) == pinned_buft) {
++                    already += ggml_nbytes(w); // loaded without mmap into memory the backend pinned
++                    continue;
++                }
++                const uintptr_t first = (uintptr_t) w->data & ~(page - 1);
++                const uintptr_t last  = ((uintptr_t) w->data + ggml_nbytes(w) + page - 1) & ~(page - 1);
++                ranges.emplace_back(first, last);
++            }
 +        }
 +        if (ranges.empty()) {
 +            if (already > 0) {
@@ -230,22 +236,6 @@ index 7708aeb..3c225d3 100644
 +        }
 +        fprintf(stderr, "llama_moe_cache: pinned %.2f GiB of host experts in %zu ranges, in %.1f s\n",
 +            total/1073741824.0, merged.size(), (ggml_time_us() - t_start)/1e6);
-     }
- 
-     bool resolve(const ggml_tensor * node, ggml_backend_t target, ggml_tensor ** cached_weight, void ** cache_entry) {
-@@ -367,6 +527,63 @@ struct llama_moe_cache::impl {
-                 l.planned_epoch = 0;
-             }
-         }
-+
-+        if (stats_every > 0) {
-+            const int64_t t = ggml_time_us();
-+            end_step(t);
-+            cur = step_timing();
-+            cur.t_begin = t;
-+            cur.t_hook  = t;
-+            cur.sampled = ++n_begun % sample_every == 0;
-+        }
 +    }
 +
 +    // count the step that began at cur.t_begin and ends at t, and report every stats_every steps
@@ -296,29 +286,38 @@ index 7708aeb..3c225d3 100644
 +        fprintf(stderr, "%s\n", line.c_str());
      }
  
-     bool prepare(const binding * entry, const int32_t * ids, size_t n_ids, const int32_t ** remapped_ids) {
-@@ -381,6 +598,8 @@ struct llama_moe_cache::impl {
-             return true;
-         }
+     ggml_tensor * get_slot_map(int32_t il, int64_t n_tokens, int64_t n_expert_used) const {
+@@ -436,6 +651,16 @@ struct llama_moe_cache::impl {
+ 
+         GGML_ASSERT(backend == this->backend);
  
 +        const int64_t t_start = stats_every > 0 ? ggml_time_us() : 0;
++        if (stats_every > 0 && il <= cur.last_il) {
++            // the layers came round again: a new step
++            end_step(t_start);
++            cur = step_timing();
++            cur.t_begin = t_start;
++            cur.t_hook  = t_start;
++            cur.sampled = ++n_begun % sample_every == 0;
++        }
 +
-         l.planned_ids.assign(ids, ids + n_ids);
-         l.remapped_ids.resize(n_ids);
- 
-@@ -409,19 +628,44 @@ struct llama_moe_cache::impl {
-         st.misses += fills.size();
-         st.bytes  += bytes;
+         // the get_rows that looks up the slots of the selected experts
+         const int n_nodes = ggml_graph_n_nodes(graph);
+         const ggml_tensor * lookup = nullptr;
+@@ -492,17 +717,43 @@ struct llama_moe_cache::impl {
+         // the next copy synchronizes the backend before it changes the slot map again
+         ggml_backend_tensor_set_async(backend, dst, src->data, 0, ggml_nbytes(src));
  
 +        if (stats_every > 0) {
 +            if (cur.sampled && bytes > 0) {
-+                // the GPU has drained to read the ids back, so this waits for the copies alone
++                // the GPU has drained to read the ids back, so this waits for the uploads alone
 +                ggml_backend_synchronize(backend);
 +            }
 +            const int64_t t_end = ggml_time_us();
 +            if (cur.n_layers++ == 0) {
-+                cur.n_ids = n_ids;
++                cur.n_ids = (int64_t) ids.size();
 +            }
++            cur.last_il = il;
 +            cur.wait_us += t_start - cur.t_hook;
 +            if (cur.sampled) {
 +                cur.copy_us  += t_end - t_start;
@@ -331,8 +330,6 @@ index 7708aeb..3c225d3 100644
 +            cur.t_hook = t_end;
 +        }
 +
-         l.planned_epoch = epoch;
-         *remapped_ids = l.remapped_ids.data();
          return true;
      }
  

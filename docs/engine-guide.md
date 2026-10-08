@@ -663,13 +663,14 @@ larger compute buffer takes 1.5 GiB more from the cache. Two slots gained
 10-15%, three 18%, and six or eight no more than four. `--moe-prefetch N`
 takes 2 to 8 slots, `--moe-prefetch 0` turns it off.
 
-With an expert cache, the experts it already holds are copied into the slots
-from its own VRAM, and only the others over the bus (18% of the bytes with
-the 6 GiB cache of the model above). One line on stderr says the share taken
-from VRAM; `LLAMA_MOE_PREFETCH_FROM_CACHE=0` copies everything over the bus,
-a diagnostic to compare the two, like the variables above. On the reference
-PC this read the 33,200-token prompt at 1,509 tokens/s instead of 1,368
-(+10%), to the same answer (`docs/moe-offload-plan.md`, phase 6b).
+Up to 0.7.40 the experts an expert cache already held were copied into the
+slots from its own VRAM, and only the others over the bus (18% of the bytes
+with the 6 GiB cache of the model above), which read the 33,200-token prompt
+at 1,509 tokens/s instead of 1,368 (`docs/moe-offload-plan.md`, phase 6b).
+That was patch `0004`, and `LLAMA_MOE_PREFETCH_FROM_CACHE` with it: after the
+bump to the cache llama.cpp merged (PR #29887), the copy callback does the
+same where the prefetch is off, and the prefetch copies everything over the
+bus (1,390 tokens/s on the same prompt, 987 without it).
 
 It applies to micro-batches of 512 tokens or more, on one NVIDIA GPU (a CUDA
 build), to experts kept in RAM with the model read into memory rather than
