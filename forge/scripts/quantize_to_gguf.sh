@@ -251,14 +251,13 @@ fi
 # 4. Quantize F16 → Q4_K_M
 # ---------------------------------------------------------------------------
 
-# A Q4 beside a rebuilt F16 is stale by construction: it was quantized from
-# whatever F16 stood here before. Re-quantize rather than reuse it, the same
-# staleness the F16 block above handles against HF. When the F16 is reused,
-# the Q4 beside it derives from exactly that file and the skip below stands.
-if [ "${F16_BUILT}" = 1 ]; then
-    rm -f "$QUANT_FILE"
-fi
-if [ -f "$QUANT_FILE" ]; then
+# A Q4 beside a rebuilt F16 may be stale: it was quantized from whatever F16
+# stood here before. Re-quantize rather than reuse it, the same staleness the
+# F16 block above handles against HF -- but leave it in place until the new
+# one replaces it (the .partial rename below). The F16 is also rebuilt when it
+# was only deleted to save space, the chains' own habit, and then the old Q4
+# was right: a re-quantization that fails must not leave no Q4 at all.
+if [ -f "$QUANT_FILE" ] && [ "${F16_BUILT}" = 0 ]; then
     log "$QUANT_TYPE GGUF already at $QUANT_FILE — skipping quantization"
 else
     rm -f "$QUANT_FILE.partial"
