@@ -222,6 +222,18 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - **Writing 1.5 tokens/s slower** (54.8 → 53.3) in both orders, with no share for the order. Nothing of this change runs while an answer is written: a decode step stages no expert. One guess is the GPU's clock after a prompt read harder, the speed_check's writing following its long questions; a writing test on a server that has read no long prompt yet tells.
 - What is left for reading: fewer, larger copies over the bus, or the larger micro-batch with the cache's VRAM lent while a prompt is read (Strata §3.5), the larger change of the two.
 
+**Against a stock llama-server, 8 October** (`bench/llama_server_compare.sh`): the same pin (b86d2f0) built twice with CUDA, once as it is and once with `0003` and `0004` and a `--moe-prefetch` flag in `common/arg.cpp`; Qwen3.8-Flash-Next IQ2_XS, `--cpu-moe --moe-cache-mib 5500 --load-mode none -ub 2048`, the 33,200-token prompt. Six rounds, the three variants in a rotated order in each (every variant twice in each position), 18 servers, every one giving the same answer (68b329da). The first round ran with the desktop on the GPU; from the second a second card drives it.
+
+| variant | read tokens/s (mean, sd, range) | write tokens/s (mean, sd) |
+|---|---|---|
+| stock | 1,010.7, 28.2, 950-1,031 | 52.6, 1.8 |
+| `0003` (every expert over the bus) | 1,387.9, 8.3, 1,379-1,398 | 53.6, 0.4 |
+| `0003` + `0004` (6% of the bytes from VRAM) | 1,544.8, 8.0, 1,534-1,557 | 53.4, 0.3 |
+
+- **The prefetch reads a long prompt 37% faster than stock** (1,010.7 → 1,387.9), in every round and every order.
+- **`0004` adds 11%** (1,387.9 → 1,544.8) with only 6% of the bytes taken from VRAM at this cache size, in every round.
+- **Writing is the same** in the three (the spread is larger than the differences): the dip seen in the first pass was noise.
+
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
