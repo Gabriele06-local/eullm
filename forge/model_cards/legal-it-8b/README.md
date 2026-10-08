@@ -19,6 +19,8 @@ tags:
 
 # legal-it-8b
 
+> ⚠️ **Non usarlo in una chat senza i testi delle norme.** Se nel prompt non ci sono gli articoli di legge, legal-it-8b non lo dice: inventa con sicurezza numeri di articoli, contenuti e conclusioni, e conferma le premesse sbagliate di chi scrive. Va usato solo con un sistema di retrieval che gli passi i testi, come descritto sotto. Stiamo addestrando una versione che dichiari quando i testi mancano.
+
 **Un modello da 8 miliardi di parametri che risponde a domande sul diritto italiano leggendo i testi di legge che gli vengono forniti.** Gira in locale: il file Q4_K_M pesa 5,2 GB e funziona con llama.cpp, Ollama e l'[EULLM Engine](https://github.com/eullm/eullm).
 
 Sulle 429 domande degli esami riservati, mai viste in addestramento, risponde correttamente all'**89,0%**, contro l'80,9% del modello di partenza con lo stesso retrieval.
@@ -145,6 +147,8 @@ Apache 2.0, come il modello di partenza Ministral-3-8B-Instruct-2512. I testi no
 ---
 
 ## English summary
+
+> ⚠️ **Do not use it in a plain chat without the legal texts.** With no articles in the prompt the model does not say so: it confidently invents article numbers, contents and conclusions, and confirms the user's false premises. Use it only behind retrieval that supplies the texts, as described above. A version that says when the texts are missing is in training.
 
 **legal-it-8b** is an 8B model, fine-tuned from Ministral-3-8B-Instruct-2512, that answers questions on Italian law **from the legal texts placed in its prompt** (retrieval-augmented, open book). The Q4_K_M GGUF is 5.2 GB.
 
