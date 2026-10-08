@@ -97,6 +97,24 @@ class MetricsTest(unittest.TestCase):
         self.assertIn("ece", report)
         self.assertEqual(report["evaluated_tokens_mean"], 7)
 
+    def test_latency_p50_is_nearest_rank_like_the_siblings(self):
+        """p50 read ms[n//2] -- the upper median, one rank above nearest-rank
+        on every even-n run -- while the p95 on the next line and
+        rb/qf_metrics.percentile ("as the other ReflexBench reports have it")
+        use ceil(p*n)-1."""
+        dev = [case("a", "answer"), case("a", "answer")]
+        test = [case("b", "answer"), case("b", "answer")]
+
+        def gate(score, ms):
+            return rg_methods.Decision(
+                score, "answer", {"answer": score}, ms, {"evaluated_tokens": 7})
+
+        report = rg_metrics.summarize(
+            [(c, gate(s, m)) for c, s, m in zip(dev, [0.8, 0.3], [10.0, 20.0])],
+            [(c, gate(s, m)) for c, s, m in zip(test, [0.7, 0.4], [30.0, 40.0])],
+        )
+        self.assertEqual(report["latency_ms"], {"p50": 20.0, "p95": 40.0})
+
     def test_a_score_without_a_decision_gets_two_thresholds(self):
         dev = [case("a", label) for label in rg_metrics.LABELS]
         test = [case("b", label) for label in rg_metrics.LABELS]

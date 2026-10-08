@@ -178,7 +178,10 @@ def summarize(dev, test):
         report["ece"] = ece(scores, positives)
     ms = sorted(d.ms for _, d in dev + test)
     report["latency_ms"] = {
-        "p50": ms[len(ms) // 2] if ms else None,
+        # Nearest-rank like the p95 below and rb/qf_metrics.percentile
+        # ("as the other ReflexBench reports have it"): ms[n//2] is the
+        # UPPER median, one rank above it on every even-n run.
+        "p50": ms[min(len(ms) - 1, max(0, math.ceil(0.5 * len(ms)) - 1))] if ms else None,
         "p95": ms[min(len(ms) - 1, math.ceil(0.95 * len(ms)) - 1)] if ms else None,
     }
     evaluated = [
