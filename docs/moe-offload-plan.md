@@ -249,6 +249,21 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - Pinned memory alone is +66% reading over `mmap` with the cache (613.0 to 1,020.2); the prefetch adds +53% on top.
 - Still to measure: PCIe 3.0, where a report on the prefetch PR says it got slower; and a model that does not fit in RAM, where `mmap` reads from the disk.
 
+**On an A100, 8 October** (Leonardo, job 59739979, `forge/scripts/leonardo/sbatch_prefetch_bench.slurm`): one A100 64 GB (PCIe 4.0 x16), Qwen3.8-Flash-Next IQ4_NL (96 GiB, the file the maintainers measure), 16,000 MiB cache, the same prompt and `-ub 2048`, stock pin. Two runs of `pinned` and `prefetch` in opposite orders (r1: mmap, pinned, prefetch; r2: prefetch, pinned), one of the rest; the same answer hash in all 7 runs.
+
+| configuration | read tokens/s | write tokens/s |
+|---|---|---|
+| `--cpu-moe` + cache, `mmap` | 242.2 | 25.9 |
+| `--cpu-moe` + cache, pinned | 736.1, 733.4 | 38.6, 38.8 |
+| the prefetch (`--moe-prefetch 4`) | 922.8, 924.7 | 38.7, 38.8 |
+| 3 GPUs, `-sm layer`, no cache, stock | 641.3 | 15.7 |
+| 3 GPUs, `-sm layer`, prefetch flag set | 640.9 | 15.8 |
+
+- The prefetch reads 26% faster than pinned memory (about 734 to 924) and 3.8 times `mmap`; writing is unchanged, as on the reference PC. The two pairs agree within 0.4%, whatever the order.
+- The gain is smaller than the reference PC's (+53%): here 6% of a micro-batch's experts come from the cache's slots in VRAM (16,000 MiB of 96 GiB), the rest over the bus.
+- With three GPUs the prefetch turns itself off ("off, it supports one GPU"), the speed and the answer are the stock server's.
+- The page cache did not beat pinned memory with the model in RAM (340 GB requested, 96 GiB read): `mmap` read at a third of the pinned speed.
+
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
