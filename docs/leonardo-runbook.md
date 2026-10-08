@@ -329,30 +329,30 @@ GPUs visible, where the prefetch must switch itself off and the answer stay the
 same.
 
 It runs from its own checkout, so the pipelines running from `$WORK/eullm` are
-not touched. On a login node:
+not touched, and under the project's fast scratch (`$BENCH_ROOT`, default
+`/leonardo_scratch/fast/<project>/prefetch-bench`), not `$WORK`: on 8 October
+`$WORK` was at 87.6% of its 1 TB (`cindata`) and the pipelines write their
+checkpoints there. Scratch is purged, which suits a bench; delete
+`$BENCH_ROOT` when it is done. On a login node:
 
 ```bash
 # 1. the checkout (own tree, never a pull on $WORK/eullm)
 git clone --branch feat/prefetch-reads-moe-cache https://github.com/eullm/eullm.git "$WORK/eullm-prefetch"
-grep -c "moe-prefetch" "$WORK/eullm-prefetch/forge/scripts/leonardo/sbatch_prefetch_bench.slurm"   # expect >= 1
+git -C "$WORK/eullm-prefetch" pull -q
+grep -c "BENCH_ROOT" "$WORK/eullm-prefetch/forge/scripts/leonardo/sbatch_prefetch_bench.slurm"   # expect >= 1
 
-# 2. space (the model is 96 GiB, the builds a few GB) -- cindata lags by hours
-cindata
-
-# 3. the model, in tmux (no network on compute nodes)
-source "$WORK/eullm-prefetch/forge/scripts/leonardo/env.sh"
-python -c "from huggingface_hub import snapshot_download as d; d('ggml-org/Qwen3.8-Flash-Next-GGUF', allow_patterns=['*IQ4_NL*'], local_dir='$WORK/prefetch-bench/models')"
-
-# 4. the two llama-server binaries (stock, and with the prefetch), built on the login node
-bash "$WORK/eullm-prefetch/forge/scripts/leonardo/build_prefetch_bench.sh"
-
-# 5. the job
-cd "$WORK/eullm-prefetch" && mkdir -p logs && sbatch forge/scripts/leonardo/sbatch_prefetch_bench.slurm
+# 2. in tmux (the model is 96 GiB): the model, the two binaries, then the job
+bash "$WORK/eullm-prefetch/forge/scripts/leonardo/prepare_prefetch_bench.sh"
 ```
 
-The results are in `$WORK/prefetch-bench/results/<job id>/` and as a table at the
-end of the job's log: per configuration, tokens/s reading a 33,200-token prompt
-and writing, and the hash of two answers (they must match across configurations).
-The expert cache is 16,000 MiB, about a sixth of the experts, as on the reference
-machine. `mmap` is plain llama-server with the page cache; `pinned` is the
-cache with the experts in pinned memory; `prefetch` is the prefetch on top.
+`prepare_prefetch_bench.sh` downloads the model (resumable), builds the stock
+llama-server and the one with the prefetch (`build_prefetch_bench.sh`), and submits
+`sbatch_prefetch_bench.slurm` unless one is already queued, so running it twice cannot
+queue two jobs.
+
+The results are in `$BENCH_ROOT/results/<job id>/` and as a table at the end of the
+job's log: per configuration, tokens/s reading a 33,200-token prompt and writing,
+and the hash of two answers (they must match across configurations). The expert
+cache is 16,000 MiB, about a sixth of the experts, as on the reference machine.
+`mmap` is plain llama-server with the page cache; `pinned` is the cache with the
+experts in pinned memory; `prefetch` is the prefetch on top.
