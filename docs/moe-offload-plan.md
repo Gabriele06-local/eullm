@@ -234,6 +234,21 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - **`0004` adds 11%** (1,387.9 → 1,544.8) with only 6% of the bytes taken from VRAM at this cache size, in every round.
 - **Writing is the same** in the three (the spread is larger than the differences): the dip seen in the first pass was noise.
 
+**Against `--mmap`, 8 October** (`bench/llama_server_mmap_compare.sh`): the same model, prompt (33,200 tokens), `-ub 2048` and stock pin, three rounds in rotated orders, the same answer in all 15 runs; the pages warm (two long questions before the measurement).
+
+| configuration | read tokens/s (mean, sd) | write tokens/s |
+|---|---|---|
+| llama-server defaults (`mmap`, automatic fit) | 643.4, 9.2 | 20.8 |
+| `--cpu-moe`, `mmap` | 543.7, 4.3 | 16.7 |
+| `--cpu-moe` + 5500 MiB cache, `mmap` | 613.0, 3.0 | 36.2 |
+| `--cpu-moe` + cache, pinned (`--load-mode none`) | 1,020.2, 1.2 | 52.7 |
+| the prefetch (`--moe-prefetch 4`) | 1,557.3, 2.8 | 53.7 |
+
+- Reading a long prompt with the prefetch is 2.4 times the defaults and 2.5 times the cache with `mmap`: copying ahead does not lose to the page cache here (all the experts fit in RAM; PCIe 4.0 x16).
+- Most of the writing gain (20.8 to 53) is the cache and the pinned memory, which are upstream already, not the prefetch, which runs only while a prompt is read.
+- Pinned memory alone is +66% reading over `mmap` with the cache (613.0 to 1,020.2); the prefetch adds +53% on top.
+- Still to measure: PCIe 3.0, where a report on the prefetch PR says it got slower; and a model that does not fit in RAM, where `mmap` reads from the disk.
+
 ## 3. Upstream
 
 - Phase 2 is small and helps any MoE with experts in RAM: a candidate for a llama.cpp issue, then a PR.
