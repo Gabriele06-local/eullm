@@ -8,6 +8,9 @@
 #     export EULLM_BIN=$PWD/target-next3/release/eullm
 #     sbatch tools/lumi/sbatch_concurrency_diag.slurm [MODEL_ID] [CONCURRENCY ...]
 #
+# EULLM_BIN_BEFORE, when set, is an older engine run through the closed-loop
+# rounds as well (label eullm-before), for a before and after on the same node.
+#
 # Default: qwen3-8b, 1 4 16. Output: eullm-concurrency-<job>.out beside where
 # it was submitted, every server's log next to it (*.eullm-<n>.log,
 # *.eullm-kvu-<n>.log, *.llama-<n>.log).
@@ -40,7 +43,7 @@ set -uo pipefail
 source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh"
 : "${EULLM_BIN:?set EULLM_BIN to the ROCm eullm binary}"
 : "${LLAMA_SERVER_BIN:?set LLAMA_SERVER_BIN (install_runtimes.sh builds it)}"
-for bin in "$EULLM_BIN" "$LLAMA_SERVER_BIN"; do
+for bin in "$EULLM_BIN" "$LLAMA_SERVER_BIN" ${EULLM_BIN_BEFORE:+"$EULLM_BIN_BEFORE"}; do
     [ -x "$bin" ] || { echo "[err] $bin is not there: build it first"; exit 1; }
 done
 
@@ -57,6 +60,7 @@ from point import store_gguf; print(store_gguf('$MODEL') or '')")
 
 echo "=== concurrency diagnosis: $MODEL at ${LEVELS[*]} requests, on $(hostname), $(date -Is) ==="
 echo "  eullm        $("$EULLM_BIN" --version 2>&1 | head -1)"
+[ -z "${EULLM_BIN_BEFORE:-}" ] || echo "  before       $("$EULLM_BIN_BEFORE" --version 2>&1 | head -1)"
 echo "  llama-server $("$LLAMA_SERVER_BIN" --version 2>&1 | grep -m1 version)"
 echo "  gguf         $GGUF"
 echo
@@ -78,12 +82,12 @@ stop() {
 
 CLOSED=(--profiles llama --duration 60 --lengths 32:384 --repeats 1)
 
-eullm_rounds() {  # N LABEL [FLAG ...]: an EuLLM server with FLAGs, its rounds and step lines
-    local n=$1 label=$2
-    shift 2
+eullm_rounds() {  # N LABEL BIN [FLAG ...]: an EuLLM server with FLAGs, its rounds and step lines
+    local n=$1 label=$2 bin=$3
+    shift 3
     # The scheduler's step lines, every ten seconds while it works.
     RUST_LOG="eullm=info,eullm::steps=debug" \
-        "$EULLM_BIN" serve --port "$PORT" --batch-size "$n" --ctx-size "$((SLOT_CTX * n))" \
+        "$bin" serve --port "$PORT" --batch-size "$n" --ctx-size "$((SLOT_CTX * n))" \
         --cache-type-k f16 --cache-type-v f16 "$@" >"$OUT.$label-$n.log" 2>&1 &
     server=$!
     if wait_ready /api/version "$server"; then
@@ -104,8 +108,11 @@ eullm_rounds() {  # N LABEL [FLAG ...]: an EuLLM server with FLAGs, its rounds a
 for n in "${LEVELS[@]}"; do
     ctx=$((SLOT_CTX * n))
 
-    eullm_rounds "$n" eullm
-    eullm_rounds "$n" eullm-kvu --kv-unified
+    eullm_rounds "$n" eullm "$EULLM_BIN"
+    eullm_rounds "$n" eullm-kvu "$EULLM_BIN" --kv-unified
+    if [ -n "${EULLM_BIN_BEFORE:-}" ]; then
+        eullm_rounds "$n" eullm-before "$EULLM_BIN_BEFORE"
+    fi
 
     "$LLAMA_SERVER_BIN" --host 127.0.0.1 --port "$PORT" -m "$GGUF" --alias "$MODEL" \
         -c "$ctx" -np "$n" -ngl 999 -ctk f16 -ctv f16 >"$OUT.llama-$n.log" 2>&1 &
