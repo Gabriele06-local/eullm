@@ -207,7 +207,7 @@ def compare(a: Graded, base: Graded) -> Comparison:
         la, lb = a.lengths.get(i, 0), base.lengths.get(i, 0)
         if la != lb:
             discordant += 1
-          longer += (la > lb) == ar
+            longer += (la > lb) == ar
     shared = sorted(set(a.verif) & set(base.verif))
     va = sum(a.verif[i] > base.verif[i] for i in shared)
     vb = sum(base.verif[i] > a.verif[i] for i in shared)
