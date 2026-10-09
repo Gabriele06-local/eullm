@@ -408,7 +408,8 @@ pub(crate) fn build_ctx_params_with_cache(
         .with_n_ubatch(n_ubatch)
         .with_n_threads(config.threads as i32)
         .with_n_threads_batch(config.threads as i32)
-        .with_n_rs_seq(config.rs_seq);
+        .with_n_rs_seq(config.rs_seq)
+        .with_kv_unified(config.kv_unified);
 
     if config.moe_cache_bytes > 0 {
         params = params.with_moe_cache_size(config.moe_cache_bytes as usize);
@@ -576,6 +577,8 @@ pub struct InferenceConfig {
     /// `--load-threads`: readers that bring the model file into the page
     /// cache ahead of the load (see `crate::readahead`).
     pub load_threads: crate::readahead::LoadThreads,
+    /// `--kv-unified`: one KV cache for every sequence instead of one each.
+    pub kv_unified: bool,
 }
 
 impl Default for InferenceConfig {
@@ -605,6 +608,7 @@ impl Default for InferenceConfig {
             no_mmap: false,
             moe_prefetch_slots: 0,
             load_threads: crate::readahead::LoadThreads::default(),
+            kv_unified: false,
         }
     }
 }

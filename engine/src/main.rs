@@ -334,6 +334,17 @@ struct RuntimeOpts {
     )]
     load_threads: readahead::LoadThreads,
 
+    /// One KV cache for every sequence (llama.cpp's `--kv-unified`) instead of
+    /// one per sequence, with several slots (`--batch-size` above 1).
+    /// Experimental, off by default. With one cache per sequence llama.cpp
+    /// splits a decode step into one pass of the model for every run of
+    /// consecutive slot numbers among the answering sequences, so a slot left
+    /// out of a step (waiting for its prompt, or idle) splits it in two; one
+    /// cache takes any slots in one pass, and its attention reads every
+    /// sequence's cells, masked.
+    #[arg(long)]
+    kv_unified: bool,
+
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
     /// architectures — see the README's "--ctx-checkpoints" section).
@@ -989,6 +1000,7 @@ async fn main() {
                 mmap,
                 moe_prefetch,
                 load_threads,
+                kv_unified,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1131,6 +1143,7 @@ async fn main() {
                 mmap,
                 moe_prefetch,
                 load_threads,
+                kv_unified,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1182,6 +1195,7 @@ async fn main() {
                 mmap,
                 moe_prefetch,
                 load_threads,
+                kv_unified,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1292,6 +1306,7 @@ async fn main() {
                 mmap,
                 moe_prefetch,
                 load_threads,
+                kv_unified,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 rust_debug,
@@ -2529,6 +2544,7 @@ async fn cmd_run(
     mmap: bool,
     moe_prefetch: u32,
     load_threads: readahead::LoadThreads,
+    kv_unified: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     mut ctx_size: u32,
@@ -3143,6 +3159,7 @@ async fn cmd_run(
             no_mmap,
             moe_prefetch_slots,
             load_threads,
+            kv_unified,
         };
 
         // The continuous-batching scheduler is text-only; multimodal models
@@ -3378,6 +3395,7 @@ async fn cmd_run(
             mmap,
             moe_prefetch,
             load_threads,
+            kv_unified,
             ctx_checkpoints,
             checkpoint_min_step,
             rust_debug,
@@ -3458,6 +3476,7 @@ async fn cmd_serve(
     mmap: bool,
     moe_prefetch: u32,
     load_threads: readahead::LoadThreads,
+    kv_unified: bool,
     ctx_checkpoints: usize,
     checkpoint_min_step: u32,
     rust_debug: bool,
@@ -3571,6 +3590,7 @@ async fn cmd_serve(
         mmap,
         moe_prefetch,
         load_threads,
+        kv_unified,
         ctx_checkpoints,
         checkpoint_min_step,
         rust_debug,

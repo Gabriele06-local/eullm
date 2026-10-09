@@ -19,12 +19,18 @@ tell the two causes apart: `none` is what c07 measured, `ollama` and
 
 The prompt is raw text on both (no chat template), the same for every
 request, as in c07.
+
+With --duration, the N clients instead send requests one after another
+until the time is up, each with a prompt of its own and an answer length
+drawn from --lengths: answers end at different times and a slot is freed
+and taken again while the others answer, as in c07's graded workload.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 import threading
 import time
@@ -43,13 +49,14 @@ PROFILES = {
 }
 
 
-def body(api: str, model: str, sampling, num_predict: int, seed: int) -> tuple:
+def body(api: str, model: str, sampling, num_predict: int, seed: int,
+         prompt: str = PROMPT) -> tuple:
     """(path, JSON body) of one request."""
     if api == "eullm":
         options = dict(sampling or {}, num_predict=num_predict, seed=seed)
-        return "/api/generate", {"model": model, "prompt": PROMPT, "raw": True,
+        return "/api/generate", {"model": model, "prompt": prompt, "raw": True,
                                  "stream": False, "think": False, "options": options}
-    return "/completion", dict(sampling or {}, prompt=PROMPT, n_predict=num_predict,
+    return "/completion", dict(sampling or {}, prompt=prompt, n_predict=num_predict,
                                seed=seed, stream=False, cache_prompt=True)
 
 
@@ -97,6 +104,43 @@ def one_round(args, sampling, rnd: int) -> dict:
             "errors": errors[:3], "failed": len(errors)}
 
 
+def closed_loop(args, sampling, rnd: int) -> dict:
+    """N clients, each sending requests one after another for args.duration
+    seconds; the round ends when the last answer started in time is in."""
+    lo, hi = (int(x) for x in args.lengths.split(":"))
+    deadline = time.time() + args.duration
+    per_client = [[0, 0, []] for _ in range(args.concurrency)]  # tokens, requests, errors
+
+    def client(i):
+        rng = random.Random(1000 * rnd + i)
+        k = 0
+        while time.time() < deadline:
+            # A prompt of its own: nothing to reuse from another request.
+            prompt = f"[{rnd}.{i}.{k}] " + PROMPT
+            path, payload = body(args.api, args.model, sampling, rng.randint(lo, hi),
+                                 1000 * rnd + i, prompt)
+            try:
+                per_client[i][0] += generated(args.api, post(args.url, path, payload,
+                                                             args.timeout))
+                per_client[i][1] += 1
+            except Exception as e:  # noqa: BLE001 - every failure is reported, none hidden
+                per_client[i][2].append(str(e)[:200])
+            k += 1
+
+    t0 = time.time()
+    threads = [threading.Thread(target=client, args=(i,)) for i in range(args.concurrency)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    wall = time.time() - t0
+    tokens = sum(c[0] for c in per_client)
+    errors = [e for c in per_client for e in c[2]]
+    return {"mode": "closed-loop", "tokens": tokens, "requests": sum(c[1] for c in per_client),
+            "wall_s": round(wall, 3), "agg_tok_s": round(tokens / wall, 1) if wall > 0 else None,
+            "errors": errors[:3], "failed": len(errors)}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--url", required=True)
@@ -108,6 +152,10 @@ def main(argv=None) -> int:
     ap.add_argument("--num-predict", type=int, default=256)
     ap.add_argument("--repeats", type=int, default=2)
     ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--duration", type=float, default=0,
+                    help="seconds of requests one after another per client (0: all at once)")
+    ap.add_argument("--lengths", default="32:384",
+                    help="MIN:MAX tokens per answer with --duration, drawn per request")
     args = ap.parse_args(argv)
 
     # One short request first: the model loads, and nothing measured pays for it.
@@ -119,7 +167,10 @@ def main(argv=None) -> int:
             print(f"unknown profile {name!r}: one of {', '.join(PROFILES)}", file=sys.stderr)
             return 2
         for rnd in range(args.repeats):
-            r = one_round(args, PROFILES[name], rnd)
+            if args.duration > 0:
+                r = closed_loop(args, PROFILES[name], rnd)
+            else:
+                r = one_round(args, PROFILES[name], rnd)
             print(json.dumps(dict({"label": args.label or args.api, "profile": name,
                                    "concurrency": args.concurrency, "repeat": rnd}, **r)),
                   flush=True)

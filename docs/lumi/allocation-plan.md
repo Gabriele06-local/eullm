@@ -308,7 +308,16 @@ In order:
    round of sixteen starts over sixteen steps, where llama-server reads them
    in one batch; sampling is 12% of a step (0.19 ms per token, on one
    thread). The graded workload's distance (14B 99 against 315 tokens/s) is
-   larger than either explains and is still to be read.
+   larger than either explains. The likely reason, found on 09-10-2026: with
+   a KV cache per slot, llama.cpp runs the model once per run of consecutive
+   slot numbers in the order a step lists them (`split_equal`, sequential),
+   and EuLLM listed them in the order answers had ended and slots been taken
+   again. With requests arriving and ending all the time, as in the graded
+   workload, steps took 3.5 to 4 passes on four CPU cores (Qwen3-0.6B, eight
+   clients one request after another); in slot order, 1.0 to 1.4, and 60-71
+   tokens/s instead of 41-43. The `steps:` lines now count the passes, and the
+   diagnosis has closed-loop rounds (`--duration`) and `--kv-unified` to
+   measure it on the GCDs.
 3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
    engine runs one decision at a time per server; `c08` measures the queueing
    that causes as concurrency grows, and replicas as today's way round it.

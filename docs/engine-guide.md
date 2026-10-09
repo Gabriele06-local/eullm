@@ -277,15 +277,25 @@ RUST_LOG=eullm=info,eullm::steps=debug eullm serve --batch-size 4 --ctx-size 819
 and, every ten seconds while it works, it logs one line:
 
 ```text
-steps: 10.1 s, 87 steps, 4.0 seqs/step, 35 tok/s | decode 90.4% (104.48 ms/step),
-  sample 9.4% (2.719 ms/token), emit 0.2% (0.059 ms/token), prefill 0.0% (0 tok),
-  idle 0.0%, other 0.0%
+steps: 10.1 s, 87 steps, 4.0 seqs/step, 1.00 passes/step, 35 tok/s |
+  decode 90.4% (104.48 ms/step), sample 9.4% (2.719 ms/token),
+  emit 0.2% (0.059 ms/token), prefill 0.0% (0 tok), idle 0.0%, other 0.0%
 ```
 
 `decode` is the forward pass (waited for, so it is the GPU's time), `sample`
 choosing each answer's token from its logits, `emit` turning it into text and
 sending it, `prefill` the prompts read between steps, `idle` waiting for
-requests. Without the setting nothing is timed.
+requests. `passes/step` is how many times a step ran the whole model: with a
+KV cache per answer, llama.cpp's default with several slots, it takes one
+pass for each run of consecutive slot numbers among the answers in the step,
+so a slot left out (its prompt still waiting, or no request in it) splits a
+step in two. One is the most a step should take. Without the setting nothing
+is timed.
+
+`--kv-unified` (experimental) gives all the slots one KV cache instead, as
+llama-server does when it chooses its number of slots itself: any slots go
+in one pass, and every answer's attention reads all the slots' cells,
+masked, which costs more as the contexts grow.
 
 The line above is Qwen3.5-0.8B on four CPU cores with Ollama's default
 sampling: sampling took 2.7 ms per token, and 1.1 ms with
