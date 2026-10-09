@@ -12,7 +12,8 @@
     "prompt_tokens is nominal, at 4 characters a token; the Italian filler is ~3.3 for Qwen3, so",
     "30000 is ~36,500 real tokens (the results hold the counted ones). In a 32768 slot it does",
     "not fit (12 failed points, 06-10-2026); long-context-40k measures it in a 40960 slot,",
-    "Qwen3's own trained context."
+    "Qwen3's own trained context, and long-context no longer plans it (24 more had failed by",
+    "09-10-2026, one round after another)."
   ],
   "pull": ["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL"],
   "defaults": {"kind": "throughput", "repeats": 3, "extra_args": ["--fit-strict"]},
@@ -44,7 +45,7 @@
     {"name": "long-context", "priority": 50, "est_s": 1800,
      "set": {"gcds": 1, "slot_ctx": 32768},
      "axes": {"model": ["qwen3-8b", "qwen3-14b", "qwen3-32b", "qwen3.6-35b-a3b"],
-              "batch": [1, 4], "prompt_tokens": [0, 8000, 16000, 30000],
+              "batch": [1, 4], "prompt_tokens": [0, 8000, 16000],
               "kv": ["f16/f16", "q8_0/q8_0"]}},
     {"name": "long-context-40k", "priority": 55, "est_s": 1800,
      "set": {"gcds": 1, "slot_ctx": 40960, "prompt_tokens": 30000},

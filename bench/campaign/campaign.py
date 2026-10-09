@@ -518,7 +518,8 @@ class Runner:
         self.sampler.start()
         print(f"[{now_iso()}] job {self.job} on {self.host}: devices {self.devices} "
               f"(physical {list(self.physical.values())}), "
-              f"{(self.deadline - time.time()) / 3600:.1f} h, engine {self.engine['version']}",
+              f"{(self.deadline - time.time()) / 3600:.1f} h, engine {self.engine['version']}"
+              f"{f', label {point.ENGINE_LABEL}' if point.ENGINE_LABEL else ''}",
               flush=True)
         owner = {"job": self.job, "host": self.host}
         replan_at = 0.0
@@ -659,14 +660,18 @@ def cmd_plan(args):
     os.makedirs(os.path.join(args.queue, "specs"), exist_ok=True)
     specs = load_specs(args.specs)
     for path, spec in specs:
-        points = expand(spec, args.round)
+        points = expand(spec, args.round, args.engine_label)
         added = [p for p in points if q.add(p)]
         name = os.path.basename(path)
         if args.round:
             name = name.replace(".json", f".{args.round}.json")
+        if args.engine_label:
+            name = name.replace(".json", f".{args.engine_label}.json")
         with open(os.path.join(args.queue, "specs", name), "w") as f:
             json.dump(spec, f, indent=1)
-        print(f"{path}{f' (round {args.round})' if args.round else ''}: {len(points)} points, "
+        label = f" for jobs labelled {args.engine_label}" if args.engine_label else ""
+        print(f"{path}{f' (round {args.round})' if args.round else ''}{label}: "
+              f"{len(points)} points, "
               f"{len(added)} new, up to {node_hours(added):.0f} node-hours")
     print("queue:", q.counts())
     if args.engine:
@@ -971,6 +976,9 @@ def main(argv=None):
                    "a new round measures every point again")
     p.add_argument("--engine", default=os.environ.get("EULLM_BIN"),
                    help="check the models are in the store (eullm list)")
+    p.add_argument("--engine-label",
+                   help="run these points only in jobs submitted with EULLM_ENGINE_LABEL "
+                        "set to this (one engine build): jobs of another build leave them")
 
     p = sub.add_parser("pulls")
     p.add_argument("specs", nargs="+")

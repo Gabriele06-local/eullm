@@ -28,6 +28,23 @@ A new engine build is a new round — the same specs measured again:
 ROUND=v0.7.30 SKIP_PULLS=1 bash tools/lumi/campaign_setup.sh
 ```
 
+A job takes points from the queue for as long as it runs, up to 48 hours,
+with the binary it was submitted with. To queue a round for a new build
+while jobs of the old one are still running, give the round an engine
+label and submit the new build's jobs with the same label:
+
+```bash
+$CAMPAIGN plan --queue "$CAMPAIGN_DIR" --round r-next3 --engine-label next3 \
+    tools/lumi/campaigns/c07-runtimes.json
+EULLM_BIN=/scratch/.../eullm-target/next3/release/eullm EULLM_ENGINE_LABEL=next3 \
+    bash tools/lumi/submit_campaign.sh 1 2
+```
+
+A point planned with a label runs only in a job with that label
+(`EULLM_ENGINE_LABEL`), and one planned without a label only in a job
+without one; runners older than the label (`RUNNER_VERSION` 3) leave
+labelled points alone.
+
 ## Specs
 
 JSON: defaults, then groups, each a fixed `set` and a cartesian product of

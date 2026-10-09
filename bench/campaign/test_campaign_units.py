@@ -312,6 +312,26 @@ def test_a_runner_leaves_points_it_cannot_run_in_the_queue():
     assert not point.can_run({"kind": "throughput", "runtime": "unknown-server"})
 
 
+def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
+    import point
+
+    labelled = normalize({"model": "m", "engine_label": "next3"})
+    assert labelled["runner"] == 4 and labelled["engine_label"] == "next3"
+    assert "engine_label" not in normalize({"model": "m", "engine_label": ""})
+    plain = normalize({"model": "m"})
+    assert point.can_run(labelled, "next3")
+    assert not point.can_run(labelled, "next2")
+    assert not point.can_run(labelled, "")  # a job submitted without a label
+    assert point.can_run(plain, "")
+    assert not point.can_run(plain, "next3")
+    # Planned for a build, a spec is new points: none done before is replaced.
+    spec = {"campaign": "c", "groups": [{"name": "g", "set": {"model": "m"}}]}
+    (before,) = expand(spec)
+    (after,) = expand(spec, engine_label="next3")
+    assert before["id"] != after["id"]
+    assert after["engine_label"] == "next3" and "engine_label" not in before
+
+
 def test_new_fields_leave_old_ids_alone_and_mark_their_points():
     old = normalize({"model": "m"})
     assert "runtime" not in old and "runner" not in old
