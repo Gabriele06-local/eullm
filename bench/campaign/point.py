@@ -988,6 +988,8 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                            decode_ms=(t.get("prefix") or 0) + (t.get("questions") or 0),
                            prompt_tokens=e.get("prompt_tokens"),
                            evaluated_tokens=e.get("evaluated_tokens"),
+                           # Absent when the request was evaluated alone.
+                           together=e.get("requests_together") or 1,
                            digest=answers_digest(out.get("answers")))
             except Exception as ex:
                 rec.update(ok=False, error=str(ex)[:200])
@@ -1032,6 +1034,9 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
         "wait_ms_p95": r1(percentile(wait, 0.95)),
         "prompt_tokens_mean": mean([r["prompt_tokens"] for r in ok]),
         "evaluated_tokens_mean": mean([r["evaluated_tokens"] for r in ok]),
+        # Requests the engine evaluated together with each (batched mode):
+        # 1 for an engine that takes them one at a time.
+        "requests_together_mean": mean([r.get("together", 1) for r in ok]),
         "consistency": {"compared": len(repeats), "identical": same,
                         "rate": round(same / len(repeats), 4) if repeats else None},
         "duration_s": round(elapsed, 1),
