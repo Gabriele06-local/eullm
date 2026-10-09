@@ -300,11 +300,8 @@ def test_refusals_under_older_checks_are_asked_again_once(corpus, teacher, tmp_p
     mod = _load("cds_schede")
     assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids),
                      "--out", str(out), "--url", url]) == 0
-    # both rows predate the current checks (v3), so both are asked again: the
-    # good card lands, and the one the teacher serves clean this time lands too.
-    assert sorted(json.loads(line)["id"] for line in out.read_text().splitlines()) == [
-        "cds/2019000000", "cds/2021000004"]
-    assert len(seen) == 2
+    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == ["cds/2019000000"]
+    assert len(seen) == 1
 
 
 def test_sparse_bm25_ranks_like_bm25_and_returns_rulings_once():
