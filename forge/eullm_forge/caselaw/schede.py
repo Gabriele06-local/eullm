@@ -60,9 +60,12 @@ _NORM = re.compile(
     r"\bart[t]?\.|\bd\.?\s*lgs|\bd\.?\s*l\.|\bl(?:egge|\.)\s*(?:r\.|n)?\.?\s*\d|\bl\.\s*r\.|"
     r"\bd\.?p\.?r|\br\.?\s*d\.|\bd\.?p\.?c\.?m|c\.p\.a|\bcost|\bdirettiva|\bregolamento|"
     r"\bc\.c\.|\bc\.p\.|\bt\.u\.|\btuel\b|\d+/\d{2,4}", re.I)
-# Bump when the checks change: refusals recorded under an older version are
-# asked again once (cds_schede.py), the rest stay refused.
-CHECKS_VERSION = 3
+# Bump when a check gets looser, or is fixed because it refused cards it
+# should have accepted: refusals recorded under an older version are then
+# asked again once (cds_schede.py). A stricter check needs no bump -- the
+# teacher runs at temperature 0, so an earlier refusal would only be
+# refused again.
+CHECKS_VERSION = 2
 # Case-insensitive on purpose: the teacher varies capitalisation
 # ([persona_1]), and instruct_gen.py documents the same for its own
 # placeholder check -- a missed placeholder lands verbatim in the card, the
