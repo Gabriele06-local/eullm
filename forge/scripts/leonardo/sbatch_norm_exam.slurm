@@ -28,6 +28,11 @@
 #   EXAM_OPEN_TAG  suffix of the open-book label (default "open"); give the
 #                hybrid runs another one ("hyb") so both sit in one directory
 #                and compare_graded.py sets them side by side
+#   EXAM_OPEN_ARGS  extra legal_eval.py options for the open-book run only:
+#                "--absent" with EXAM_OPEN_TAG=absent is the abstention exam
+#                (each item's own article taken out of the texts); the
+#                closed-book run of the same job is its no-text half.
+#                abstain_summary.py counts both
 #   EXAM_GGUF    space-separated label=file.gguf pairs: those labels of
 #                EXAM_MODELS answer with the GGUF through llama-server, the
 #                model's path giving the tokenizer (legal_eval.py --gguf), so
@@ -135,7 +140,7 @@ for pair in $EXAM_MODELS; do
         else
             # shellcheck disable=SC2086
             "${EVAL[@]}" "$path" --label "$label-$TAG" --norms $EXAM_NORMS "${RETRIEVAL[@]}" "${GGUF[@]}" \
-                --answers "$OUT/answers-$label-$TAG.jsonl" || status=1
+                ${EXAM_OPEN_ARGS:-} --answers "$OUT/answers-$label-$TAG.jsonl" || status=1
         fi
     fi
 done

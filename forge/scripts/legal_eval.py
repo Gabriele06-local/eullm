@@ -48,6 +48,19 @@ measure what quantization costs on these questions:
 
     python forge/scripts/legal_eval.py <merged-dir> --label NAME-q4 \
         --gguf <merged-dir's q4_k_m.gguf> --norms ...
+
+ABSTENTION. Every answer is also checked by program
+(`eullm_forge.eval.abstain`): whether it says the texts do not hold the
+answer (``abstained``), and which articles it cites that neither the question
+nor the texts it was given name (``unsourced_articles``). Three runs of the
+same exam then measure honesty, not only knowledge:
+
+* open book: abstaining is a lost answer, the rate should be near 0;
+* ``--absent`` (with ``--norms``): the item's own article is taken out of the
+  retrieved texts, and no note says so -- what a RAG gives when retrieval
+  misses. Abstaining is the right answer;
+* closed book: no texts at all, as in a plain chat. Abstaining, or at least
+  citing no article from memory, is the right answer.
 """
 
 from __future__ import annotations
@@ -68,6 +81,7 @@ from eullm_forge.eval import (  # noqa: E402
     load_seed,
     open_book_prompt,
 )
+from eullm_forge.eval.abstain import abstained, unsourced_articles  # noqa: E402
 from eullm_forge.eval.retrieval import label as norm_label  # noqa: E402
 
 
@@ -136,6 +150,22 @@ def load_model(auto_cls, path: str, n_gpus: int, fallback_cls=None):
     return model.to("cuda") if n_gpus == 1 else model
 
 
+def retrieve(index, item, k: int, absent: bool = False) -> tuple[list[dict], str]:
+    """The texts an item is asked with, and the note on a missing article.
+
+    With ``absent`` the item's own article (``metadata`` code and articolo,
+    as make_norm_exam.py writes them) is taken out -- continuation chunks
+    too, hence ``articles_of`` -- and the next records retrieved take its
+    place; no note is given, since a RAG whose retrieval missed gives none.
+    """
+    if not absent:
+        return index.search(item.question, k), index.missing_article_note(item.question)
+    code, number = item.metadata.get("code"), item.metadata.get("articolo")
+    found = [r for r in index.search(item.question, k + 6)
+             if not (r.get("code") == code and number in index.articles_of(r))]
+    return found[:k], ""
+
+
 def chat_prompt(tok, content: str) -> str:
     """One user turn in the model's chat format, with thinking switched off.
 
@@ -192,6 +222,9 @@ def main() -> int:
                     help="legislazione_*.chunks.jsonl files: ask OPEN BOOK, "
                          "with the retrieved norms in the prompt")
     ap.add_argument("--k", type=int, default=3, help="norms retrieved per question")
+    ap.add_argument("--absent", action="store_true",
+                    help="with --norms: take each item's own article out of the texts "
+                         "(the abstention exam; see ABSTENTION above)")
     ap.add_argument("--embedder", help="with --norms: fuse BM25 with this embedding model "
                     "(eullm_forge.eval.dense); default BM25 alone")
     ap.add_argument("--reranker", help="with --embedder: reorder the fused list with this model")
@@ -212,6 +245,8 @@ def main() -> int:
                          "held-out exam, whose questions nobody improving the models "
                          "should read (see make_norm_exam.py)")
     args = ap.parse_args()
+    if args.absent and not args.norms:
+        ap.error("--absent takes the article out of retrieved texts: give --norms")
 
     from transformers import AutoTokenizer
 
@@ -231,13 +266,13 @@ def main() -> int:
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
 
-    contexts, prompts = {}, []
+    contexts, in_hand, prompts = {}, {}, []
     for it in items:
         content = it.question
         if index:
-            found = index.search(it.question, args.k)
-            note = index.missing_article_note(it.question)
+            found, note = retrieve(index, it, args.k, absent=args.absent)
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
+            in_hand[it.id] = {a for r in found for a in index.articles_of(r)}
             content = open_book_prompt(it.question, found, note=note)
         prompts.append(chat_prompt(tok, content))
     if args.gguf:
@@ -271,6 +306,9 @@ def main() -> int:
                 print(f"\n[eval] {it.id} reads: {'; '.join(contexts[it.id]) or 'nothing found'}")
             print(f"\n[eval] {it.id}: {it.question}\n{answers[it.id]}", flush=True)
 
+    abst = {it.id: abstained(answers[it.id]) for it in items}
+    unsourced = {it.id: unsourced_articles(answers[it.id], it.question, in_hand.get(it.id, ()))
+                 for it in items}
     report = evaluate_qa(items, answers)
     if not args.quiet:
         for r in report["per_item"]:
@@ -282,6 +320,9 @@ def main() -> int:
           f"{s['keyword_coverage']:.3f} over {s.get('keyword_items', s['n'])} of "
           f"{s['n']} items, "
           f"{ended}/{s['n']} ended their turn", flush=True)
+    print(f"[eval] {args.label or args.model}: abstained {sum(abst.values())}/{s['n']}, "
+          f"citing articles not in hand {sum(bool(u) for u in unsourced.values())}/{s['n']}"
+          f"{' (own article taken out)' if args.absent else ''}", flush=True)
 
     if args.answers:
         with open(args.answers, "w", encoding="utf-8") as f:
@@ -290,7 +331,10 @@ def main() -> int:
                                     "answer": answers[it.id], "reference": it.reference,
                                     "rubric": it.rubric,
                                     "keyword_coverage": r["keyword_coverage"],
-                                    "context": contexts.get(it.id)},
+                                    "context": contexts.get(it.id),
+                                    "abstained": abst[it.id],
+                                    "unsourced_articles": unsourced[it.id],
+                                    "absent": args.absent},
                                    ensure_ascii=False) + "\n")
     if args.csv:
         append_csv_row(Path(args.csv),
