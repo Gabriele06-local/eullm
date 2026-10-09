@@ -43,6 +43,7 @@ source "${EULLM_REPO:?submit through submit_campaign.sh, which exports EULLM_REP
 GCDS="${SLURM_GPUS_ON_NODE:-8}"
 echo "=== eullm campaign job $SLURM_JOB_ID on $(hostname) ==="
 printf '  %-12s %s\n' gcds "$GCDS" engine "$("$EULLM_BIN" --version 2>&1 | head -1)" \
+    label "${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}" \
     repo "$(git -C "$EULLM_REPO" rev-parse --short HEAD 2>/dev/null)" \
     python "$PY" queue "$CAMPAIGN_DIR" models "$EULLM_MODELS_DIR"
 rocm-smi --showproductname 2>&1 | grep -E 'GPU\[' | head -8 | sed 's/^/  /'
