@@ -42,3 +42,20 @@ Release 0.7.40 Linux Vulkan build (`~/work/vulkan-test`, `GGML_VK_VISIBLE_DEVICE
 - `--no-flash-attn`: 18.6 writing, **345 reading**.
 Qwen3.5-9B Q4_K_M with flash attention on: 5.0 / 38. So on RDNA 2 under Vulkan the flash-attention path costs most of the prompt-reading speed. To decide: turn flash attention off by default on Vulkan where there are no cooperative matrices (needs a check on a newer llama.cpp than 0.7.40's, and on another Vulkan card), or at least say it in `docs/platforms.md`.
 Also found: the board's second long slot (the chipset's) negotiates PCIe 3.0 x2 here, not x4; the card in it measures the same as in x16 once the model is loaded. Long-text check of the MoE cache (reports of looping on the merged PR): 4,000 tokens, temperature 0, with and without the cache on Flash-Next IQ2_XS, neither loops; they diverge after 230 characters at a near tie, as greedy runs do when the numerics move.
+
+## Update (9 October) — flash attention on and off, Vulkan on the RX 6700 XT
+EuLLM 0.7.40 Vulkan build, default context (4,096), a 3,000-token prompt, two rounds in opposite orders, greedy answers (each model's answer is the same in both rounds and differs between on and off, as numerics do). Qwen3-14B Q4_K_M with `--no-fit --gpu-layers 99` (the automatic fit left 3 of 40 layers in RAM with the desktop on the other card); Gemma-4 E4B Q4_K_M; Qwen3.6-35B-A3B Q4_K_M with `--cpu-moe`.
+
+| model | flash attention | read tokens/s (round 1, round 2) | write tokens/s |
+|---|---|---|---|
+| Qwen3-14B | on | 43.7, 42.0 | 20.7, 20.4 |
+| Qwen3-14B | off | 246.4, 470.0 | 33.2, 32.8 |
+| Gemma-4 E4B | on | 64.5, 74.7 | 22.7, 24.4 |
+| Gemma-4 E4B | off | 43.0, 43.9 | 18.4, 20.4 |
+| Qwen3.6-35B-A3B, experts in RAM | on | 43.3, 42.5 | 9.3, 9.1 |
+| Qwen3.6-35B-A3B, experts in RAM | off | 25.8, 42.9 | 9.3, 9.1 |
+
+- Switching it off helps the dense Qwen3-14B a lot (reading 6 to 11 times, writing +60%), hurts Gemma-4 E4B (reading about 35% slower) and changes nothing for the MoE with its experts in RAM (round 2; round 1 of "off" was lower for no reason found).
+- So a blanket default of "off on Vulkan without cooperative matrices" would cost Gemma 35%: the choice depends on the model. Not made; to say in `docs/platforms.md` for RDNA 2.
+- The "off" readings of Qwen3-14B and of the MoE moved a lot between rounds (246 to 470; 26 to 43), unexplained. One card, one build, 3,000 tokens: an order of magnitude, not a figure.
+- A first attempt with `--ctx-size 8192` was discarded: the fit put 35 of 40 layers on the card.
