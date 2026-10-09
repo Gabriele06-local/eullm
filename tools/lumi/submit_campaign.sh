@@ -27,7 +27,10 @@ source "$(dirname "$0")/campaign_env.sh"
 export EULLM_BIN
 
 mkdir -p "$CAMPAIGN_DIR/logs"
-$CAMPAIGN status --queue "$CAMPAIGN_DIR" | head -3
+# Its first lines only: `head` closes the pipe before a long status is out,
+# and under pipefail the status command dying of that stopped the script
+# before any job was submitted (09-10-2026).
+$CAMPAIGN status --queue "$CAMPAIGN_DIR" 2>/dev/null | head -3 || true
 # A job runs only the points planned with its label (plan --engine-label),
 # or only the unlabelled ones without one.
 echo "engine $EULLM_BIN, label ${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}"
