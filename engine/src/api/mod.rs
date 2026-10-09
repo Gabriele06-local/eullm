@@ -188,6 +188,9 @@ pub struct AppState {
     /// `--load-threads`: readers of the model file ahead of every load this
     /// server makes (see `crate::readahead`).
     pub load_threads: crate::readahead::LoadThreads,
+    /// `--kv-unified`: one KV cache for every sequence of a model this
+    /// server loads.
+    pub kv_unified: bool,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -679,6 +682,7 @@ impl AppState {
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
                 load_threads: self.load_threads,
+                kv_unified: self.kv_unified,
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -2828,6 +2832,8 @@ pub struct ServeConfig {
     pub moe_prefetch: u32,
     /// `--load-threads` (see `AppState::load_threads`).
     pub load_threads: crate::readahead::LoadThreads,
+    /// `--kv-unified` (see `AppState::kv_unified`).
+    pub kv_unified: bool,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3147,6 +3153,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         mmap: cfg.mmap,
         moe_prefetch: cfg.moe_prefetch,
         load_threads: cfg.load_threads,
+        kv_unified: cfg.kv_unified,
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3325,6 +3332,7 @@ impl AppState {
             mmap: false,
             moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,
             load_threads: crate::readahead::LoadThreads::default(),
+            kv_unified: false,
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

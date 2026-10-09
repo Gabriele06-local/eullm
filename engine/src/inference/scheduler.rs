@@ -188,6 +188,8 @@ struct StepTimes {
     steps: u64,
     /// Tokens decoded by those steps: one per answering sequence each.
     tokens: u64,
+    /// Passes of the model those steps took (see `decode_passes`).
+    passes: u64,
     decode: std::time::Duration,
     sample: std::time::Duration,
     emit: std::time::Duration,
@@ -207,6 +209,7 @@ impl StepTimes {
             since: std::time::Instant::now(),
             steps: 0,
             tokens: 0,
+            passes: 0,
             decode: Default::default(),
             sample: Default::default(),
             emit: Default::default(),
@@ -252,7 +255,8 @@ impl StepTimes {
         let parts = self.decode + self.sample + self.emit + self.prefill + self.idle;
         let other = wall.saturating_sub(parts);
         format!(
-            "{:.1} s, {} steps, {:.1} seqs/step, {:.0} tok/s | decode {:.1}% ({:.2} ms/step), \
+            "{:.1} s, {} steps, {:.1} seqs/step, {:.2} passes/step, {:.0} tok/s | \
+             decode {:.1}% ({:.2} ms/step), \
              sample {:.1}% ({:.3} ms/token), emit {:.1}% ({:.3} ms/token), \
              prefill {:.1}% ({} tok), idle {:.1}%, other {:.1}%",
             s,
@@ -261,6 +265,11 @@ impl StepTimes {
                 0.0
             } else {
                 self.tokens as f64 / self.steps as f64
+            },
+            if self.steps == 0 {
+                0.0
+            } else {
+                self.passes as f64 / self.steps as f64
             },
             self.tokens as f64 / s,
             pct(self.decode),
@@ -275,6 +284,44 @@ impl StepTimes {
             pct(other),
         )
     }
+}
+
+/// How many passes of the model llama.cpp makes for a decode batch of one
+/// token per sequence, `seq_ids` in the order the batch holds them.
+///
+/// With one KV cache per sequence (llama.cpp's default with several), the
+/// batch is cut by `llama_batch_allocr::split_equal` in sequential mode: a
+/// micro-batch starts at the first token not yet taken and takes, in batch
+/// order, only the sequences whose ids follow one another (`id == last + 1`).
+/// Sequences 0, 1, 3, 4 are two passes, and so are 3, 0, 1, 2; every pass
+/// reads all of the model's weights. With one KV cache for all (`unified`)
+/// any tokens go together, `n_ubatch` at a time.
+fn decode_passes(seq_ids: &[i32], unified: bool, n_ubatch: usize) -> u32 {
+    let n_ubatch = n_ubatch.max(1);
+    if unified {
+        return seq_ids.len().div_ceil(n_ubatch) as u32;
+    }
+    let mut taken = vec![false; seq_ids.len()];
+    let mut left = seq_ids.len();
+    let mut passes = 0;
+    while left > 0 {
+        let mut last: Option<i32> = None;
+        let mut in_pass = 0;
+        for (i, &id) in seq_ids.iter().enumerate() {
+            if taken[i] || last.is_some_and(|l| id != l + 1) {
+                continue;
+            }
+            taken[i] = true;
+            last = Some(id);
+            left -= 1;
+            in_pass += 1;
+            if in_pass == n_ubatch {
+                break;
+            }
+        }
+        passes += 1;
+    }
+    passes
 }
 
 /// An idle sequence slot together with the exact token history currently
@@ -2091,6 +2138,13 @@ fn run_scheduler_loop(
         decode_batch.clear();
         logit_of_seq.clear();
 
+        // In slot order: with a KV cache per sequence llama.cpp makes one
+        // pass of the model per run of consecutive slots in the order the
+        // batch holds them (`decode_passes`), and `active` is in no order
+        // once answers end (`swap_remove` in step 6) and slots are taken
+        // again: 3, 0, 1, 2 was two passes where 0, 1, 2, 3 is one.
+        active.sort_unstable_by_key(|seq| seq.seq_id);
+
         for seq in active.iter() {
             let Some(token) = seq.last_token else {
                 continue;
@@ -2130,6 +2184,9 @@ fn run_scheduler_loop(
                 times.decode += t.elapsed();
                 times.steps += 1;
                 times.tokens += decode_batch.n_tokens() as u64;
+                let order: Vec<i32> = logit_of_seq.iter().map(|&(id, _)| id).collect();
+                times.passes +=
+                    decode_passes(&order, config.kv_unified, ctx.n_ubatch() as usize) as u64;
             }
             if let Err(e) = decoded {
                 tracing::error!("Batch decode failed: {e}");
@@ -2849,8 +2906,8 @@ mod tests {
     use super::super::output::stop_prefix_holdback;
     use super::{
         CachedSlot, GenerateRequest, NotQueued, PieceOutcome, PromptCheckpoint, SchedulerHandle,
-        SendOutcome, StepTimes, StreamEvent, best_checkpoint, common_prefix_len, drafts_kept,
-        mtp_drafts, pick_slot, process_piece, text_prefix_match, try_send_piece,
+        SendOutcome, StepTimes, StreamEvent, best_checkpoint, common_prefix_len, decode_passes,
+        drafts_kept, mtp_drafts, pick_slot, process_piece, text_prefix_match, try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
@@ -2864,6 +2921,7 @@ mod tests {
         let mut times = StepTimes::new(true);
         times.steps = 400;
         times.tokens = 6400;
+        times.passes = 600;
         times.decode = Duration::from_millis(6000);
         times.sample = Duration::from_millis(3200);
         times.emit = Duration::from_millis(64);
@@ -2872,10 +2930,32 @@ mod tests {
         let line = times.summary(Duration::from_secs(10));
         assert_eq!(
             line,
-            "10.0 s, 400 steps, 16.0 seqs/step, 640 tok/s | decode 60.0% (15.00 ms/step), \
+            "10.0 s, 400 steps, 16.0 seqs/step, 1.50 passes/step, 640 tok/s | \
+             decode 60.0% (15.00 ms/step), \
              sample 32.0% (0.500 ms/token), emit 0.6% (0.010 ms/token), \
              prefill 5.0% (2048 tok), idle 0.0%, other 2.4%"
         );
+    }
+
+    /// A decode batch costs one pass of the model per run of consecutive
+    /// slot numbers in the order it holds them, as llama.cpp cuts it with a
+    /// KV cache per sequence; one pass per micro-batch with one for all.
+    #[test]
+    fn a_decode_batch_takes_one_pass_per_run_of_consecutive_slots() {
+        assert_eq!(decode_passes(&[0, 1, 2, 3], false, 512), 1);
+        assert_eq!(decode_passes(&[4, 5, 6], false, 512), 1);
+        // A slot left out (its prompt waiting, or idle) cuts the run.
+        assert_eq!(decode_passes(&[0, 1, 3, 4], false, 512), 2);
+        assert_eq!(decode_passes(&[0, 2, 4, 6], false, 512), 4);
+        // Order counts: the first token not yet taken starts each pass.
+        assert_eq!(decode_passes(&[3, 0, 1, 2], false, 512), 2);
+        assert_eq!(decode_passes(&[0, 2, 1, 3], false, 512), 2);
+        assert_eq!(decode_passes(&[3, 2, 1, 0], false, 512), 4);
+        // No more than n_ubatch sequences in a pass.
+        assert_eq!(decode_passes(&[0, 1, 2, 3], false, 2), 2);
+        // One cache for all: any slots, any order.
+        assert_eq!(decode_passes(&[3, 0, 6, 2], true, 512), 1);
+        assert_eq!(decode_passes(&[], false, 512), 0);
     }
 
     /// Off, nothing is timed: there is no clock to take a part's time from,

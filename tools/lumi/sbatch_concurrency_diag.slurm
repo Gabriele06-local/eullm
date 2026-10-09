@@ -10,14 +10,20 @@
 #
 # Default: qwen3-8b, 1 4 16. Output: eullm-concurrency-<job>.out beside where
 # it was submitted, every server's log next to it (*.eullm-<n>.log,
-# *.llama-<n>.log).
+# *.eullm-kvu-<n>.log, *.llama-<n>.log).
 #
 # Reading it. One JSON line per round: `agg_tok_s` is every token of the
 # round over its wall time. Profile `none` is what c07 measured (each server
 # its own defaults), `ollama` and `llama` give both servers the same chain.
+# The `closed-loop` rounds keep every client sending requests one after
+# another for a minute, prompts of their own and answers of 32 to 384
+# tokens, as c07's graded workload does; EuLLM runs them twice, with a KV
+# cache per sequence (its default) and with one for all (--kv-unified).
 # In EuLLM's log, every `steps:` line splits ten seconds of the scheduler
 # into decode (the GPU), sample (choosing each sequence's token, on one CPU
-# thread), emit (text and the reply channel) and prefill.
+# thread), emit (text and the reply channel) and prefill, and says how many
+# passes of the model a step took: one per run of consecutive slots in the
+# batch, with a KV cache per sequence.
 
 #SBATCH --job-name=eullm-concurrency
 #SBATCH --partition=small-g
@@ -70,23 +76,36 @@ stop() {
     sleep 2
 }
 
+CLOSED=(--profiles llama --duration 60 --lengths 32:384 --repeats 1)
+
+eullm_rounds() {  # N LABEL [FLAG ...]: an EuLLM server with FLAGs, its rounds and step lines
+    local n=$1 label=$2
+    shift 2
+    # The scheduler's step lines, every ten seconds while it works.
+    RUST_LOG="eullm=info,eullm::steps=debug" \
+        "$EULLM_BIN" serve --port "$PORT" --batch-size "$n" --ctx-size "$((SLOT_CTX * n))" \
+        --cache-type-k f16 --cache-type-v f16 "$@" >"$OUT.$label-$n.log" 2>&1 &
+    server=$!
+    if wait_ready /api/version "$server"; then
+        if [ "$label" = eullm ]; then
+            $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label "$label" \
+                --concurrency "$n" --profiles none,ollama,llama,greedy
+        fi
+        $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label "$label" \
+            --concurrency "$n" "${CLOSED[@]}"
+    else
+        echo "[!!] $label did not start at $n: tail $OUT.$label-$n.log"
+    fi
+    stop "$server"
+    echo "--- $label at $n: its step lines ---"
+    grep "steps:" "$OUT.$label-$n.log" | tail -14
+}
+
 for n in "${LEVELS[@]}"; do
     ctx=$((SLOT_CTX * n))
 
-    # The scheduler's step lines, every ten seconds while it works.
-    RUST_LOG="eullm=info,eullm::steps=debug" \
-        "$EULLM_BIN" serve --port "$PORT" --batch-size "$n" --ctx-size "$ctx" \
-        --cache-type-k f16 --cache-type-v f16 >"$OUT.eullm-$n.log" 2>&1 &
-    server=$!
-    if wait_ready /api/version "$server"; then
-        $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label eullm \
-            --concurrency "$n" --profiles none,ollama,llama,greedy
-    else
-        echo "[!!] eullm did not start at $n: tail $OUT.eullm-$n.log"
-    fi
-    stop "$server"
-    echo "--- eullm at $n: its step lines ---"
-    grep "steps:" "$OUT.eullm-$n.log" | tail -12
+    eullm_rounds "$n" eullm
+    eullm_rounds "$n" eullm-kvu --kv-unified
 
     "$LLAMA_SERVER_BIN" --host 127.0.0.1 --port "$PORT" -m "$GGUF" --alias "$MODEL" \
         -c "$ctx" -np "$n" -ngl 999 -ctk f16 -ctv f16 >"$OUT.llama-$n.log" 2>&1 &
@@ -94,6 +113,8 @@ for n in "${LEVELS[@]}"; do
     if wait_ready /health "$server"; then
         $PROBE --url "http://127.0.0.1:$PORT" --api llama --model "$MODEL" --label llama-server \
             --concurrency "$n" --profiles none,ollama,llama,greedy
+        $PROBE --url "http://127.0.0.1:$PORT" --api llama --model "$MODEL" --label llama-server \
+            --concurrency "$n" "${CLOSED[@]}"
     else
         echo "[!!] llama-server did not start at $n: tail $OUT.llama-$n.log"
     fi
