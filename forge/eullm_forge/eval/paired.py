@@ -19,9 +19,10 @@ end.
 A second thing a total hides is how long the answers are. An LLM judge can
 favour long answers or short ones (Dubois et al. 2024; Soumik 2026), and our
 SFT models answer in 440 characters where their base answers in 1,160. So
-every comparison also reports, among the questions where the two disagree,
-how often the answer judged right is the longer one: far from one half, the
-judge may be grading length as much as law.
+every comparison also reports, among the questions where the two disagree
+and the answers differ in length, how often the answer judged right is the
+longer one: far from one half, the judge may be grading length as much as
+law. A tie in length is no evidence either way, so it is left out.
 
 Nothing here prints a question: ids name the article asked.
 """
@@ -172,7 +173,9 @@ class Comparison:
     base_only_lenient: int
     p_lenient: float
     by_kind: dict[str, tuple[int, int]]
-    longer_wins: float | None   # among discordant items, share where the right answer is longer
+    # among discordant items whose answers differ in length, share where the
+    # right answer is longer (a tie is in neither count)
+    longer_wins: float | None
     verif_a_only: int = 0       # judge-free: a right, base not
     verif_base_only: int = 0
     verif_n: int = 0
