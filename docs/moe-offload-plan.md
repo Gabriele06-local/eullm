@@ -249,6 +249,18 @@ At 4,096 a micro-batch takes 3.3 s, of which copying 33 GiB at 24 GB/s is at mos
 - Pinned memory alone is +66% reading over `mmap` with the cache (613.0 to 1,020.2); the prefetch adds +53% on top.
 - Still to measure: PCIe 3.0, where a report on the prefetch PR says it got slower; and a model that does not fit in RAM, where `mmap` reads from the disk.
 
+**The prefetch with `mmap`, 9 October** (reference PC, IQ2_XS, cache 5500 MiB, three rounds in rotated order, the same answer in all 12 runs). The pageable-memory check of patch 0003 was lifted for this run only (a local switch, not in the patches).
+
+| configuration | read tokens/s (mean, sd) | write tokens/s |
+|---|---|---|
+| cache, `mmap` | 618.3, 1.9 | 36.6 |
+| cache, `mmap`, prefetch forced on | 479.6, 4.5 | 36.6 |
+| cache, pinned | 1,020.6, 7.9 | 53.4 |
+| cache, pinned, prefetch | 1,529.0, 32.4 | 51.8 |
+
+- With the experts in pageable memory the prefetch reads 22% slower than the plain copy, in every round: the copy into a slot holds the host until the slot's previous reader has run, so copies and splits alternate again, and the slots cost on top. The rule "only with pinned experts" stays.
+- Another implementation of the idea (PR #28414, measured by a third party on ROCm with PCIe 5.0) reports a gain with `mmap`; it is not reproduced here and may depend on the backend.
+
 **On an A100, 8 October** (Leonardo, job 59739979, `forge/scripts/leonardo/sbatch_prefetch_bench.slurm`): one A100 64 GB (PCIe 4.0 x16), Qwen3.8-Flash-Next IQ4_NL (96 GiB, the file the maintainers measure), 16,000 MiB cache, the same prompt and `-ub 2048`, stock pin. Two runs of `pinned` and `prefetch` in opposite orders (r1: mmap, pinned, prefetch; r2: prefetch, pinned), one of the rest; the same answer hash in all 7 runs.
 
 | configuration | read tokens/s | write tokens/s |
