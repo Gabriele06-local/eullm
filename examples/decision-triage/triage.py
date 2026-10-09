@@ -250,6 +250,11 @@ def load(args):
             )
         return found
     if args.mbox:
+        # mailbox.mbox creates the file when missing (create=True is the
+        # default), so a typo'd path silently grew a stray 0-byte file and
+        # the run ended with "no email found" for mail that never existed.
+        if not os.path.isfile(args.mbox):
+            raise SystemExit(f"no such mbox file: {args.mbox}")
         box = mailbox.mbox(args.mbox, factory=None)
         found = []
         for raw in box:
