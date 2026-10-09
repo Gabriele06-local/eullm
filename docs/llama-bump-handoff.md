@@ -59,3 +59,17 @@ EuLLM 0.7.40 Vulkan build, default context (4,096), a 3,000-token prompt, two ro
 - So a blanket default of "off on Vulkan without cooperative matrices" would cost Gemma 35%: the choice depends on the model. Not made; to say in `docs/platforms.md` for RDNA 2.
 - The "off" readings of Qwen3-14B and of the MoE moved a lot between rounds (246 to 470; 26 to 43), unexplained. One card, one build, 3,000 tokens: an order of magnitude, not a figure.
 - A first attempt with `--ctx-size 8192` was discarded: the fit put 35 of 40 layers on the card.
+
+### Why only some models gain (9 October, same card, same build)
+Two more models, two rounds in opposite orders: Qwen3-4B Q4_K_M (head size 128) and Qwen3.5-9B Q4_K_M (head size 256).
+
+| model | head size | flash attention | read tokens/s | write tokens/s |
+|---|---|---|---|---|
+| Qwen3-4B | 128 | on | 92.4, 90.3 | 47.5, 44.4 |
+| Qwen3-4B | 128 | off | 1,301.3, 1,274.8 | 79.1, 78.9 |
+| Qwen3.5-9B | 256 | on | 46.0, 44.1 | 5.8, 5.6 |
+| Qwen3.5-9B | 256 | off | 51.0, 44.6 | 5.7, 5.5 |
+
+- The pattern across five models: head size 128 (Qwen3-4B, Qwen3-14B) reads 6 to 14 times faster without flash attention; 256 (Qwen3.5-9B, Qwen3.6-35B-A3B, whose layers are mostly recurrent) is a tie; Gemma-4 E4B (256 and 512, sliding window) reads about 50% faster with it.
+- In ggml-vulkan's scalar flash-attention tuning (`get_fa_tuning_params_scalar`, present in both pins) a head of 128 or less with a large batch on AMD other than GCN takes a branch of its own (no row split, plus an occupancy limit marked "values are guessed, tested on RDNA2"); larger heads take another. That fits the pattern, and is not proven: testing it means building the Vulkan backend with that branch off, and `glslc` is not installed here.
+- Not related to flash attention, seen on the way: Qwen3.5-9B writes at 5.6 tokens/s and the MoE at 9 on this card (a 9B Q4 should write several times faster); Qwen2.5-Math-7B Q8_0 hung the GPU (`The CS has been cancelled because the context is lost`) while reading a 3,000-token prompt, with flash attention on and off.
