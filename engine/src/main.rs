@@ -293,7 +293,10 @@ struct RuntimeOpts {
     no_mmap: bool,
 
     /// Keep the model file mapped where --moe-cache would read it into
-    /// memory to pin its experts.
+    /// memory to pin its experts, or where a model that goes to the GPUs whole
+    /// is more than half the memory this process may use (the RAM, or a Slurm
+    /// job's --mem), which is otherwise read in: mapped, such a model did not
+    /// load in an hour on LUMI-G, read in it loaded in 3 to 4 minutes.
     #[arg(long, conflicts_with = "no_mmap")]
     mmap: bool,
 
@@ -3123,6 +3126,28 @@ async fn cmd_run(
         // model that has its own projector still finds it in load_generation_model,
         // by store entry or by the file sitting beside its weights.
         api_mmproj = mmproj.clone();
+
+        // A model that goes to the GPUs whole and is more than half the
+        // memory is read in: mapped, it does not load (`fit::read_in_whole_on_gpu`).
+        if !no_mmap {
+            let whole_on_gpu = fit::vram_bytes().is_some_and(|(_, total)| total > 0)
+                && fit::every_layer_on_gpu(
+                    gpu_layers,
+                    fit::read_gguf_info(&gguf_path).map(|info| info.n_layers),
+                    cpu_moe,
+                    n_cpu_moe,
+                    moe_cache_bytes,
+                );
+            if let Some(why) = fit::read_in_whole_on_gpu(
+                fit::model_file_bytes(&gguf_path),
+                whole_on_gpu,
+                readahead::memory_for_cache(),
+                mmap,
+            ) {
+                println!("[EULLM] {why}.");
+                no_mmap = true;
+            }
+        }
 
         // The prefetch's slots, where experts are kept in RAM and pinned, on
         // the one CUDA GPU it runs on (the expert cache's own condition).

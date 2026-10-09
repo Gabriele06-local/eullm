@@ -1544,6 +1544,55 @@ pub fn plan_read_into_memory(
     }
 }
 
+/// Whether every layer of the model, and every expert, goes to the GPUs:
+/// `gpu_layers` of `-1`, or at least one more than the model's
+/// `n_layers` (the output layer is the extra one), with no expert kept in
+/// RAM. An unknown layer count counts as all only for `-1`.
+pub fn every_layer_on_gpu(
+    gpu_layers: i32,
+    n_layers: Option<u32>,
+    cpu_moe: bool,
+    n_cpu_moe: u32,
+    moe_cache_bytes: u64,
+) -> bool {
+    let all_layers = gpu_layers < 0
+        || n_layers.is_some_and(|n| i64::from(gpu_layers) > i64::from(n));
+    all_layers && !cpu_moe && n_cpu_moe == 0 && moe_cache_bytes == 0
+}
+
+/// Whether a model that goes to the GPUs whole is read into memory instead
+/// of mapped, and the line that says why when it is: when its files are more
+/// than half of the memory this process may fill (`memory`, the RAM or a
+/// Slurm job's `--mem`), unless `--mmap` keeps them mapped.
+///
+/// Measured on LUMI-G (c09, 07-10-2026 and 08-10-2026), loading cold from
+/// Lustre: Qwen3-Coder-480B Q4_K_M, 270 GiB on 8 GCDs of a 480 GiB job,
+/// never loaded mapped (six tries; one watched for 70 minutes, the file read
+/// into the page cache and then copied to the GPUs by one thread at 90 MB/s)
+/// and loaded read in, in 160 and 208 s; DeepSeek-V3.1 Q4_K_M the same, 226 s
+/// read in. Below half nothing is gained: Qwen3-235B, 132 GiB, 110 s mapped
+/// and 108 s read in; Qwen3.8-27B, 29 GiB, 46 s mapped and 51 s read in. The
+/// tokens per second were the same both ways.
+pub fn read_in_whole_on_gpu(
+    model_bytes: u64,
+    whole_on_gpu: bool,
+    memory: Option<u64>,
+    keep_mapped: bool,
+) -> Option<String> {
+    let memory = memory?;
+    if keep_mapped || !whole_on_gpu || model_bytes <= memory / 2 {
+        return None;
+    }
+    Some(format!(
+        "reading the model ({}) into memory instead of mapping its file: it goes to the GPUs \
+         whole and is more than half of the {} of memory this process may use, where a \
+         mapped file is read twice and copied to the GPUs a page at a time (--mmap keeps it \
+         mapped)",
+        gib(model_bytes),
+        gib(memory)
+    ))
+}
+
 /// Whether llama.cpp's expert cache can run on this machine: one GPU, a
 /// CUDA one. The cache refuses more than one device, and it has been
 /// measured on CUDA only. `Err` says why not, for the log.
@@ -3557,6 +3606,37 @@ mod plan_offload_tests {
         let (read, why) = plan_read_into_memory(false, false, 33 * GIB, None);
         assert!(!read);
         assert!(why.unwrap().contains("not known"));
+    }
+
+    /// A model that goes to the GPUs whole is read in when its files are more
+    /// than half the memory (LUMI-G's 480B: 270 GiB of a 480 GiB job), and
+    /// stays mapped below (the 235B's 132 GiB), when part of it stays on the
+    /// CPU, when the memory is not known, or with `--mmap`.
+    #[test]
+    fn a_model_on_the_gpus_larger_than_half_the_memory_is_read_in() {
+        let job = Some(480 * GIB);
+        let why = read_in_whole_on_gpu(270 * GIB, true, job, false).expect("read in");
+        assert!(why.contains("270.00 GiB") && why.contains("--mmap keeps"), "{why}");
+        assert_eq!(read_in_whole_on_gpu(132 * GIB, true, job, false), None);
+        assert_eq!(read_in_whole_on_gpu(240 * GIB, true, job, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, false, job, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, None, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, job, true), None);
+    }
+
+    /// All layers is `-1`, or one more than the model's blocks (the output
+    /// layer); any expert in RAM is not all on the GPUs.
+    #[test]
+    fn every_layer_on_the_gpu_counts_the_output_layer_and_the_experts() {
+        assert!(every_layer_on_gpu(-1, None, false, 0, 0));
+        assert!(every_layer_on_gpu(-1, Some(62), false, 0, 0));
+        assert!(every_layer_on_gpu(63, Some(62), false, 0, 0));
+        assert!(every_layer_on_gpu(999, Some(62), false, 0, 0));
+        assert!(!every_layer_on_gpu(62, Some(62), false, 0, 0));
+        assert!(!every_layer_on_gpu(999, None, false, 0, 0));
+        assert!(!every_layer_on_gpu(-1, Some(62), true, 0, 0));
+        assert!(!every_layer_on_gpu(-1, Some(62), false, 30, 0));
+        assert!(!every_layer_on_gpu(-1, Some(62), false, 0, GIB));
     }
 
     #[test]
