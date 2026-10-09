@@ -62,8 +62,12 @@ _NORM = re.compile(
     r"\bc\.c\.|\bc\.p\.|\bt\.u\.|\btuel\b|\d+/\d{2,4}", re.I)
 # Bump when the checks change: refusals recorded under an older version are
 # asked again once (cds_schede.py), the rest stay refused.
-CHECKS_VERSION = 2
-_PLACEHOLDER = re.compile(r"\[[A-Z_]+(?:_\d+)?\]")
+CHECKS_VERSION = 3
+# Case-insensitive on purpose: the teacher varies capitalisation
+# ([persona_1]), and instruct_gen.py documents the same for its own
+# placeholder check -- a missed placeholder lands verbatim in the card, the
+# index prefix, and training. Uppercase-only let every other spelling pass.
+_PLACEHOLDER = re.compile(r"\[[A-Z_]+(?:_\d+)?\]", re.IGNORECASE)
 
 
 class CardRejected(ValueError):

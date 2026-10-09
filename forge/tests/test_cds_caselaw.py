@@ -80,6 +80,12 @@ def test_a_card_is_parsed_and_the_case_cannot_leak_into_it():
     for bad, reason in [
         ({**GOOD, "principi": ["La società [PERSONA_1] non poteva essere esclusa dalla gara "
                                "per il motivo dedotto."]}, "placeholder"),
+        # the teacher varies capitalisation ([persona_1]), and instruct_gen
+        # documents the same for its own check: only uppercase was refused.
+        ({**GOOD, "principi": ["La società [persona_1] non poteva essere esclusa."]},
+         "placeholder"),
+        ({**GOOD, "principi": ["La società [Persona_1] non poteva essere esclusa."]},
+         "placeholder"),
         ({**GOOD, "materia": "RSSMRA80A01H501U"}, "structured_pii"),
         ({**GOOD, "domande_esame": GOOD["domande_esame"][:1]}, "count"),
         ({**GOOD, "principi": []}, "count"),
@@ -196,7 +202,7 @@ def test_cards_are_written_refused_and_not_asked_twice(corpus, teacher, tmp_path
     assert c["teacher"] == "qwen3-30b-q8" and c["principi"] == GOOD["principi"]
     rejects = [json.loads(line) for line in
                (out.parent / "schede.rejects.jsonl").read_text().splitlines()]
-    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 2}]
+    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 3}]
     assert seen[0]["response_format"] == {"type": "json_object"} and seen[0]["temperature"] == 0
     assert seen[0]["chat_template_kwargs"] == {"enable_thinking": False}
     n = len(seen)
@@ -294,8 +300,11 @@ def test_refusals_under_older_checks_are_asked_again_once(corpus, teacher, tmp_p
     mod = _load("cds_schede")
     assert mod.main(["--chunks", str(chunks), "--openga", str(og), "--ids", str(ids),
                      "--out", str(out), "--url", url]) == 0
-    assert [json.loads(line)["id"] for line in out.read_text().splitlines()] == ["cds/2019000000"]
-    assert len(seen) == 1
+    # both rows predate the current checks (v3), so both are asked again: the
+    # good card lands, and the one the teacher serves clean this time lands too.
+    assert sorted(json.loads(line)["id"] for line in out.read_text().splitlines()) == [
+        "cds/2019000000", "cds/2021000004"]
+    assert len(seen) == 2
 
 
 def test_sparse_bm25_ranks_like_bm25_and_returns_rulings_once():
