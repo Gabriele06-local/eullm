@@ -87,6 +87,22 @@ def test_validate_corpus_flags_missing_fields(tmp_path: Path):
     assert any("text" in k for k in stats["issues"])
 
 
+def test_validate_corpus_rejects_a_line_that_is_not_json(tmp_path: Path):
+    """A line no parser can read was warned-to-stderr and dropped: never
+    counted, never listed, exit 0. Three lines in, two counted, zero
+    malformed -- from the validator whose job is rejecting corrupt corpora."""
+    path = tmp_path / "italgiure_snpen_2026.jsonl"
+    with path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps(_sample_record()) + "\n")
+        f.write("{not json at all\n")
+        f.write(json.dumps(_sample_record()) + "\n")
+
+    stats = mod.validate_corpus(tmp_path)
+    assert stats["total_records"] == 2
+    assert stats["malformed_records"] == 1
+    assert stats["issues"] == {"malformed JSON line": 1}
+
+
 def test_validate_corpus_detects_duplicates(tmp_path: Path):
     path = tmp_path / "italgiure_snpen_2026.jsonl"
     with path.open("w", encoding="utf-8") as f:

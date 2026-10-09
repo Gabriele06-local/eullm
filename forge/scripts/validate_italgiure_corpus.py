@@ -44,7 +44,13 @@ REQUIRED_META_FIELDS = (
 )
 
 
-def _iter_jsonl(path: Path) -> Iterator[dict]:
+def _iter_jsonl(path: Path) -> Iterator[dict | None]:
+    """Parsed records, with None for lines that are not JSON at all.
+
+    The None keeps the corrupt line visible to the caller: warned-to-stderr
+    and dropped here, it never reached `malformed_records`, so a file with
+    lines no parser can read still validated clean and exited 0.
+    """
     with path.open(encoding="utf-8") as f:
         for lineno, raw in enumerate(f, start=1):
             raw = raw.strip()
@@ -57,6 +63,7 @@ def _iter_jsonl(path: Path) -> Iterator[dict]:
                     f"[WARN] {path.name}:{lineno} — malformed JSON: {exc}",
                     file=sys.stderr,
                 )
+                yield None
 
 
 def _percentile(values: list[int], pct: float) -> int:
@@ -123,6 +130,10 @@ def validate_corpus(
 
         slice_samples: list[dict] = []
         for rec in _iter_jsonl(path):
+            if rec is None:  # not JSON at all: malformed, and the gate sees it
+                stats["malformed_records"] += 1
+                stats["issues"]["malformed JSON line"] += 1
+                continue
             issues = _validate_record(rec)
             if issues:
                 stats["malformed_records"] += 1
