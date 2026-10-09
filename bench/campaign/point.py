@@ -42,7 +42,14 @@ REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 # above this, or a kind or runtime this file does not know, and is left in
 # the queue for a runner that does: jobs keep the code they started with
 # for up to 48 hours, while plan adds points at any time.
-RUNNER_VERSION = 3
+RUNNER_VERSION = 4
+# The engine build this job runs, as `plan --engine-label` names it
+# (EULLM_ENGINE_LABEL, exported by submit_campaign.sh). A point planned with a
+# label runs only in a job with the same one, and a point planned without one
+# only in a job without one: a queue can hold rounds for a new build while
+# jobs started with the old binary are still taking points from it, and each
+# round is measured on the engine it was planned for.
+ENGINE_LABEL = os.environ.get("EULLM_ENGINE_LABEL") or None
 KINDS = ("throughput", "workload", "finetune", "decision")
 # The servers a point can measure: the engine, and for comparison the stock
 # llama.cpp server (the same backend without EuLLM's runtime) and Ollama
@@ -52,9 +59,11 @@ RUNTIMES = ("eullm", "llama-server", "ollama")
 RUNTIME_BIN_ENV = {"llama-server": "LLAMA_SERVER_BIN", "ollama": "OLLAMA_BIN"}
 
 
-def can_run(p: dict) -> bool:
+def can_run(p: dict, engine_label=None) -> bool:
+    label = ENGINE_LABEL if engine_label is None else engine_label or None
     return (p.get("runner", 1) <= RUNNER_VERSION and p.get("kind") in KINDS
-            and p.get("runtime", "eullm") in RUNTIMES)
+            and p.get("runtime", "eullm") in RUNTIMES
+            and (p.get("engine_label") or None) == label)
 
 
 READY_TIMEOUT_S = 900

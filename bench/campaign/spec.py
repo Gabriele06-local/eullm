@@ -36,6 +36,9 @@ DECISION_MODES = ("shared_prefix", "batched", "separate")
 NEW_RUNNER = 2
 # `cold` points need the runner that drops their model from the page cache.
 EVICT_RUNNER = 3
+# Points planned for one engine build (`plan --engine-label`) need the runner
+# that reads EULLM_ENGINE_LABEL: an older one would run them on any engine.
+LABEL_RUNNER = 4
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -186,6 +189,12 @@ def normalize(raw: dict) -> dict:
             raise SpecError("a workload point needs sets")
         if p["max_duration_s"] < p["min_duration_s"]:
             raise SpecError("max_duration_s is below min_duration_s")
+    if raw.get("engine_label"):
+        # Only when given, as `cold`: every point planned before keeps its id.
+        p["engine_label"] = str(p["engine_label"])
+        p["runner"] = max(p.get("runner", 1), LABEL_RUNNER)
+    elif "engine_label" in p:
+        del p["engine_label"]
     if "cold" in raw:
         if p["kind"] == "finetune":
             raise SpecError("a finetune point loads no server: cold does not apply")
@@ -207,15 +216,18 @@ def width(p: dict) -> int:
     return 8 if p.get("exclusive") else p["gcds"]
 
 
-def expand(spec: dict, round_=None) -> list:
+def expand(spec: dict, round_=None, engine_label=None) -> list:
     """Every point of `spec`, each with its id, group, campaign and hints;
-    `round_` overrides the spec's own round."""
+    `round_` overrides the spec's own round, and `engine_label` keeps every
+    point for the jobs started with that label (point.can_run)."""
     campaign = spec.get("campaign")
     if not campaign:
         raise SpecError("the spec needs a campaign name")
     defaults = dict(spec.get("defaults", {}))
     if round_ is not None:
         defaults["round"] = round_
+    if engine_label:
+        defaults["engine_label"] = engine_label
     points, seen = [], set()
     for group in spec.get("groups", []):
         name = group.get("name")

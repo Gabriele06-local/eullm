@@ -318,6 +318,26 @@ In order:
    tokens/s instead of 41-43. The `steps:` lines now count the passes, and the
    diagnosis has closed-loop rounds (`--duration`) and `--kv-unified` to
    measure it on the GCDs.
+
+   On the GCD (job 22663207, 09-10-2026, Qwen3-14B Q4_K_M, the engine with
+   both fixes), tokens/s:
+
+   | | EuLLM | EuLLM `--kv-unified` | llama-server |
+   |---|---:|---:|---:|
+   | 4 clients, one request after another | 145 | 144 | 139 |
+   | 16 clients, one request after another | 377 | 391 | 340 |
+   | 16 at once, each server's defaults | 449 | | 462 |
+   | 16 at once, penalty off on both | 454 | | 456 |
+   | 16 at once, penalty 1.1 on both | 454 | | 353 |
+   | 16 at once, greedy | 457 | | 474 |
+
+   Closed-loop steps took 1.03-1.10 passes on average (1.00 with
+   `--kv-unified`), the prompts read between steps 6-7% of the time.
+   The closed loop is a stand-in for the graded workload (short raw prompts,
+   answers of 32-384 tokens): a `c07` round on this engine is the check.
+   What is left at sixteen at once (3%): the round's prompts start over
+   fifteen steps, 15.2 sequences per step on average where llama-server has
+   16 from the first.
 3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
    engine runs one decision at a time per server; `c08` measures the queueing
    that causes as concurrency grows, and replicas as today's way round it.

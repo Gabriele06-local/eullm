@@ -28,6 +28,9 @@ export EULLM_BIN
 
 mkdir -p "$CAMPAIGN_DIR/logs"
 $CAMPAIGN status --queue "$CAMPAIGN_DIR" | head -3
+# A job runs only the points planned with its label (plan --engine-label),
+# or only the unlabelled ones without one.
+echo "engine $EULLM_BIN, label ${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}"
 
 for n in $(seq 1 "$NODES"); do
     prev=""
