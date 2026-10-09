@@ -74,6 +74,21 @@ def test_the_length_check_says_how_often_the_right_answer_was_the_longer():
     assert compare(b, a).longer_wins == 1.0      # same items, seen from the other side
 
 
+def test_equal_length_disagreements_count_but_never_win_on_length():
+    """Deadline answers share one template with different numbers, so ties
+    are the common case there. The docstring promises longer_wins "among the
+    questions where the two disagree": the tie counts in the denominator,
+    while neither side being longer, it never counts in the numerator."""
+    ids = [f"norm-termine-codice_penale-{i}" for i in range(2)]
+    a = _graded("a", [(ids[0], "correct"), (ids[1], "wrong")],
+                {ids[0]: 20, ids[1]: 15})
+    b = _graded("b", [(ids[0], "wrong"), (ids[1], "correct")],
+                {ids[0]: 10, ids[1]: 15})
+    out = compare(a, b)
+    assert sum(sum(v) for v in out.by_kind.values()) == 2
+    assert out.longer_wins == 0.5
+
+
 def test_human_agreement_counts_the_errors_that_move_a_comparison():
     m = {"a": _graded("a", {"x": "correct", "y": "wrong", "z": "correct", "w": "correct"})}
     rows = [{"chiave": "a|x", "giudizio": "corretto"},
