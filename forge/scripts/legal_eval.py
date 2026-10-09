@@ -81,7 +81,7 @@ from eullm_forge.eval import (  # noqa: E402
     load_seed,
     open_book_prompt,
 )
-from eullm_forge.eval.abstain import abstained, unsourced_articles  # noqa: E402
+from eullm_forge.eval.abstain import abstained, cited_articles, unsourced_articles  # noqa: E402
 from eullm_forge.eval.retrieval import label as norm_label  # noqa: E402
 
 
@@ -164,6 +164,13 @@ def retrieve(index, item, k: int, absent: bool = False) -> tuple[list[dict], str
     found = [r for r in index.search(item.question, k + 6)
              if not (r.get("code") == code and number in index.articles_of(r))]
     return found[:k], ""
+
+
+def articles_in_hand(index, found: list[dict]) -> set[str]:
+    """The articles given, and those their texts refer to: "ai sensi dell'art.
+    1176" in a text given is a citation from the text, not from memory."""
+    return ({a for r in found for a in index.articles_of(r)}
+            | {a for r in found for a in cited_articles(r.get("text", ""))})
 
 
 def chat_prompt(tok, content: str) -> str:
@@ -272,7 +279,7 @@ def main() -> int:
         if index:
             found, note = retrieve(index, it, args.k, absent=args.absent)
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
-            in_hand[it.id] = {a for r in found for a in index.articles_of(r)}
+            in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
         prompts.append(chat_prompt(tok, content))
     if args.gguf:

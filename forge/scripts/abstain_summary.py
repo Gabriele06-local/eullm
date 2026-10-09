@@ -4,9 +4,12 @@
     python forge/scripts/abstain_summary.py $WORK/eval/abstain-exam/answers-*.jsonl
 
 Reads the answers files of `legal_eval.py`. Those it wrote since the
-abstention exam carry ``abstained`` and ``unsourced_articles``; for an older
-file both are worked out here, the second from the question alone (the
-texts it was asked with are not on file), so it is an upper bound there.
+abstention exam carry ``abstained`` and ``unsourced_articles``. For an older
+file abstaining is worked out here, but citing is shown as n/a: the texts it
+was asked with are not on file, and an article a text refers to ("ai sensi
+dell'art. 1176") is a citation from the text, not from memory. Counted
+without them, every by-topic answer that names its article looked invented
+(100% on 2026-10-09).
 
 One line per file, then one per kind of item (the ``tipo`` in the exam's
 ids, ``norm-<tipo>-<code>-<article>``): how many answers abstain, and how many
@@ -28,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.eval.abstain import abstained, unsourced_articles  # noqa: E402
+from eullm_forge.eval.abstain import abstained  # noqa: E402
 
 
 def kind_of(item_id: str) -> str:
@@ -38,13 +41,13 @@ def kind_of(item_id: str) -> str:
 
 
 def summarize(rows: list[dict]) -> dict[str, list[int]]:
-    """[items, abstained, citing articles not in hand] per kind, and over all."""
+    """[items, abstained, citing articles not in hand] per kind, and over all;
+    the last is None for a file written before the check."""
     tally: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     for r in rows:
         answer = r.get("answer", "")
         abst = r["abstained"] if "abstained" in r else abstained(answer)
-        unsourced = (r["unsourced_articles"] if "unsourced_articles" in r
-                     else unsourced_articles(answer, r.get("question", "")))
+        unsourced = r.get("unsourced_articles")
         for key in ("all", kind_of(str(r.get("id", "")))):
             t = tally[key]
             t[0] += 1
@@ -69,8 +72,10 @@ def main(argv: list[str] | None = None) -> int:
         for key in ["all"] + sorted(k for k in t if k != "all"):
             n, a, u = t[key]
             head = f"{p.name} [{mode}]" if key == "all" else f"    {key}"
+            cited = (f"{u} ({u / n:.1%})" if "unsourced_articles" in rows[0]
+                     else "n/a (written before the check)")
             print(f"{head}: {n} items | abstained {a} ({a / n:.1%}) | "
-                  f"citing articles not in hand {u} ({u / n:.1%})")
+                  f"citing articles not in hand {cited}")
     return 0
 
 
