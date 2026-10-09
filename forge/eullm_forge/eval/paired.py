@@ -204,14 +204,6 @@ def compare(a: Graded, base: Graded) -> Comparison:
         if ar == br:
             continue
         by_kind[kind_of(i)][0 if ar else 1] += 1
-        # Every disagreement counts, including equal lengths: the docstring
-        # promises "among the questions where the two disagree", and by_kind
-        # just above counts them all. A tie is not a win for either side --
-        # neither answer is longer -- so only the numerator stays gated on
-        # unequal lengths. Deadline answers share one template with different
-        # numbers ("Entro 60 giorni" vs "Entro 30 giorni"), so ties are the
-        # common case there, not a corner.
-        discordant += 1
         la, lb = a.lengths.get(i, 0), base.lengths.get(i, 0)
         if la != lb:
             longer += (la > lb) == ar
