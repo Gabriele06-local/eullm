@@ -292,7 +292,7 @@ fn network_magic(magic: u64) -> Option<&'static str> {
 /// What the page cache may hold for a load: the memory the kernel calls
 /// available, and no more than this process's cgroup is allowed (a Slurm
 /// job's `--mem`), whichever is smaller.
-fn memory_for_cache() -> Option<u64> {
+pub(crate) fn memory_for_cache() -> Option<u64> {
     let available = std::fs::read_to_string("/proc/meminfo")
         .ok()
         .and_then(|m| meminfo_available(&m));

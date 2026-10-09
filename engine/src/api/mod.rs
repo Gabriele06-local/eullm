@@ -636,7 +636,7 @@ impl AppState {
                     crate::inference::DEFAULT_N_UBATCH
                 );
             }
-            let (load_no_mmap, why) = crate::fit::plan_read_into_memory(
+            let (mut load_no_mmap, why) = crate::fit::plan_read_into_memory(
                 self.no_mmap,
                 self.mmap,
                 plan.as_ref().map_or(0, |plan| plan.moe_cache_host_bytes),
@@ -644,6 +644,27 @@ impl AppState {
             );
             if let Some(why) = why {
                 tracing::info!("{why}");
+            }
+            // A model that goes to the GPUs whole and is more than half the
+            // memory is read in: mapped, it does not load (`fit::read_in_whole_on_gpu`).
+            if !load_no_mmap {
+                let whole_on_gpu = crate::fit::vram_bytes().is_some_and(|(_, total)| total > 0)
+                    && crate::fit::every_layer_on_gpu(
+                        gpu_layers,
+                        crate::fit::read_gguf_info(&gguf_path).map(|info| info.n_layers),
+                        cpu_moe,
+                        n_cpu_moe,
+                        moe_cache_bytes,
+                    );
+                if let Some(why) = crate::fit::read_in_whole_on_gpu(
+                    file_size,
+                    whole_on_gpu,
+                    crate::readahead::memory_for_cache(),
+                    self.mmap,
+                ) {
+                    tracing::info!("{why}");
+                    load_no_mmap = true;
+                }
             }
             let moe_prefetch_slots =
                 crate::fit::prefetch_slots(moe_prefetch, load_no_mmap, cpu_moe, n_cpu_moe);

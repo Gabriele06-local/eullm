@@ -185,8 +185,20 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    after 3 minutes, then one thread at 95% of a core copied it to the GPUs at
    about 90 MB/s, still unfinished after 70 minutes, the page cache stuck near
    half the RAM. With `--no-mmap` the same model loaded in 151.8 s. c09's
-   `load-nommap` groups measure it on every model before the engine reads a
-   large model into memory by itself.
+   `load-nommap` groups measured it on every model (cold, seconds):
+
+   | model, GCDs | mapped | read in |
+   |---|---:|---:|
+   | Qwen3.8-27B Q8, 29 GiB, 1 | 46 | 51 |
+   | Qwen3-235B Q4_K_M, 132 GiB, 4 | 110 | 108 |
+   | Qwen3-Coder-480B Q4_K_M, 270 GiB, 8 | failed 6 of 6 | 160, 208 |
+   | DeepSeek-V3.1 Q4_K_M, 8 | failed 3 of 3 | 226 |
+
+   The tokens per second were the same both ways. The engine now reads a
+   model in by itself when it goes to the GPUs whole and its files are more
+   than half the memory the process may use (`fit::read_in_whole_on_gpu`);
+   `--mmap` keeps it mapped. The `moe-` groups of c02 that failed loading can
+   be planned again on that engine.
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 
