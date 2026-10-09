@@ -1031,6 +1031,22 @@ still 2–5× faster than `separate`. Measured with 64 questions: 316 / 347 /
 `batched` and 630 / 1645 ms / — `separate`. Calibrate in the mode that
 will serve.
 
+**`batched` requests that arrive together are answered together.** The
+decision model runs one request at a time, so with many clients the
+requests queue. Those asked in `batched` mode that reach it while it is
+busy are evaluated together: each request's state in a sequence of its own,
+decoded side by side, then their questions, 64 at a time across requests,
+in shared decode calls — up to 16 requests, and no more context than one
+request may use (`--decision-ctx`). An answer then moves with the other
+requests' questions too, by the rounding above, as it already moves with
+the other questions of its own request; `shared_prefix` and `separate`
+requests are never grouped, and stay bit for bit what they are alone. The
+`eullm` extension of the response says when it happened:
+`requests_together`, the requests evaluated with it (itself included), and
+the context, prefix and question times are then the group's. A model that
+reads in blocks (Jev-Style 2B) decodes one block per call, which no other
+request can share: its requests stay one at a time.
+
 **Limits:** 64 questions per request, 2–26 options per `choice` (up to 255
 with a Jev-Style model), 2–10 levels per `score`, and `--decision-ctx` tokens
 of context per request (default 8192). A request over the context limit is
