@@ -353,7 +353,11 @@ In order:
 3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
    engine runs one decision at a time per server; `c08` measures the queueing
    that causes as concurrency grows, and replicas as today's way round it.
-   Batching decisions in the engine is the change it is the "before" of.
+   Batching decisions in the engine is the change it is the "before" of:
+   since 09-10-2026 `batched` requests that arrive together are evaluated in
+   shared decode calls (option 2 of three: only for clients that ask for
+   `batched`, so the default stays reproducible bit for bit); a `c08` round on
+   that engine is the "after".
 4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
    RAM, the direction Strata takes on consumer GPUs (the head-to-head with
    Strata stays on the RTX 5070 Ti, `docs/moe-offload-plan.md`). Objective

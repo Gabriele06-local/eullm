@@ -18,6 +18,7 @@
 //! context: llama.cpp attends over the used cells rounded up to 256, which
 //! a context sized in whole steps of that never caps.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc;
@@ -39,6 +40,11 @@ use super::{
 /// Fewest cells a context is created with: below this, growing it again on
 /// the next slightly longer request would cost more than the memory saved.
 pub(super) const MIN_CELLS: usize = 2048;
+
+/// Most `batched` requests evaluated together. Each keeps its state in a
+/// sequence of its own while the questions are read, and a hybrid model
+/// keeps a recurrent state per sequence.
+const MAX_TOGETHER: usize = 16;
 
 /// How prompts are cut into decode calls. Fixed per model: it is part of
 /// what an answer is computed with, and a context is created for it.
@@ -124,6 +130,9 @@ pub(super) struct EngineConfig {
 enum Message {
     Evaluate(Box<Job>, mpsc::SyncSender<JobResult>),
     Release(mpsc::SyncSender<()>),
+    /// Hold the worker until the sender of this receiver is dropped.
+    #[cfg(test)]
+    Pause(mpsc::Receiver<()>),
 }
 
 /// The handle `DecisionModel` keeps: dropping it stops the worker and frees
@@ -155,6 +164,16 @@ impl Engine {
         answer
             .recv()
             .map_err(|_| DecisionError::Runtime("the decision worker stopped".into()))?
+    }
+
+    /// Hold the worker until the returned sender is dropped: requests sent
+    /// meanwhile wait in the channel, as those that arrive while it is busy
+    /// do, and are then taken together.
+    #[cfg(test)]
+    pub fn pause(&self) -> mpsc::Sender<()> {
+        let (resume, wait) = mpsc::channel();
+        let _ = self.send(Message::Pause(wait));
+        resume
     }
 
     /// Free the context, and with it the VRAM it holds, until the next
@@ -237,29 +256,110 @@ impl<'m> Worker<'m> {
     }
 
     fn run(mut self, rx: &mpsc::Receiver<Message>) {
-        while let Ok(message) = rx.recv() {
+        // Messages taken off the channel while gathering `batched` requests
+        // and left for after them, in the order they came.
+        let mut later: VecDeque<Message> = VecDeque::new();
+        loop {
+            let message = match later.pop_front() {
+                Some(message) => message,
+                None => match rx.recv() {
+                    Ok(message) => message,
+                    Err(_) => break,
+                },
+            };
             match message {
-                Message::Evaluate(job, reply) => {
-                    let result = match catch_unwind(AssertUnwindSafe(|| self.evaluate(&job))) {
-                        Ok(result) => result,
-                        Err(panic) => {
-                            // Whatever the context holds now is not known.
-                            self.cached = None;
-                            let what = panic
-                                .downcast_ref::<String>()
-                                .map(String::as_str)
-                                .or_else(|| panic.downcast_ref::<&str>().copied())
-                                .unwrap_or("unknown panic");
-                            Err(DecisionError::Runtime(format!(
-                                "decision evaluation failed: {what}"
-                            )))
+                Message::Evaluate(job, reply) if self.groupable(&job) => {
+                    // Every `batched` request already waiting goes with it,
+                    // as long as all of them together fit what one request
+                    // may use.
+                    while let Ok(message) = rx.try_recv() {
+                        later.push_back(message);
+                    }
+                    let exact = job.exact;
+                    let mut cells = job_cells(&job);
+                    let mut group = vec![(job, reply)];
+                    let mut rest = VecDeque::new();
+                    for message in later.drain(..) {
+                        match message {
+                            Message::Evaluate(job, reply)
+                                if group.len() < MAX_TOGETHER
+                                    && self.groupable(&job)
+                                    && job.exact == exact
+                                    && cells + job_cells(&job)
+                                        <= self.config.max_ctx as usize =>
+                            {
+                                cells += job_cells(&job);
+                                group.push((job, reply));
+                            }
+                            other => rest.push_back(other),
                         }
-                    };
+                    }
+                    later = rest;
+                    self.evaluate_group(group);
+                }
+                Message::Evaluate(job, reply) => {
+                    let result = self.guarded(|w| w.evaluate(&job));
                     let _ = reply.send(result);
                 }
                 Message::Release(done) => {
                     self.cached = None;
                     let _ = done.send(());
+                }
+                #[cfg(test)]
+                Message::Pause(resume) => {
+                    let _ = resume.recv();
+                }
+            }
+        }
+    }
+
+    /// `f`, with a panic turned into an error and the context, whose state
+    /// is then not known, dropped.
+    fn guarded<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<T, DecisionError>,
+    ) -> Result<T, DecisionError> {
+        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+            Ok(result) => result,
+            Err(panic) => {
+                self.cached = None;
+                let what = panic
+                    .downcast_ref::<String>()
+                    .map(String::as_str)
+                    .or_else(|| panic.downcast_ref::<&str>().copied())
+                    .unwrap_or("unknown panic");
+                Err(DecisionError::Runtime(format!(
+                    "decision evaluation failed: {what}"
+                )))
+            }
+        }
+    }
+
+    /// Whether `job` may be evaluated together with other requests: asked
+    /// in `batched` mode, on a causal protocol. A block protocol decodes one
+    /// renderer block per call, which no other request's tokens can share.
+    fn groupable(&self, job: &Job) -> bool {
+        job.mode == EvalMode::Batched && !self.config.protocol.blocks
+    }
+
+    /// One request alone as before, several in shared calls; every one gets
+    /// its own reply, and a failure they share reaches all of them.
+    fn evaluate_group(&mut self, group: Vec<(Box<Job>, mpsc::SyncSender<JobResult>)>) {
+        if let [(job, reply)] = group.as_slice() {
+            let result = self.guarded(|w| w.evaluate(job));
+            let _ = reply.send(result);
+            return;
+        }
+        let jobs: Vec<&Job> = group.iter().map(|(job, _)| job.as_ref()).collect();
+        match self.guarded(|w| w.batched_together(&jobs)) {
+            Ok(results) => {
+                for ((_, reply), result) in group.iter().zip(results) {
+                    let _ = reply.send(result);
+                }
+            }
+            Err(e) => {
+                for (_, reply) in &group {
+                    let _ = reply.send(Err(e.clone()));
                 }
             }
         }
@@ -578,6 +678,7 @@ impl<'m> Worker<'m> {
                 prefix_reused,
                 questions_ms,
                 readout_ms: 0.0,
+                requests_together: 1,
             },
         )
     }
@@ -686,8 +787,177 @@ impl<'m> Worker<'m> {
                 prefix_reused,
                 questions_ms,
                 readout_ms: 0.0,
+                requests_together: 1,
             },
         )
+    }
+
+    /// `batched` requests that arrived together, in shared decode calls:
+    /// each request's state in a sequence of its own (`0..k`), decoded side
+    /// by side, then every request's questions, `group` at a time across
+    /// requests, each in a sequence that starts as a copy of its state's.
+    /// An answer then moves with what else is in a call by the model's
+    /// numerical noise, as it already does in `batched` within one request;
+    /// `shared_prefix` and `separate` never come here. The state kept in
+    /// sequence 0 between requests is neither used nor kept.
+    ///
+    /// Per request its result, `Cancelled` for one abandoned meanwhile;
+    /// `Err` for a failure they all share.
+    fn batched_together(&mut self, jobs: &[&Job]) -> Result<Vec<JobResult>, DecisionError> {
+        let k = jobs.len();
+        let group = self.config.protocol.group.max(1);
+        // Every question of every request, in order: (request, prompt).
+        let questions: Vec<(usize, usize)> = jobs
+            .iter()
+            .enumerate()
+            .flat_map(|(j, job)| (0..job.prompts.len()).map(move |i| (j, i)))
+            .collect();
+        let rounds: Vec<&[(usize, usize)]> = questions.chunks(group).collect();
+        let own = |&(j, i): &(usize, usize)| jobs[j].prompts[i].len() - jobs[j].shared;
+        let reads = |&(j, i): &(usize, usize)| jobs[j].reads[i].len();
+        // The worker gathered requests whose cells add up to what one
+        // request may use; the states and one round are fewer.
+        let needed = jobs.iter().map(|job| job.shared).sum::<usize>()
+            + rounds
+                .iter()
+                .map(|r| r.iter().map(own).sum::<usize>())
+                .max()
+                .unwrap_or(0);
+        let n_outputs = rounds
+            .iter()
+            .map(|r| r.iter().map(reads).sum::<usize>())
+            .max()
+            .unwrap_or(1)
+            .clamp(1, 256)
+            .max(questions.iter().map(reads).max().unwrap_or(1));
+        let context_ms = self.context(
+            jobs[0].exact,
+            needed,
+            u32::try_from(k + group).unwrap_or(u32::MAX),
+            u32::try_from(n_outputs).unwrap_or(u32::MAX),
+        )?;
+
+        let prefix_started = Instant::now();
+        let batch_size = self.config.protocol.batch as usize;
+        let mut batch = LlamaBatch::new(batch_size, 1);
+        {
+            let c = self.cached();
+            c.prefix = None;
+            clear(&mut c.ctx)?;
+            for (j, job) in jobs.iter().enumerate() {
+                for (pos, &token) in job.prompts[0][..job.shared].iter().enumerate() {
+                    if batch.n_tokens() as usize >= batch_size {
+                        c.ctx
+                            .decode(&mut batch)
+                            .map_err(|e| runtime("Prefix decode failed", e))?;
+                        batch.clear();
+                    }
+                    batch
+                        .add(token, pos as i32, &[j as i32], false)
+                        .map_err(|e| runtime("Failed to build prefix batch", e))?;
+                }
+            }
+            if batch.n_tokens() > 0 {
+                c.ctx
+                    .decode(&mut batch)
+                    .map_err(|e| runtime("Prefix decode failed", e))?;
+                batch.clear();
+            }
+            c.ctx.synchronize();
+        }
+        let prefix_ms = ms_since(prefix_started);
+
+        let questions_started = Instant::now();
+        let capacity = self.cached().n_outputs as usize;
+        let mut outputs: Vec<Vec<Read>> = (0..questions.len()).map(|_| Vec::new()).collect();
+        let mut cancelled = vec![false; k];
+        let mut first = 0;
+        for round in &rounds {
+            for (j, job) in jobs.iter().enumerate() {
+                cancelled[j] |= job.cancel.is_cancelled();
+            }
+            // (index among all questions, request, prompt), of the requests
+            // still wanted.
+            let live: Vec<(usize, usize, usize)> = round
+                .iter()
+                .enumerate()
+                .map(|(n, &(j, i))| (first + n, j, i))
+                .filter(|&(_, j, _)| !cancelled[j])
+                .collect();
+            first += round.len();
+            for (slot, &(_, j, _)) in live.iter().enumerate() {
+                if jobs[j].shared > 0 {
+                    self.cached()
+                        .ctx
+                        .copy_kv_cache_seq(j as i32, (k + slot) as i32, None, None)
+                        .map_err(|e| runtime("Failed to share the prefix", e))?;
+                }
+            }
+            batch.clear();
+            let mut pending: Vec<(usize, i32)> = Vec::new();
+            for (slot, &(n, j, i)) in live.iter().enumerate() {
+                let job = jobs[j];
+                for (pos, &token) in job.prompts[i].iter().enumerate().skip(job.shared) {
+                    let read = job.reads[i].binary_search(&pos).is_ok();
+                    if batch.n_tokens() as usize >= batch_size
+                        || (read && pending.len() >= capacity)
+                    {
+                        self.flush(&mut batch, &mut pending, &jobs[0].readout, &mut outputs)?;
+                    }
+                    if read {
+                        pending.push((n, batch.n_tokens()));
+                    }
+                    batch
+                        .add(token, pos as i32, &[(k + slot) as i32], read)
+                        .map_err(|e| runtime("Failed to build question batch", e))?;
+                }
+            }
+            if batch.n_tokens() > 0 {
+                self.flush(&mut batch, &mut pending, &jobs[0].readout, &mut outputs)?;
+            }
+            for slot in 0..live.len() {
+                drop_sequence(&mut self.cached().ctx, (k + slot) as u32)?;
+            }
+        }
+        let questions_ms = ms_since(questions_started);
+        // The states go with the group: sequence 0 holds no request's now.
+        clear(&mut self.cached().ctx)?;
+
+        let cells = self.cached().cells;
+        let mut per_job: Vec<Vec<Vec<Read>>> = (0..k).map(|_| Vec::new()).collect();
+        for (&(j, _), out) in questions.iter().zip(outputs) {
+            per_job[j].push(out);
+        }
+        Ok(jobs
+            .iter()
+            .zip(per_job)
+            .zip(cancelled)
+            .map(|((job, outputs), cancelled)| {
+                if cancelled {
+                    return Err(DecisionError::Cancelled);
+                }
+                let own: usize = job.prompts.iter().map(|p| p.len() - job.shared).sum();
+                finish(
+                    job,
+                    outputs,
+                    self.config.threads,
+                    EvalStats {
+                        mode: EvalMode::Batched,
+                        prompts: job.prompts.len(),
+                        shared_prefix_tokens: job.shared,
+                        evaluated_tokens: own + job.shared,
+                        prompt_tokens: job.prompts.iter().map(Vec::len).sum(),
+                        context_cells: cells,
+                        context_ms,
+                        prefix_ms,
+                        prefix_reused: false,
+                        questions_ms,
+                        readout_ms: 0.0,
+                        requests_together: k,
+                    },
+                )
+            })
+            .collect())
     }
 
     /// Decode `batch`, wait for it, read the outputs `pending` points at,
@@ -758,6 +1028,7 @@ impl<'m> Worker<'m> {
                 prefix_reused: false,
                 questions_ms,
                 readout_ms: 0.0,
+                requests_together: 1,
             },
         )
     }
@@ -819,6 +1090,7 @@ impl<'m> Worker<'m> {
                 prefix_reused,
                 questions_ms,
                 readout_ms: 0.0,
+                requests_together: 1,
             },
         )
     }
@@ -864,9 +1136,20 @@ impl<'m> Worker<'m> {
                 prefix_reused: false,
                 questions_ms,
                 readout_ms: 0.0,
+                requests_together: 1,
             },
         )
     }
+}
+
+/// The cells `job` holds at most: its state once, every question after it.
+fn job_cells(job: &Job) -> usize {
+    job.shared
+        + job
+            .prompts
+            .iter()
+            .map(|p| p.len() - job.shared)
+            .sum::<usize>()
 }
 
 /// Most read positions any one block holds.

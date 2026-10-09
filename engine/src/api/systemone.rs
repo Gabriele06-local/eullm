@@ -1072,6 +1072,11 @@ struct ResponseExtension {
     prefix_reused: bool,
     /// Tokens decoded for the answers.
     evaluated_tokens: usize,
+    /// Requests the decision model evaluated in the same decode calls as
+    /// this one, itself included: `batched` requests that arrived together.
+    /// Absent when it was alone.
+    #[serde(skip_serializing_if = "is_one")]
+    requests_together: usize,
     timings_ms: Timings,
     #[serde(skip_serializing_if = "Option::is_none")]
     content_free: Option<ContentFreeInfo>,
@@ -1081,6 +1086,10 @@ struct ResponseExtension {
     /// before the model read them. Absent when it removed none.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     policy_removed: BTreeMap<String, Vec<String>>,
+}
+
+fn is_one(n: &usize) -> bool {
+    *n == 1
 }
 
 #[derive(Debug, Serialize)]
@@ -1577,6 +1586,7 @@ fn response(
             shared_prefix_tokens: decision.stats.shared_prefix_tokens,
             prefix_reused: decision.stats.prefix_reused,
             evaluated_tokens: decision.stats.evaluated_tokens,
+            requests_together: decision.stats.requests_together,
             timings_ms: Timings::from(&decision.stats),
             content_free: (parsed.calibration == Calibration::ContentFree).then(|| {
                 ContentFreeInfo {
@@ -2597,6 +2607,7 @@ mod tests {
             prefix_reused: false,
             questions_ms: 3.0,
             readout_ms: 0.5,
+            requests_together: 1,
         };
         Decision {
             outcomes,

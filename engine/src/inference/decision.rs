@@ -997,6 +997,10 @@ pub struct EvalStats {
     /// Turning logits rows into per-class log-probabilities. Kept apart
     /// from decode time because it is CPU work over the whole vocabulary.
     pub readout_ms: f64,
+    /// Requests evaluated in the same decode calls, this one included:
+    /// `batched` requests that arrived together. The context, prefix and
+    /// question times above are then the group's.
+    pub requests_together: usize,
 }
 
 /// Per-question result of [`DecisionModel::decide`].
@@ -1440,10 +1444,7 @@ impl DecisionModel {
         }
         let (prompts, state_prefix) = self.prompts(code, state, questions)?;
 
-        let _running = self
-            .eval_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _running = self.hold_worker(options.mode);
         // Abandoned while it waited for the request before it.
         cancel.check()?;
 
@@ -1556,10 +1557,7 @@ impl DecisionModel {
             EvalMode::Separate => 0,
             EvalMode::SharedPrefix | EvalMode::Batched => p,
         };
-        let _running = self
-            .eval_lock
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _running = self.hold_worker(options.mode);
         cancel.check()?;
         let (scores, stats) = self.engine.evaluate(engine::Job {
             reads: rendered.iter().map(|r| r.slots.clone()).collect(),
@@ -1594,6 +1592,23 @@ impl DecisionModel {
             prior_stats: None,
             priors_cached: 0,
         })
+    }
+
+    /// The lock a request holds while its jobs reach the worker, so that its
+    /// priors and answers come back to back and the state the worker keeps
+    /// is its own; `None` for `batched`, whose requests go to the worker
+    /// without waiting for each other and are evaluated together when they
+    /// arrive together (`engine::Worker::batched_together`).
+    fn hold_worker(&self, mode: EvalMode) -> Option<std::sync::MutexGuard<'_, ()>> {
+        (mode != EvalMode::Batched)
+            .then(|| self.eval_lock.lock().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Hold the decision worker until the returned sender is dropped: the
+    /// requests made meanwhile reach it together.
+    #[cfg(test)]
+    fn pause_worker(&self) -> std::sync::mpsc::Sender<()> {
+        self.engine.pause()
     }
 
     /// Whether flash attention may be used (`--no-flash-attn` not given).
@@ -2921,6 +2936,108 @@ mod tests {
     /// EULLM_DECISION_TEST_MODEL=/path/to/stories260K.gguf \
     ///     cargo test --bin eullm decision::tests::real_ -- --ignored --nocapture
     /// ```
+    /// `batched` requests that arrive together are evaluated in the same
+    /// decode calls, and each gets the answers it gets alone within the
+    /// model's own numerical noise: twice what `batched` and `separate`
+    /// differ by for that request alone, and never more than the tolerance
+    /// where that is nothing (an F32 model). A quantized hybrid model moves
+    /// by a few hundredths even alone (Jev-Style-0.8B-Decision-v3 on a CPU:
+    /// 0.063 between `batched` and `separate`, 0.074 between `shared_prefix`
+    /// and `separate`). A `shared_prefix` request that arrives with them is
+    /// not grouped, and its answers are the ones it gets alone, to the bit.
+    #[test]
+    #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
+    fn real_model_batched_requests_that_arrive_together_share_their_calls() {
+        let tolerance: f64 = std::env::var("EULLM_DECISION_TEST_TOLERANCE")
+            .ok()
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(if crate::inference::has_gpu_backend() {
+                2e-2
+            } else {
+                1e-3
+            });
+        // F32 cache, no flash attention: on an F32 model what is left is the
+        // logic, to ~1e-6 (see `DecisionModel::exact`).
+        let mut model = load_test_model();
+        model.exact = true;
+        let model = model;
+        let questions = test_questions(&model);
+        let states = [
+            TEST_STATE,
+            "Anna baked bread on Sunday morning. Her brother ate half of it before lunch, \
+             and she was not happy about that.",
+            "The train left the station ten minutes late. Marco missed it and took the bus, \
+             which got him home before the train arrived.",
+        ];
+        let decide = |state: &str, mode| {
+            model
+                .decide(
+                    state,
+                    &questions,
+                    DecideOptions {
+                        mode,
+                        content_free: false,
+                    },
+                    &Cancel::default(),
+                )
+                .expect("decision")
+        };
+        let gap = |a: &Decision, b: &Decision| -> f64 {
+            let mut worst: f64 = 0.0;
+            for (p, q) in a.outcomes.iter().zip(&b.outcomes) {
+                for (x, y) in p.logprobs.iter().zip(&q.logprobs) {
+                    // A code the model all but rules out can sit at -30 in
+                    // one run and -31 in the other without meaning anything.
+                    if x.max(*y) > -15.0 {
+                        worst = worst.max((x - y).abs());
+                    }
+                }
+            }
+            worst
+        };
+        let alone: Vec<(Decision, Decision)> = states
+            .iter()
+            .map(|state| (decide(state, EvalMode::Batched), decide(state, EvalMode::Separate)))
+            .collect();
+        let exact_alone = decide(TEST_STATE, EvalMode::SharedPrefix);
+
+        let resume = model.pause_worker();
+        let (together, exact_with) = std::thread::scope(|s| {
+            let batched: Vec<_> = states
+                .iter()
+                .map(|state| s.spawn(|| decide(state, EvalMode::Batched)))
+                .collect();
+            let exact = s.spawn(|| decide(TEST_STATE, EvalMode::SharedPrefix));
+            // Long enough for every request to be waiting at the worker.
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            drop(resume);
+            let together: Vec<Decision> = batched
+                .into_iter()
+                .map(|h| h.join().expect("batched request"))
+                .collect();
+            (together, exact.join().expect("shared_prefix request"))
+        });
+
+        for (i, (with, (alone, separate))) in together.iter().zip(&alone).enumerate() {
+            assert_eq!(with.stats.mode, EvalMode::Batched);
+            assert_eq!(with.stats.requests_together, states.len(), "request {i} was not grouped");
+            assert_eq!(alone.stats.requests_together, 1);
+            let noise = gap(alone, separate);
+            let limit = tolerance.max(2.0 * noise);
+            let moved = gap(with, alone);
+            eprintln!(
+                "request {i}: together vs alone {moved:.2e}, alone batched vs separate \
+                 {noise:.2e} (limit {limit:.2e})"
+            );
+            assert!(moved <= limit, "request {i}: together and alone differ by {moved}");
+        }
+        assert_eq!(exact_with.stats.requests_together, 1);
+        let logprobs = |d: &Decision| -> Vec<Vec<f64>> {
+            d.outcomes.iter().map(|o| o.logprobs.clone()).collect()
+        };
+        assert_eq!(logprobs(&exact_with), logprobs(&exact_alone));
+    }
+
     #[test]
     #[ignore = "needs a GGUF model in EULLM_DECISION_TEST_MODEL"]
     fn real_model_every_mode_matches_separate_evaluation() {
