@@ -319,3 +319,43 @@ def test_a_grounded_context_keeps_the_continuation_retrieval_found():
     found, _ = _context(index, "Entro quanti giorni agisce il creditore dalla notifica?", job,
                         1, random.Random(0))
     assert any("sessanta giorni" in r["text"] for r in found)
+
+
+def test_abstain_prompts_teach_the_difference_and_hide_the_note_from_the_student(tmp_path):
+    """2026-10-08: with no texts, legal-it-8b invented articles."""
+    import importlib.util
+
+    from eullm_forge.eval.retrieval import open_book_prompt
+
+    records = [
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 41. \n \n (Rubrica quarantuno). \n \n Il creditore e il debitore."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+         "text": "Il creditore agisce entro sessanta giorni dalla notifica."},
+        {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+         "text": "Art. 42. \n \n (Rubrica quarantadue). \n \n "
+                 "Il debitore deve dare preavviso al creditore nel codice civile."},
+    ]
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records))
+    question = "Nel codice civile, entro quanto deve agire il creditore?"
+    pair = {"task": "openbook_grounded", "named": False, "key": "ob-g-codice_civile-41",
+            "instruction": open_book_prompt(question, records[:2]), "output": "x"}
+    pairs = tmp_path / "pairs.jsonl"
+    pairs.write_text(json.dumps(pair, ensure_ascii=False) + "\n")
+    script = Path(__file__).resolve().parents[1] / "scripts" / "make_abstain_prompts.py"
+    spec = importlib.util.spec_from_file_location("make_abstain_prompts", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    out = tmp_path / "abstain.jsonl"
+    assert mod.main([str(pairs), "--norms", str(norms), "--absent", "1", "--grounded", "1",
+                     "--no-text", "1", "--out", str(out)]) == 0
+    rows = {r["kind"]: r for r in map(json.loads, out.read_text().splitlines())}
+    assert set(rows) == {"absent", "statute", "no_text"}
+    absent = rows["absent"]
+    assert "sessanta giorni" not in absent["student"][0]["content"]   # the article is gone
+    assert absent["teacher"][0]["content"].startswith(mod.ABSENT_NOTE)
+    assert "Nota riservata" not in absent["student"][0]["content"]
+    assert "sessanta giorni" in rows["statute"]["student"][0]["content"]
+    assert rows["no_text"]["student"][0]["content"] == question
+    assert rows["no_text"]["teacher"][0]["content"].startswith(mod.NO_TEXT_NOTE)
