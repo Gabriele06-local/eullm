@@ -92,6 +92,15 @@ def test_absent_takes_the_items_own_article_out_and_says_nothing():
     assert legal_eval.retrieve(index, ghost, 2, absent=True)[1] == ""
 
 
+def test_an_article_a_given_text_refers_to_is_in_hand():
+    legal_eval = _load("legal_eval")
+    index = NormIndex([_rec("codice_civile", "1218", "Art. 1218. Il debitore risponde "
+                            "del danno, salvo quanto previsto dall'art. 1176 e dagli "
+                            "artt. 1256 e 1257.")])
+    assert legal_eval.articles_in_hand(index, index.records) == {"1218", "1176", "1256",
+                                                                  "1257"}
+
+
 def test_the_summary_counts_by_kind_and_works_out_old_files(tmp_path, capsys):
     mod = _load("abstain_summary")
     new = tmp_path / "answers-x-absent.jsonl"
@@ -112,5 +121,5 @@ def test_the_summary_counts_by_kind_and_works_out_old_files(tmp_path, capsys):
            "citing articles not in hand 1 (50.0%)" in out
     assert "    termine: 1 items | abstained 0 (0.0%)" in out
     assert "answers-x.jsonl [closed]: 1 items | abstained 0 (0.0%) | " \
-           "citing articles not in hand 1 (100.0%)" in out
+           "citing articles not in hand n/a (written before the check)" in out
     assert "art. 624?" not in out and "..." not in out   # counts only
