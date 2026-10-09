@@ -80,6 +80,12 @@ def test_a_card_is_parsed_and_the_case_cannot_leak_into_it():
     for bad, reason in [
         ({**GOOD, "principi": ["La società [PERSONA_1] non poteva essere esclusa dalla gara "
                                "per il motivo dedotto."]}, "placeholder"),
+        # the teacher varies capitalisation ([persona_1]), and instruct_gen
+        # documents the same for its own check: only uppercase was refused.
+        ({**GOOD, "principi": ["La società [persona_1] non poteva essere esclusa."]},
+         "placeholder"),
+        ({**GOOD, "principi": ["La società [Persona_1] non poteva essere esclusa."]},
+         "placeholder"),
         ({**GOOD, "materia": "RSSMRA80A01H501U"}, "structured_pii"),
         ({**GOOD, "domande_esame": GOOD["domande_esame"][:1]}, "count"),
         ({**GOOD, "principi": []}, "count"),
