@@ -202,7 +202,7 @@ def test_cards_are_written_refused_and_not_asked_twice(corpus, teacher, tmp_path
     assert c["teacher"] == "qwen3-30b-q8" and c["principi"] == GOOD["principi"]
     rejects = [json.loads(line) for line in
                (out.parent / "schede.rejects.jsonl").read_text().splitlines()]
-    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 3}]
+    assert rejects == [{"id": "cds/2020000003", "reason": "placeholder", "v": 2}]
     assert seen[0]["response_format"] == {"type": "json_object"} and seen[0]["temperature"] == 0
     assert seen[0]["chat_template_kwargs"] == {"enable_thinking": False}
     n = len(seen)
