@@ -154,9 +154,11 @@ struct ActiveSequence {
     prompt_time: std::time::Duration,
 }
 
-/// A prompt read a chunk at a time between decode steps, when there is more
-/// than one slot (see `run_scheduler_loop`, step 7). Its sequence joins
-/// `active`, with the answer's first token, once the whole prompt is read.
+/// A prompt read a chunk at a time, when there is more than one slot: in the
+/// decode steps of the sequences already answering (see `run_scheduler_loop`,
+/// step 3), or between them (step 7) once a step it was part of failed. Its
+/// sequence joins `active`, with the answer's first token, once the whole
+/// prompt is read.
 struct PendingPrefill {
     seq: ActiveSequence,
     /// The next token of `seq.prompt_tokens` to decode; starts past the
@@ -166,9 +168,23 @@ struct PendingPrefill {
     /// to a checkpoint or to the whole prompt: once, as for a prompt read
     /// whole (`fall_back_from_reuse`).
     may_fall_back: bool,
+    /// Read on its own between the steps (step 7), no longer in them: a step
+    /// this prompt was part of failed, and on its own a failure is its alone,
+    /// with the fall-back above, and not every answer's in the step.
+    apart: bool,
     /// From `prefill_setup`: the prompt's length and the answer's cap.
     n_tokens: u32,
     effective_max: u32,
+}
+
+/// A waiting prompt's part of one decode step (step 3): its tokens from
+/// `pending.cursor` to `to`, and the position in the batch of the prompt's
+/// last token when this part reaches it, where the answer's first token is
+/// sampled from.
+struct PromptPart {
+    pending: PendingPrefill,
+    to: usize,
+    logit: Option<i32>,
 }
 
 /// Where the scheduler's time goes, summed over ten seconds and logged as one
@@ -177,9 +193,11 @@ struct PendingPrefill {
 ///
 /// c07 measured EuLLM 11-36% below llama-server with 16 requests at once,
 /// and level with it at one. The parts of a step say why: `decode` is the
-/// GPU's forward pass, `sample` choosing each sequence's token on the CPU,
-/// one after the other, `emit` its text and the reply channel, `prefill`
-/// the prompts read between steps. To part the GPU's time from the CPU's,
+/// GPU's forward pass, with the waiting prompts read in it, `sample`
+/// choosing each sequence's token on the CPU, one after the other, `emit` its
+/// text and the reply channel, `prefill` the prompts read outside the steps:
+/// with nothing answering, or apart after a step failed. To part the GPU's
+/// time from the CPU's,
 /// a timed decode waits for the GPU before sampling starts, which sampling
 /// did anyway.
 struct StepTimes {
@@ -195,6 +213,9 @@ struct StepTimes {
     emit: std::time::Duration,
     prefill: std::time::Duration,
     prefill_tokens: u64,
+    /// Prompt tokens read in the steps themselves, beside the answers'
+    /// tokens: their time is the steps' decode time.
+    step_prompt_tokens: u64,
     idle: std::time::Duration,
 }
 
@@ -215,6 +236,7 @@ impl StepTimes {
             emit: Default::default(),
             prefill: Default::default(),
             prefill_tokens: 0,
+            step_prompt_tokens: 0,
             idle: Default::default(),
         }
     }
@@ -256,7 +278,7 @@ impl StepTimes {
         let other = wall.saturating_sub(parts);
         format!(
             "{:.1} s, {} steps, {:.1} seqs/step, {:.2} passes/step, {:.0} tok/s | \
-             decode {:.1}% ({:.2} ms/step), \
+             decode {:.1}% ({:.2} ms/step, {} prompt tok), \
              sample {:.1}% ({:.3} ms/token), emit {:.1}% ({:.3} ms/token), \
              prefill {:.1}% ({} tok), idle {:.1}%, other {:.1}%",
             s,
@@ -274,6 +296,7 @@ impl StepTimes {
             self.tokens as f64 / s,
             pct(self.decode),
             ms_per(self.decode, self.steps),
+            self.step_prompt_tokens,
             pct(self.sample),
             ms_per(self.sample, self.tokens),
             pct(self.emit),
@@ -286,36 +309,55 @@ impl StepTimes {
     }
 }
 
-/// How many passes of the model llama.cpp makes for a decode batch of one
-/// token per sequence, `seq_ids` in the order the batch holds them.
+/// How many passes of the model llama.cpp makes for a decode batch,
+/// `seq_ids` holding each token's sequence in the order of the batch: one per
+/// sequence for the answers' tokens, a run of the same one for a prompt's.
 ///
 /// With one KV cache per sequence (llama.cpp's default with several), the
 /// batch is cut by `llama_batch_allocr::split_equal` in sequential mode: a
 /// micro-batch starts at the first token not yet taken and takes, in batch
-/// order, only the sequences whose ids follow one another (`id == last + 1`).
-/// Sequences 0, 1, 3, 4 are two passes, and so are 3, 0, 1, 2; every pass
-/// reads all of the model's weights. With one KV cache for all (`unified`)
-/// any tokens go together, `n_ubatch` at a time.
+/// order, only the sequences whose ids follow one another (`id == last + 1`),
+/// then the same number of tokens from each of them, as many as the one with
+/// fewest has and `n_ubatch` allows. Sequences 0, 1, 3, 4 are two passes, and
+/// so are 3, 0, 1, 2; a prompt beside one token of each answer is a pass for
+/// the answers and the prompt's first token, then passes for the rest of it.
+/// Every pass reads all of the model's weights. With one KV cache for all
+/// (`unified`) any tokens go together, `n_ubatch` at a time.
 fn decode_passes(seq_ids: &[i32], unified: bool, n_ubatch: usize) -> u32 {
     let n_ubatch = n_ubatch.max(1);
     if unified {
         return seq_ids.len().div_ceil(n_ubatch) as u32;
     }
-    let mut taken = vec![false; seq_ids.len()];
+    // Each sequence's tokens, as positions in the batch, and how many of
+    // them are taken: a sequence's tokens are taken in batch order.
+    let mut of_seq: std::collections::HashMap<i32, (Vec<usize>, usize)> = Default::default();
+    for (i, &id) in seq_ids.iter().enumerate() {
+        of_seq.entry(id).or_default().0.push(i);
+    }
+    let mut used = vec![false; seq_ids.len()];
     let mut left = seq_ids.len();
     let mut passes = 0;
     while left > 0 {
-        let mut last: Option<i32> = None;
-        let mut in_pass = 0;
+        let mut seqs: Vec<i32> = Vec::new();
         for (i, &id) in seq_ids.iter().enumerate() {
-            if taken[i] || last.is_some_and(|l| id != l + 1) {
+            if used[i] || seqs.contains(&id) || seqs.last().is_some_and(|&l| id != l + 1) {
                 continue;
             }
-            taken[i] = true;
-            last = Some(id);
-            left -= 1;
-            in_pass += 1;
-            if in_pass == n_ubatch {
+            seqs.push(id);
+            if seqs.len() > n_ubatch {
+                break;
+            }
+        }
+        let mut rounds = 0;
+        while seqs.iter().all(|id| of_seq[id].1 < of_seq[id].0.len()) {
+            for id in &seqs {
+                let (at, taken) = of_seq.get_mut(id).expect("a sequence of the batch");
+                used[at[*taken]] = true;
+                *taken += 1;
+                left -= 1;
+            }
+            rounds += 1;
+            if (rounds + 1) * seqs.len() > n_ubatch {
                 break;
             }
         }
@@ -424,6 +466,11 @@ pub struct SchedulerHandle {
     shutdown: Arc<AtomicBool>,
     /// Join handle for the scheduler thread.
     thread: Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>>,
+    /// Taken by the decode loop at every turn in tests only: a test holds it
+    /// so that the requests it makes meanwhile reach the loop together
+    /// (`SchedulerHandle::gate`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    gate: Arc<std::sync::Mutex<()>>,
 }
 
 impl SchedulerHandle {
@@ -538,8 +585,16 @@ impl SchedulerHandle {
             notify_mutex: Arc::new(std::sync::Mutex::new(())),
             shutdown: Arc::new(AtomicBool::new(false)),
             thread: Arc::new(std::sync::Mutex::new(None)),
+            gate: Arc::new(std::sync::Mutex::new(())),
         };
         (handle, rx)
+    }
+
+    /// What the decode loop takes at every turn: while a test holds it, the
+    /// loop waits, and the requests made meanwhile are taken together when
+    /// it is let go.
+    pub(crate) fn gate(&self) -> Arc<std::sync::Mutex<()>> {
+        Arc::clone(&self.gate)
     }
 }
 
@@ -633,6 +688,8 @@ impl BatchScheduler {
         let notify_clone = Arc::clone(&notify);
         let notify_mutex_clone = Arc::clone(&notify_mutex);
         let shutdown_clone = Arc::clone(&shutdown);
+        let gate = Arc::new(std::sync::Mutex::new(()));
+        let gate_clone = Arc::clone(&gate);
 
         // Channel for the scheduler thread to signal model load completion.
         // Carries a weak reference to the loaded model alongside the load
@@ -659,6 +716,7 @@ impl BatchScheduler {
                         shutdown_clone,
                         ready_tx,
                         backend,
+                        gate_clone,
                     )
                 })) {
                     Ok(Ok(())) => {}
@@ -697,6 +755,7 @@ impl BatchScheduler {
                 notify_mutex,
                 shutdown,
                 thread: Arc::new(std::sync::Mutex::new(Some(join_handle))),
+                gate,
             },
             model_info,
         ))
@@ -1152,27 +1211,31 @@ fn fall_back_from_reuse(
 /// The answer's first token, sampled from the logits of the prompt's last
 /// token once the whole prompt is read, and handed to the sequence like
 /// every later one (`emit_token`). Returns the sequence if it goes on.
+///
+/// `logit` is the prompt's last token's position in the batch that read it:
+/// -1, the last output, when the prompt was read on its own, as only that
+/// token had logits; its own position when it was read in a decode step
+/// beside other sequences' tokens (step 3 of `run_scheduler_loop`).
 fn begin_generation(
     model: &LlamaModel,
     ctx: &mut LlamaContext,
     mut seq: ActiveSequence,
+    logit: i32,
     idle_slots: &mut Vec<CachedSlot>,
     checkpoints: &mut Vec<PromptCheckpoint>,
     sched_config: &SchedulerConfig,
 ) -> Option<ActiveSequence> {
-    // Output index -1 (= last output): only the final prompt token had
-    // logits enabled, so there is exactly one output entry.
     if sched_config.debug_logit_check {
-        warn_if_logits_corrupt(ctx, -1, seq.seq_id);
+        warn_if_logits_corrupt(ctx, logit, seq.seq_id);
     }
     // `sample` also accepts the token into the sampler's history (penalties,
     // grammar): see `build_sampler`.
-    let token = seq.sampler.sample(ctx, -1);
+    let token = seq.sampler.sample(ctx, logit);
 
     // Always-on O(1) guard: a NaN here means the whole forward pass produced
     // nothing usable, and continuing would stream garbage that reads as a
     // real answer.
-    if sampled_token_is_corrupt(ctx, -1, token) {
+    if sampled_token_is_corrupt(ctx, logit, token) {
         tracing::error!(
             "Seq {}: sampled token {} has a NaN/Inf logit — \
              aborting generation instead of emitting garbage. \
@@ -1514,6 +1577,8 @@ fn run_scheduler_loop(
     // one process. See `main.rs`, which creates the one instance the whole
     // process shares.
     backend: Arc<LlamaBackend>,
+    // Taken at every turn of the loop, in tests only (`SchedulerHandle::gate`).
+    #[cfg_attr(not(test), allow(unused_variables))] gate: Arc<std::sync::Mutex<()>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Use the RETURNED value, never `config.gpu_layers` — on a binary with no
     // GPU backend this is 0. See `super::check_gpu_support` for what asking
@@ -1787,8 +1852,8 @@ fn run_scheduler_loop(
     };
 
     let mut active: Vec<ActiveSequence> = Vec::with_capacity(sched_config.max_batch_size);
-    // Prompts waiting to be read, or being read, a chunk at a time between
-    // decode steps (step 7): with more than one slot. With one, and so with
+    // Prompts waiting to be read, or being read, a chunk at a time in the
+    // decode steps (step 3): with more than one slot. With one, and so with
     // the MTP head, a prompt is read whole when its request is taken, as
     // nothing else is answering meanwhile.
     let chunked = sched_config.max_batch_size > 1 && mtp_state.is_none();
@@ -1809,12 +1874,21 @@ fn run_scheduler_loop(
     // Empty and never grows when `sched_config.ctx_checkpoints == 0`.
     let mut checkpoints: Vec<PromptCheckpoint> = Vec::new();
     // Pre-allocate the decode batch once — reused every iteration to avoid
-    // repeated malloc/free in the hot decode loop.
-    let mut decode_batch = LlamaBatch::new(sched_config.max_batch_size.max(1), 1);
-    // (seq_id, output index in the current decode batch), rebuilt each
-    // iteration in step 3 and read back in step 5. Reused rather than
+    // repeated malloc/free in the hot decode loop. A step holds the answers'
+    // tokens and, with several slots, waiting prompts' up to `n_batch`.
+    let step_capacity = if chunked {
+        (ctx.n_batch() as usize).max(sched_config.max_batch_size)
+    } else {
+        sched_config.max_batch_size
+    };
+    let mut decode_batch = LlamaBatch::new(step_capacity.max(1), 1);
+    // (seq_id, position of its token in the current decode batch), rebuilt
+    // each iteration in step 3 and read back in step 5. Reused rather than
     // reallocated for the same reason as the batch itself.
     let mut logit_of_seq: Vec<(i32, i32)> = Vec::with_capacity(sched_config.max_batch_size);
+    // Every token's sequence in the current decode batch, in its order: what
+    // `decode_passes` counts the step's passes of the model from.
+    let mut batch_seqs: Vec<i32> = Vec::with_capacity(step_capacity);
 
     tracing::info!(
         "Scheduler running — max_batch_size={}, queue_capacity={}, total_ctx={}, per_seq_ctx={}",
@@ -1839,6 +1913,8 @@ fn run_scheduler_loop(
     let mut times = StepTimes::new(timed);
 
     loop {
+        #[cfg(test)]
+        drop(gate.lock().unwrap_or_else(|e| e.into_inner()));
         times.log_if_due();
 
         // ── 0. Check shutdown flag ────────────────────────────────────
@@ -2000,9 +2076,9 @@ fn run_scheduler_loop(
                     // paying for the old, proven full-reprefill behavior —
                     // never a hard failure of the user's request.
                     // With several slots the prompt is read a chunk at a time
-                    // in step 7, between the decode steps of the sequences
-                    // already answering, so a long prompt holds none of them up;
-                    // here it is only checked and its slot prepared. With one
+                    // in the decode steps of the sequences already answering
+                    // (step 3), so a long prompt holds none of them up; here
+                    // it is only checked and its slot prepared. With one
                     // slot, and so with the MTP head, it is read whole, here.
                     if chunked {
                         let mut effective_reuse_len = reuse_len;
@@ -2043,6 +2119,7 @@ fn run_scheduler_loop(
                                     seq,
                                     cursor: effective_reuse_len,
                                     may_fall_back: effective_reuse_len > 0 && !fell_back,
+                                    apart: false,
                                     n_tokens,
                                     effective_max,
                                 });
@@ -2098,6 +2175,7 @@ fn run_scheduler_loop(
                                 model,
                                 &mut ctx,
                                 seq,
+                                -1,
                                 &mut idle_slots,
                                 &mut checkpoints,
                                 &sched_config,
@@ -2168,22 +2246,22 @@ fn run_scheduler_loop(
             continue;
         }
 
-        // ── 3. Build batch with one token per active sequence ───────────
+        // ── 3. Build the step: one token per answering sequence, and the
+        //       waiting prompts' next tokens ─────────────────────────────
         //
-        // `logit_of_seq` records, per seq_id, which output index of THIS batch
-        // that sequence's logits will land at — assigned in insertion order,
-        // because that is the order llama.cpp produces outputs in.
+        // `logit_of_seq` records, per seq_id, where in THIS batch that
+        // sequence's logits are: the position of its token, which is what
+        // llama.cpp's `llama_get_logits_ith` (and so `sample`) takes.
         //
-        // Deriving the index this way rather than by re-counting in step 5 is a
-        // correctness requirement, not tidiness. A failed `add` used to only log
-        // a warning: the sequence was absent from the batch, yet step 5 still
-        // handed it the next index and every sequence after it shifted by one,
-        // so each would sample from another conversation's distribution and emit
-        // plausible-looking text belonging to someone else. Silent, and
-        // impossible to distinguish from a model quality problem after the fact.
-        decode_batch.clear();
-        logit_of_seq.clear();
-
+        // Recording it as the token is added, rather than re-counting in
+        // step 5, is a correctness requirement, not tidiness. A failed `add`
+        // used to only log a warning: the sequence was absent from the batch,
+        // yet step 5 still handed it the next index and every sequence after
+        // it shifted by one, so each would sample from another conversation's
+        // distribution and emit plausible-looking text belonging to someone
+        // else. Silent, and impossible to distinguish from a model quality
+        // problem after the fact.
+        //
         // In slot order: with a KV cache per sequence llama.cpp makes one
         // pass of the model per run of consecutive slots in the order the
         // batch holds them (`decode_passes`), and `active` is in no order
@@ -2191,72 +2269,138 @@ fn run_scheduler_loop(
         // again: 3, 0, 1, 2 was two passes where 0, 1, 2, 3 is one.
         active.sort_unstable_by_key(|seq| seq.seq_id);
 
-        for seq in active.iter() {
-            let Some(token) = seq.last_token else {
-                continue;
-            };
-            match decode_batch.add(token, seq.n_past, &[seq.seq_id], true) {
-                Ok(()) => {
-                    let idx = logit_of_seq.len() as i32;
-                    logit_of_seq.push((seq.seq_id, idx));
+        // The waiting prompts are read in the step itself, oldest first, as
+        // much of them as `prompt_budget` gives, in slot order among the
+        // answers' tokens. Read between the steps instead (until 0.7.50),
+        // sixteen requests arriving together started over sixteen steps,
+        // each a pass for the answers and one for a prompt; in the step, the
+        // first one reads all of them that fit. With one KV cache for all,
+        // the answers' tokens and a micro-batch of prompt are one pass; with
+        // a KV cache per sequence, a prompt's slot fills the gap it left in
+        // the run of answering slots, and the rest of it takes its passes.
+        let mut parts: Vec<PromptPart> = Vec::new();
+        if chunked && !prefilling.is_empty() {
+            let answering = active.iter().filter(|seq| seq.last_token.is_some()).count();
+            let oldest = prefilling
+                .iter()
+                .find(|p| !p.apart)
+                .map_or(0, |p| p.seq.prompt_tokens.len() - p.cursor);
+            let mut budget = prompt_budget(
+                answering,
+                oldest,
+                ctx.n_batch() as usize,
+                ctx.n_ubatch() as usize,
+            );
+            let mut waiting = VecDeque::with_capacity(prefilling.len());
+            while let Some(pending) = prefilling.pop_front() {
+                if pending.seq.tx.is_closed() {
+                    // The client went away while its prompt was waiting or
+                    // being read: what the slot holds of it is of no use to
+                    // anyone.
+                    finish_wiped(&mut ctx, pending.seq.seq_id, &mut idle_slots);
+                    continue;
                 }
-                Err(e) => {
-                    // Should be unreachable: the batch is allocated with
-                    // max_batch_size capacity and `active` never exceeds it. If
-                    // it ever happens, this sequence has no logits to sample and
-                    // must be failed rather than fed someone else's.
-                    tracing::error!(
-                        "Seq {}: could not be added to the decode batch ({e}) — failing it \
-                         rather than sampling from another sequence's logits",
-                        seq.seq_id,
-                    );
+                if pending.apart || budget == 0 {
+                    waiting.push_back(pending);
+                    continue;
                 }
+                let to = (pending.cursor + budget).min(pending.seq.prompt_tokens.len());
+                budget -= to - pending.cursor;
+                parts.push(PromptPart {
+                    pending,
+                    to,
+                    logit: None,
+                });
             }
+            prefilling = waiting;
+            parts.sort_unstable_by_key(|part| part.pending.seq.seq_id);
         }
 
-        // ── 4. Decode the batch ─────────────────────────────────────────
-        if decode_batch.n_tokens() > 0 {
-            tracing::debug!(
-                "Decoding batch: {} tokens, {} active sequences",
-                decode_batch.n_tokens(),
-                active.len(),
+        // ── 4. Decode the step ──────────────────────────────────────────
+        let t = times.start();
+        let mut decoded = fill_step_batch(
+            &mut decode_batch,
+            &active,
+            &mut parts,
+            &mut logit_of_seq,
+            &mut batch_seqs,
+        )
+        .and_then(|()| decode_step(&mut ctx, &mut decode_batch));
+        if let Err(e) = &decoded
+            && !parts.is_empty()
+        {
+            // A prompt in the step may be what failed it: a prefix reused
+            // from its slot that llama.cpp would not continue, or no room
+            // left in a KV cache for all. Read between the steps, such a
+            // failure was the prompt's alone, with the fall-back from a
+            // reused prefix; so it is again. The step's prompts are read
+            // apart from now on (step 7), and the step is decoded again
+            // without them. A batch llama.cpp refuses (positions that do not
+            // follow what the slot holds, no room in the cache) it refuses
+            // before computing any of it: such a step left nothing behind.
+            tracing::warn!(
+                "A decode step with {} prompts in it failed ({e}): reading them on their own \
+                 from now on, and the step again without them",
+                parts.len(),
             );
-            let t = times.start();
-            let decoded = ctx.decode(&mut decode_batch);
-            if let Some(t) = t {
-                // The decode only queues the work on a GPU: wait for it here,
-                // as the first sample would, so that its time is the GPU's.
-                ctx.synchronize();
+            for part in parts.drain(..) {
+                let mut pending = part.pending;
+                pending.apart = true;
+                prefilling.push_back(pending);
+            }
+            prefilling.make_contiguous().sort_by_key(|p| p.seq.start);
+            decoded = fill_step_batch(
+                &mut decode_batch,
+                &active,
+                &mut parts,
+                &mut logit_of_seq,
+                &mut batch_seqs,
+            )
+            .and_then(|()| decode_step(&mut ctx, &mut decode_batch));
+        }
+        if let Some(t) = t
+            && decode_batch.n_tokens() > 0
+        {
+            // The decode only queues the work on a GPU: wait for it here,
+            // as the first sample would, so that its time is the GPU's.
+            ctx.synchronize();
+            let read: u64 = parts.iter().map(|p| (p.to - p.pending.cursor) as u64).sum();
+            if logit_of_seq.is_empty() {
+                // Prompts only, with nothing answering: their reading time.
+                times.prefill += t.elapsed();
+                times.prefill_tokens += read;
+            } else {
                 times.decode += t.elapsed();
                 times.steps += 1;
-                times.tokens += decode_batch.n_tokens() as u64;
-                let order: Vec<i32> = logit_of_seq.iter().map(|&(id, _)| id).collect();
+                times.tokens += logit_of_seq.len() as u64;
+                times.step_prompt_tokens += read;
                 times.passes +=
-                    decode_passes(&order, config.kv_unified, ctx.n_ubatch() as usize) as u64;
+                    decode_passes(&batch_seqs, config.kv_unified, ctx.n_ubatch() as usize) as u64;
             }
-            if let Err(e) = decoded {
-                tracing::error!("Batch decode failed: {e}");
-                // Send errors to all active sequences and clear. This is a
-                // hard error potentially affecting every active sequence
-                // simultaneously — unsafe to assume any partial cache state,
-                // so fully wipe each one and return an empty-history slot
-                // (also fixes a pre-existing leak: these seq_ids used to be
-                // dropped from `active` without ever being returned to the
-                // pool).
-                for seq in active.drain(..) {
-                    let _ = seq
-                        .tx
-                        .try_send(StreamEvent::Error(format!("Decode failed: {e}")));
-                    let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
-                    idle_slots.push(CachedSlot {
-                        seq_id: seq.seq_id,
-                        tokens: Vec::new(),
-                        text: String::new(),
-                        last_used: std::time::Instant::now(),
-                    });
-                }
-                continue;
+        }
+        if let Err(e) = decoded {
+            tracing::error!("Batch decode failed: {e}");
+            // Send errors to all active sequences and clear. This is a
+            // hard error potentially affecting every active sequence
+            // simultaneously — unsafe to assume any partial cache state,
+            // so fully wipe each one and return an empty-history slot
+            // (also fixes a pre-existing leak: these seq_ids used to be
+            // dropped from `active` without ever being returned to the
+            // pool). The prompts of the step are not among them: they
+            // were set apart above.
+            for seq in active.drain(..) {
+                let _ = seq
+                    .tx
+                    .try_send(StreamEvent::Error(format!("Decode failed: {e}")));
+                let _ = ctx.clear_kv_cache_seq(Some(seq.seq_id as u32), None, None);
+                idle_slots.push(CachedSlot {
+                    seq_id: seq.seq_id,
+                    tokens: Vec::new(),
+                    text: String::new(),
+                    last_used: std::time::Instant::now(),
+                });
             }
+            continue;
         }
 
         // ── 5. Sample one token per sequence, send events ───────────────
@@ -2269,8 +2413,8 @@ fn run_scheduler_loop(
                 continue;
             }
 
-            // Read this sequence's own output index from step 3 rather than
-            // assuming it matches iteration order (see the comment there).
+            // Read this sequence's own logits position from step 3 rather
+            // than assuming it matches iteration order (see the comment there).
             let Some(logit_idx) = logit_of_seq
                 .iter()
                 .find(|(seq_id, _)| *seq_id == seq.seq_id)
@@ -2289,7 +2433,6 @@ fn run_scheduler_loop(
                 });
                 continue;
             };
-
             // `seq.last_token` was just decoded by this iteration's batch
             // `ctx.decode()` call (step 4, above) and is now physically
             // resident in the KV cache at what was `seq.n_past` — bump it
@@ -2365,17 +2508,70 @@ fn run_scheduler_loop(
             active.swap_remove(i);
         }
 
-        // ── 7. Read the next chunk of a waiting prompt ──────────────────
+        // ── 6'. The prompts read in the step ────────────────────────────
         //
-        // Decode first: every answering sequence has had its token (steps
-        // 3-6), then the oldest waiting prompt advances by one chunk. While
-        // others answer the chunk is one micro-batch, so each of their tokens
-        // waits for one micro-batch of prompt at most instead of the whole
-        // prompt; alone, it is the whole batch, as a prompt read whole. Either
-        // way llama.cpp computes it a micro-batch at a time, from the same
-        // start, so the prompt is read the same way as `prefill_sequence`
-        // reads it.
-        if let Some(mut pending) = prefilling.pop_front() {
+        // Before any other decode: the answer's first token is sampled from
+        // this step's logits. A prompt read whole starts its answer, which
+        // joins the steps from the next one; the others wait for their next
+        // part.
+        for part in parts.drain(..) {
+            let PromptPart {
+                mut pending,
+                to,
+                logit,
+            } = part;
+            let seq_id = pending.seq.seq_id;
+            if to < pending.seq.prompt_tokens.len() {
+                pending.cursor = to;
+                prefilling.push_back(pending);
+                continue;
+            }
+            let Some(logit) = logit else {
+                // Unreachable: the part that reaches a prompt's end gave its
+                // last token logits (`fill_step_batch`).
+                let _ = pending.seq.tx.try_send(StreamEvent::Error(
+                    "Internal scheduler error: the prompt's last token had no logits".into(),
+                ));
+                finish_wiped(&mut ctx, seq_id, &mut idle_slots);
+                continue;
+            };
+            let mut seq = pending.seq;
+            seq.tokens_prompt = pending.n_tokens;
+            seq.n_past = to as i32;
+            seq.max_tokens = pending.effective_max;
+            seq.prefilled = true;
+            seq.prompt_time = seq.start.elapsed();
+            if let Some(seq) = begin_generation(
+                model,
+                &mut ctx,
+                seq,
+                logit,
+                &mut idle_slots,
+                &mut checkpoints,
+                &sched_config,
+            ) {
+                active.push(seq);
+            }
+            tracing::debug!(
+                "Sequence {seq_id} prefilled ({} prompt tokens)",
+                pending.n_tokens
+            );
+        }
+        // Oldest first, as step 3 reads them.
+        prefilling.make_contiguous().sort_by_key(|p| p.seq.start);
+
+        // ── 7. Read the next chunk of a prompt set apart ────────────────
+        //
+        // Only a prompt that was in a step that failed (step 4) is read here,
+        // on its own: after the step, as all prompts were read until 0.7.50.
+        // While others answer the chunk is one micro-batch, so each of their
+        // tokens waits for one micro-batch of prompt at most instead of the
+        // whole prompt; alone, it is the whole batch, as a prompt read whole.
+        // Either way llama.cpp computes it a micro-batch at a time, from the
+        // same start, so the prompt is read the same way as
+        // `prefill_sequence` reads it.
+        if let Some(at) = prefilling.iter().position(|p| p.apart) {
+            let mut pending = prefilling.remove(at).expect("a position in the queue");
             let seq_id = pending.seq.seq_id;
             let n_prompt = pending.seq.prompt_tokens.len();
             if pending.seq.tx.is_closed() {
@@ -2407,7 +2603,7 @@ fn run_scheduler_loop(
             match read {
                 Ok(()) if chunk_end < n_prompt => {
                     pending.cursor = chunk_end;
-                    prefilling.push_front(pending);
+                    prefilling.insert(at, pending);
                 }
                 Ok(()) => {
                     let mut seq = pending.seq;
@@ -2420,6 +2616,7 @@ fn run_scheduler_loop(
                         model,
                         &mut ctx,
                         seq,
+                        -1,
                         &mut idle_slots,
                         &mut checkpoints,
                         &sched_config,
@@ -2440,7 +2637,7 @@ fn run_scheduler_loop(
                         &e,
                     );
                     pending.may_fall_back = false;
-                    prefilling.push_front(pending);
+                    prefilling.insert(at, pending);
                 }
                 Err(e) => {
                     let _ = pending
@@ -2452,6 +2649,126 @@ fn run_scheduler_loop(
             }
         }
     }
+}
+
+/// How many prompt tokens a decode step reads beside the tokens of
+/// `answering` answers, `oldest` being what is left of the first prompt it
+/// reads.
+///
+/// With some answering, a micro-batch less their tokens: with one KV cache
+/// for all the step is then one pass of the model, and each answer's token
+/// waits for a micro-batch of prompt at most, as when prompts were read
+/// between the steps. Never under half a micro-batch, so that prompts still
+/// move with small micro-batches, nor past the batch.
+///
+/// With none answering, up to a whole batch, as a prompt read on its own,
+/// but no further than the end of the micro-batch the first prompt ends in:
+/// the prompts after it fill that micro-batch and wait for the next step,
+/// rather than make the first wait for them. Eight 209-token prompts
+/// arriving together on four CPU cores, read in one batch, all started
+/// answering after the eight were read.
+fn prompt_budget(answering: usize, oldest: usize, n_batch: usize, n_ubatch: usize) -> usize {
+    let n_ubatch = n_ubatch.max(1);
+    if answering == 0 {
+        return oldest.max(1).next_multiple_of(n_ubatch).min(n_batch);
+    }
+    n_ubatch
+        .saturating_sub(answering)
+        .max(n_ubatch / 2)
+        .min(n_batch.saturating_sub(answering))
+}
+
+/// Fill `batch` with one decode step, in slot order (see `decode_passes`):
+/// the last token of every answering sequence of `active` (sorted by slot),
+/// with logits, and the tokens of each prompt part (sorted by slot), with
+/// logits on a prompt's last token only. Where each answer's logits are goes
+/// in `logit_of_seq`, a finishing prompt's in its part, and every token's
+/// sequence, in batch order, in `seqs`.
+///
+/// An answer's token that does not fit is left out and logged: step 5 then
+/// fails that sequence rather than hand it another's logits. A prompt part
+/// that does not fit fails the step, as a failed decode does. Neither
+/// happens: the batch holds `n_batch` tokens, and `prompt_budget` keeps the
+/// step within it.
+fn fill_step_batch(
+    batch: &mut LlamaBatch,
+    active: &[ActiveSequence],
+    parts: &mut [PromptPart],
+    logit_of_seq: &mut Vec<(i32, i32)>,
+    seqs: &mut Vec<i32>,
+) -> Result<(), String> {
+    fn add_answer(
+        batch: &mut LlamaBatch,
+        seq: &ActiveSequence,
+        logit_of_seq: &mut Vec<(i32, i32)>,
+        seqs: &mut Vec<i32>,
+    ) {
+        let Some(token) = seq.last_token else {
+            return;
+        };
+        let at = batch.n_tokens();
+        match batch.add(token, seq.n_past, &[seq.seq_id], true) {
+            Ok(()) => {
+                logit_of_seq.push((seq.seq_id, at));
+                seqs.push(seq.seq_id);
+            }
+            Err(e) => tracing::error!(
+                "Seq {}: could not be added to the decode batch ({e}) — failing it \
+                 rather than sampling from another sequence's logits",
+                seq.seq_id,
+            ),
+        }
+    }
+
+    fn add_part(
+        batch: &mut LlamaBatch,
+        part: &mut PromptPart,
+        seqs: &mut Vec<i32>,
+    ) -> Result<(), String> {
+        let seq_id = part.pending.seq.seq_id;
+        let tokens = &part.pending.seq.prompt_tokens;
+        let last = tokens.len() - 1;
+        for (pos, token) in tokens
+            .iter()
+            .enumerate()
+            .take(part.to)
+            .skip(part.pending.cursor)
+        {
+            let at = batch.n_tokens();
+            batch
+                .add(*token, pos as i32, &[seq_id], pos == last)
+                .map_err(|e| format!("Failed to add prompt token: {e}"))?;
+            seqs.push(seq_id);
+            if pos == last {
+                part.logit = Some(at);
+            }
+        }
+        Ok(())
+    }
+
+    batch.clear();
+    logit_of_seq.clear();
+    seqs.clear();
+    let mut next = 0;
+    for seq in active {
+        while next < parts.len() && parts[next].pending.seq.seq_id < seq.seq_id {
+            add_part(batch, &mut parts[next], seqs)?;
+            next += 1;
+        }
+        add_answer(batch, seq, logit_of_seq, seqs);
+    }
+    for part in &mut parts[next..] {
+        add_part(batch, part, seqs)?;
+    }
+    Ok(())
+}
+
+/// Decode `batch`, when it holds anything.
+fn decode_step(ctx: &mut LlamaContext, batch: &mut LlamaBatch) -> Result<(), String> {
+    if batch.n_tokens() == 0 {
+        return Ok(());
+    }
+    ctx.decode(batch).map_err(|e| e.to_string())
 }
 
 /// Prefill the unreused suffix of a sequence's prompt tokens into the context.
@@ -2953,7 +3270,8 @@ mod tests {
     use super::{
         CachedSlot, GenerateRequest, NotQueued, PieceOutcome, PromptCheckpoint, SchedulerHandle,
         SendOutcome, StepTimes, StreamEvent, best_checkpoint, common_prefix_len, decode_passes,
-        drafts_kept, mtp_drafts, pick_slot, process_piece, text_prefix_match, try_send_piece,
+        drafts_kept, mtp_drafts, pick_slot, process_piece, prompt_budget, text_prefix_match,
+        try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
@@ -2977,9 +3295,15 @@ mod tests {
         assert_eq!(
             line,
             "10.0 s, 400 steps, 16.0 seqs/step, 1.50 passes/step, 640 tok/s | \
-             decode 60.0% (15.00 ms/step), \
+             decode 60.0% (15.00 ms/step, 0 prompt tok), \
              sample 32.0% (0.500 ms/token), emit 0.6% (0.010 ms/token), \
              prefill 5.0% (2048 tok), idle 0.0%, other 2.4%"
+        );
+        times.step_prompt_tokens = 4960;
+        assert!(
+            times
+                .summary(Duration::from_secs(10))
+                .contains("decode 60.0% (15.00 ms/step, 4960 prompt tok)")
         );
     }
 
@@ -3002,6 +3326,70 @@ mod tests {
         // One cache for all: any slots, any order.
         assert_eq!(decode_passes(&[3, 0, 6, 2], true, 512), 1);
         assert_eq!(decode_passes(&[], false, 512), 0);
+    }
+
+    /// A step that reads a prompt beside the answers' tokens: with a KV cache
+    /// per sequence, one pass takes a token of every sequence in the run,
+    /// the prompt's first among them, and the rest of the prompt is passes of
+    /// its own, `n_ubatch` tokens at most, shared equally between prompts.
+    #[test]
+    fn a_prompt_in_a_step_fills_its_slot_in_the_answers_run() {
+        let step = |answers: &[i32], prompts: &[(i32, usize)]| -> Vec<i32> {
+            let mut parts: Vec<(i32, usize)> = answers.iter().map(|&id| (id, 1)).collect();
+            parts.extend_from_slice(prompts);
+            parts.sort_unstable();
+            parts
+                .iter()
+                .flat_map(|&(id, n)| std::iter::repeat_n(id, n))
+                .collect()
+        };
+        // Answers 0, 1, 3, 4 and slot 2's prompt between them: one pass for
+        // all five slots, then the 99 prompt tokens left. Read after the
+        // step instead, the answers were two passes and the prompt one.
+        let batch = step(&[0, 1, 3, 4], &[(2, 100)]);
+        assert_eq!(decode_passes(&batch, false, 512), 2);
+        assert_eq!(decode_passes(&[0, 1, 3, 4], false, 512), 2);
+        // A prompt longer than a micro-batch: its passes are the micro-batches.
+        assert_eq!(decode_passes(&step(&[0, 1], &[(2, 1200)]), false, 512), 4);
+        // Two prompts share micro-batches: equal parts of each, as long as
+        // the shorter lasts, then the longer alone.
+        assert_eq!(
+            decode_passes(&step(&[], &[(0, 100), (1, 300)]), false, 512),
+            2
+        );
+        // Sixteen prompts arriving together, 100 tokens each: 32 of each per
+        // pass, in four passes; read one per step, they were sixteen.
+        let sixteen: Vec<(i32, usize)> = (0..16).map(|id| (id, 100)).collect();
+        assert_eq!(decode_passes(&step(&[], &sixteen), false, 512), 4);
+        // One cache for all: n_ubatch tokens a pass, whatever their slots.
+        assert_eq!(
+            decode_passes(&step(&[0, 1, 3, 4], &[(2, 100)]), true, 512),
+            1
+        );
+        assert_eq!(decode_passes(&step(&[], &sixteen), true, 512), 4);
+    }
+
+    /// Beside answers a step reads a micro-batch of prompt less their
+    /// tokens; with none, up to a batch, to the end of the micro-batch the
+    /// first prompt ends in; never past the batch.
+    #[test]
+    fn a_step_reads_a_micro_batch_of_prompt_beside_the_answers() {
+        assert_eq!(prompt_budget(16, 3000, 2048, 512), 496);
+        assert_eq!(prompt_budget(1, 3000, 256, 16), 15);
+        // Small micro-batches: half of one at least.
+        assert_eq!(prompt_budget(12, 3000, 2048, 16), 8);
+        // A batch already full of answers' tokens.
+        assert_eq!(prompt_budget(16, 3000, 16, 512), 0);
+        assert_eq!(prompt_budget(16, 3000, 300, 512), 284);
+        // Nothing answering: a long prompt is read a batch at a time, as
+        // read on its own; a short one's micro-batch is filled with the
+        // next prompts, which wait for the next step for the rest.
+        assert_eq!(prompt_budget(0, 3000, 2048, 512), 2048);
+        assert_eq!(prompt_budget(0, 952, 2048, 512), 1024);
+        assert_eq!(prompt_budget(0, 209, 2048, 512), 512);
+        assert_eq!(prompt_budget(0, 512, 2048, 512), 512);
+        assert_eq!(prompt_budget(0, 1, 2048, 512), 512);
+        assert_eq!(prompt_budget(0, 600, 512, 512), 512);
     }
 
     /// Off, nothing is timed: there is no clock to take a part's time from,

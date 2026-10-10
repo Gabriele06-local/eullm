@@ -594,16 +594,18 @@ requests at the same time, and raise `--ctx-size` with it.
 With 16 concurrent requests on an RTX 5070 Ti, EuLLM serves 259 tok/s in total, 2.75× a single request's throughput. See [benchmarks](benchmarks.md) for details.
 
 **A long prompt does not stop the others.** With more than one slot, a new
-request's prompt is read a chunk at a time between the decode steps of the
-answers already being written: every answering request gets its next token,
-then the prompt advances by one micro-batch (`--n-ubatch`), and so on until
-it is read. A 30,000-token RAG prompt used to be read whole the moment its
-request was taken, and every other answer on the server stopped until it
-was. Alone on the server a prompt is read a whole batch (`--n-batch`) at a
-time, as before, and with one slot (the default) nothing changes. Either way
-llama.cpp computes it one micro-batch at a time from the same positions, so
-the answer is the one a prompt read whole gets. Prompts wait in arrival
-order; one is read at a time.
+request's prompt is read a chunk at a time in the decode steps of the
+answers already being written: each step gives every answering request its
+next token and reads up to a micro-batch (`--n-ubatch`) of waiting prompt
+beside them, and so on until the prompt is read. A 30,000-token RAG prompt
+used to be read whole the moment its request was taken, and every other
+answer on the server stopped until it was. With nothing else answering,
+prompts are read a whole batch (`--n-batch`) at a time, and with one slot
+(the default) nothing changes. Either way llama.cpp computes a prompt one
+micro-batch at a time from the same positions, so the answer is the one a
+prompt read whole gets. Prompts are read in arrival order, as many in a step
+as fit: requests that arrive together are read together and start answering
+together, instead of one per step.
 
 **A full queue is a 503.** Behind the requests being answered, each slot
 keeps up to eight waiting, in arrival order: with the default single slot,
