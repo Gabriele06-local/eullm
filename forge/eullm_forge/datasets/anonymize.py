@@ -114,8 +114,16 @@ RE_CF_AZIENDA = re.compile(
 
 # Italian IBAN: starts with IT + 2 check digits + CIN letter + 5 ABI + 5 CAB
 # + 12 account chars. 27 chars total.
+#
+# NO word boundaries, and case-insensitive, for the same two reasons
+# documented on RE_CF above: `\b` demands a non-word character on each
+# side, so every IBAN glued to an adjacent run ("IBANIT60X...", a lost
+# space, a stray trailing digit) passed through in clear text -- exactly
+# the shapes bad OCR produces -- and the generator varies capitalisation
+# ("it60x..."). On a PII path recall wins over precision.
 RE_IBAN = re.compile(
-    r"\bIT\d{2}[A-Z]\d{10}[A-Z0-9]{12}\b"
+    r"IT\d{2}[A-Z]\d{10}[A-Z0-9]{12}",
+    re.IGNORECASE,
 )
 
 RE_EMAIL = re.compile(

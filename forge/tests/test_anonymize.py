@@ -86,6 +86,21 @@ def test_redacts_iban():
     assert stats.iban == 1
 
 
+def test_redacts_glued_and_lowercase_ibans():
+    """RE_CF documents why it has no word boundaries (54 CFs survived glued
+    to adjacent runs) and why it is case-insensitive; RE_IBAN had both
+    flaws, so glued and lowercase IBANs passed through in clear text."""
+    iban = "IT60X0542811101000000123456"
+    for text in (f"accredito su IBAN{iban} intestato",
+                 f"accredito su IBAN {iban}1 intestato",
+                 f"accredito su IBAN {iban}X intestato",
+                 f"accredito su IBAN {iban.lower()} intestato"):
+        out, stats = anonymize_text(text)
+        assert iban not in out and iban.lower() not in out.replace("[IBAN]", "")
+        assert "[IBAN]" in out
+        assert stats.iban == 1
+
+
 def test_redacts_email():
     text = "contatto: mario.rossi@example.com per info"
     out, stats = anonymize_text(text)
