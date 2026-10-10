@@ -42,13 +42,37 @@ from eullm_forge.caselaw import attach_meta, load_openga, load_rulings  # noqa: 
 from eullm_forge.caselaw.index import RulingIndex, SparseBM25, build_units  # noqa: E402
 from eullm_forge.caselaw.prompts import caselaw_prompt, ruling_label  # noqa: E402
 
-_CITED = re.compile(r"n\.\s*(\d{9})\b|n\.\s*(\d{1,5})\s*/\s*((?:19|20)\d\d)\b")
+_CITED = re.compile(r"n\.\s*(\d{9})\b|n\.\s*(\d{1,5})\s*/\s*((?:19|20)\d\d)\b",
+                    re.IGNORECASE)
+
+
+# An act of law numbered the way rulings are: "l. n. 241/1990", "d.lgs. n.
+# 50/2016", "d.P.R. n. 1199/1971", "legge 7 agosto 1990, n. 241/1990". Read as
+# a ruling, a statute the answer cites correctly counted as a ruling invented
+# outside the passages: the models trained on statutes as well (opd-abs,
+# 2026-10-10) cite laws more, and "cites only rulings it was given" fell from
+# 0.89 to 0.57-0.65 on that alone.
+_ACT = re.compile(
+    r"(?:\bl\.|\blegge|\bl\.\s*r\.|\bd\.\s*lgs\.?|\bdlgs\.?|\bd\.\s*l\.|\bd\.?\s*p\.?\s*r\.?|"
+    r"\bd\.\s*m\.|\bd\.?\s*p\.?\s*c\.?\s*m\.?|\bdecreto[\w\s'-]{0,40}?|\bregolamento|\breg\.|"
+    r"\bdirettiva|\bdir\.|\bt\.\s*u\.|\btesto unico|\bcodice)"
+    r"(?:\s+(?:regionale|ue|ce|cee)|\s*\((?:ue|ce|cee)\))?(?:\s+\d{1,2}\s+[a-z]+\s+\d{4})?"
+    r"\s*,?\s*$",
+    re.IGNORECASE)
 
 
 def cited_numbers(text: str) -> set[str]:
-    """Ruling numbers an answer cites, in OpenGA's form: "n. 202301234" or "n. 1234/2023"."""
+    """Ruling numbers an answer cites, in OpenGA's form: "n. 202301234" or "n. 1234/2023".
+
+    A number right after an act of law ("l. n. 241/1990") is that act's, not a
+    ruling's, and is left out.
+    """
     out = set()
-    for full, num, year in _CITED.findall(text or ""):
+    text = text or ""
+    for m in _CITED.finditer(text):
+        if _ACT.search(text[max(0, m.start() - 60):m.start()]):
+            continue
+        full, num, year = m.groups()
         out.add(full if full else f"{year}{int(num):05d}")
     return out
 

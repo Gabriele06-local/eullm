@@ -152,6 +152,29 @@ def test_cited_numbers_reads_both_forms():
             "nonché dall'art. 120, n. 3 c.p.a.")
     assert mod.cited_numbers(text) == {"202301234", "202100045"}
     assert mod.cited_numbers("") == set()
+    # Italian capitalizes "N." at sentence start: uppercase cited nothing,
+    # so a hallucinated "N. 999/2019" read cited_ok=True (vacuous empty set)
+    # and a correct "N. 45/2021" read source_cited=False.
+    assert mod.cited_numbers("Come chiarito da Cons. Stato, N. 999/2019 si applica.") == {
+        "201900999"}
+    assert mod.cited_numbers("Come chiarito nella sentenza N. 45/2021 del Consiglio.") == {
+        "202100045"}
+
+
+def test_a_law_numbered_like_a_ruling_is_not_a_ruling_cited():
+    """"l. n. 241/1990" is a statute: read as a ruling, every answer citing a
+    law correctly counted as citing a ruling it was never given."""
+    mod = _load("cds_answer")
+    for law in ("ai sensi dell'art. 21-octies della l. n. 241/1990",
+                "secondo il d.lgs. n. 50/2016", "il D.Lgs. n. 36/2023",
+                "il d.P.R. n. 1199/1971", "la legge n. 241/1990",
+                "la legge 7 agosto 1990, n. 241/1990", "la l.r. n. 12/2005",
+                "il decreto legislativo n. 104/2010", "il regolamento (UE) n. 679/2016",
+                "il d.l. n. 76/2020", "il D.P.C.M. n. 5/2020"):
+        assert mod.cited_numbers(law) == set(), law
+    both = ("La l. n. 241/1990, come letta da Cons. Stato, sez. VI, n. 1234/2023 "
+            "e dalla sentenza n. 202301235.")
+    assert mod.cited_numbers(both) == {"202301234", "202301235"}
 
 
 def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, monkeypatch,
@@ -318,3 +341,22 @@ def test_statute_rows_are_anchored_to_the_student_before_the_run(tiny_model, tmp
 
     assert first_kl("anchored", "--anchor-statutes") == 0.0
     assert first_kl("taught") > 1.0
+
+
+def test_rescoring_reads_the_answers_already_written(tmp_path, capsys):
+    """A law cited correctly no longer counts as a ruling invented, without
+    asking the questions again."""
+    mod = _load("cds_rescore")
+    p = tmp_path / "answers-x.jsonl"
+    rows = [{"id": "q0", "ruling": "cds/202301234", "context": ["cds/202301234"],
+             "answer": "Ai sensi della l. n. 241/1990, come in Cons. Stato n. 1234/2023.",
+             "cited_ok": False, "source_cited": True},
+            {"id": "q1", "ruling": "cds/202301234", "context": ["cds/202301234"],
+             "answer": "Cons. Stato n. 999/2019 lo esclude.", "cited_ok": False,
+             "source_cited": False}]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert mod.main([str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "citing only rulings given 0.000 -> 0.500" in out
+    assert "citing the source 0.500 -> 0.500" in out
+    assert "999" not in out and "Cons." not in out
