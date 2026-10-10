@@ -18,8 +18,12 @@ THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def visible(text):
-    """The answer without a reasoning block the model wrote first."""
-    return THINK.sub("", text or "")
+    """The answer without a reasoning block the model wrote first.
+
+    With U+2212 MINUS SIGN folded to a hyphen: models emit it, and without
+    the fold "−14" extracted as 14.0 and graded a correct determinant wrong.
+    """
+    return THINK.sub("", text or "").replace("\u2212", "-")
 
 
 def after_answer(text):
