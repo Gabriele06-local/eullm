@@ -77,7 +77,14 @@ _SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
 # (_HEADER/_NUMBER below). It read only the first four, so "art. 12-sexies"
 # was heard as "art. 12" and by_article handed the model Art. 12 for a
 # 12-sexies question -- five suffixes of wrong-article retrieval.
-_ARTICLE = re.compile(rf"\bart(?:icolo|icoli|t)?\s+(\d+)(?:\s*({_SUFFIXES}))?\b")
+_NUM = rf"(\d+)(?:\s*({_SUFFIXES}))?"
+# "l'art. 1453 e 3 mesi", "l'art. 12 e 2 commi": a number followed by a unit
+# is a quantity, not a second article.
+_UNIT = r"(?!\s*(?:comm|giorn|mes|ann|or[ae]\b))"
+_ARTICLE = re.compile(
+    rf"\bart(?:icolo|icoli|t)?\s+{_NUM}\b"
+    rf"((?:\s*(?:,|e|ed)\s*\d+(?:\s*(?:{_SUFFIXES}))?\b{_UNIT})*)")
+_MORE = re.compile(rf"(?:,|\be|\bed)\s*{_NUM}\b{_UNIT}")
 
 
 def tokens(text: str) -> list[str]:
@@ -158,8 +165,19 @@ def record_heading(record: dict) -> str:
 
 
 def named_articles(text: str) -> list[str]:
-    """Article numbers a question names, as the records spell them."""
-    return [_article_key(num, suffix) for num, suffix in _ARTICLE.findall(normalize_text(text))]
+    """Article numbers a question names, as the records spell them.
+
+    Lists included: "artt. 1176 e 1375" names both, the way the answer-side
+    parser (abstain._CITE/_MORE) reads the identical text. One number per
+    occurrence read only the first, so by_article dropped the rest -- a
+    question about two articles was answered from one.
+    """
+    out = []
+    for m in _ARTICLE.finditer(normalize_text(text)):
+        out.append(_article_key(m.group(1), m.group(2) or ""))
+        out.extend(_article_key(num, suffix or "")
+                   for num, suffix in _MORE.findall(m.group(3) or ""))
+    return out
 
 
 @dataclass
