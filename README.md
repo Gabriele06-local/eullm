@@ -183,7 +183,8 @@ wait for Forge or the Hub.
 
 | | |
 |---|---|
-| [Engine guide](docs/engine-guide.md) | using it with your tools, decisions, security, GPU memory, MoE, KV-cache reuse, daemon mode, multimodal, building from source |
+| [Quick start](docs/quickstart.md) | **start here**: how to start it, the options worth knowing with what each does, startup scripts, common problems |
+| [Engine guide](docs/engine-guide.md) | in depth, with the measurements: using it with your tools, decisions, security, GPU memory, MoE, KV-cache reuse, daemon mode, multimodal, building from source |
 | [Engine reference](docs/engine.md) | every command, flag and endpoint |
 | [Platforms](docs/platforms.md) | every download, ARM, data-centre GPUs, community testers |
 | [Examples](examples/README.md) | Snake and email triage with `/v1/systemone` |
