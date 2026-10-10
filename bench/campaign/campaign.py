@@ -6,7 +6,7 @@
     campaign.py f32s     SPEC.json... --queue DIR      F32 models finetune points still need
     campaign.py prefetch --queue DIR [--sets ...]      fetch the sets and finetune text (login)
     campaign.py run      --queue DIR [--devices 0-7]   drain the queue on this node
-    campaign.py status   --queue DIR                   what is waiting, running, done
+    campaign.py status   --queue DIR [--each]          what is waiting, running, done
     campaign.py unblock  --queue DIR                   retry points blocked on a model
     campaign.py retry    --queue DIR [--group PREFIX]  failed points back, once fixed
     campaign.py collect  --queue DIR [--out FILE.csv]  one row per measured point
@@ -842,9 +842,9 @@ def cmd_status(args):
         else:
             print(f"  running {pid}  (no owner yet)")
     for state in ("failed", "blocked"):
-        for pid in q.ids(state):
-            notes = q.load(state, pid).get("notes") or [""]
-            print(f"  {state} {pid}: {notes[-1][:200]}")
+        points = [dict(q.load(state, pid), id=pid) for pid in q.ids(state)]
+        for line in stopped_lines(state, points, each=args.each):
+            print(line)
     todo = q.todo()
     if todo:
         by_group = {}
@@ -852,6 +852,32 @@ def cmd_status(args):
             by_group[p["group"]] = by_group.get(p["group"], 0) + 1
         print("  waiting by group:", ", ".join(f"{g} {n}" for g, n in sorted(by_group.items())))
     return 0
+
+
+def stopped_cause(note: str) -> str:
+    """What stopped a point, in one line: the first line of its last note
+    (the rest is the server's log), without the command line of a timeout."""
+    first = (note or "").strip().splitlines()[0] if (note or "").strip() else "(no note)"
+    first = re.sub(r"Command '\[.*?\]'", "Command '…'", first)
+    return first.rstrip(" :")[:140]
+
+
+def stopped_lines(state: str, points: list, each: bool = False) -> list:
+    """The failed or blocked points as one line per group and cause, most
+    frequent first; with `each`, one line per point instead."""
+    if not points:
+        return []
+    causes = [(p.get("group", "?"), stopped_cause((p.get("notes") or [""])[-1]), p["id"])
+              for p in points]
+    if each:
+        return [f"  {state} {pid} ({group}): {cause}" for group, cause, pid in causes]
+    counts = {}
+    for group, cause, _ in causes:
+        counts[(group, cause)] = counts.get((group, cause), 0) + 1
+    lines = [f"  {state} {len(points)}, by group and cause (status --each lists every point):"]
+    for (group, cause), n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        lines.append(f"    {n:3d}  {group}: {cause}")
+    return lines
 
 
 def cmd_retry(args):
@@ -1065,7 +1091,9 @@ def main(argv=None):
                         "without it")
     p.add_argument("--sample-s", type=float, default=2.0)
 
-    with_queue(sub.add_parser("status"))
+    p = with_queue(sub.add_parser("status"))
+    p.add_argument("--each", action="store_true",
+                   help="one line per failed or blocked point instead of one per group and cause")
     with_queue(sub.add_parser("unblock"))
     p = with_queue(sub.add_parser("retry"))
     p.add_argument("--group", help="only points whose id starts with this, e.g. moe-671b")
