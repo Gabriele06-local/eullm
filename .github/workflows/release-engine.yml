@@ -2559,13 +2559,15 @@ jobs:
 
             LLM inference engine in Rust: one binary, any GGUF model, on CPU or GPU. Continuous batching, quantized KV cache, zero telemetry, and an AI Act-ready audit trail.
 
-            ### This release: AMD and Intel GPUs on Windows, and MoE prompts read faster
+            ### This release: a server that stays up under concurrency, and MoE models that load right
 
-            **`eullm-windows-x64-vulkan.zip`** is new: a Windows build that runs on the GPU through Vulkan, for AMD Radeon cards and Ryzen integrated graphics, Intel Arc, and the NVIDIA cards the CUDA build does not cover (GTX 1000, RTX 2000, or a driver older than 580). Until now those machines ran models on the CPU. `install.ps1` picks it by itself for those GPUs. It has not yet been run on an AMD or Intel GPU under Windows: reports are welcome.
+            **A request for JSON no longer brings the server down.** `format: "json"` made llama.cpp abort the whole process at the first token, taking every other request with it. Fixed, and the repeat penalty now looks back over the 64 tokens it was set to, not 32.
 
-            **MoE models with their experts in RAM read long prompts faster, with nothing to set.** The next experts are now copied to the GPU while the current ones compute (`--moe-prefetch`, on by default), and those the expert cache already holds come from VRAM instead of over PCIe. On an RTX 5070 Ti, Qwen3.8-Flash-Next read a 33,200-token prompt 42% faster with the prefetch (1,373 tokens/s against 968), and 10% faster again with the copies from VRAM (1,509 against 1,368).
+            **`--moe-cache auto` finds its room again for a model with a per-layer embedding table.** Since 0.7.40, `--fit` counted Qwen3.8-Flash-Next IQ2_XS's 28.8 GB embedding table as VRAM and offloaded a reduced layer split instead of the cache: 181 tokens/s reading and 6.4 writing, against 987 and 56. If you saw that, this is the fix.
 
-            **`--fit` sizes a model split into several GGUF files from all of them.** The 0.7.30 notes listed this fix, but it was merged after that release was built: it is in this one.
+            **Several clients at once are served faster.** Answers written side by side take one pass of the model per token, not several, and the repeat penalty (1.1 by default) no longer costs 1.2 ms for every token of every answer. On LUMI-G, with 16 requests at once, EuLLM was up to 36% behind llama-server and is now 8% behind.
+
+            **`eullm update` installs the latest release in place of the running one**, checking it against the release's checksums first (0.7.40 and earlier do not have it: update those once more with the installer). **`eullm-windows-x64-rocm.zip`** is new and experimental, for Radeon RX 7900, RX 9070 and Radeon AI PRO R9700 cards through ROCm; it has been built and started, but not yet run on a Radeon: reports are welcome.
 
             ### Quick install
 

@@ -202,12 +202,13 @@ class NodeSampler:
             }
         return stats
 
-    def latest(self, max_age_s: float = 10.0) -> dict:
-        """The newest reading if it is younger than `max_age_s`, else a
-        fresh one: what the devices hold now, before a point starts."""
+    def latest(self, max_age_s: float = 10.0, since: float = 0.0) -> dict:
+        """The newest reading if it is younger than `max_age_s` and was taken
+        at `since` or later, else a fresh one: what the devices hold now,
+        before a point starts."""
         with self._lock:
             last = self.samples[-1] if self.samples else None
-        if last and time.time() - last[0] <= max_age_s:
+        if last and last[0] >= since and time.time() - last[0] <= max_age_s:
             return last[1]
         return self.reader() or {}
 
