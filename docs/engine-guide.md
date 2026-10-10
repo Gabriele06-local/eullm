@@ -758,8 +758,43 @@ What it needs:
 - **One request at a time**, `--batch-size 1`, the default. With more slots
   `--mtp` is off, and the log says so.
 - An architecture llama.cpp drafts for: Qwen3.5/3.6 (`qwen35`, `qwen35moe`)
-  and the others its MTP drafter supports. Not Qwen3.8-Flash-Next
-  (`qwen4exp`) yet: its converter drops the MTP layers.
+  and the others its MTP drafter supports. Qwen3.8-Flash-Next (`qwen4exp`)
+  has its head in a file of its own: see `--mtp-model` below.
+
+### A head in a file of its own (`--mtp-model FILE`)
+
+A GGUF whose converter dropped the MTP layers can still draft, if the head
+exists as a GGUF of its own (the head alone, a few GB, made from the model's
+original checkpoint):
+
+```bash
+eullm serve --default-model ./Qwen3.8-Flash-Next-IQ2_XS.gguf --moe-cache auto \
+  --mtp 2 --mtp-model ./mtp-Qwen3.8-Flash-Next-Q8_0.gguf
+```
+
+The head is loaded on the GPU beside the model and its draft context reads
+the model's own state, as with a head inside the GGUF; `--fit` counts the
+file and the context in what it reserves. Without `--mtp` the flag does
+nothing and the log says so; if the file cannot be loaded the model runs
+without drafts.
+
+Measured on an RTX 5070 Ti (PCIe 4.0 x16), Qwen3.8-Flash-Next IQ2_XS (68 GB
+in two files, the experts pinned in RAM, `--moe-cache 5500`, 8,192 tokens of
+context), tokens per second writing a story and a piece of code, one run per
+row, drafts kept in brackets:
+
+| Setting | Story, T=0 | Code, T=0 | Story, T=0.7 | Code, T=0.7 |
+| --- | ---: | ---: | ---: | ---: |
+| no drafts | 55.4 | 49.2 | 54.4 | 47.5 |
+| `--mtp 1` | 61.1 (83%) | 58.3 | 58.6 (81%) | 58.9 |
+| `--mtp 2` | 61.0 (71%) | 64.3 | 55.9 (68%) | 65.3 |
+| `--mtp 3` | 56.2 (62%) | 65.8 | 50.3 (56%) | 66.9 |
+
+`--mtp 1` for prose (+8% at temperature 0.7), `--mtp 2` for code (+37%);
+`--mtp 3` loses on prose. llama-server with the same head file
+(`--spec-type draft-mtp -md FILE`) measured the same shape, 3 to 8% lower.
+Each check still reads the experts of every token it checks, which is why the
+gain is a fraction of a dense model's.
 
 A head is trained to guess one token ahead; the drafts after the first are
 its guesses on its own guesses, kept less and less often, and each costs a

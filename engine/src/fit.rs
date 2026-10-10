@@ -3869,6 +3869,36 @@ mod plan_offload_tests {
         assert_eq!(mtp_reserve_bytes(None, 4096, F16.0, F16.1, 512), 0);
     }
 
+    /// `--mtp-model` reserves the head's file whole plus the draft context,
+    /// sized as one layer, whatever the model's own GGUF says about MTP.
+    #[test]
+    fn a_head_in_its_own_file_is_reserved_whole_with_its_context() {
+        let info = GgufInfo {
+            n_embd: Some(1024),
+            key_length: Some(256),
+            value_length: Some(256),
+            full_attention_interval: Some(4),
+            architecture: Some("qwen35".into()),
+            nextn_layers: None,
+            ..attention(25, 2)
+        };
+        let file = 4 * GIB;
+        // The model's own GGUF has no MTP layers: nothing from that side.
+        assert_eq!(mtp_reserve_bytes(Some(&info), 4096, F16.0, F16.1, 512), 0);
+        // The file plus one layer's KV and the compute floor.
+        assert_eq!(
+            mtp_file_reserve_bytes(file, Some(&info), 4096, F16.0, F16.1, 512),
+            file + 8 * MIB + 32 * MIB
+        );
+        // The KV grows with the context.
+        assert_eq!(
+            mtp_file_reserve_bytes(file, Some(&info), 32768, F16.0, F16.1, 512),
+            file + 64 * MIB + 32 * MIB
+        );
+        // Without the model's header only the file can be counted.
+        assert_eq!(mtp_file_reserve_bytes(file, None, 4096, F16.0, F16.1, 512), file);
+    }
+
     /// A model sized to fill the card left `--mtp`'s head no room: its
     /// context is built after the load, from the VRAM sizing had handed out.
     /// Reserved, it costs the model the layers it needs instead.
