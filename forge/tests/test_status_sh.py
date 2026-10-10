@@ -32,7 +32,8 @@ def _exe(path: Path, body: str) -> None:
 
 def run_status(tmp_path: Path, queue: list[tuple[str, str, str]],
                ended: list[tuple[str, str, str, str]],
-               gpu_queue: list[str] | None = None, disk_pct: int = 50) -> str:
+               gpu_queue: list[str] | None = None, disk_pct: int = 50,
+               extra_env: dict[str, str] | None = None) -> str:
     bin_ = tmp_path / "bin"
     bin_.mkdir(exist_ok=True)
     q_reason = "\\n".join("|".join(j) for j in queue)
@@ -63,7 +64,7 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\\n'
 printf 'lustre 1000 {disk_pct * 10} 0 {disk_pct}%% /work\\n'
 """)
     env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}",
-           "EULLM_RUNS": str(tmp_path / "runs")}
+           "EULLM_RUNS": str(tmp_path / "runs"), **(extra_env or {})}
     out = subprocess.run(["bash", str(SCRIPT), "2026-09-27T21:00"], env=env,
                          capture_output=True, text=True, timeout=60)
     assert out.returncode == 0, out.stderr
@@ -245,6 +246,22 @@ def test_an_idle_gpu_queue_is_flagged_and_a_queued_chain_is_not(tmp_path, runs):
     out = run_status(tmp_path, queue=[("eullm-grpo-r2-v04", "PENDING", "Dependency")],
                      ended=[], gpu_queue=["59332673"])
     assert "idle" not in out and "nothing wrong found" in out
+
+
+def test_a_base_model_whose_scratch_copy_is_gone_is_flagged(tmp_path, runs):
+    """2026-10-10: base models moved to the purged fast scratch behind
+    symlinks. A purged copy leaves a link to nothing, and compute nodes
+    cannot download it again."""
+    work = tmp_path / "work"
+    (work / "models").mkdir(parents=True)
+    scratch = tmp_path / "scratch"
+    (scratch / "Qwen3-14B").mkdir(parents=True)
+    (work / "models" / "Qwen3-14B").symlink_to(scratch / "Qwen3-14B")
+    (work / "models" / "Qwen3.8-27B").symlink_to(scratch / "Qwen3.8-27B")   # purged
+    (work / "models" / "local").mkdir()
+    out = run_status(tmp_path, [], [], extra_env={"WORK": str(work)})
+    assert "[!!] " + str(work / "models" / "Qwen3.8-27B") + " points to" in out
+    assert "Qwen3-14B points to" not in out and "local points to" not in out
 
 
 def test_a_full_disk_is_flagged(tmp_path, runs):
