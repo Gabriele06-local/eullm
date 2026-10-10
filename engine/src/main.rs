@@ -263,6 +263,15 @@ struct RuntimeOpts {
     #[arg(long, value_name = "P", default_value_t = 0.0, value_parser = parse_probability)]
     mtp_p_min: f32,
 
+    /// With `--mtp`: a GGUF holding the MTP head alone, for a model whose own
+    /// GGUF has none (Qwen3.8-Flash-Next's, for instance: the head is a
+    /// separate file, such as unsloth's `mtp-Qwen3.8-Flash-Next-Q8_0.gguf`).
+    /// It is loaded onto the GPU whole, so it costs that much VRAM (3.85 GB
+    /// for that one), which `--fit` keeps out of the layers and the expert
+    /// cache. Without `--mtp` it is ignored.
+    #[arg(long, value_name = "FILE")]
+    mtp_model: Option<PathBuf>,
+
     /// For MoE models whose experts do not all fit in VRAM: keep every
     /// expert in RAM and give the VRAM they would have taken to a cache of
     /// the ones the model uses most. `auto` sizes it from the VRAM left once
@@ -998,6 +1007,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                mtp_model,
                 moe_cache,
                 no_mmap,
                 mmap,
@@ -1141,6 +1151,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                mtp_model,
                 moe_cache,
                 no_mmap,
                 mmap,
@@ -1193,6 +1204,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                mtp_model,
                 moe_cache,
                 no_mmap,
                 mmap,
@@ -1304,6 +1316,7 @@ async fn main() {
                 rs_seq,
                 mtp,
                 mtp_p_min,
+                mtp_model,
                 moe_cache,
                 no_mmap,
                 mmap,
@@ -2542,6 +2555,7 @@ async fn cmd_run(
     rs_seq: u32,
     mtp: u32,
     mtp_p_min: f32,
+    mtp_model: Option<PathBuf>,
     moe_cache: Option<fit::MoeCache>,
     no_mmap: bool,
     mmap: bool,
@@ -2930,13 +2944,24 @@ async fn cmd_run(
             // `fit::mtp_reserve_bytes`): only where it will draft, on the
             // scheduler's one slot, which a model with a projector never gets.
             let mtp_reserve = if mtp > 0 && batch_size == 1 && mmproj_for_config.is_none() {
-                fit::mtp_reserve_bytes(
-                    fit::read_gguf_info(&gguf_path).as_ref(),
-                    ctx_size,
-                    kv_bpe_k,
-                    kv_bpe_v,
-                    n_ubatch,
-                )
+                match mtp_model.as_deref() {
+                    // The head's own file: loaded whole onto the GPU.
+                    Some(file) => fit::mtp_file_reserve_bytes(
+                        std::fs::metadata(file).map_or(0, |m| m.len()),
+                        fit::read_gguf_info(&gguf_path).as_ref(),
+                        ctx_size,
+                        kv_bpe_k,
+                        kv_bpe_v,
+                        n_ubatch,
+                    ),
+                    None => fit::mtp_reserve_bytes(
+                        fit::read_gguf_info(&gguf_path).as_ref(),
+                        ctx_size,
+                        kv_bpe_k,
+                        kv_bpe_v,
+                        n_ubatch,
+                    ),
+                }
             } else {
                 0
             };
@@ -3180,6 +3205,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            mtp_model: mtp_model.clone(),
             moe_cache_bytes,
             no_mmap,
             moe_prefetch_slots,
@@ -3286,6 +3312,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            mtp_model: mtp_model.clone(),
             moe_cache_bytes,
             no_mmap,
             moe_prefetch_slots,
@@ -3415,6 +3442,7 @@ async fn cmd_run(
             rs_seq,
             mtp,
             mtp_p_min,
+            mtp_model,
             moe_cache,
             no_mmap: no_mmap_flag,
             mmap,
@@ -3496,6 +3524,7 @@ async fn cmd_serve(
     rs_seq: u32,
     mtp: u32,
     mtp_p_min: f32,
+    mtp_model: Option<PathBuf>,
     moe_cache: Option<fit::MoeCache>,
     no_mmap: bool,
     mmap: bool,
@@ -3610,6 +3639,7 @@ async fn cmd_serve(
         rs_seq,
         mtp,
         mtp_p_min,
+        mtp_model,
         moe_cache,
         no_mmap,
         mmap,

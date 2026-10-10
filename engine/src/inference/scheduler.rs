@@ -1020,6 +1020,7 @@ struct MtpState<'m> {
 /// recurrent rollback of its own.
 fn start_mtp<'m>(
     model: &'m LlamaModel,
+    draft_model: Option<&'m LlamaModel>,
     backend: &LlamaBackend,
     config: &InferenceConfig,
     ctx_size: NonZeroU32,
@@ -1033,7 +1034,9 @@ fn start_mtp<'m>(
         .with_n_rs_seq(0)
         .with_n_seq_max(1)
         .with_n_outputs_max(n_max + 1);
-    let draft_ctx = model
+    // The head's own file when there is one, else the model itself.
+    let draft_ctx = draft_model
+        .unwrap_or(model)
         .new_context_with_ctx_other(backend, params, target)
         .map_err(|e| format!("could not create the MTP draft context: {e}"))?;
     // What the head's own context takes beside the target's: `--fit`
@@ -1577,6 +1580,41 @@ fn run_scheduler_loop(
     let model_owner = Arc::new(SharedModel(model));
     let model = &*model_owner;
 
+    // `--mtp-model`: the MTP head in a file of its own, for a model whose GGUF
+    // has none. Loaded whole onto the GPU, as llama-server loads a draft model
+    // (`-ngld 99`), and declared before `ctx` and `mtp_state` below so that it
+    // drops after them: the draft context borrows it.
+    let draft_model: Option<LlamaModel> = match (config.mtp > 0, config.mtp_model.as_ref()) {
+        (true, Some(path)) => {
+            tracing::info!("MTP: loading the head from {}", path.display());
+            let params = LlamaModelParams::default()
+                .with_n_gpu_layers(1000)
+                .with_load_mtp(true);
+            let params = pin!(params);
+            match LlamaModel::load_from_file(&backend, path, &params) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!(
+                        "MTP: could not load {}: {e} — generating without drafts",
+                        path.display()
+                    );
+                    None
+                }
+            }
+        }
+        (false, Some(_)) => {
+            tracing::warn!("--mtp-model has no effect without --mtp");
+            None
+        }
+        _ => None,
+    };
+    // A head in a file of its own that failed to load leaves nothing to draft with.
+    let mtp_layers = match (config.mtp_model.is_some(), draft_model.as_ref()) {
+        (true, Some(m)) => m.n_layer_nextn(),
+        (true, None) => 0,
+        (false, _) => model.n_layer_nextn(),
+    };
+
     // Use context_size as the TOTAL KV cache budget, shared across all
     // sequences (matching Ollama / llama.cpp server behaviour).  Previous
     // code multiplied context_size × max_batch_size, which easily overflowed
@@ -1625,7 +1663,7 @@ fn run_scheduler_loop(
     let (mtp_draft, mtp_off) = mtp_drafts(
         config.mtp,
         sched_config.max_batch_size,
-        model.n_layer_nextn(),
+        mtp_layers,
     );
     if let Some(reason) = mtp_off {
         tracing::warn!("{reason}");
@@ -1729,7 +1767,15 @@ fn run_scheduler_loop(
 
     // After `ctx`, so it is dropped first: the drafter points at both.
     let mut mtp_state = if mtp_draft > 0 {
-        match start_mtp(model, &backend, &config, ctx_size, &ctx, mtp_draft) {
+        match start_mtp(
+            model,
+            draft_model.as_ref(),
+            &backend,
+            &config,
+            ctx_size,
+            &ctx,
+            mtp_draft,
+        ) {
             Ok(state) => Some(state),
             Err(e) => {
                 tracing::warn!("MTP: {e} — generating without drafts");

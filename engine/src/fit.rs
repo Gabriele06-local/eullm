@@ -948,6 +948,44 @@ pub(crate) fn mtp_reserve_bytes(
     let Some(nextn) = info.nextn_layers.filter(|&n| n > 0 && n < info.n_layers) else {
         return 0;
     };
+    mtp_context_bytes(info, nextn, ctx, kv_bytes_per_elem_k, kv_bytes_per_elem_v, n_ubatch)
+}
+
+/// What `--mtp-model` takes from the GPU: the head's file, loaded whole, and
+/// the draft context it runs on (one layer, sized like the model's own
+/// attention layers, which `info` describes). The model's own GGUF has no
+/// MTP layers then, so [`mtp_reserve_bytes`] counts nothing for it.
+pub(crate) fn mtp_file_reserve_bytes(
+    file_bytes: u64,
+    info: Option<&GgufInfo>,
+    ctx: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    n_ubatch: u32,
+) -> u64 {
+    let Some(info) = info else {
+        return file_bytes;
+    };
+    file_bytes.saturating_add(mtp_context_bytes(
+        info,
+        1,
+        ctx,
+        kv_bytes_per_elem_k,
+        kv_bytes_per_elem_v,
+        n_ubatch,
+    ))
+}
+
+/// The KV cache of `nextn` layers over `ctx` tokens plus the compute buffer
+/// of a micro-batch, for the MTP head's context.
+fn mtp_context_bytes(
+    info: &GgufInfo,
+    nextn: u32,
+    ctx: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    n_ubatch: u32,
+) -> u64 {
     let per_token_per_layer = match info.kv_elems_per_token_per_layer() {
         Some((k_elems, v_elems)) => k_elems * kv_bytes_per_elem_k + v_elems * kv_bytes_per_elem_v,
         None => FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER,

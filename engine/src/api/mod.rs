@@ -172,6 +172,8 @@ pub struct AppState {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--mtp-model` (see `InferenceConfig::mtp_model`).
+    pub mtp_model: Option<std::path::PathBuf>,
     /// `--moe-cache`, as the user gave it: every load sizes its own cache
     /// from it (see `fit::plan_moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
@@ -699,6 +701,7 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                mtp_model: self.mtp_model.clone(),
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
@@ -878,6 +881,7 @@ impl AppState {
                 rs_seq: self.rs_seq,
                 mtp: self.mtp,
                 mtp_p_min: self.mtp_p_min,
+                mtp_model: self.mtp_model.clone(),
                 moe_cache_bytes,
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
@@ -2843,6 +2847,8 @@ pub struct ServeConfig {
     pub mtp: u32,
     /// `--mtp-p-min` (see `InferenceConfig::mtp_p_min`).
     pub mtp_p_min: f32,
+    /// `--mtp-model` (see `InferenceConfig::mtp_model`).
+    pub mtp_model: Option<std::path::PathBuf>,
     /// `--moe-cache` (see `AppState::moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
     /// `--no-mmap` (see `AppState::no_mmap`).
@@ -3169,6 +3175,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         rs_seq: cfg.rs_seq,
         mtp: cfg.mtp,
         mtp_p_min: cfg.mtp_p_min,
+        mtp_model: cfg.mtp_model.clone(),
         moe_cache: cfg.moe_cache,
         no_mmap: cfg.no_mmap,
         mmap: cfg.mmap,
@@ -3348,6 +3355,7 @@ impl AppState {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            mtp_model: None,
             moe_cache: None,
             no_mmap: false,
             mmap: false,

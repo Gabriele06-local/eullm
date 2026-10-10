@@ -39,6 +39,9 @@ pub struct ModelBanner {
     pub mtp: u32,
     /// `--mtp-p-min`: the head's confidence below which it stops drafting.
     pub mtp_p_min: f32,
+    /// `--mtp-model`: the file the MTP head is loaded from, when it is not in
+    /// the model's own GGUF.
+    pub mtp_model: Option<std::path::PathBuf>,
     /// VRAM for the cache of the experts kept in RAM (`--moe-cache`, once
     /// sized); 0 for none.
     pub moe_cache_bytes: u64,
@@ -154,6 +157,9 @@ impl ModelBanner {
                 "  MTP drafts:    up to {} per step (speculative decoding with the model's MTP head)",
                 self.mtp
             );
+            if let Some(file) = &self.mtp_model {
+                println!("                 head loaded from {}", file.display());
+            }
             if self.mtp_p_min > 0.0 {
                 println!(
                     "                 while the head is at least {:.0}% sure of its next draft",

@@ -556,6 +556,9 @@ pub struct InferenceConfig {
     /// `--mtp-p-min`: the MTP head stops drafting below this probability
     /// of its own (0 = always the full `mtp`).
     pub mtp_p_min: f32,
+    /// `--mtp-model`: a GGUF holding the MTP head alone, for a model whose own
+    /// GGUF has none (the head is then loaded from here, onto the GPU).
+    pub mtp_model: Option<std::path::PathBuf>,
     /// Bytes of VRAM for a cache of the MoE experts kept in RAM (0 = none):
     /// the size `--moe-cache` comes to once the load is sized, never the
     /// flag itself (see `fit::plan_moe_cache`). Every context of this
@@ -604,6 +607,7 @@ impl Default for InferenceConfig {
             rs_seq: 0,
             mtp: 0,
             mtp_p_min: 0.0,
+            mtp_model: None,
             moe_cache_bytes: 0,
             no_mmap: false,
             moe_prefetch_slots: 0,
