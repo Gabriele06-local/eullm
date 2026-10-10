@@ -54,6 +54,9 @@ def index():
      ["1176", "1375"]),
     ("Cosa dicono gli artt. 3 e 4 e 5 del codice civile?", "codice_civile",
      ["3", "4", "5"]),
+    # ...but a number with a unit after it is a quantity, not an article
+    ("Che cosa prevede l'art. 1453 e 3 mesi del codice civile?", "codice_civile", ["1453"]),
+    ("Cosa dice l'art. 12 e 2 commi del codice civile?", "codice_civile", ["12"]),
 ])
 def test_a_named_article_and_code_are_read_out_of_the_question(question, code, nums):
     assert named_code(question) == code
