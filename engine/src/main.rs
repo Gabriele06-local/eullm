@@ -5240,6 +5240,16 @@ mod cli_default_parity_tests {
         }
     }
 
+    /// `--mtp-model` is unset unless asked, and exists on both subcommands.
+    #[test]
+    fn the_mtp_head_file_is_unset_unless_asked() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).mtp_model, None);
+        let asked = runtime_opts(&["eullm", "serve", "--mtp", "2", "--mtp-model", "head.gguf"]);
+        assert_eq!(asked.mtp_model, Some(PathBuf::from("head.gguf")));
+        let run = runtime_opts(&["eullm", "run", "m.gguf", "--mtp-model", "head.gguf"]);
+        assert_eq!(run.mtp_model, Some(PathBuf::from("head.gguf")));
+    }
+
     #[test]
     fn the_expert_cache_is_off_unless_asked_and_takes_auto_or_mib() {
         assert_eq!(runtime_opts(&["eullm", "serve"]).moe_cache, None);

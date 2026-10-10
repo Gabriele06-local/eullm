@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Added
+- **`--mtp-model FILE`: speculative decoding for a model whose GGUF has no MTP head, when the head exists as a file of its own.** Qwen3.8-Flash-Next IQ2_XS on an RTX 5070 Ti, with the head from a separate GGUF: answers at temperature 0.7 go from 54 to 59 tokens/s on prose with `--mtp 1` and from 48 to 65 on code with `--mtp 2`; `--mtp 3` is slower than no drafts on prose. Needs `--mtp`; `--fit` counts the file and its context.
+
 ## 0.7.50 — 2026-10-10
 
 ### Changed
