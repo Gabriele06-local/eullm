@@ -2,10 +2,12 @@
 
 import datetime as dt
 import os
+from types import SimpleNamespace
 
 import pytest
 
 import budget
+import campaign
 from devices import (
     NodeSampler,
     aligned_group,
@@ -269,6 +271,20 @@ def test_pace_against_the_calendar():
     assert 15 < p["calendar_pct"] < 18
     assert p["behind_node_hours"] == p["target_to_date"] > 700
     assert 1.1 < p["needed_nodes_continuous"] < 1.3
+
+
+def test_budget_after_the_end_date_reports_instead_of_crashing(capsys, monkeypatch):
+    """pace() rightly returns None for the needed rates once no hours are
+    left, but cmd_budget formatted them with :8.1f -- TypeError, killing a
+    spend report that prints fine. The rates line now says the allocation
+    is over."""
+    monkeypatch.setattr(campaign.budget, "read_sacct", lambda start, account=None: [])
+    args = SimpleNamespace(start="2026-09-12", end="2026-10-01", account=None,
+                           budget_node_hours=4500.0, json=False)
+    assert campaign.cmd_budget(args) == 0
+    out = capsys.readouterr().out
+    assert "days left" in out and "spent " in out
+    assert "allocation ended 2026-10-01; nothing left to pace" in out
 
 
 def test_shipped_campaigns_expand():

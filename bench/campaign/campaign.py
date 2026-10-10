@@ -1001,8 +1001,15 @@ def cmd_budget(args):
           f"{pace['days_left']} days left)")
     print(f"target     {pace['target_to_date']:8.1f} node-h  to date on a straight line")
     print(f"behind     {pace['behind_node_hours']:8.1f} node-h")
-    print(f"needed     {pace['needed_node_hours_per_day']:8.1f} node-h/day from now = "
-          f"{pace['needed_nodes_continuous']} nodes busy around the clock")
+    need, nodes = pace["needed_node_hours_per_day"], pace["needed_nodes_continuous"]
+    # Past the end date pace() rightly returns None for both: there are no
+    # hours left to hold a rate over. The spend report above still stands,
+    # so say so instead of crashing on the format string.
+    if need is None:
+        print(f"needed     --        (allocation ended {args.end}; nothing left to pace)")
+    else:
+        print(f"needed     {need:8.1f} node-h/day from now = "
+              f"{nodes} nodes busy around the clock")
     for part, h in sorted(by_part.items()):
         print(f"  {part:12s} {h / budget.GPU_HOURS_PER_NODE_HOUR:8.1f} node-h")
     return 0
