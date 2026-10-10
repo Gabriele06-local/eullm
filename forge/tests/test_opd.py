@@ -308,6 +308,34 @@ def test_every_prompts_row_is_validated_before_the_models_load(tmp_path):
         mod.load_rows(prompts)
 
 
+def _wordlevel(vocab: dict[str, int]):
+    tokenizers = pytest.importorskip("tokenizers")
+    transformers = pytest.importorskip("transformers")
+    raw = tokenizers.Tokenizer(tokenizers.models.WordLevel(vocab, unk_token="[UNK]"))
+    raw.pre_tokenizer = tokenizers.pre_tokenizers.WhitespaceSplit()
+    return transformers.PreTrainedTokenizerFast(tokenizer_object=raw)
+
+
+def test_a_vocabulary_plus_a_few_tokens_of_its_own_is_the_same_vocabulary():
+    """Qwen3.8 is Qwen3.5 plus seven audio tokens after all the others: the
+    same ids for every token text can produce. A token inserted among the
+    others moves ids and is a different vocabulary."""
+    from eullm_forge.opd import MAX_EXTRA_TOKENS, same_vocabulary
+
+    words = ["[UNK]", "il", "ricorso", "è", "respinto"]
+    base = {w: i for i, w in enumerate(words)}
+    probe = "il ricorso è respinto"
+    student = _wordlevel(base)
+    audio = _wordlevel({**base, **{f"<audio_{k}>": len(base) + k for k in range(7)}})
+    assert same_vocabulary(student, audio, probe) and same_vocabulary(audio, student, probe)
+    shifted = _wordlevel({"[UNK]": 0, "<audio>": 1, **{w: i + 1 for w, i in base.items()
+                                                         if w != "[UNK]"}})
+    assert not same_vocabulary(student, shifted, probe)
+    many = _wordlevel({**base, **{f"<x{k}>": len(base) + k
+                                  for k in range(MAX_EXTRA_TOKENS + 1)}})
+    assert not same_vocabulary(student, many, probe)
+
+
 def test_a_teacher_with_another_vocabulary_is_refused(tiny_model, tmp_path):
     path, prompts = tiny_model
     transformers = pytest.importorskip("transformers")
