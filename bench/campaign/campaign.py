@@ -90,6 +90,15 @@ REPLAN_S = 120
 # started on a GCD already holding 40-60 GB (a server left over from an
 # earlier point), measured at a fraction of their speed beside it.
 DIRTY_MIB = 2048
+# A device freed this recently is not judged yet: the driver may still be
+# handing back the memory of the server that just ended, and a reading taken
+# before that sees it as a leftover. On 09-10-2026 that set aside the device
+# of every point that ended with nothing else running, and the job, with
+# nothing left to run, ended after one point, four times over.
+SETTLE_S = 10.0
+# A device set aside for this long is left out of the job: whatever holds its
+# memory is not one of this job's servers, and the other devices go on.
+GIVE_UP_S = 900.0
 # Servers a point may leave behind. Ollama loads a model in a child process
 # of its own, which can outlive `ollama serve`.
 SERVER_NAMES = ("eullm", "llama-server", "ollama")
@@ -223,6 +232,8 @@ class Runner:
         self.finished = []
         self.draining = []  # (servers that outlived their kill, their devices)
         self.quarantined = {}  # device: MiB it held with no point on it
+        self.quarantined_at = {}  # device: when it was set aside
+        self.freed_at = {}  # device: when its last point gave it back
         self.lock = threading.Lock()
         self.stop = threading.Event()
         # Set when a point finishes or a stop arrives, so the next point
@@ -404,9 +415,16 @@ class Runner:
             self.finished.append((run, state, note, ended))
         self.wake.set()
 
+    def settled_at(self, devices) -> float:
+        """When the last of `devices` to be freed can be judged: SETTLE_S
+        after its point gave it back."""
+        settle = getattr(self.args, "settle_s", SETTLE_S)
+        return max((self.freed_at.get(d, 0.0) for d in devices), default=0.0) + settle
+
     def held_mib(self, devices) -> dict:
-        """MiB of VRAM each of `devices` holds now, where the sampler says."""
-        reading = self.sampler.latest()
+        """MiB of VRAM each of `devices` holds now, where the sampler says,
+        from a reading taken once they have settled."""
+        reading = self.sampler.latest(since=self.settled_at(devices))
         out = {}
         for d in devices:
             used = reading.get(self.physical[d], {}).get("used")
@@ -420,6 +438,8 @@ class Runner:
         with self.lock:
             self.free -= set(dirty)
             self.quarantined.update(dirty)
+            for d in dirty:
+                self.quarantined_at.setdefault(d, time.time())
         print(f"[{now_iso()}] devices {sorted(dirty)} hold "
               f"{', '.join(f'{m} MiB' for m in dirty.values())} with no point on them: "
               f"set aside until they are clean", flush=True)
@@ -444,22 +464,37 @@ class Runner:
     def reap(self) -> int:
         with self.lock:
             finished, self.finished = self.finished, []
+        freed = 0
         if self.quarantined:
-            clean = [d for d, m in self.held_mib(list(self.quarantined)).items()
-                     if m <= DIRTY_MIB]
+            held = self.held_mib(list(self.quarantined))
+            clean = [d for d, m in held.items() if m <= DIRTY_MIB]
             if clean:
                 with self.lock:
                     for d in clean:
                         self.quarantined.pop(d, None)
+                        self.quarantined_at.pop(d, None)
                     self.free |= set(clean)
                 print(f"[{now_iso()}] devices {sorted(clean)} clean again", flush=True)
+                freed += len(clean)
+            give_up = getattr(self.args, "give_up_s", GIVE_UP_S)
+            lost = [d for d in self.quarantined
+                    if time.time() - self.quarantined_at.get(d, time.time()) > give_up]
+            if lost:
+                with self.lock:
+                    for d in lost:
+                        self.quarantined.pop(d, None)
+                        self.quarantined_at.pop(d, None)
+                        self.devices.remove(d)
+                print(f"[{now_iso()}] devices {sorted(lost)} still hold memory after "
+                      f"{give_up / 60:.0f} min: left out of this job", flush=True)
         # Devices whose server outlived its kill come back when it is gone.
-        freed = 0
         for straggler in list(self.draining):
             if all(s.proc.poll() is not None for s in straggler[0]):
                 self.draining.remove(straggler)
                 with self.lock:
                     self.free |= set(straggler[1])
+                    for d in straggler[1]:
+                        self.freed_at[d] = time.time()
                 print(f"[{now_iso()}] devices {sorted(straggler[1])} free again", flush=True)
                 freed += 1
         for run, state, note, ended in finished:
@@ -472,6 +507,8 @@ class Runner:
                           f"{sorted(run.reserved)} wait for it", flush=True)
                 else:
                     self.free |= set(run.reserved)
+                    for d in run.reserved:
+                        self.freed_at[d] = ended
             for d in run.reserved:
                 self.busy_s[d] += ended - run.started
             try:
@@ -523,11 +560,13 @@ class Runner:
               flush=True)
         owner = {"job": self.job, "host": self.host}
         replan_at = 0.0
+        settling = None  # when a device just given back can be judged
         while not self.stop.is_set():
             # Reading the queue is a directory listing and a file per point
             # on Lustre: do it when devices free up, not on every poll, and
             # every few minutes for points other jobs put back or added.
             if self.reap() or time.time() >= replan_at:
+                settling = None
                 todo = sorted((p for p in self.queue.todo() if point.can_run(p)),
                               key=order_key)
                 while todo and not self.stop.is_set():
@@ -535,6 +574,10 @@ class Runner:
                     if choice is None:
                         break
                     p, use, reserved, duration = choice
+                    if time.time() < self.settled_at(reserved):
+                        # Just given back: judged, and used, once settled.
+                        settling = self.settled_at(reserved)
+                        break
                     held = self.held_mib(reserved)
                     dirty = {d: m for d, m in held.items() if m > DIRTY_MIB}
                     if dirty:
@@ -544,8 +587,11 @@ class Runner:
                     claimed = self.queue.claim(p["id"], owner)
                     if claimed is not None:
                         self.launch(claimed, use, reserved, duration, held)
-                replan_at = time.time() + REPLAN_S
-            if not self.running and not self.draining:
+                replan_at = settling if settling is not None else time.time() + REPLAN_S
+            # Nothing running is the end only when nothing is waiting either:
+            # a device settling, or set aside until it is clean (or given up).
+            if (not self.running and not self.draining and not self.quarantined
+                    and settling is None):
                 break
             self.wake.wait(self.args.poll_s)
             self.wake.clear()
@@ -1004,6 +1050,12 @@ def main(argv=None):
                    help="stop starting points this long before the walltime")
     p.add_argument("--port-base", type=int, default=18000)
     p.add_argument("--poll-s", type=float, default=5.0)
+    p.add_argument("--settle-s", type=float, default=SETTLE_S,
+                   help="seconds a device given back by a point waits before it is judged "
+                        "clean or holding a leftover's memory")
+    p.add_argument("--give-up-s", type=float, default=GIVE_UP_S,
+                   help="seconds a device set aside may stay so before the job goes on "
+                        "without it")
     p.add_argument("--sample-s", type=float, default=2.0)
 
     with_queue(sub.add_parser("status"))

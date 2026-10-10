@@ -28,7 +28,7 @@ def engine(tmp_path):
 def run_args(queue, engine, **kw):
     a = dict(queue=queue, results=None, devices="0-3", backend="rocm", bind="none",
              site="test", engine=engine, walltime_s=3600, margin_s=0, port_base=0,
-             poll_s=0.2, sample_s=0.5)
+             poll_s=0.2, sample_s=0.5, settle_s=0.0, give_up_s=900.0)
     a.update(kw)
     return argparse.Namespace(**a)
 
@@ -455,6 +455,64 @@ def test_stop_does_not_raise_when_the_server_outlives_the_wait(tmp_path):
     s.proc = subprocess.Popen(["sleep", "30"], start_new_session=True)
     assert s.stop(kill_wait_s=5) is True  # SIGTERM is enough for sleep
     assert s.stop() is True  # already gone
+
+
+def _three_points(qdir, name):
+    q = Queue(qdir)
+    spec = {"campaign": name, "defaults": {"repeats": 1, "num_predict": 4},
+            "groups": [{"name": "g", "est_s": 60, "set": {"gcds": 1},
+                        "axes": {"model": ["qwen3-8b", "qwen3-4b", "qwen3-1.7b"]}}]}
+    for p in expand(spec):
+        q.add(p)
+
+
+def test_a_device_just_given_back_is_judged_once_it_has_settled(tmp_path, engine, capsys,
+                                                                 monkeypatch):
+    """The memory of a point's server goes a moment after the point ends. A
+    reading from that moment saw it as a leftover's, set the device aside,
+    and a job with nothing else running ended after one point (09-10-2026)."""
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    qdir = str(tmp_path / "q")
+    _three_points(qdir, "c-settle")
+    r = campaign.Runner(run_args(qdir, engine, devices="0-0", port_base=free_port_base(),
+                                 settle_s=0.6))
+
+    def reader():
+        just_freed = time.time() - r.freed_at.get(0, 0.0) < 0.4
+        held = 30 * 2**30 if just_freed else 50 * 2**20
+        return {"0": {"used": held, "total": 64 * 2**30, "use": 0}}
+
+    r.sampler.reader = reader
+    r.loop()
+    out = capsys.readouterr().out
+    assert "with no point on them" not in out
+    assert sum(line.startswith("BENCH_RESULT ") for line in out.splitlines()) == 3
+
+
+def test_a_job_waits_for_a_device_set_aside_then_goes_on_without_it(tmp_path, engine, capsys,
+                                                                    monkeypatch):
+    """With nothing else running, a job no longer ends while a device is set
+    aside: it waits for it, and leaves it out once it has held memory for
+    give_up_s, after the points the other devices could run."""
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    qdir = str(tmp_path / "q")
+    _three_points(qdir, "c-give-up")
+    r = campaign.Runner(run_args(qdir, engine, devices="0-1", port_base=free_port_base(),
+                                 give_up_s=1.0))
+
+    def reader():
+        return {"0": {"used": 50 * 2**20, "total": 64 * 2**30, "use": 0},
+                "1": {"used": 40 * 2**30, "total": 64 * 2**30, "use": 0}}
+
+    r.sampler.reader = reader
+    r.loop()
+    out = capsys.readouterr().out
+    assert "devices [1] hold 40960 MiB with no point on them" in out
+    assert "devices [1] still hold memory after" in out
+    assert sum(line.startswith("BENCH_RESULT ") for line in out.splitlines()) == 3
+    assert list(r.devices) == [0] and not r.quarantined
 
 
 def test_a_device_holding_vram_with_no_point_on_it_is_set_aside(tmp_path, engine, capsys,
