@@ -254,6 +254,15 @@ def main() -> int:
     args = ap.parse_args()
     if args.absent and not args.norms:
         ap.error("--absent takes the article out of retrieved texts: give --norms")
+    # Dangling retrieval flags are silently ignored below -- the strings are
+    # never touched without their parent, so a run meant to measure embedder
+    # X comes back closed-book/BM25 with exit 0 and looks like a result.
+    if args.embedder and not args.norms:
+        ap.error("--embedder fuses BM25 with an embedding model: give --norms")
+    if args.reranker and not args.embedder:
+        ap.error("--reranker reorders the fused list: give --embedder")
+    if args.retrieval_cache and not args.embedder:
+        ap.error("--retrieval-cache holds document embeddings: give --embedder")
 
     from transformers import AutoTokenizer
 

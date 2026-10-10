@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
+
+import pytest
 
 from eullm_forge.eval import evaluate_qa, load_seed
 
@@ -115,6 +118,26 @@ def test_quiet_grading_prints_no_item(tmp_path, capsys):
         with out.open(encoding="utf-8", newline="") as f:
             rows = list(csv.DictReader(f))
         assert [r["label"] for r in rows] == ["a", "b"], module.CSV_HEADER[:2]
+
+
+def test_dangling_retrieval_flags_are_refused_like_absent(monkeypatch, capsys):
+    """--embedder/--reranker/--retrieval-cache without their parents were
+    silently ignored: the strings never touched, so a run meant to measure
+    embedder X came back closed-book/BM25 with exit 0. --absent without
+    --norms already refused; these do now. Before any heavy import, so no
+    model or dependency is needed to run this."""
+    cases = [
+        ["model", "--absent"],
+        ["model", "--embedder", "NOPE-XYZ"],
+        ["model", "--norms", "n.jsonl", "--reranker", "R"],
+        ["model", "--retrieval-cache", "c.txt"],
+    ]
+    for argv in cases:
+        monkeypatch.setattr(sys, "argv", ["legal_eval.py", *argv])
+        with pytest.raises(SystemExit) as refused:
+            legal_eval.main()
+        assert refused.value.code == 2
+        assert "give --" in capsys.readouterr().err
 
 
 # --- the chat prompt: thinking off, for every kind of template ---------------
