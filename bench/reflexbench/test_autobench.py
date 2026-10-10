@@ -37,6 +37,9 @@ class GradeTest(unittest.TestCase):
         self.assertIsNone(ab_grade.extract_number("I do not know"))
         # A reasoning block does not count.
         self.assertEqual(ab_grade.extract_number("<think>Answer: 5</think>Answer: 6"), 6)
+        # Models emit U+2212 MINUS SIGN too: without the fold it extracted
+        # as 14.0 and graded a correct determinant wrong.
+        self.assertEqual(ab_grade.extract_number("Answer: \u221214"), -14.0)
 
     def test_the_letter_after_the_last_answer(self):
         self.assertEqual(ab_grade.extract_letter("The sun.\nAnswer: (B)"), "B")
