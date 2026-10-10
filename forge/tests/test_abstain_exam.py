@@ -49,6 +49,11 @@ def test_articles_cited_lists_included():
                           "art. 9 quater, artt. 3, 4 ed 5") == \
         {"2043", "1176", "1375", "54-bis", "9-quater", "3", "4", "5"}
     assert cited_articles("Il termine è di trenta giorni.") == set()
+    # a quantity or a paragraph after the list separator is not an article
+    assert cited_articles("ai sensi dell'art. 1453 e 3 mesi dopo") == {"1453"}
+    assert cited_articles("l'art. 360, 1° comma, n. 3 c.p.c.") == {"360"}
+    assert cited_articles("l'art. 12 e 2 commi") == {"12"}
+    assert cited_articles("artt. 2043, 2059 e 2087") == {"2043", "2059", "2087"}
 
 
 def test_only_articles_from_memory_count():
@@ -105,8 +110,9 @@ def test_the_summary_counts_by_kind_and_works_out_old_files(tmp_path, capsys):
     mod = _load("abstain_summary")
     new = tmp_path / "answers-x-absent.jsonl"
     new.write_text("".join(json.dumps(r) + "\n" for r in [
-        {"id": "norm-contenuto-codice_penale-624", "question": "art. 624?", "answer": "...",
-         "context": ["codice penale, art. 625"], "abstained": True,
+        {"id": "norm-contenuto-codice_penale-624", "question": "art. 624?",
+         "answer": "Nei testi disponibili non ho trovato la norma.",
+         "context": ["codice penale, art. 625"], "abstained": False,
          "unsourced_articles": [], "absent": True},
         {"id": "norm-termine-codice_penale-626", "question": "art. 626?", "answer": "...",
          "context": [], "abstained": False, "unsourced_articles": ["49"], "absent": True}]))
@@ -123,3 +129,16 @@ def test_the_summary_counts_by_kind_and_works_out_old_files(tmp_path, capsys):
     assert "answers-x.jsonl [closed]: 1 items | abstained 0 (0.0%) | " \
            "citing articles not in hand n/a (written before the check)" in out
     assert "art. 624?" not in out and "..." not in out   # counts only
+
+
+def test_the_summary_reads_answers_again_with_the_current_checks(tmp_path, capsys):
+    """An abstention the stored flag missed is counted, and with no texts the
+    articles cited are read again: "e 3 mesi" is no longer article 3."""
+    mod = _load("abstain_summary")
+    closed = tmp_path / "answers-y.jsonl"
+    closed.write_text(json.dumps({
+        "id": "norm-termine-codice_civile-1453", "question": "Che cosa prevede l'art. 1453 c.c.?",
+        "answer": "L'art. 1453 e 3 mesi dopo...", "context": None,
+        "abstained": False, "unsourced_articles": ["3"]}) + "\n")
+    assert mod.main([str(closed)]) == 0
+    assert "citing articles not in hand 0 (0.0%)" in capsys.readouterr().out

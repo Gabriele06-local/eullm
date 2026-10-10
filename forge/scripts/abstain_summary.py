@@ -31,7 +31,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.eval.abstain import abstained  # noqa: E402
+from eullm_forge.eval.abstain import abstained, unsourced_articles  # noqa: E402
 
 
 def kind_of(item_id: str) -> str:
@@ -46,8 +46,14 @@ def summarize(rows: list[dict]) -> dict[str, list[int]]:
     tally: dict[str, list[int]] = defaultdict(lambda: [0, 0, 0])
     for r in rows:
         answer = r.get("answer", "")
-        abst = r["abstained"] if "abstained" in r else abstained(answer)
+        # Both read again with the current checks wherever the file allows,
+        # so runs answered before a fix of the checks compare with runs after:
+        # abstaining needs only the answer; citing, with no texts given
+        # (closed book), only the answer and the question.
+        abst = abstained(answer)
         unsourced = r.get("unsourced_articles")
+        if unsourced is not None and r.get("context") is None:
+            unsourced = unsourced_articles(answer, r.get("question", ""))
         for key in ("all", kind_of(str(r.get("id", "")))):
             t = tally[key]
             t[0] += 1
