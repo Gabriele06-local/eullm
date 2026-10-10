@@ -78,9 +78,13 @@ _SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
 # was heard as "art. 12" and by_article handed the model Art. 12 for a
 # 12-sexies question -- five suffixes of wrong-article retrieval.
 _NUM = rf"(\d+)(?:\s*({_SUFFIXES}))?"
+# "l'art. 1453 e 3 mesi", "l'art. 12 e 2 commi": a number followed by a unit
+# is a quantity, not a second article.
+_UNIT = r"(?!\s*(?:comm|giorn|mes|ann|or[ae]\b))"
 _ARTICLE = re.compile(
-    rf"\bart(?:icolo|icoli|t)?\s+{_NUM}\b((?:\s*(?:,|e|ed)\s*\d+(?:\s*(?:{_SUFFIXES}))?\b)*)")
-_MORE = re.compile(rf"(?:,|\be|\bed)\s*{_NUM}")
+    rf"\bart(?:icolo|icoli|t)?\s+{_NUM}\b"
+    rf"((?:\s*(?:,|e|ed)\s*\d+(?:\s*(?:{_SUFFIXES}))?\b{_UNIT})*)")
+_MORE = re.compile(rf"(?:,|\be|\bed)\s*{_NUM}\b{_UNIT}")
 
 
 def tokens(text: str) -> list[str]:
