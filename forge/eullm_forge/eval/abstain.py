@@ -38,10 +38,14 @@ ABSTAIN = re.compile(
 
 _SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
 _NUM = rf"(\d+)(?:[\s-]*({_SUFFIXES}))?\b"
+# After a list separator, a number followed by a unit or an ordinal is not a
+# second article: "art. 1453 e 3 mesi", "art. 12 e 2 commi", "art. 360, 1°
+# comma" (retrieval.named_articles reads questions the same way).
+_UNIT = r"(?!\s*(?:°|º|comm|co\.|giorn|mes|ann|or[ae]\b))"
 # "art. 54", "articolo 54-bis", and every number of "artt. 1176 e 1375".
 _CITE = re.compile(rf"\bart(?:icol[oi]|t)?\.?\s*{_NUM}((?:\s*(?:,|e|ed)\s*\d+"
-                   rf"(?:[\s-]*(?:{_SUFFIXES}))?\b)*)", re.IGNORECASE)
-_MORE = re.compile(rf"(?:,|\be|\bed)\s*{_NUM}", re.IGNORECASE)
+                   rf"(?:[\s-]*(?:{_SUFFIXES}))?\b{_UNIT})*)", re.IGNORECASE)
+_MORE = re.compile(rf"(?:,|\be|\bed)\s*{_NUM}{_UNIT}", re.IGNORECASE)
 
 
 def _key(num: str, suffix: str | None) -> str:
