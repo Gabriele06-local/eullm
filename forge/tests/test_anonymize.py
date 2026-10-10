@@ -747,3 +747,41 @@ def test_the_script_ignores_the_files_the_pipeline_wrote_next_to_the_slices(tmp_
     # and the derived files are untouched, not deleted
     assert (tmp_path / "italgiure_snciv_2023.chunks.jsonl").exists()
     assert (tmp_path / "italgiure_snciv_2023.dedup.jsonl").exists()
+
+
+def test_sample_without_dry_run_is_refused_before_touching_output(tmp_path, capsys):
+    """A sample run starts from record 0 and opens the destination with "w".
+
+    Without --dry-run it truncated a finished output to N lines while the
+    progress file still said complete, and the next full run skipped as
+    done -- losing the rest. --sample is inspection-only, as documented.
+    """
+    import importlib.util
+    import json
+
+    script = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "anonymize_italgiure.py"
+    spec = importlib.util.spec_from_file_location("anonymize_italgiure", script)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    def ruling(n):
+        return {"id": f"snciv/2023000{n}", "court": "snciv", "year": 2023, "number": n,
+                "date": "2023-03-01", "text": f"Ruling body {n}.",
+                "sections": {"fatto": f"Fatto {n}.", "motivo": f"Motivo {n}."}}
+
+    (tmp_path / "italgiure_snciv_2023.jsonl").write_text(
+        "".join(json.dumps(ruling(i), ensure_ascii=False) + "\n" for i in range(1, 6)),
+        encoding="utf-8")
+    assert mod.main([str(tmp_path), "--no-ner"]) == 0
+    anon = tmp_path / "italgiure_snciv_2023.anon.jsonl"
+    assert sum(1 for _ in anon.open(encoding="utf-8")) == 5
+
+    with pytest.raises(SystemExit) as refused:
+        mod.main([str(tmp_path), "--no-ner", "--sample", "2"])
+    assert refused.value.code == 2
+    # the finished output and its progress are exactly as the full run left them
+    assert sum(1 for _ in anon.open(encoding="utf-8")) == 5
+    progress = json.loads((tmp_path / "_anon_progress.json").read_text(encoding="utf-8"))
+    assert progress == {"snciv_2023": 5}
+    # ...and --sample with --dry-run still inspects without writing
+    assert mod.main([str(tmp_path), "--no-ner", "--sample", "2", "--dry-run"]) == 0

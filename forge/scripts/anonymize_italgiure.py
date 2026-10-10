@@ -165,6 +165,12 @@ def main(argv: list[str] | None = None) -> int:
     corpus = args.corpus_dir
     if not corpus.is_dir():
         parser.error(f"{corpus} is not a directory")
+    # A sample run starts from record 0 and opens the destination with "w",
+    # so without --dry-run it truncates a finished output to N lines while
+    # the progress file still says complete -- and the next full run skips
+    # as done, losing the rest. --sample is inspection-only, as documented.
+    if args.sample and not args.dry_run:
+        parser.error("--sample is for inspection: pair it with --dry-run")
 
     sources = sorted(corpus.glob("italgiure_*.jsonl"))
     # Skip everything this pipeline has already produced, not just *.anon.jsonl.
