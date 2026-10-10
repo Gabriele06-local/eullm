@@ -152,6 +152,13 @@ def test_cited_numbers_reads_both_forms():
             "nonché dall'art. 120, n. 3 c.p.a.")
     assert mod.cited_numbers(text) == {"202301234", "202100045"}
     assert mod.cited_numbers("") == set()
+    # Italian capitalizes "N." at sentence start: uppercase cited nothing,
+    # so a hallucinated "N. 999/2019" read cited_ok=True (vacuous empty set)
+    # and a correct "N. 45/2021" read source_cited=False.
+    assert mod.cited_numbers("Come chiarito da Cons. Stato, N. 999/2019 si applica.") == {
+        "201900999"}
+    assert mod.cited_numbers("Come chiarito nella sentenza N. 45/2021 del Consiglio.") == {
+        "202100045"}
 
 
 def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, monkeypatch,

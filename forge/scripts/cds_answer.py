@@ -42,7 +42,8 @@ from eullm_forge.caselaw import attach_meta, load_openga, load_rulings  # noqa: 
 from eullm_forge.caselaw.index import RulingIndex, SparseBM25, build_units  # noqa: E402
 from eullm_forge.caselaw.prompts import caselaw_prompt, ruling_label  # noqa: E402
 
-_CITED = re.compile(r"n\.\s*(\d{9})\b|n\.\s*(\d{1,5})\s*/\s*((?:19|20)\d\d)\b")
+_CITED = re.compile(r"n\.\s*(\d{9})\b|n\.\s*(\d{1,5})\s*/\s*((?:19|20)\d\d)\b",
+                    re.IGNORECASE)
 
 
 def cited_numbers(text: str) -> set[str]:
