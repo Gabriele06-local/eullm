@@ -116,6 +116,34 @@ nessun blocco prolungato del decode durante prefill lunghi; riuso KV validato su
   in 1,52 s, la risposta in streaming continua, con la pausa più lunga di
   108 ms (letto intero, si fermerebbe per tutta la lettura).
 
+  **Batch misto, 10 ottobre** (`scheduler.rs`, step 3). I prompt in coda
+  ora si leggono nello stesso `llama_decode` dei token delle risposte: un
+  token per risposta e, in ordine di slot tra loro, i prossimi token dei
+  prompt più vecchi, fino a un micro-batch meno i token delle risposte
+  (`prompt_budget`; tutto il batch se nessuno risponde). Il motivo è c07 su
+  LUMI: sedici richieste insieme partivano in sedici passi, uno per prompt,
+  e i passi portavano 15,2 sequenze in media invece di 16. Ora le richieste
+  che arrivano insieme partono insieme. Con una KV cache per tutti
+  (`--kv-unified`) risposte e prompt sono un solo passaggio del modello; con
+  una per slot (default) lo slot del prompt chiude il buco nella fila degli
+  slot che rispondono, e il resto del prompt prende i suoi passaggi
+  (`decode_passes` simula `split_equal` anche con i prompt). La ragione per
+  cui si erano tenute due chiamate resta coperta: se un passo con dei prompt
+  fallisce, quei prompt passano alla lettura separata di prima (step 7, con
+  il ripiego dal prefisso riusato) e il passo si ripete senza di loro, così
+  l'errore di un prompt resta suo. llama.cpp rifiuta un batch (posizioni che
+  non seguono lo slot, cache piena) prima di calcolarne qualunque parte.
+  Senza nessuno che risponde si legge fino a un batch intero, ma non oltre
+  la fine del micro-batch in cui finisce il primo prompt: con tutto il batch,
+  otto prompt da 209 token arrivati insieme su 4 core CPU partivano tutti
+  alla fine (primo token: mediana 11,6 s contro 8,3 s di prima).
+  Test su modello vero: prompt da 1, 11, 31, 89 e 229 token che arrivano
+  insieme (lo scheduler trattenuto con un fermo che esiste solo nei test,
+  finché le richieste sono in coda), letti negli stessi passi accanto a una
+  risposta in corso, tre dei quali finiscono nello stesso passo, rispondono
+  come letti interi su un server a uno slot; con il primo token preso dai
+  logit sbagliati il test fallisce.
+
 - [x] **0.7-E · Auto-composizione `--fit` + `--n-cpu-moe`** *(implementato
   0.6.70-rc14)*
   Prima la scelta di N era manuale (trial-and-error documentato nel README).

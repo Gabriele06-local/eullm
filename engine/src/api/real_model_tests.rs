@@ -1309,16 +1309,17 @@ async fn real_model_mtp_drafts_do_not_change_the_answer() {
     );
 }
 
-/// With more than one slot a prompt is read a chunk at a time, between the
+/// With more than one slot a prompt is read a chunk at a time, beside the
 /// tokens of the answers already going (roadmap 0.7-D). It used to be read
 /// whole as soon as its request was taken, and every answer stopped until it
 /// was: one long prompt froze every other conversation on the server.
 ///
-/// An answer streams while a 3,500-token prompt arrives, read 16 tokens at a
-/// time beside it: the answer must keep coming while the prompt is read, and
-/// the prompt's own answer must be the one a server with a single slot,
-/// reading it whole, gives. The prompt's request asks for one token, so the
-/// time it takes is the time its prompt takes.
+/// An answer streams while a 3,500-token prompt arrives, read 15 tokens at a
+/// time in its steps (a micro-batch of 16 less the answer's token): the
+/// answer must keep coming while the prompt is read, and the prompt's own
+/// answer must be the one a server with a single slot, reading it whole,
+/// gives. The prompt's request asks for one token, so the time it takes is
+/// the time its prompt takes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
 async fn real_model_a_long_prompt_is_read_between_the_tokens_of_an_answer() {
@@ -1389,7 +1390,7 @@ async fn real_model_a_long_prompt_is_read_between_the_tokens_of_an_answer() {
         answer_ended > answered,
         "the answer ended before the prompt was read: make it longer"
     );
-    // 3,500 tokens in chunks of 16 are 219 chunks, each after a token of the
+    // 3,500 tokens 15 at a time are 234 steps, each with a token of the
     // answer. Read whole, the prompt let out only what the answer wrote while
     // the request was on its way: a handful.
     assert!(
@@ -1457,6 +1458,121 @@ async fn real_model_a_prompt_read_in_chunks_answers_as_one_read_whole() {
     assert_finished(&a);
     assert_finished(&b);
     assert_eq!(answer(&a), answer(&b));
+}
+
+/// Prompts that arrive together are read together, in the same decode
+/// steps, beside the token of an answer already going: a prompt's last token
+/// is then one among other sequences' tokens, and its answer's first token
+/// is sampled from that token's own logits. Each answer must be the one a
+/// server with a single slot gives the same prompt, read whole: an answer
+/// started from another position's logits, or a prompt read into another's
+/// slot, would not be. Lengths from one token to several steps' worth, so
+/// that prompts end in different steps and in different parts of a step.
+/// Greedy, on the CPU.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "needs a GGUF model in EULLM_GENERATION_TEST_MODEL"]
+async fn real_model_prompts_read_together_answer_as_each_read_alone() {
+    let configure = |slots: usize| {
+        move |state: &mut AppState| {
+            state.ctx_size = 1024 * slots as u32;
+            state.batch_size = slots;
+            state.n_batch = 256;
+            state.n_ubatch = Some(64);
+        }
+    };
+    let together = start(&["tiny-a"], configure(6)).await;
+    let alone = start(&["tiny-a"], configure(1)).await;
+    let ask = |prompt: &str, num_predict: u32| {
+        json!({
+            "model": "tiny-a", "prompt": prompt, "raw": true, "stream": false,
+            "cache_prompt": false,
+            "options": { "temperature": 0, "seed": 1, "num_predict": num_predict },
+        })
+    };
+    let prompts: Vec<String> = vec![
+        "Once".into(),
+        "Lily and Tom went to the park".into(),
+        " Once upon a time there was a little dog".repeat(3),
+        "The sun was hot and the bird sang".repeat(6),
+        " One day a girl named Sue found a big red ball".repeat(12),
+    ];
+
+    // The answer already going, so that every step has a token beside the
+    // prompts: streamed, to know it is.
+    let response = reqwest::Client::new()
+        .post(format!("{}/api/generate", together.base))
+        .json(&json!({
+            "model": "tiny-a", "prompt": "Once upon a time", "stream": true,
+            "options": { "temperature": 0, "num_predict": 900 },
+        }))
+        .send()
+        .await
+        .expect("request");
+    assert_eq!(response.status(), 200);
+    let mut going = response.bytes_stream();
+    going
+        .next()
+        .await
+        .expect("the answer's first token")
+        .expect("chunk");
+
+    // The decode loop held while the requests are made, so that it takes
+    // them together and reads their prompts in the same steps.
+    let gate = together
+        .state
+        .models
+        .read()
+        .await
+        .find("tiny-a")
+        .and_then(|m| m.scheduler.as_ref().map(|s| s.gate()))
+        .expect("tiny-a runs on the scheduler");
+    let held = gate.lock().expect("the gate");
+    let asked: Vec<_> = prompts
+        .iter()
+        .map(|prompt| {
+            let base = together.base.clone();
+            let body = ask(prompt, 24);
+            tokio::spawn(async move {
+                let response = reqwest::Client::new()
+                    .post(format!("{base}/api/generate"))
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("request");
+                let status = response.status();
+                let text = response.text().await.expect("body");
+                let lines: Vec<Value> = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| serde_json::from_str(l).expect("a JSON line"))
+                    .collect();
+                (status, lines)
+            })
+        })
+        .collect();
+    // A blocking wait, not an `.await`: the requests run on the runtime's
+    // workers meanwhile, and the gate is not held across an await point.
+    std::thread::sleep(Duration::from_millis(300));
+    drop(held);
+    let answers = futures_util::future::join_all(asked).await;
+    for (prompt, asked) in prompts.iter().zip(&answers) {
+        let (status, read_together) = asked.as_ref().expect("the request's task");
+        assert_eq!(status.as_u16(), 200, "{read_together:?}");
+        assert_finished(read_together);
+        let (status, read_alone) = alone.generate(ask(prompt, 24)).await;
+        assert_eq!(status, 200, "{read_alone:?}");
+        assert_eq!(
+            answer(read_together),
+            answer(&read_alone),
+            "{} prompt tokens",
+            read_alone.last().unwrap()["prompt_eval_count"]
+        );
+    }
+    let mut rest = String::new();
+    while let Some(chunk) = going.next().await {
+        rest.push_str(&String::from_utf8_lossy(&chunk.expect("chunk")));
+    }
+    assert!(rest.contains("\"done\":true"), "{rest}");
 }
 
 /// A chat template that opens the reasoning block at the end of the prompt

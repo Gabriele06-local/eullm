@@ -24,6 +24,12 @@ With --duration, the N clients instead send requests one after another
 until the time is up, each with a prompt of its own and an answer length
 drawn from --lengths: answers end at different times and a slot is freed
 and taken again while the others answer, as in c07's graded workload.
+
+On EuLLM a round also says when its answers started: `first_token_p50_s`
+and `first_token_max_s`, from each answer's `prompt_eval_duration`, the time
+from the request being taken to its prompt being read, waiting behind other
+prompts included. llama-server's `prompt_ms` leaves its wait out, so it has
+none.
 """
 
 from __future__ import annotations
@@ -66,6 +72,23 @@ def generated(api: str, answer: dict) -> int:
     return int(answer.get("tokens_predicted") or 0)
 
 
+def first_token(api: str, answer: dict):
+    """Seconds from the request being taken to its answer's first token,
+    where the server says (EuLLM); None otherwise."""
+    if api == "eullm" and answer.get("prompt_eval_duration") is not None:
+        return answer["prompt_eval_duration"] / 1e9
+    return None
+
+
+def started(firsts: list) -> dict:
+    """The median and the longest of the first-token times there are."""
+    firsts = sorted(f for f in firsts if f is not None)
+    if not firsts:
+        return {}
+    return {"first_token_p50_s": round(firsts[len(firsts) // 2], 3),
+            "first_token_max_s": round(firsts[-1], 3)}
+
+
 def post(url: str, path: str, payload: dict, timeout: float) -> dict:
     req = urllib.request.Request(url + path, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
@@ -83,9 +106,10 @@ def one_round(args, sampling, rnd: int) -> dict:
         t0 = time.time()
         try:
             answer = post(args.url, path, payload, args.timeout)
-            results[i] = (generated(args.api, answer), time.time() - t0, None)
+            results[i] = (generated(args.api, answer), time.time() - t0, None,
+                          first_token(args.api, answer))
         except Exception as e:  # noqa: BLE001 - every failure is reported, none hidden
-            results[i] = (0, time.time() - t0, str(e)[:200])
+            results[i] = (0, time.time() - t0, str(e)[:200], None)
 
     threads = [threading.Thread(target=worker, args=(i,)) for i in range(args.concurrency)]
     for t in threads:
@@ -97,11 +121,12 @@ def one_round(args, sampling, rnd: int) -> dict:
     wall = time.time() - t0
     tokens = sum(r[0] for r in results)
     errors = [r[2] for r in results if r[2]]
-    return {"tokens": tokens, "wall_s": round(wall, 3),
-            "agg_tok_s": round(tokens / wall, 1) if wall > 0 else None,
-            "per_request_tok_s": round(sum(r[0] / r[1] for r in results if r[1] > 0)
-                                       / len(results), 1),
-            "errors": errors[:3], "failed": len(errors)}
+    return dict({"tokens": tokens, "wall_s": round(wall, 3),
+                 "agg_tok_s": round(tokens / wall, 1) if wall > 0 else None,
+                 "per_request_tok_s": round(sum(r[0] / r[1] for r in results if r[1] > 0)
+                                            / len(results), 1)},
+                **started([r[3] for r in results]),
+                errors=errors[:3], failed=len(errors))
 
 
 def closed_loop(args, sampling, rnd: int) -> dict:
@@ -109,7 +134,8 @@ def closed_loop(args, sampling, rnd: int) -> dict:
     seconds; the round ends when the last answer started in time is in."""
     lo, hi = (int(x) for x in args.lengths.split(":"))
     deadline = time.time() + args.duration
-    per_client = [[0, 0, []] for _ in range(args.concurrency)]  # tokens, requests, errors
+    # tokens, requests, errors, first-token times
+    per_client = [[0, 0, [], []] for _ in range(args.concurrency)]
 
     def client(i):
         rng = random.Random(1000 * rnd + i)
@@ -120,9 +146,10 @@ def closed_loop(args, sampling, rnd: int) -> dict:
             path, payload = body(args.api, args.model, sampling, rng.randint(lo, hi),
                                  1000 * rnd + i, prompt)
             try:
-                per_client[i][0] += generated(args.api, post(args.url, path, payload,
-                                                             args.timeout))
+                answer = post(args.url, path, payload, args.timeout)
+                per_client[i][0] += generated(args.api, answer)
                 per_client[i][1] += 1
+                per_client[i][3].append(first_token(args.api, answer))
             except Exception as e:  # noqa: BLE001 - every failure is reported, none hidden
                 per_client[i][2].append(str(e)[:200])
             k += 1
@@ -136,9 +163,11 @@ def closed_loop(args, sampling, rnd: int) -> dict:
     wall = time.time() - t0
     tokens = sum(c[0] for c in per_client)
     errors = [e for c in per_client for e in c[2]]
-    return {"mode": "closed-loop", "tokens": tokens, "requests": sum(c[1] for c in per_client),
-            "wall_s": round(wall, 3), "agg_tok_s": round(tokens / wall, 1) if wall > 0 else None,
-            "errors": errors[:3], "failed": len(errors)}
+    return dict({"mode": "closed-loop", "tokens": tokens,
+                 "requests": sum(c[1] for c in per_client), "wall_s": round(wall, 3),
+                 "agg_tok_s": round(tokens / wall, 1) if wall > 0 else None},
+                **started([f for c in per_client for f in c[3]]),
+                errors=errors[:3], failed=len(errors))
 
 
 def main(argv=None) -> int:

@@ -349,7 +349,11 @@ In order:
    answers of 32-384 tokens): a `c07` round on this engine is the check.
    What is left at sixteen at once (3%): the round's prompts start over
    fifteen steps, 15.2 sequences per step on average where llama-server has
-   16 from the first.
+   16 from the first. Since 10-10-2026 a step reads the waiting prompts
+   itself, beside the answers' tokens, as llama-server does: the diagnosis
+   with `EULLM_BIN_BEFORE` set to the engine before it is the check, and its
+   lines now say when EuLLM's answers started (`first_token_p50_s`,
+   `first_token_max_s`).
 3. **Decisions** (`c08`): `/v1/systemone` with the Jev-Style releases. The
    engine runs one decision at a time per server; `c08` measures the queueing
    that causes as concurrency grows, and replicas as today's way round it.

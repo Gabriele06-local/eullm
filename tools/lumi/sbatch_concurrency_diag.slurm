@@ -8,8 +8,9 @@
 #     export EULLM_BIN=$PWD/target-next3/release/eullm
 #     sbatch tools/lumi/sbatch_concurrency_diag.slurm [MODEL_ID] [CONCURRENCY ...]
 #
-# EULLM_BIN_BEFORE, when set, is an older engine run through the closed-loop
-# rounds as well (label eullm-before), for a before and after on the same node.
+# EULLM_BIN_BEFORE, when set, is an older engine run through the same rounds
+# (label eullm-before, all at once with llama's chain), for a before and
+# after on the same node.
 #
 # Default: qwen3-8b, 1 4 16. Output: eullm-concurrency-<job>.out beside where
 # it was submitted, every server's log next to it (*.eullm-<n>.log,
@@ -22,6 +23,8 @@
 # another for a minute, prompts of their own and answers of 32 to 384
 # tokens, as c07's graded workload does; EuLLM runs them twice, with a KV
 # cache per sequence (its default) and with one for all (--kv-unified).
+# EuLLM's lines also say when answers started (`first_token_p50_s`,
+# `first_token_max_s`: from the request being taken to its first token).
 # In EuLLM's log, every `steps:` line splits ten seconds of the scheduler
 # into decode (the GPU), sample (choosing each sequence's token, on one CPU
 # thread), emit (text and the reply channel) and prefill, and says how many
@@ -91,10 +94,12 @@ eullm_rounds() {  # N LABEL BIN [FLAG ...]: an EuLLM server with FLAGs, its roun
         --cache-type-k f16 --cache-type-v f16 "$@" >"$OUT.$label-$n.log" 2>&1 &
     server=$!
     if wait_ready /api/version "$server"; then
-        if [ "$label" = eullm ]; then
-            $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label "$label" \
-                --concurrency "$n" --profiles none,ollama,llama,greedy
-        fi
+        # All at once: every profile on the engine under test, llama's chain
+        # (the closed loop's) on the others.
+        local profiles=llama
+        [ "$label" = eullm ] && profiles=none,ollama,llama,greedy
+        $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label "$label" \
+            --concurrency "$n" --profiles "$profiles"
         $PROBE --url "http://127.0.0.1:$PORT" --api eullm --model "$MODEL" --label "$label" \
             --concurrency "$n" "${CLOSED[@]}"
     else
