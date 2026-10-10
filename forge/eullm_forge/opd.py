@@ -18,7 +18,7 @@ Machines, On-Policy Distillation, 2025; TESSY, arXiv 2604.14164).
 Teacher and student must share a tokenizer: the loss compares their
 distributions token by token. `same_vocabulary` refuses a pair that does
 not (Qwen3-30B-A3B can teach Qwen3-4B, Ministral-3-14B can teach
-Ministral 8B).
+Ministral 8B, Qwen3.8 can teach Qwen3.5).
 """
 
 from __future__ import annotations
@@ -38,15 +38,37 @@ def reverse_kl(student_logits, teacher_logits, mask=None):
     return (kl * mask).sum() / mask.sum().clamp(min=1)
 
 
-def same_vocabulary(tok_a, tok_b, probe: str = "Il ricorso è respinto ai sensi dell'art. 120 "
-                                                "c.p.a., con condanna alle spese.") -> bool:
-    """Whether two tokenizers give the same ids: the same vocabulary, or at least
-    the same encoding of an ordinary legal sentence and the same size."""
+#: How many tokens one tokenizer may have beyond the other and still count as
+#: the same vocabulary: Qwen3.8 is Qwen3.5 plus seven audio tokens.
+MAX_EXTRA_TOKENS = 16
+
+_PROBE = "Il ricorso è respinto ai sensi dell'art. 120 c.p.a., con condanna alle spese."
+
+
+def same_vocabulary(tok_a, tok_b, probe: str = _PROBE) -> bool:
+    """Whether two tokenizers give the same ids, so their distributions can be
+    compared token by token.
+
+    Three ways to pass: the same vocabulary; one vocabulary being the other
+    plus a few tokens of its own, every shared token at the same id and the
+    extra ones after all of them (Qwen3.8 adds seven audio tokens to Qwen3.5's
+    248,044 + 26 -- text never produces them, so they carry no probability
+    that matters); or, when a tokenizer cannot list its vocabulary, the same
+    size and the same encoding of an ordinary legal sentence (Mistral-Small-
+    3.2-24B and Ministral 8B differ in two unused special tokens).
+    """
+    same_text = (tok_a(probe, add_special_tokens=False)["input_ids"]
+                 == tok_b(probe, add_special_tokens=False)["input_ids"])
     try:
-        if tok_a.get_vocab() == tok_b.get_vocab():
-            return True
+        va, vb = tok_a.get_vocab(), tok_b.get_vocab()
     except (AttributeError, NotImplementedError):
-        pass
-    return (len(tok_a) == len(tok_b)
-            and tok_a(probe, add_special_tokens=False)["input_ids"]
-            == tok_b(probe, add_special_tokens=False)["input_ids"])
+        return len(tok_a) == len(tok_b) and same_text
+    if va == vb:
+        return True
+    small, big = sorted((va, vb), key=len)
+    extra = set(big) - set(small)
+    if (extra and len(extra) <= MAX_EXTRA_TOKENS
+            and all(big.get(t) == i for t, i in small.items())
+            and min(big[t] for t in extra) > max(small.values())):
+        return same_text
+    return len(tok_a) == len(tok_b) and same_text
