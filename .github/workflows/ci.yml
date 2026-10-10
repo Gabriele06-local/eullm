@@ -236,11 +236,27 @@ jobs:
       - uses: actions/checkout@v5
         # No submodules: cargo-deny reads manifests, never the C++ source, and
         # the llama.cpp checkout is over a gigabyte.
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          # One workspace at the repository root covers engine, hub and the
-          # vendored llama-cpp-rs crates.
-          command: check advisories bans licenses sources
+      # The release binary, not EmbarkStudios/cargo-deny-action: the action
+      # builds a Docker image on every run (rust:alpine, apk update, then this
+      # same tarball), and on 2026-10-09 that build failed on three runs in a
+      # row with no change on our side, turning main red. The binary is what
+      # the image ran anyway; the checksum is the one published beside it.
+      - name: Install cargo-deny
+        env:
+          DENY_VERSION: "0.20.2"
+          DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+        run: |
+          set -euo pipefail
+          name="cargo-deny-${DENY_VERSION}-x86_64-unknown-linux-musl"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/deny.tgz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${DENY_VERSION}/${name}.tar.gz"
+          echo "${DENY_SHA256}  $RUNNER_TEMP/deny.tgz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/deny.tgz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/${name}" >> "$GITHUB_PATH"
+      # One workspace at the repository root covers engine, hub and the
+      # vendored llama-cpp-rs crates.
+      - name: cargo deny
+        run: cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features check advisories bans licenses sources
 
   # ── Engine ───────────────────────────────────────────────────────────
   engine:
