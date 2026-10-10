@@ -41,8 +41,11 @@ _THINKING = re.compile(r"<think>.*?</think>", re.S)
 #: Markdown and quotes a chat model wraps a one-word answer in.
 _WRAPPING = "*_`'\"([ \t\r\n"
 #: What may follow a code for the reply still to be only that code:
-#: "B", "B)", "B.", "Yes, it does", a new line.
-_AFTER_CODE = ").:,*_`'\"]\n"
+#: "B", "B)", "B.", "B!", "Yes, it does", a new line. An emphatic code is
+#: the same disobedience as a dotted one: without "!", "?" and ";", "Yes!"
+#: counted as teacher_unparsed and its question went unlabelled -- silent
+#: loss, no error, just a smaller set.
+_AFTER_CODE = ").:,*_`'\"]\n!?;"
 
 
 def parse_reply(text: str, question: Question) -> int | None:

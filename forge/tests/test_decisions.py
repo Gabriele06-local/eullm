@@ -464,11 +464,14 @@ def test_a_teachers_reply_is_parsed_strictly():
     team, sev, noul = (question_from_api(s) for s in (TEAM, SEVERITY, URGENT))
     cases = [
         (noul, "Yes", 0), (noul, "no.", 1), (noul, "**Yes**", 0), (noul, "Yes, it does", 0),
+        (noul, "Yes!", 0), (noul, "No!", 1),
         (noul, "<think>maybe no</think>\n\nYes", 0), (noul, "<think>still thinking", None),
         (noul, "Yesterday", None), (noul, "Probably yes", None),
         (team, "B", 1), (team, "B) tech", 1), (team, "(C)", 2), (team, "billing", 0),
-        (team, "A good fit is B", None), (team, "D", None), (team, "", None),
-        (sev, "2", 2), (sev, "3", None), (sev, "1.", 1),
+        (team, "B!", 1), (team, "B?", 1),
+        (team, "A good fit is B", None), (team, "A good fit is B?", None),
+        (team, "D", None), (team, "", None),
+        (sev, "2", 2), (sev, "3", None), (sev, "1.", 1), (sev, "1!", 1), (sev, "2?", 2),
     ]
     for question, reply, expected in cases:
         assert parse_reply(reply, question) == expected, reply
