@@ -432,10 +432,16 @@ def build_exam(records: list[dict], per_code: int = 10, seed: int | None = None,
                                   ref, kw, rub))
 
         last = max(int(re.match(r"\d+", a.number).group()) for a in pool)
+        drawn: set[int] = set()
         for _ in range(max(1, per_code // 5)):
             fake = last + rng.randint(50, 900)
-            while (code, str(fake)) in exclude:
+            # Redrawn against the trained numbers AND against this draw:
+            # a repeated randint makes two items with the same id, and the
+            # setdefault below silently discards the second, so the exam
+            # comes back one item short.
+            while (code, str(fake)) in exclude or fake in drawn:
                 fake = last + rng.randint(50, 900)
+            drawn.add(fake)
             it = item(
                 "inesistente", str(fake), f"Che cosa prevede l'art. {fake} {of}?",
                 f"Non esiste l'art. {fake} {of}.",
