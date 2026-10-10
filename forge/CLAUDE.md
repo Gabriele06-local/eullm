@@ -151,9 +151,15 @@ proposing a new request shape.
    that need them (setup_grpo_libs.sh). The known-good state is
    `$WORK/eullm_venv-known-good-2026-10-01.txt`; restoring is
    `pip install -r` of it, not guessing versions.
-6. **Space:** `$WORK` is 1 TB for everything. A merged 8B is 17 GB, a 14B
-   28 GB, plus the same again while converting to GGUF. Check `cindata`
-   (its figure lags by hours) before adding models.
+6. **Space:** `$WORK` is 1 TB for everything we produce. A merged 8B is
+   17 GB, a 14B 28 GB, plus the same again while converting to GGUF. Check
+   `df -h $WORK` before adding models. **Downloaded base models go to the
+   fast scratch** (`/leonardo_scratch/fast/<project>/models`), not to
+   `$WORK`: they can be downloaded again, `$WORK` reached 96% on 2026-10-10
+   with two downloads. Already on `$WORK`, they are moved with
+   `move_to_scratch.sh`, which copies then swaps for a symlink and so stops
+   no job. The scratch is purged: never put there what only we can produce.
+   See the runbook's "Storage".
 7. **Every submission is idempotent and gated:** it checks the inputs exist
    and that the same chain is not already queued, and stops at the first
    failed check, so running it twice cannot duplicate jobs.

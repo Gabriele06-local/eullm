@@ -14,7 +14,52 @@
 | Max walltime 24 h (`boost_usr_prod`) | Multi-day phases run as chains of jobs (`submit_chain.sh`); every launcher auto-resumes from the latest checkpoint. |
 | Compute nodes have **no internet** | Models are prefetched to `$WORK` from a login node; jobs run with `HF_HUB_OFFLINE=1` (env.sh forces it inside jobs). llama.cpp is cloned during setup. |
 | Budget linearization: ~625 node hours/month, unused budget reported to EuroHPC | Start Phase 1 immediately; keep the queue fed. Check consumption with `saldo -b`. |
-| `$HOME` 50 GB, `$WORK` 1 TB (project), `$SCRATCH` purged | Everything (venv, HF cache, dataset, checkpoints) lives on `$WORK`. env.sh encodes the layout. |
+| `$HOME` 50 GB, `$WORK` 1 TB (project), fast scratch purged | What only we can produce (venv, corpora, checkpoints, adapters, merged models, GGUFs, answers) lives on `$WORK`; downloaded base models live on the project's fast scratch behind symlinks. See [Storage](#storage-work-and-the-fast-scratch). |
+
+## Storage: `$WORK` and the fast scratch
+
+`$WORK` is the project's 1 TB, and it filled up twice: 109% on 5 October
+(a 27B conversion failed writing its first tensor) and 96% on 10 October,
+when two base-model downloads (Qwen3.8-27B, 52 GB; Qwen3.5-4B, 9 GB) landed
+next to the Hugging Face cache, Qwen3-14B and Mistral-Small-24B. The split
+since then:
+
+| Where | What | Why |
+|---|---|---|
+| `$WORK` | venv, corpora and rulings, prompts, checkpoints and adapters, merged models, GGUFs, exams, answers, grades, reports | only we can produce them, or they are personal data (the rulings) that stay where the data protection measures were set up |
+| `/leonardo_scratch/fast/AIFAC_P02_1147/models` | base models downloaded from Hugging Face: the HF cache (`$HF_HOME/hub`: teachers, judges, embedder, reranker) and `$WORK/models/*` | they can be downloaded again at any time; the scratch is outside the 1 TB quota |
+
+The fast scratch is **purged** when files go unused. Ours are read every day
+and the allocation ends on 2 November, but if a copy is ever purged the
+symlink on `$WORK` points at nothing and every job that needs that model
+fails at load — compute nodes have no internet. `status.sh` flags such a
+link with `[!!]`; the fix is to download the model again from a login node
+(`hf download <repo> --local-dir <the path the symlink names>`).
+
+**Moving a model without stopping the jobs that use it:**
+`forge/scripts/leonardo/move_to_scratch.sh` copies, then swaps. The original
+stays in place and in use while rsync copies it (twice, to catch changes);
+the swap is a rename plus a symlink, so a job opening the path finds one or
+the other. A running job already has the model in memory; the next link of a
+chain follows the symlink. It skips, never forces, a path that is already a
+symlink, missing, or would leave less than 50 GB free on the scratch. Run it
+as a serial job, so it does not depend on the login session:
+
+```bash
+sbatch -J eullm-move -p lrd_all_serial -c 2 --mem=4G -t 04:00:00 \
+    -o $WORK/eullm_runs/opd/logs/%x-%j.out \
+    --wrap "bash $WORK/eullm/forge/scripts/leonardo/move_to_scratch.sh \
+            /leonardo_scratch/fast/$(basename $WORK)/models \
+            $HF_HOME/hub $WORK/models/Qwen3-14B"
+```
+
+Download new base models straight to the scratch
+(`hf download <repo> --local-dir /leonardo_scratch/fast/$(basename $WORK)/models/<name>`)
+and point the job at that path, rather than downloading to `$WORK` and
+moving afterwards: the download is what filled `$WORK` on 10 October.
+
+Do not `mv` a model a queued chain uses: across filesystems it is a copy
+that leaves the path half-there for minutes.
 
 ## Node-hour budget
 

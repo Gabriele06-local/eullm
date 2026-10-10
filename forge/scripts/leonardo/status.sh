@@ -20,6 +20,8 @@
 #   * $WORK more than 90% full. On 2026-10-05 it reached 109% of its 1 TB
 #     quota unnoticed, and a 27B conversion failed writing its first tensor;
 #     every job that writes a checkpoint would have been next;
+#   * a base model moved to the fast scratch (move_to_scratch.sh) whose copy
+#     has been purged: the symlink on $WORK points at nothing;
 #   * no GPU job running or queued at all. On 2026-10-04 the allocation spent
 #     1.8 node-hours in a day with ~530 left for 29 days, and it was the user
 #     who noticed. Idle GPUs are flagged, unspent hours are not: the rule is
@@ -156,6 +158,15 @@ if [ -n "$pct" ]; then
         flag "\$WORK is ${pct}% full: free space before a job fails writing (du -sh \$WORK/*)"
     fi
 fi
+# Base models live on the fast scratch behind symlinks (move_to_scratch.sh),
+# and the scratch is purged when unused. A symlink left pointing at nothing is
+# a model every job that needs it will fail to load -- compute nodes cannot
+# download it again -- so say which, and how to get it back.
+for link in "${WORK:-/nonexistent}"/models/* "${HF_HOME:-/nonexistent}/hub"; do
+    if [ -L "$link" ] && [ ! -e "$link" ]; then
+        flag "$link points to $(readlink "$link"), which is gone (scratch purged?): download it again from a login node"
+    fi
+done
 
 echo
 echo "== GPU work =="
