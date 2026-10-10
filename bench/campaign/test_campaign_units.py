@@ -376,6 +376,37 @@ def test_failed_points_can_be_retried_by_group(tmp_path):
     assert q.ids("failed") == ["rt-1"]
 
 
+def test_status_gives_one_line_per_group_and_cause_not_the_server_logs():
+    from campaign import stopped_lines
+
+    log = "\n2026-10-07T12:20:42Z  INFO eullm::api: Decision traces: off"
+    points = [
+        {"id": f"lc-{i}", "group": "long-context",
+         "notes": ["PointError: warm-up failed on server 0: Prefill failed: "
+                   "Prompt (36491 tokens) does not fit in context window (32768)" + log]}
+        for i in range(3)
+    ] + [
+        {"id": "m-1", "group": "moe-480b",
+         "notes": ["TimeoutExpired: Command '['taskset', '-c', '49-55', 'eullm', 'serve']' "
+                   "timed out after 900 seconds"]},
+        {"id": "m-2", "group": "moe-480b",
+         "notes": ["PointError: server on port 18000 not ready in 900 s:" + log]},
+    ]
+    lines = stopped_lines("failed", points)
+    assert lines[0].startswith("  failed 5, by group and cause")
+    assert "  3  long-context: PointError: warm-up failed" in lines[1]
+    assert lines[1].endswith("does not fit in context window (32768)")
+    assert any(line.endswith("moe-480b: TimeoutExpired: Command '…' timed out after 900 seconds")
+               for line in lines)
+    assert any(line.endswith("moe-480b: PointError: server on port 18000 not ready in 900 s")
+               for line in lines)
+    assert len(lines) == 4 and not any("INFO" in line for line in lines)
+
+    each = stopped_lines("failed", points, each=True)
+    assert len(each) == 5 and each[0].startswith("  failed lc-0 (long-context): PointError")
+    assert stopped_lines("blocked", []) == []
+
+
 def test_a_load_records_the_file_system_its_model_is_on_through_links(tmp_path, monkeypatch):
     import point
 
