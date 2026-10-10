@@ -43,13 +43,17 @@ def index():
     ("Cosa stabilisce l'art. 27 della Costituzione italiana?", "costituzione", ["27"]),
     ("Cosa dice l'art. 327 c.p.c.?", "codice_procedura_civile", ["327"]),
     ("Cosa dice l'art. 2043-bis c.c.?", "codice_civile", ["2043-bis"]),
-    # the record side always read nine Latin suffixes; the question side
-    # stopped at quinquies, so "art. 12-sexies" was heard as "art. 12".
     ("Cosa prevede l'art. 12-sexies del codice penale?", "codice_penale", ["12-sexies"]),
     ("Cosa prevede l'art. 12-septies del codice penale?", "codice_penale", ["12-septies"]),
     ("Cosa prevede l'art. 12-octies del codice penale?", "codice_penale", ["12-octies"]),
     ("Cosa prevede l'art. 12-novies del codice penale?", "codice_penale", ["12-novies"]),
     ("Cosa prevede l'art. 12-decies del codice penale?", "codice_penale", ["12-decies"]),
+    # lists, the way the answer-side parser reads them: one number per
+    # occurrence handed the model Art. 1176 for a 1176-and-1375 question.
+    ("Che cosa prevedono gli artt. 1176 e 1375 del codice civile?", "codice_civile",
+     ["1176", "1375"]),
+    ("Cosa dicono gli artt. 3 e 4 e 5 del codice civile?", "codice_civile",
+     ["3", "4", "5"]),
 ])
 def test_a_named_article_and_code_are_read_out_of_the_question(question, code, nums):
     assert named_code(question) == code
@@ -78,6 +82,22 @@ def test_a_suffixed_article_retrieves_itself_not_its_plain_sibling():
     index = NormIndex(records)
     found = index.by_article("Che cosa prevede l'art. 12-sexies del codice penale?")
     assert [r["text"] for r in found] == ["Art. 12-sexies. Testo del dodici sexies."]
+
+
+def test_a_two_article_question_retrieves_both_articles():
+    """One number per occurrence handed the model Art. 1176 for a
+    1176-and-1375 question. The answer-side parser reads such lists; the
+    question side now does too."""
+    from eullm_forge.eval.retrieval import NormIndex
+
+    records = [
+        rec("codice_civile", "1176", "Art. 1176. Testo del millesette."),
+        rec("codice_civile", "1375", "Art. 1375. Testo del milletre."),
+    ]
+    index = NormIndex(records)
+    found = index.by_article("Che cosa prevedono gli artt. 1176 e 1375 del codice civile?")
+    assert [r["text"] for r in found] == ["Art. 1176. Testo del millesette.",
+                                          "Art. 1375. Testo del milletre."]
 
 
 def test_a_question_without_an_article_goes_to_bm25(index):
