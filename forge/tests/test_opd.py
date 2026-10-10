@@ -270,6 +270,21 @@ def test_an_empty_adapter_config_is_not_a_finished_adapter(tmp_path, capsys):
     assert "nothing left to do" not in capsys.readouterr().out
 
 
+def test_every_prompts_row_is_validated_before_the_models_load(tmp_path):
+    """Only the first row was checked, so a file whose later row lacks
+    'teacher' passed the gate and crashed with KeyError at batch time --
+    after the student and the 61 GB teacher were loaded."""
+    mod = _load("opd_train")
+    prompts = tmp_path / "prompts.jsonl"
+    prompts.write_text("".join(json.dumps(r) + "\n" for r in [
+        {"student": [{"role": "user", "content": "q"}],
+         "teacher": [{"role": "user", "content": "t"}]},
+        {"student": [{"role": "user", "content": "q"}]},
+    ]))
+    with pytest.raises(SystemExit, match="row 1"):
+        mod.load_rows(prompts)
+
+
 def test_a_teacher_with_another_vocabulary_is_refused(tiny_model, tmp_path):
     path, prompts = tiny_model
     transformers = pytest.importorskip("transformers")

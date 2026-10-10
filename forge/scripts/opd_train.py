@@ -66,9 +66,12 @@ def load_rows(path: Path) -> list[dict]:
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
     if not rows:
         raise SystemExit(f"[opd] no prompts in {path}")
-    for r in rows[:1]:
+    # Every row, not just the first: a file whose later row lacks 'teacher'
+    # passed this gate and crashed with KeyError at batch time, after the
+    # student and the 61 GB teacher were loaded.
+    for n, r in enumerate(rows):
         if not (isinstance(r.get("student"), list) and isinstance(r.get("teacher"), list)):
-            raise SystemExit("[opd] rows need 'student' and 'teacher' message lists "
+            raise SystemExit(f"[opd] row {n} needs 'student' and 'teacher' message lists "
                              "(make_opd_prompts.py)")
     return rows
 
