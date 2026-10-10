@@ -418,6 +418,21 @@ def test_a_made_up_number_training_used_is_not_asked_again():
     assert fakes and all(it.metadata["articolo"] == str(last + 900) for it in fakes)
 
 
+def test_two_identical_fake_draws_do_not_lose_an_item():
+    """Fake numbers redraw against `exclude` but not against each other, so
+    a repeated randint made two items with the same id and setdefault
+    silently discarded the second: the exam came back one item short."""
+    filler = " Il presente articolo contiene disposizioni di dettaglio sufficienti." * 3
+    records = [{"code": "codice_civile", "article_num": "", "chunk_index": 0,
+                "text": f"Art. {n}. \n \n (Rubrica {n}). \n \n Disciplina numero {n}."
+                        + filler}
+               for n in range(1, 61)]
+    items = build_exam(records, per_code=30, seed=186)
+    fakes = [it for it in items if it.metadata["tipo"] == "inesistente"]
+    assert len(fakes) == 6
+    assert len({it.id for it in fakes}) == 6
+
+
 def test_the_script_excludes_trained_articles_and_says_only_how_many(tmp_path, capsys):
     import json
 
