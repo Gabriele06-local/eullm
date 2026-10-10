@@ -115,6 +115,15 @@ def _article_xml(urn, num, title, body):
             f'<meta><FRBRWork><FRBRthis value="{urn}/!main"/></FRBRWork></meta></akomaNtoso>')
 
 
+def _section_xml(urn, sections):
+    """AKN without <article>/<num>: sections carrying the number in eId."""
+    body = "".join(
+        f'<section eId="{eid}"><content><p>{text}</p></content></section>'
+        for eid, text in sections)
+    return (f'<akomaNtoso {NS}><act><body>{body}</body></act>'
+            f'<meta><FRBRWork><FRBRthis value="{urn}/!main"/></FRBRWork></meta></akomaNtoso>')
+
+
 def _zip(files):
     import io
     import zipfile
@@ -160,6 +169,23 @@ def test_an_article_in_two_files_is_written_once():
     }), ["codice_civile"])
     assert [r["article_num"] for r in out["codice_civile"]] == ["2043."]
     assert "riforma" not in out["codice_civile"][0]["text"]
+
+
+def test_an_eid_suffixed_article_is_not_its_bases_duplicate():
+    """eId fallback ("art_12bis", no <num>) truncated the suffix to "12",
+    so the bis article took its base's number and died as its duplicate
+    further down -- same-number records are one article. Italian codes use
+    bis/ter (c.p.c. art. 360-bis)."""
+    from eullm_forge.datasets.legal_it import parse_normattiva_opendata_zip
+
+    out = parse_normattiva_opendata_zip(_zip({
+        "vigente.xml": _section_xml(CC_URN, [
+            ("art_12", "Testo base dodici." * 20),
+            ("art_12bis", "Testo bis dodici." * 20),
+        ]),
+    }), ["codice_civile"])
+    assert [r["article_num"] for r in out["codice_civile"]] == ["12", "12bis"]
+    assert "bis dodici" in out["codice_civile"][1]["text"]
 
 
 def test_an_unrecognised_or_unwanted_file_changes_nothing():

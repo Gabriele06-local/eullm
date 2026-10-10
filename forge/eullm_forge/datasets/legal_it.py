@@ -658,10 +658,20 @@ def _parse_akn_eId_articles(
         num_el = art.find(f".//{ns}num")
         num = (num_el.text or "").strip() if num_el is not None else ""
         if not num:
-            # Extract number from eId attribute: "art_1" → "1"
+            # Extract number from eId attribute: "art_1" -> "1". The Latin
+            # suffix stays glued ("art_12bis" -> "12bis", "art_12-bis" the
+            # same): without it the bis article took its base's number and
+            # died as its duplicate further down -- same-number records are
+            # one article, and articles_from_records drops a number it sees
+            # twice as ambiguous. Only the nine suffixes the rest of the
+            # pipeline spells (retrieval._SUFFIXES) count, so "art_12__para_1"
+            # stays "12".
             eid = art.get("eId", "")
-            m = re.search(r"art[_-](\d+)", eid, re.IGNORECASE)
-            num = m.group(1) if m else eid
+            m = re.search(
+                r"art[_-](\d+)(?:[_-]?(bis|ter|quater|quinquies|sexies|septies|octies"
+                r"|novies|decies))?",
+                eid, re.IGNORECASE)
+            num = (m.group(1) + (m.group(2) or "").lower()) if m else eid
 
         heading_el = art.find(f".//{ns}heading")
         heading = " ".join(heading_el.itertext()).strip() if heading_el is not None else ""
