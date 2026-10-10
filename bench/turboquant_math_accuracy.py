@@ -145,7 +145,15 @@ def check_answer(test: dict, response: str) -> tuple[bool, str]:
         # Also check inside \boxed{...}
         boxed = re.findall(r'\\boxed\{([^}]+)\}', resp)
         boxed_str = " ".join(boxed)
-        ok = expected in resp or expected in resp_last or expected in boxed_str
+        # A number, not a digit run: "160" is a prefix of "1600", and the
+        # S4 case (7*8+6*9+5*10=160) passed a model answering 1600 -- plain
+        # and boxed -- inflating the pass rate. Same substring class as the
+        # contains_word fix in turboquant_quality.py; this mode is the
+        # number one, so the boundary is on digits.
+        num = rf"(?<!\d){re.escape(expected)}(?!\d)"
+        ok = (re.search(num, resp) is not None
+              or re.search(num, resp_last) is not None
+              or re.search(num, boxed_str) is not None)
         return ok, f"expected={expected} in response={resp_last[:80]}"
 
     return False, "unknown check mode"
