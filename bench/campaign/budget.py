@@ -21,7 +21,7 @@ import subprocess
 GPU_HOURS_PER_NODE_HOUR = 4
 SMALL_G_MEM_UNIT_MIB = 64 * 1024
 
-SACCT_FIELDS = "JobID,JobName,Partition,State,ElapsedRaw,NNodes,AllocTRES"
+SACCT_FIELDS = "JobID,JobName,Partition,State,ElapsedRaw,NNodes,AllocTRES,Start,End"
 
 
 def mem_mib(text: str) -> float:
@@ -56,14 +56,24 @@ def billed_gpu_hours(partition: str, elapsed_s: float, nodes: int, tres: dict) -
     return 0.0  # CPU partitions spend a different budget
 
 
+def _when(text: str):
+    """A sacct time ('2026-10-10T21:53:25'), or None for 'Unknown' and the like."""
+    try:
+        return dt.datetime.fromisoformat(text.strip())
+    except ValueError:
+        return None
+
+
 def parse_sacct(text: str) -> list:
-    """`sacct -X -n -P -o SACCT_FIELDS` → one dict per allocation."""
+    """`sacct -X -n -P -o SACCT_FIELDS` → one dict per allocation: what it
+    billed, at what rate (GPU-hours per hour), and when it ran (`start`,
+    `end`: None while it runs, or for output without the two fields)."""
     jobs = []
     for line in text.splitlines():
         parts = line.split("|")
-        if len(parts) != 7:
+        if len(parts) not in (7, 9):
             continue
-        jobid, name, partition, state, elapsed, nodes, tres = parts
+        jobid, name, partition, state, elapsed, nodes, tres = parts[:7]
         if not elapsed.isdigit():
             continue
         t = parse_tres(tres)
@@ -74,8 +84,46 @@ def parse_sacct(text: str) -> list:
             "state": state,
             "elapsed_s": int(elapsed),
             "gpu_hours": billed_gpu_hours(partition, int(elapsed), int(nodes or 0), t),
+            "rate": billed_gpu_hours(partition, 3600, int(nodes or 0), t),
+            "start": _when(parts[7]) if len(parts) == 9 else None,
+            "end": _when(parts[8]) if len(parts) == 9 else None,
         })
     return jobs
+
+
+def spent_between(jobs: list, since: dt.datetime, now: dt.datetime) -> float:
+    """GPU-hours billed between `since` and `now`: each job's rate over the
+    part of its run in that window, a running job's up to now."""
+    total = 0.0
+    for j in jobs:
+        if j.get("start") is None:
+            continue
+        end = j["end"] or now
+        overlap = (min(end, now) - max(j["start"], since)).total_seconds()
+        if overlap > 0:
+            total += j["rate"] * overlap / 3600
+    return total
+
+
+def burning(jobs: list) -> float:
+    """GPU-hours per hour the running jobs bill right now."""
+    return sum(j["rate"] for j in jobs if j["state"] == "RUNNING")
+
+
+def recovery(budget_node_hours: float, start: dt.date, end: dt.date, behind: float,
+             burn_node_hours_per_day: float) -> dict:
+    """How fast the gap to the straight line closes at the current burn: the
+    line's own rate, and the days until the gap is made up (None when it
+    does not close, 0 when there is none)."""
+    days = (end - start).days or 1
+    line = budget_node_hours / days
+    if behind <= 0:
+        catch_up = 0.0
+    elif burn_node_hours_per_day > line:
+        catch_up = round(behind / (burn_node_hours_per_day - line), 1)
+    else:
+        catch_up = None
+    return {"line_node_hours_per_day": round(line, 1), "catch_up_days": catch_up}
 
 
 def read_sacct(start: str, account=None) -> list:

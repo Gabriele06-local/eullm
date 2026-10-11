@@ -265,6 +265,30 @@ def test_parse_sacct():
     assert [j["gpu_hours"] for j in jobs] == [8.0, 0.5, 0.0]
 
 
+def test_sacct_with_times_says_what_the_last_day_spent_and_what_burns():
+    text = ("1|eullm-campaign|standard-g|COMPLETED|172800|1|cpu=56,gres/gpu=8,node=1|"
+            "2026-10-08T10:00:00|2026-10-10T10:00:00\n"
+            "2|eullm-campaign|standard-g|RUNNING|21600|1|cpu=56,gres/gpu=8,node=1|"
+            "2026-10-11T04:00:00|Unknown\n"
+            "3|eullm-concurrency|small-g|COMPLETED|3600|1|cpu=7,gres/gpu=1,mem=60G|"
+            "2026-10-10T20:00:00|2026-10-10T21:00:00\n"
+            "4|x|standard-g|PENDING|0|1||Unknown|Unknown\n")
+    jobs = budget.parse_sacct(text)
+    assert [j["rate"] for j in jobs] == [4.0, 4.0, 0.5, 4.0]
+    assert jobs[1]["end"] is None and jobs[3]["start"] is None
+    now = dt.datetime(2026, 10, 11, 10, 0)
+    # The last day: none of the first (ended at 10:00 the day before), the
+    # second's 6 hours so far, the small-g hour.
+    assert budget.spent_between(jobs, now - dt.timedelta(days=1), now) == 24.0 + 0.5
+    assert budget.burning(jobs) == 4.0
+    start, end = dt.date(2026, 9, 12), dt.date(2027, 3, 12)
+    # Six nodes around the clock against a 24.9 a day line: 400 behind in 3.4 days.
+    rec = budget.recovery(4500, start, end, 400.0, 6 * 24)
+    assert rec["line_node_hours_per_day"] == 24.9 and rec["catch_up_days"] == 3.4
+    assert budget.recovery(4500, start, end, 400.0, 20)["catch_up_days"] is None
+    assert budget.recovery(4500, start, end, -5.0, 20)["catch_up_days"] == 0.0
+
+
 def test_pace_against_the_calendar():
     start, end = dt.date(2026, 9, 12), dt.date(2027, 3, 12)
     p = budget.pace(4500, start, end, dt.datetime(2026, 10, 12), 0)
