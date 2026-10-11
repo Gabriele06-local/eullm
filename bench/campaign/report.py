@@ -34,6 +34,7 @@ METRICS = {
     "decision": (("dec_per_s", "dec/s"), ("dec_client_ms_p50", "p50 ms"),
                  ("dec_client_ms_p99", "p99 ms"), ("dec_wait_ms_p50", "wait ms"),
                  ("dec_decode_ms_p50", "decode ms"), ("dec_consistency", "consist"),
+                 ("dec_same_choices", "same choice"), ("dec_largest_shift", "max shift"),
                  ("dec_together", "together")) + DEVICE,
     "finetune": (("ft_loss_before", "loss0"), ("ft_loss_after", "loss1"),
                  ("ft_tok_s", "tok/s")),

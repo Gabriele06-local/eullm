@@ -365,8 +365,11 @@ def test_decision_points_queue_behind_one_worker_and_answer_the_same(tmp_path, e
     assert alone["requests"] == 24 and alone["failed"] == 0 and alone["decisions_per_s"] > 0
     # One worker: four clients wait behind each other, one does not.
     assert queued["wait_ms_p50"] > alone["wait_ms_p50"]
-    # Each of the 5 states was asked several times, and answered the same.
-    assert alone["consistency"] == {"compared": 19, "identical": 19, "rate": 1.0}
+    # Each of the 5 states was asked several times, and answered the same:
+    # to the digit, in what it decided, and nothing moved.
+    assert alone["consistency"] == {"compared": 19, "identical": 19, "rate": 1.0,
+                                    "same_choices": 19, "choices_rate": 1.0,
+                                    "largest_shift": 0.0}
     assert by[("rep", 4)]["params"]["replicas"] == 2
     assert campaign.main(["collect", "--queue", str(qdir)]) == 0
     rows = list(csv.DictReader(open(qdir / "results" / "summary.csv")))

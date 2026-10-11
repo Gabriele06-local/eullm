@@ -902,7 +902,8 @@ COLUMNS = (
     "ft_loss_after", "ft_tok_s", "ft_trainable_params", "lr", "epochs", "ft_mem_est_mib",
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
-    "extra_args", "trial", "vram_start_mib_max", "dec_together",
+    "extra_args", "trial", "vram_start_mib_max", "dec_together", "dec_same_choices",
+    "dec_largest_shift",
 )
 
 
@@ -956,6 +957,8 @@ def row_of(r: dict) -> dict:
                    dec_wait_ms_p50=d.get("wait_ms_p50"),
                    dec_decode_ms_p50=d.get("decode_ms_p50"),
                    dec_consistency=(d.get("consistency") or {}).get("rate"),
+                   dec_same_choices=(d.get("consistency") or {}).get("choices_rate"),
+                   dec_largest_shift=(d.get("consistency") or {}).get("largest_shift"),
                    dec_together=d.get("requests_together_mean"),
                    duration_s=d.get("duration_s"), requests=d.get("requests"))
     row["runtime"] = p.get("runtime", "eullm")

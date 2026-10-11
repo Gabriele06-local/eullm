@@ -39,6 +39,10 @@ EVICT_RUNNER = 3
 # Points planned for one engine build (`plan --engine-label`) need the runner
 # that reads EULLM_ENGINE_LABEL: an older one would run them on any engine.
 LABEL_RUNNER = 4
+# Decision points planned for an engine build need the runner that says
+# whether repeated requests made the same choices (`same_choices`), not only
+# the same digits: an older one would measure them without it.
+CHOICES_RUNNER = 5
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -193,6 +197,8 @@ def normalize(raw: dict) -> dict:
         # Only when given, as `cold`: every point planned before keeps its id.
         p["engine_label"] = str(p["engine_label"])
         p["runner"] = max(p.get("runner", 1), LABEL_RUNNER)
+        if p["kind"] == "decision":
+            p["runner"] = CHOICES_RUNNER
     elif "engine_label" in p:
         del p["engine_label"]
     if "cold" in raw:

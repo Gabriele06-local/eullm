@@ -42,7 +42,7 @@ REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 # above this, or a kind or runtime this file does not know, and is left in
 # the queue for a runner that does: jobs keep the code they started with
 # for up to 48 hours, while plan adds points at any time.
-RUNNER_VERSION = 4
+RUNNER_VERSION = 5
 # The engine build this job runs, as `plan --engine-label` names it
 # (EULLM_ENGINE_LABEL, exported by submit_campaign.sh). A point planned with a
 # label runs only in a job with the same one, and a point planned without one
@@ -945,6 +945,39 @@ def answers_digest(answers: dict) -> str:
     return hashlib.sha1(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
 
 
+def answers_choices(answers: dict) -> str:
+    """What the answers decide, without their probabilities: yes or no for a
+    `noul`, the code for a `choice`, the likeliest level for a `score`. Equal
+    digests made the same decisions, whatever the digits behind them."""
+    def decided(a):
+        if a.get("type") == "noul" or ("noul" in a and "probabilities" not in a):
+            return "yes" if (a.get("noul") or 0) >= 0.5 else "no"
+        if a.get("choice") is not None:
+            return a["choice"]
+        probs = a.get("probabilities") or {}
+        return max(sorted(probs), key=lambda k: probs[k]) if probs else None
+    canon = {qid: decided(a) for qid, a in sorted((answers or {}).items())}
+    return hashlib.sha1(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def answers_probabilities(answers: dict) -> dict:
+    """Every probability the answers carry, by question and key: P(yes) of a
+    `noul`, each code's or level's of a `choice` or a `score`."""
+    out = {}
+    for qid, a in (answers or {}).items():
+        if isinstance(a.get("noul"), (int, float)):
+            out[f"{qid}:yes"] = float(a["noul"])
+        for k, v in (a.get("probabilities") or {}).items():
+            if isinstance(v, (int, float)):
+                out[f"{qid}:{k}"] = float(v)
+    return out
+
+
+def largest_shift(first: dict, other: dict) -> float:
+    """The most any probability moved between two answers to one request."""
+    return max((abs(other[k] - v) for k, v in first.items() if k in other), default=0.0)
+
+
 def decision_bodies(p: dict) -> list:
     """`distinct_states` requests: one synthetic ticket history, each opened
     by its own line so no state is the one the server kept from the request
@@ -990,7 +1023,9 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                            evaluated_tokens=e.get("evaluated_tokens"),
                            # Absent when the request was evaluated alone.
                            together=e.get("requests_together") or 1,
-                           digest=answers_digest(out.get("answers")))
+                           digest=answers_digest(out.get("answers")),
+                           choices=answers_choices(out.get("answers")),
+                           probs=answers_probabilities(out.get("answers")))
             except Exception as ex:
                 rec.update(ok=False, error=str(ex)[:200])
             rec["t"] = time.time()
@@ -1012,9 +1047,16 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                          f"{[r.get('error') for r in records if not r['ok']][:3]}")
     by_state = {}
     for r in ok:
-        by_state.setdefault(r["state"], []).append(r["digest"])
-    repeats = [d for ds in by_state.values() for d in ds[1:]]
-    same = sum(d == by_state[s][0] for s, ds in by_state.items() for d in ds[1:])
+        by_state.setdefault(r["state"], []).append(r)
+    repeats = [r for rs in by_state.values() for r in rs[1:]]
+    same = sum(r["digest"] == rs[0]["digest"] for rs in by_state.values() for r in rs[1:])
+    # The digest above counts any change past the fourth decimal; in `batched`
+    # mode an answer moves with the requests evaluated beside it, so it also
+    # says whether the decisions themselves changed, and by how much at most.
+    same_choices = sum(r["choices"] == rs[0]["choices"]
+                       for rs in by_state.values() for r in rs[1:])
+    shift = max((largest_shift(rs[0]["probs"], r["probs"])
+                 for rs in by_state.values() for r in rs[1:]), default=None)
     client = [r["client_ms"] for r in ok]
     server = [r["server_ms"] for r in ok if r["server_ms"] is not None]
     decode = [r["decode_ms"] for r in ok]
@@ -1038,7 +1080,11 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
         # 1 for an engine that takes them one at a time.
         "requests_together_mean": mean([r.get("together", 1) for r in ok]),
         "consistency": {"compared": len(repeats), "identical": same,
-                        "rate": round(same / len(repeats), 4) if repeats else None},
+                        "rate": round(same / len(repeats), 4) if repeats else None,
+                        "same_choices": same_choices,
+                        "choices_rate": (round(same_choices / len(repeats), 4)
+                                         if repeats else None),
+                        "largest_shift": round(shift, 4) if shift is not None else None},
         "duration_s": round(elapsed, 1),
     }, (start, end)
 

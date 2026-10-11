@@ -333,6 +333,11 @@ def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
 
     labelled = normalize({"model": "m", "engine_label": "next3"})
     assert labelled["runner"] == 4 and labelled["engine_label"] == "next3"
+    # A decision point planned for a build is measured for its choices too,
+    # which a runner of before would leave out: it waits for one that can.
+    decision = normalize({"model": "m", "kind": "decision", "engine_label": "next6"})
+    assert decision["runner"] == 5 and not point.can_run(decision | {"runner": 6}, "next6")
+    assert normalize({"model": "m", "kind": "decision"})["runner"] == 2
     assert "engine_label" not in normalize({"model": "m", "engine_label": ""})
     plain = normalize({"model": "m"})
     assert point.can_run(labelled, "next3")
@@ -375,6 +380,27 @@ def test_answers_digest_ignores_noise_below_four_decimals():
     b = {"q": {"type": "choice", "choice": "x", "probabilities": {"x": 0.712341, "y": 0.287659}}}
     c = {"q": {"type": "choice", "choice": "y", "probabilities": {"x": 0.4, "y": 0.6}}}
     assert point.answers_digest(a) == point.answers_digest(b) != point.answers_digest(c)
+
+
+def test_a_decision_is_the_same_when_its_choices_are_whatever_the_decimals():
+    import point
+
+    a = {"u": {"type": "noul", "noul": 0.81},
+         "t": {"type": "choice", "choice": "tech", "probabilities": {"tech": 0.7, "legal": 0.3}},
+         "s": {"type": "score", "score": 1.4, "probabilities": {"1": 0.6, "2": 0.4}}}
+    moved = {"u": {"type": "noul", "noul": 0.79},
+             "t": {"type": "choice", "choice": "tech",
+                   "probabilities": {"tech": 0.66, "legal": 0.34}},
+             "s": {"type": "score", "score": 1.45, "probabilities": {"1": 0.55, "2": 0.45}}}
+    flipped = dict(moved, s={"type": "score", "score": 1.6, "probabilities": {"1": 0.4, "2": 0.6}})
+    assert point.answers_digest(a) != point.answers_digest(moved)
+    assert point.answers_choices(a) == point.answers_choices(moved)
+    assert point.answers_choices(a) != point.answers_choices(flipped)
+    # A noul across one half is a different decision.
+    no = dict(a, u={"type": "noul", "noul": 0.4})
+    assert point.answers_choices(a) != point.answers_choices(no)
+    shift = point.largest_shift(point.answers_probabilities(a), point.answers_probabilities(moved))
+    assert abs(shift - 0.05) < 1e-9
 
 
 def test_failed_points_can_be_retried_by_group(tmp_path):
