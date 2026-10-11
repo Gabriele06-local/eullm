@@ -318,7 +318,10 @@ class Runner:
         time_left = self.deadline - now - self.args.margin_s
         reserve_at = None
         for p in todo:
-            if self.width(p) > len(self.devices):
+            # Not `width > len(self.devices)`: a lost device keeps its slot,
+            # so a point needing the whole node would never fit, and as the
+            # widest it would reserve the node and keep every other out.
+            if aligned_group(set(self.devices) - self.lost, self.devices, self.width(p)) is None:
                 continue
             limit = time_left if reserve_at is None else min(time_left, reserve_at - now)
             duration = self.duration_for(p, limit)
