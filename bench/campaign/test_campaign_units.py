@@ -425,6 +425,11 @@ def test_a_decision_is_the_same_when_its_choices_are_whatever_the_decimals():
     assert point.answers_choices(a) != point.answers_choices(no)
     shift = point.largest_shift(point.answers_probabilities(a), point.answers_probabilities(moved))
     assert abs(shift - 0.05) < 1e-9
+    # One question of three decided otherwise.
+    assert point.decisions_changed(point.answers_decisions(a),
+                                   point.answers_decisions(flipped)) == (1, 3)
+    assert point.decisions_changed(point.answers_decisions(a),
+                                   point.answers_decisions(moved)) == (0, 3)
 
 
 def test_failed_points_can_be_retried_by_group(tmp_path):

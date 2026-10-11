@@ -369,7 +369,11 @@ def test_decision_points_queue_behind_one_worker_and_answer_the_same(tmp_path, e
     # to the digit, in what it decided, and nothing moved.
     assert alone["consistency"] == {"compared": 19, "identical": 19, "rate": 1.0,
                                     "same_choices": 19, "choices_rate": 1.0,
-                                    "largest_shift": 0.0}
+                                    "largest_shift": 0.0,
+                                    "questions_changed": 0,
+                                    "questions_compared": alone["consistency"][
+                                        "questions_compared"],
+                                    "questions_changed_rate": 0.0}
     assert by[("rep", 4)]["params"]["replicas"] == 2
     assert campaign.main(["collect", "--queue", str(qdir)]) == 0
     rows = list(csv.DictReader(open(qdir / "results" / "summary.csv")))

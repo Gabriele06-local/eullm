@@ -945,10 +945,9 @@ def answers_digest(answers: dict) -> str:
     return hashlib.sha1(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def answers_choices(answers: dict) -> str:
-    """What the answers decide, without their probabilities: yes or no for a
-    `noul`, the code for a `choice`, the likeliest level for a `score`. Equal
-    digests made the same decisions, whatever the digits behind them."""
+def answers_decisions(answers: dict) -> dict:
+    """What each answer decides, without its probabilities: yes or no for a
+    `noul`, the code for a `choice`, the likeliest level for a `score`."""
     def decided(a):
         if a.get("type") == "noul" or ("noul" in a and "probabilities" not in a):
             return "yes" if (a.get("noul") or 0) >= 0.5 else "no"
@@ -956,8 +955,21 @@ def answers_choices(answers: dict) -> str:
             return a["choice"]
         probs = a.get("probabilities") or {}
         return max(sorted(probs), key=lambda k: probs[k]) if probs else None
-    canon = {qid: decided(a) for qid, a in sorted((answers or {}).items())}
+    return {qid: decided(a) for qid, a in sorted((answers or {}).items())}
+
+
+def answers_choices(answers: dict) -> str:
+    """`answers_decisions` as a digest: equal digests made the same decisions,
+    whatever the digits behind them."""
+    canon = answers_decisions(answers)
     return hashlib.sha1(json.dumps(canon, sort_keys=True).encode()).hexdigest()[:16]
+
+
+def decisions_changed(first: dict, other: dict) -> tuple:
+    """(questions whose decision differs, questions compared) between two
+    answers to one request."""
+    shared = [q for q in first if q in other]
+    return sum(first[q] != other[q] for q in shared), len(shared)
 
 
 def answers_probabilities(answers: dict) -> dict:
@@ -1025,6 +1037,7 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                            together=e.get("requests_together") or 1,
                            digest=answers_digest(out.get("answers")),
                            choices=answers_choices(out.get("answers")),
+                           decisions=answers_decisions(out.get("answers")),
                            probs=answers_probabilities(out.get("answers")))
             except Exception as ex:
                 rec.update(ok=False, error=str(ex)[:200])
@@ -1057,6 +1070,11 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                        for rs in by_state.values() for r in rs[1:])
     shift = max((largest_shift(rs[0]["probs"], r["probs"])
                  for rs in by_state.values() for r in rs[1:]), default=None)
+    # One question in 64 decided otherwise makes the whole request differ:
+    # the share of questions is what a user of the decisions meets.
+    changed = [decisions_changed(rs[0]["decisions"], r["decisions"])
+               for rs in by_state.values() for r in rs[1:]]
+    flipped, asked = sum(c for c, _ in changed), sum(n for _, n in changed)
     client = [r["client_ms"] for r in ok]
     server = [r["server_ms"] for r in ok if r["server_ms"] is not None]
     decode = [r["decode_ms"] for r in ok]
@@ -1084,7 +1102,10 @@ def run_decision(p: dict, servers: list, ctx: Context) -> tuple:
                         "same_choices": same_choices,
                         "choices_rate": (round(same_choices / len(repeats), 4)
                                          if repeats else None),
-                        "largest_shift": round(shift, 4) if shift is not None else None},
+                        "largest_shift": round(shift, 4) if shift is not None else None,
+                        "questions_changed": flipped, "questions_compared": asked,
+                        "questions_changed_rate": (round(flipped / asked, 5)
+                                                   if asked else None)},
         "duration_s": round(elapsed, 1),
     }, (start, end)
 

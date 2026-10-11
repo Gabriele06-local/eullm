@@ -1037,12 +1037,21 @@ will serve.
 decision model runs one request at a time, so with many clients the
 requests queue. Those asked in `batched` mode that reach it while it is
 busy are evaluated together: each request's state in a sequence of its own,
-decoded side by side, then their questions, 64 at a time across requests,
-in shared decode calls — up to 16 requests, and no more context than one
-request may use (`--decision-ctx`). An answer then moves with the other
-requests' questions too, by the rounding above, as it already moves with
-the other questions of its own request; `shared_prefix` and `separate`
-requests are never grouped, and stay bit for bit what they are alone. The
+decoded side by side, then their questions, 64 at a time across requests
+(16 on a recurrent or hybrid model, such as the Jev-Style 0.8B), in shared
+decode calls — up to 16 requests, and no more context than one request may
+use (`--decision-ctx`). The questions go through in groups of neighbouring
+lengths: a hybrid model's decode call runs the model once for every length
+its questions stop at. An answer then moves with the other requests'
+questions too, by the rounding above, as it already moves with the other
+questions of its own request, and that is not only digits: on LUMI-G, the
+Jev-Style 0.8B Q4_K_M asked the same request again and again among others
+moved a probability by up to 3 points, and in a third to a half of the
+repeats at least one of its 8 or 64 decisions came out the other way (the
+borderline ones; alone, `batched` gave the same answers every time). Use it
+where throughput matters more than a borderline decision depending on the
+traffic; `shared_prefix` and `separate` requests are never grouped, and stay
+bit for bit what they are alone. The
 `eullm` extension of the response says when it happened:
 `requests_together`, the requests evaluated with it (itself included), and
 the context, prefix and question times are then the group's. A model that
