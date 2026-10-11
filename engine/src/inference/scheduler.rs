@@ -323,7 +323,7 @@ impl StepTimes {
 /// the answers and the prompt's first token, then passes for the rest of it.
 /// Every pass reads all of the model's weights. With one KV cache for all
 /// (`unified`) any tokens go together, `n_ubatch` at a time.
-fn decode_passes(seq_ids: &[i32], unified: bool, n_ubatch: usize) -> u32 {
+pub(crate) fn decode_passes(seq_ids: &[i32], unified: bool, n_ubatch: usize) -> u32 {
     let n_ubatch = n_ubatch.max(1);
     if unified {
         return seq_ids.len().div_ceil(n_ubatch) as u32;
