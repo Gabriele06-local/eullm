@@ -10,7 +10,6 @@ import time
 import pytest
 
 import campaign
-from devices import aligned_group
 from fsqueue import Queue
 from spec import SpecError, expand, normalize
 
@@ -604,3 +603,31 @@ def test_a_given_up_device_keeps_its_slot_so_pairs_stay_on_one_module(tmp_path, 
     _, reserved_half = r.devices_for(half)
     assert reserved_half == [4, 5, 6, 7]
     assert len({NUMA_OF_GCD[p] for p in [r.physical[d] for d in reserved_half]}) == 2
+
+
+def test_a_point_no_usable_block_can_hold_does_not_keep_the_rest_out(tmp_path, engine,
+                                                                     monkeypatch):
+    """With a lost device in its slot, a whole-node point can never be placed.
+    It is planned first, as the widest, so it used to reserve the node and
+    leave nothing to start -- not even a single-device point. It is skipped,
+    and stays in the queue for a job with every device."""
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("SLURM_JOB_ID", raising=False)
+    qdir = tmp_path / "q"
+    qdir.mkdir()
+    r = campaign.Runner(run_args(str(qdir), engine, devices="0-7",
+                                 port_base=free_port_base()))
+    whole = dict(normalize({"kind": "throughput", "model": "m", "gcds": 1, "batch": 1,
+                            "exclusive": True}), id="whole")
+    eight = dict(normalize({"kind": "throughput", "model": "m", "gcds": 8, "batch": 1}),
+                 id="eight")
+    one = dict(normalize({"kind": "throughput", "model": "m", "gcds": 1, "batch": 1}),
+               id="one")
+    now = time.time()
+    assert r.plan_next(now, [whole, one])[0]["id"] == "whole"
+
+    r.free.discard(0)
+    r.lost.add(0)
+    for wide in (whole, eight):
+        p, used, _, _ = r.plan_next(now, [wide, one])
+        assert p["id"] == "one" and used == [1]
