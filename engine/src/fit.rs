@@ -555,7 +555,16 @@ pub fn parse_gguf_moe_layout(data: &[u8], file_size: u64, n_layers: u32) -> Opti
         tensors.push((name, offset));
     }
     if tensors.is_empty() {
-        return None;
+        // A part that carries only metadata (Unsloth's UD-* splits put the
+        // tokenizer and hyperparameters alone in part 1): it holds no
+        // weights, which is a layout of zero bytes, not an unreadable file.
+        // Returning `None` here made `read_model_moe_layout` give up on the
+        // whole model, which then looked dense to `--fit`.
+        return Some(MoeLayout {
+            non_expert_bytes: 0,
+            expert_bytes_per_layer: vec![0u64; n_layers as usize],
+            largest_expert_tensor_bytes: 0,
+        });
     }
 
     let data_start = align_up(c.pos as u64, alignment)?;
@@ -4501,6 +4510,29 @@ mod moe_layout_tests {
         std::fs::write(&single, &one).unwrap();
         assert_eq!(gguf_parts(&single), vec![single.clone()]);
         assert_eq!(model_file_bytes(&single), one_size);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_split_model_whose_first_part_holds_only_metadata_is_still_laid_out() {
+        let dir = std::env::temp_dir().join(format!("eullm-split-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (meta, _) = make_gguf_with_tensors(None, &[]);
+        let (body, _) = make_gguf_with_tensors(
+            None,
+            &[
+                ("token_embd.weight", 1000),
+                ("blk.0.attn_q.weight", 100),
+                ("blk.0.ffn_up_exps.weight", 3000),
+            ],
+        );
+        let first = dir.join("m-00001-of-00002.gguf");
+        std::fs::write(&first, &meta).unwrap();
+        std::fs::write(dir.join("m-00002-of-00002.gguf"), &body).unwrap();
+        let layout = read_model_moe_layout(&first, 1).expect("both parts parse");
+        assert!(layout.is_moe());
+        assert_eq!(layout.non_expert_bytes, 1000 + 100);
+        assert_eq!(layout.expert_bytes_per_layer, vec![3000]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
