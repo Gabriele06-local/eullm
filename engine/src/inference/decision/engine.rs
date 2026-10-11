@@ -691,19 +691,11 @@ impl<'m> Worker<'m> {
         let n = job.prompts.len();
         let shared = job.shared;
         let group = self.config.protocol.group.max(1).min(n);
-        let rounds: Vec<std::ops::Range<usize>> = (0..n)
-            .step_by(group)
-            .map(|a| a..(a + group).min(n))
-            .collect();
+        let lengths: Vec<usize> = job.prompts.iter().map(|p| p.len() - shared).collect();
+        let rounds = rounds_by_length(&lengths, group);
         let needed = rounds
             .iter()
-            .map(|r| {
-                shared
-                    + job.prompts[r.clone()]
-                        .iter()
-                        .map(|p| p.len() - shared)
-                        .sum::<usize>()
-            })
+            .map(|r| shared + r.iter().map(|&i| lengths[i]).sum::<usize>())
             .max()
             .unwrap_or(shared);
         self.check_fits(needed)?;
@@ -711,7 +703,7 @@ impl<'m> Worker<'m> {
         // every read of its largest prompt.
         let n_outputs = rounds
             .iter()
-            .map(|r| job.reads[r.clone()].iter().map(Vec::len).sum::<usize>())
+            .map(|r| r.iter().map(|&i| job.reads[i].len()).sum::<usize>())
             .max()
             .unwrap_or(1)
             .clamp(1, 256)
@@ -742,7 +734,7 @@ impl<'m> Worker<'m> {
             }
             batch.clear();
             let mut pending: Vec<(usize, i32)> = Vec::new();
-            for (k, i) in round.clone().enumerate() {
+            for (k, &i) in round.iter().enumerate() {
                 let prompt = &job.prompts[i];
                 for (pos, &token) in prompt.iter().enumerate().skip(shared) {
                     let read = job.reads[i].binary_search(&pos).is_ok();
@@ -812,9 +804,15 @@ impl<'m> Worker<'m> {
             .enumerate()
             .flat_map(|(j, job)| (0..job.prompts.len()).map(move |i| (j, i)))
             .collect();
-        let rounds: Vec<&[(usize, usize)]> = questions.chunks(group).collect();
         let own = |&(j, i): &(usize, usize)| jobs[j].prompts[i].len() - jobs[j].shared;
         let reads = |&(j, i): &(usize, usize)| jobs[j].reads[i].len();
+        let lengths: Vec<usize> = questions.iter().map(own).collect();
+        // Each round as indices into `questions`, the shortest first.
+        let order = rounds_by_length(&lengths, group);
+        let rounds: Vec<Vec<(usize, usize)>> = order
+            .iter()
+            .map(|r| r.iter().map(|&q| questions[q]).collect())
+            .collect();
         // The worker gathered requests whose cells add up to what one
         // request may use; the states and one round are fewer.
         let needed = jobs.iter().map(|job| job.shared).sum::<usize>()
@@ -871,8 +869,7 @@ impl<'m> Worker<'m> {
         let capacity = self.cached().n_outputs as usize;
         let mut outputs: Vec<Vec<Read>> = (0..questions.len()).map(|_| Vec::new()).collect();
         let mut cancelled = vec![false; k];
-        let mut first = 0;
-        for round in &rounds {
+        for round in &order {
             for (j, job) in jobs.iter().enumerate() {
                 cancelled[j] |= job.cancel.is_cancelled();
             }
@@ -880,11 +877,9 @@ impl<'m> Worker<'m> {
             // still wanted.
             let live: Vec<(usize, usize, usize)> = round
                 .iter()
-                .enumerate()
-                .map(|(n, &(j, i))| (first + n, j, i))
+                .map(|&q| (q, questions[q].0, questions[q].1))
                 .filter(|&(_, j, _)| !cancelled[j])
                 .collect();
-            first += round.len();
             for (slot, &(_, j, _)) in live.iter().enumerate() {
                 if jobs[j].shared > 0 {
                     self.cached()
@@ -1143,6 +1138,23 @@ impl<'m> Worker<'m> {
 }
 
 /// The cells `job` holds at most: its state once, every question after it.
+/// The rounds of a `batched` evaluation, `group` questions each, as indices
+/// into `lengths` (each question's own tokens): the shortest first, in their
+/// order where lengths tie.
+///
+/// With a recurrent or hybrid model llama.cpp gives every sequence of a
+/// micro-batch the same number of tokens (`split_equal`), so a round runs the
+/// model once for every length its questions stop at: sixteen questions of
+/// sixteen lengths were sixteen passes, where questions of one length are
+/// one. Rounds of neighbouring lengths stop at few. A request's questions
+/// often differ in length by kind (a yes or no, a choice with its criteria),
+/// and requests that arrive together often ask the same ones.
+fn rounds_by_length(lengths: &[usize], group: usize) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = (0..lengths.len()).collect();
+    order.sort_by_key(|&i| lengths[i]);
+    order.chunks(group.max(1)).map(<[usize]>::to_vec).collect()
+}
+
 fn job_cells(job: &Job) -> usize {
     job.shared
         + job
@@ -1252,4 +1264,62 @@ fn finish(job: &Job, outputs: Vec<Vec<Read>>, threads: u32, mut stats: EvalStats
     };
     stats.readout_ms = ms_since(readout_started);
     Ok((results, stats))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rounds_by_length;
+    use crate::inference::scheduler::decode_passes;
+
+    /// The passes of the model the rounds take on a hybrid model, each round
+    /// one decode call of its questions' own tokens, one sequence each.
+    fn passes(lengths: &[usize], rounds: &[Vec<usize>]) -> u32 {
+        rounds
+            .iter()
+            .map(|round| {
+                let seqs: Vec<i32> = round
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(k, &i)| std::iter::repeat_n(k as i32 + 1, lengths[i]))
+                    .collect();
+                decode_passes(&seqs, false, 1024)
+            })
+            .sum()
+    }
+
+    /// c08's questions cycle through three kinds of different lengths, and
+    /// each topic adds its own few tokens. In the order asked, every round
+    /// of sixteen stops at a dozen lengths; shortest first, at a few.
+    #[test]
+    fn rounds_of_neighbouring_lengths_take_fewer_passes() {
+        let lengths: Vec<usize> = (0..64).map(|i| [24, 58, 66][i % 3] + i % 7).collect();
+        let in_order: Vec<Vec<usize>> = (0..64)
+            .collect::<Vec<_>>()
+            .chunks(16)
+            .map(<[usize]>::to_vec)
+            .collect();
+        let by_length = rounds_by_length(&lengths, 16);
+        let (before, after) = (passes(&lengths, &in_order), passes(&lengths, &by_length));
+        assert!(
+            after * 2 < before,
+            "{before} passes in order, {after} by length"
+        );
+
+        // Every question once, no round over the group.
+        let mut every: Vec<usize> = by_length.concat();
+        every.sort_unstable();
+        assert_eq!(every, (0..64).collect::<Vec<_>>());
+        assert!(by_length.iter().all(|r| r.len() <= 16));
+
+        // Requests that ask the same questions: those of one length go
+        // together, one pass a round.
+        let same: Vec<usize> = (0..4).flat_map(|_| [30, 31, 40, 41]).collect();
+        assert_eq!(passes(&same, &rounds_by_length(&same, 4)), 4);
+        assert_eq!(passes(&same, &rounds_by_length(&same, 16)), 4);
+        // A tie keeps the order asked.
+        assert_eq!(
+            rounds_by_length(&[5, 3, 5, 3], 2),
+            vec![vec![1, 3], vec![0, 2]]
+        );
+    }
 }
