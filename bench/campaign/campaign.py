@@ -1020,9 +1020,17 @@ def cmd_budget(args):
     for j in jobs:
         by_part[j["partition"]] = by_part.get(j["partition"], 0.0) + j["gpu_hours"]
     node_h = gpu_h / budget.GPU_HOURS_PER_NODE_HOUR
-    pace = budget.pace(args.budget_node_hours, start, end, dt.datetime.now(), node_h)
+    now = dt.datetime.now()
+    pace = budget.pace(args.budget_node_hours, start, end, now, node_h)
+    # How fast the gap closes: the last day's spend and what burns now.
+    last_day = budget.spent_between(jobs, now - dt.timedelta(days=1), now)
+    last_day /= budget.GPU_HOURS_PER_NODE_HOUR
+    burn = 24 * budget.burning(jobs) / budget.GPU_HOURS_PER_NODE_HOUR
+    rec = budget.recovery(args.budget_node_hours, start, end, pace["behind_node_hours"], burn)
     if args.json:
-        print(json.dumps(dict(pace, gpu_hours=round(gpu_h, 1), by_partition=by_part)))
+        print(json.dumps(dict(pace, gpu_hours=round(gpu_h, 1), by_partition=by_part,
+                              last_24h_node_hours=round(last_day, 1),
+                              burn_node_hours_per_day=round(burn, 1), **rec)))
         return 0
     print(f"spent      {pace['spent_node_hours']:8.1f} node-h  ({pace['spent_pct']}% of "
           f"{args.budget_node_hours:.0f}; {gpu_h:.1f} GPU-h, from sacct)")
@@ -1041,6 +1049,17 @@ def cmd_budget(args):
               f"{nodes} nodes busy around the clock")
     for part, h in sorted(by_part.items()):
         print(f"  {part:12s} {h / budget.GPU_HOURS_PER_NODE_HOUR:8.1f} node-h")
+    line = rec["line_node_hours_per_day"]
+    print(f"last 24 h  {last_day:8.1f} node-h  ({last_day / 24:.1f} nodes on average; "
+          f"the straight line is {line:.1f} a day)")
+    if pace["behind_node_hours"] <= 0:
+        verdict = "ahead of the straight line"
+    elif rec["catch_up_days"] is not None:
+        verdict = (f"the {pace['behind_node_hours']:.0f} behind is made up in "
+                   f"{rec['catch_up_days']} days at this rate")
+    else:
+        verdict = "not enough to close the gap: it grows at this rate"
+    print(f"now        {burn:8.1f} node-h/day ({burn / 24:.1f} nodes busy): {verdict}")
     return 0
 
 
