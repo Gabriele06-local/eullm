@@ -1186,6 +1186,84 @@ fn moe_budget(
     (usable, layout.non_expert_bytes as f64 + total_kv)
 }
 
+/// What `--fit` decided for a MoE model, with the load settings that go with
+/// an expert layout kept in RAM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MoeFitPlan {
+    pub decision: MoeFitDecision,
+    /// The micro-batch the plan was sized for: [`MOE_CACHE_N_UBATCH`] when no
+    /// `--n-ubatch` was given and the split still holds beside the larger
+    /// compute buffer, `None` to keep the caller's.
+    pub n_ubatch: Option<u32>,
+    /// Bytes of experts the split keeps in RAM: the load reads the model into
+    /// memory when they fit there (see [`plan_read_into_memory`]).
+    pub host_bytes: u64,
+}
+
+/// The bytes of the experts of the first `n_cpu_moe` layers.
+pub fn cpu_expert_bytes(layout: &MoeLayout, n_cpu_moe: u32) -> u64 {
+    layout
+        .expert_bytes_per_layer
+        .iter()
+        .take(n_cpu_moe as usize)
+        .sum()
+}
+
+/// [`compute_moe_fit`], and what a split with experts in RAM wants of the
+/// load beside it. Prompts are read in micro-batches, and each one pays for
+/// the experts it touches: with a 512-token micro-batch and most experts in
+/// RAM, a 31,000-token prompt moves them about 60 times (Qwen3.8-Flash-Next
+/// UD-Q4_K_XL on an A100: 379 tokens/s read at 512, 1,876 at 8,192). So,
+/// as for an expert cache, a split sized with `auto_n_ubatch` takes
+/// [`MOE_CACHE_N_UBATCH`] if it still holds with the larger compute buffer.
+pub fn compute_moe_fit_plan(
+    vram: Option<(u64, u64)>,
+    info: Option<&GgufInfo>,
+    layout: Option<&MoeLayout>,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    auto_n_ubatch: bool,
+) -> MoeFitPlan {
+    let fit = |vram| {
+        compute_moe_fit(
+            vram,
+            info,
+            layout,
+            ctx_size,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+        )
+    };
+    let mut decision = fit(vram);
+    let mut n_ubatch = None;
+    if auto_n_ubatch && matches!(decision, MoeFitDecision::Proceed { n_cpu_moe } if n_cpu_moe > 0)
+    {
+        let larger = vram.map(|(free, total)| {
+            (
+                free.saturating_sub(ubatch_reserve_bytes(MOE_CACHE_N_UBATCH)),
+                total,
+            )
+        });
+        let again = fit(larger);
+        if matches!(again, MoeFitDecision::Proceed { n_cpu_moe } if n_cpu_moe > 0) {
+            decision = again;
+            n_ubatch = Some(MOE_CACHE_N_UBATCH);
+        }
+    }
+    let host_bytes = match (&decision, layout) {
+        (MoeFitDecision::Proceed { n_cpu_moe }, Some(layout)) => {
+            cpu_expert_bytes(layout, *n_cpu_moe)
+        }
+        _ => 0,
+    };
+    MoeFitPlan {
+        decision,
+        n_ubatch,
+        host_bytes,
+    }
+}
+
 /// Compute the MoE-aware fit decision from probed VRAM, GGUF info, and the
 /// tensor layout parsed by [`parse_gguf_moe_layout`]/[`read_gguf_moe_layout`].
 ///
@@ -1564,7 +1642,7 @@ pub fn plan_read_into_memory(
         Some(ram) if pin_fits_in_ram(cache_host_bytes, ram) => (
             true,
             Some(format!(
-                "--moe-cache: reading the model into memory, so that its {} of experts in RAM \
+                "experts in RAM: reading the model into memory, so that its {} of them \
                  are pinned for the GPU's copies (--mmap keeps the file mapped)",
                 gib(cache_host_bytes)
             )),
@@ -1572,7 +1650,7 @@ pub fn plan_read_into_memory(
         Some(ram) => (
             false,
             Some(format!(
-                "--moe-cache: keeping the model file mapped: pinning its {} of experts in RAM \
+                "experts in RAM: keeping the model file mapped: pinning its {} of experts in RAM \
                  would leave less than {} of the {} of RAM to the rest (--no-mmap reads it \
                  into memory anyway)",
                 gib(cache_host_bytes),
@@ -1583,7 +1661,7 @@ pub fn plan_read_into_memory(
         None => (
             false,
             Some(
-                "--moe-cache: keeping the model file mapped: the size of the RAM is not known \
+                "experts in RAM: keeping the model file mapped: the size of the RAM is not known \
                  here (--no-mmap reads it into memory anyway)"
                     .to_string(),
             ),
@@ -1942,6 +2020,33 @@ pub fn run_moe_fit(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+    )
+}
+
+/// [`run_moe_fit`] with [`compute_moe_fit_plan`]'s micro-batch and host bytes.
+pub fn run_moe_fit_plan(
+    model_path: &Path,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    reserve_bytes: u64,
+    auto_n_ubatch: bool,
+) -> MoeFitPlan {
+    let info = read_gguf_info(model_path);
+    let file_size = model_file_bytes(model_path);
+    let layout = match (&info, file_size) {
+        (Some(i), size) if size > 0 => read_model_moe_layout(model_path, i.n_layers),
+        _ => None,
+    };
+    let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
+    compute_moe_fit_plan(
+        vram,
+        info.as_ref(),
+        layout.as_ref(),
+        ctx_size,
+        kv_bytes_per_elem_k,
+        kv_bytes_per_elem_v,
+        auto_n_ubatch,
     )
 }
 
@@ -2337,16 +2442,25 @@ pub fn plan_offload(
         };
     }
 
-    let moe = if flags.cpu_moe || flags.n_cpu_moe > 0 {
-        MoeFitDecision::NotMoe
+    let MoeFitPlan {
+        decision: moe,
+        n_ubatch: moe_n_ubatch,
+        host_bytes: moe_host_bytes,
+    } = if flags.cpu_moe || flags.n_cpu_moe > 0 {
+        MoeFitPlan {
+            decision: MoeFitDecision::NotMoe,
+            n_ubatch: None,
+            host_bytes: 0,
+        }
     } else {
-        compute_moe_fit(
+        compute_moe_fit_plan(
             vram,
             info,
             layout,
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            flags.auto_n_ubatch,
         )
     };
     let (gpu_layers, cpu_moe, n_cpu_moe, basis) = match moe {
@@ -2405,8 +2519,8 @@ pub fn plan_offload(
         free_vram: vram.map(|(free, _)| free),
         capped_from: (capped != gpu_layers).then_some(gpu_layers),
         moe_cache_bytes: 0,
-        moe_cache_host_bytes: 0,
-        n_ubatch: None,
+        moe_cache_host_bytes: moe_host_bytes,
+        n_ubatch: moe_n_ubatch,
         moe_prefetch_bytes: 0,
     }
 }
@@ -3060,6 +3174,53 @@ mod plan_offload_tests {
             auto_n_ubatch: false,
             moe_prefetch: MoePrefetch::default(),
         }
+    }
+
+    /// A split with experts in RAM reads prompts in a larger micro-batch when
+    /// none was asked for, sized with the larger compute buffer, and reports
+    /// the experts it keeps in RAM; a fixed micro-batch, or a model that fits
+    /// whole, is left as it was.
+    #[test]
+    fn a_split_of_experts_takes_a_larger_micro_batch_unless_one_was_asked() {
+        let (info, layout, size) = moe();
+        let vram = Some((16 * GIB, 16 * GIB));
+        let plan = |auto_n_ubatch, vram| {
+            plan_offload(
+                vram,
+                Some(&info),
+                Some(&layout),
+                size,
+                16_384,
+                2.0,
+                2.0,
+                0,
+                0,
+                OffloadFlags {
+                    auto_n_ubatch,
+                    ..flags()
+                },
+            )
+        };
+
+        let fixed = plan(false, vram);
+        let OffloadBasis::MoeExperts { n_cpu_moe: kept } = fixed.basis else {
+            panic!("a 20 GiB MoE on 16 GiB splits its experts: {:?}", fixed.basis);
+        };
+        assert_eq!(fixed.n_ubatch, None);
+        assert_eq!(fixed.moe_cache_host_bytes, u64::from(kept) * 400 * MIB);
+
+        let auto = plan(true, vram);
+        let OffloadBasis::MoeExperts { n_cpu_moe: more } = auto.basis else {
+            panic!("still a split: {:?}", auto.basis);
+        };
+        assert_eq!(auto.n_ubatch, Some(MOE_CACHE_N_UBATCH));
+        // The larger compute buffer is paid for by keeping more in RAM, never less.
+        assert!(more >= kept);
+        assert_eq!(auto.moe_cache_host_bytes, u64::from(more) * 400 * MIB);
+
+        let roomy = plan(true, Some((80 * GIB, 80 * GIB)));
+        assert_eq!(roomy.n_ubatch, None);
+        assert_eq!(roomy.moe_cache_host_bytes, 0);
     }
 
     /// The sizing every API load ran before `plan_offload`, step for step:
