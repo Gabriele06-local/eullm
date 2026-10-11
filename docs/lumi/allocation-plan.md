@@ -423,6 +423,30 @@ In order:
    shared decode calls (option 2 of three: only for clients that ask for
    `batched`, so the default stays reproducible bit for bit); a `c08` round on
    that engine is the "after".
+
+   What it found (`r-next5`, 10-10-2026, Jev-Style 0.8B v3, `batched`,
+   decisions/s before and after, and how many requests went together):
+
+   | request | 4 at once | 16 at once | 64 at once |
+   |---|---:|---:|---:|
+   | 256-token state, 8 questions | 8.9 → 11.9 (2) | 9.3 → 11.9 (12.8) | 10.2 → 12.0 (14.8) |
+   | 1024-token state, 8 questions | 7.1 → 7.9 (2) | 6.6 → 7.5 (8.1) | 6.5 → 7.5 (8.9) |
+   | 64 questions | 1.3-1.4 → 1.5-1.6 (2) | about the same | about the same |
+   | 4096-token state | about 3 (1-3) | about 3 | about 3 |
+
+   The median wait at 16 and 64 at once fell by 15-20% where requests went
+   together (1555 to 1329 ms, 6278 to 4996 ms). The gain is that small
+   because the 0.8B is a hybrid model, whose rounds hold 16 questions at most
+   (a recurrent state per sequence): two 8-question requests fill one, and a
+   64-question request fills four on its own; the GPU time per question did
+   not fall (97 ms for one 8-question request, 1161 ms for 12.8 together).
+   `shared_prefix` and the 2B (read in blocks) are never grouped, and did not
+   change. Requests evaluated together answered with other digits each time
+   (`consist` 0.07-0.56 against 1 alone), as documented; whether the choices
+   changed too, or only the digits, is what the decision points measure since
+   11-10-2026 (`same choice`, and `max shift`, the most a probability moved).
+   What a question costs on the 0.8B, about 10 ms of decode whether alone or
+   not, is the next thing to look at.
 4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
    RAM, the direction Strata takes on consumer GPUs (the head-to-head with
    Strata stays on the RTX 5070 Ti, `docs/moe-offload-plan.md`). Objective
