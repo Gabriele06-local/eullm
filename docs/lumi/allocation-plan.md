@@ -27,6 +27,17 @@ first of those months went by with almost nothing spent, so from 05-10-2026:
 so the campaign runs on **two nodes in parallel** until the deficit is
 recovered (`status.sh` shows when), then one.
 
+11-10-2026: 386 node-h spent, 347 behind the straight line (733 to date),
+120.7 billed in the last 24 hours on five to six nodes; `budget` now says
+what the last day spent and when the gap closes at the current burn (2.9
+days at six nodes). The straight line is the stricter measure: the calendar
+below asks 750 node-h by the end of October and back-loads the rest
+(850-880 a month from November, the long soaks over Christmas), and by it
+the six nodes reach October's figure around 13-10. So the burst stops there:
+the queued links that would carry superseded engines (the unlabelled chain,
+`next3`, `next4`'s soaks) into the week are cancelled, and the queue goes back
+to one background chain plus a node for each new engine build.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
