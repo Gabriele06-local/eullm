@@ -102,6 +102,7 @@ def test_the_deadline_the_article_also_mentions_is_allowed():
     ("L'art. 2999 del codice civile non esiste nella raccolta.", "inesistente"),
     ("Tra i testi normativi riportati non trovo la disposizione che risponde.", "assente"),
     ("I testi riportati non contengono la norma richiesta.", "assente"),
+    ("Nei dati disponibili non ho trovato la norma che risponde alla domanda.", "inesistente"),
 ])
 def test_saying_it_is_not_there_scores_where_it_is_true(answer, tipo):
     assert score_answer(answer, tipo) == 1.0

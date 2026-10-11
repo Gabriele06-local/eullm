@@ -46,7 +46,11 @@ MAX_DEADLINES = 2
 _ABSTAIN = re.compile(
     r"non esiste|inesistent|non (?:è|e') (?:previst|presente|contenut|riportat)"
     r"|non (?:sono|risulta(?:no)?) (?:presenti|riportat|contenut)"
-    r"|non trovo|non (?:è|e') possibile (?:individuare|trovare|rispondere)"
+    # "Non ho trovato" is "non trovo" in the past: RAG Enterprise's abstention
+    # and legal-it-8b's ("Nei dati disponibili non ho trovato la norma che
+    # risponde alla domanda"). Missing here, 62 such answers to absent
+    # articles counted as wrong in the no-judge column of 2026-10-11.
+    r"|non trovo|non ho trovato|non (?:è|e') possibile (?:individuare|trovare|rispondere)"
     # The verb in either number, and the handful of ways of saying it that
     # models reach for. Only "non contengono" was here, so "non contiene" --
     # the same sentence, one text instead of many -- scored nothing, and
