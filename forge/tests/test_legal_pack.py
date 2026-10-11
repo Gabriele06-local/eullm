@@ -106,6 +106,14 @@ def test_citations_outside_the_sources_and_abstentions_are_told_apart():
         == ["1176", "1375", "1453", "360"]
     assert not mod.check_sources("Secondo gli artt. 969 e 970 c.c.", loose)["sources_ok"]
     assert not mod.check_sources("[Relazione illustrativa]", loose)["sources_ok"]
+    # a bracket that cites no file is counted apart, not as an article from memory
+    for bracket in ("[Filename]", "[Codice civile]", "[ibidem]",
+                    "[Codice di procedura penale, art. ...txt]",
+                    "[Nessuna citazione applicabile poiché il testo non è presente]"):
+        got = mod.check_sources(f"Il termine è di 60 giorni {bracket}.", loose)
+        assert got["sources_ok"] and got["malformed_citations"] == [bracket[1:-1]], bracket
+    both = mod.check_sources("[Filename] e [Codice civile, art. 970]", loose)
+    assert not both["sources_ok"] and both["outside_sources"] == ["Codice civile, art. 970"]
     # "l'articolo precedente" of art. 1048 is art. 1047, and only that one
     prev = ["Codice civile, art. 1048 (Obblighi degli utenti)\n\nNella derivazione e "
             "nell'uso delle acque a norma dell'articolo precedente..."]
@@ -223,7 +231,7 @@ def test_the_summary_reads_an_ungraded_file_and_names_the_code_as_the_pack_does(
     p.write_text(json.dumps({
         "id": "norm-contenuto-codice_civile-2875", "question": "Che cosa prevede l'art. 2875 c.c.?",
         "metadata": {"tipo": "contenuto", "code": "codice_civile", "articolo": "2875"},
-        "answer": "L'art. 2875 del codice civile non è presente nei dati forniti.",
+        "answer": "L'art. 2875 del codice civile non è presente nei dati forniti [Filename].",
         "sources": ["Codice civile, art. 2475 - Amministrazione della societa'.txt",
                     "Codice penale, art. 2875.txt"],
         "abstained": False, "sources_ok": False}) + "\n")
@@ -231,6 +239,7 @@ def test_the_summary_reads_an_ungraded_file_and_names_the_code_as_the_pack_does(
     out = capsys.readouterr().out
     assert "precision n/a (not graded; 0 answered)" in out
     assert "citing outside the sources 0" in out and "abstained 1" in out
+    assert "malformed citations 1" in out
     assert "article asked among the sources 0/1" in out
 
 

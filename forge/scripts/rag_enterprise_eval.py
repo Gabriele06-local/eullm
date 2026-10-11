@@ -106,6 +106,24 @@ def abstained(answer: str) -> bool:
     return bool(ABSTAIN.search(answer or ""))
 
 
+# A bracket that cites no file at all: the prompt's own placeholder copied
+# ("[Filename]"), a code with no article ("[Codice civile]"), a legal "ibidem",
+# a name cut short ("[Codice penale, art. ...txt]") or a sentence. Measured on
+# RAG Enterprise 0.1.48 these were most of the "outside the sources" count, and
+# none of them is an article cited from memory.
+_PLACEHOLDERS = {"filename", "file name", "nome file", "nome del file", "fonte", "source",
+                 "ibidem", "ibid.", "ibid", "ivi", "id."}
+
+
+def _malformed(bracket: str) -> bool:
+    """Whether a bracket names no file: no article in it and not a name."""
+    c = re.sub(r"\s+", " ", bracket.strip().lower().removesuffix(".txt"))
+    if _articles(c):
+        return False
+    return (c in _PLACEHOLDERS or c in {n.lower() for n in CODE_NAMES.values()}
+            or ".." in c or "…" in c or c.startswith("nessun"))
+
+
 def _head(name: str) -> str:
     """A pack file's citation without its rubrica: "codice civile, art. 743"."""
     name = re.sub(r"\s+", " ", name.strip().lower().removesuffix(".txt"))
@@ -155,6 +173,8 @@ def check_sources(answer: str, sources: list[str], question: str = "",
     for t in source_texts:
         numbers.update(_neighbours(t))
     cited = [c.strip() for c in _BRACKETS.findall(answer or "")]
+    malformed = [c for c in cited if _malformed(c)]
+    cited = [c for c in cited if c not in malformed]
     # A bracket that names articles is checked on those articles, like a
     # citation in the text: models copy file names loosely ("art.62",
     # "contrattacon", "artt. 969 - Ricognizione.txt; Articolo 1870"), and
@@ -169,7 +189,8 @@ def check_sources(answer: str, sources: list[str], question: str = "",
     bad_arts = [a for a in arts if a not in numbers and a not in asked]
     return {"cited_files": cited, "cited_articles": arts,
             "sources_ok": not bad and not bad_arts,
-            "outside_sources": bad + [f"art. {a}" for a in bad_arts]}
+            "outside_sources": bad + [f"art. {a}" for a in bad_arts],
+            "malformed_citations": malformed}
 
 
 class Api:
@@ -337,6 +358,7 @@ def summarize(rows: list[dict], pack: Path | None = None) -> dict:
         "precision": len(correct) / len(answered) if answered else 0.0,
         "answered": len(answered), "correct": len(correct),
         "outside_sources": sum(not r.get("sources_ok", True) for r in rows),
+        "malformed": sum(bool(r.get("malformed_citations")) for r in rows),
         "absent_items": len(absent),
         "abstained": sum(bool(r.get("abstained")) for r in rows),
         "graded": any("grade" in r for r in rows),
@@ -355,6 +377,7 @@ def cmd_summary(args) -> int:
         print(f"{p.name}: {s['questions']} questions | {precision} | "
               f"coverage {s['coverage']:.3f} | "
               f"citing outside the sources {s['outside_sources']} | "
+              f"malformed citations {s['malformed']} | "
               f"absent articles abstained {s['absent_abstained']}/{s['absent_items']} | "
               f"article asked among the sources {s['asked_retrieved']}/{s['asked_items']} | "
               f"abstained {s['abstained']}")
