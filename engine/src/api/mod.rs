@@ -632,7 +632,7 @@ impl AppState {
             let load_n_batch = crate::inference::batch_for_ubatch(self.n_batch, load_n_ubatch);
             if cache_n_ubatch.is_some() {
                 tracing::info!(
-                    "--moe-cache: reading prompts {load_n_ubatch} tokens at a time (--n-ubatch), \
+                    "experts in RAM: reading prompts {load_n_ubatch} tokens at a time (--n-ubatch), \
                      so that the experts in RAM are copied to the GPU once per {load_n_ubatch} \
                      prompt tokens instead of {}",
                     crate::inference::DEFAULT_N_UBATCH

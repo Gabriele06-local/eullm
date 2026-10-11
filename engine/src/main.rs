@@ -3024,7 +3024,7 @@ async fn cmd_run(
                     n_ubatch = larger;
                     n_batch = inference::batch_for_ubatch(n_batch, larger);
                     println!(
-                        "[EULLM] --moe-cache: reading prompts {larger} tokens at a time \
+                        "[EULLM] experts in RAM: reading prompts {larger} tokens at a time \
                          (--n-ubatch), so that the experts in RAM are copied to the GPU once \
                          per {larger} prompt tokens instead of {}.",
                         inference::DEFAULT_N_UBATCH
@@ -3041,12 +3041,23 @@ async fn cmd_run(
                 }
                 no_mmap = read_in;
             } else {
-                let moe_decision = if !cpu_moe && n_cpu_moe == 0 {
-                    fit::run_moe_fit(&gguf_path, ctx_size, kv_bpe_k, kv_bpe_v, sizing_reserve)
+                let moe_plan = if !cpu_moe && n_cpu_moe == 0 {
+                    fit::run_moe_fit_plan(
+                        &gguf_path,
+                        ctx_size,
+                        kv_bpe_k,
+                        kv_bpe_v,
+                        sizing_reserve,
+                        n_ubatch_flag.is_none(),
+                    )
                 } else {
-                    fit::MoeFitDecision::NotMoe
+                    fit::MoeFitPlan {
+                        decision: fit::MoeFitDecision::NotMoe,
+                        n_ubatch: None,
+                        host_bytes: 0,
+                    }
                 };
-                match moe_decision {
+                match moe_plan.decision {
                     fit::MoeFitDecision::Proceed { n_cpu_moe: computed } if computed > 0 => {
                         println!(
                             "[EULLM] MoE model: keeping expert tensors on CPU RAM for the \
@@ -3054,6 +3065,26 @@ async fn cmd_run(
                         );
                         n_cpu_moe = computed;
                         gpu_layers = -1;
+                        if let Some(larger) = moe_plan.n_ubatch {
+                            n_ubatch = larger;
+                            n_batch = inference::batch_for_ubatch(n_batch, larger);
+                            println!(
+                                "[EULLM] experts in RAM: reading prompts {larger} tokens at a \
+                                 time (--n-ubatch), so that they are copied to the GPU once per \
+                                 {larger} prompt tokens instead of {}.",
+                                inference::DEFAULT_N_UBATCH
+                            );
+                        }
+                        let (read_in, why) = fit::plan_read_into_memory(
+                            no_mmap,
+                            mmap,
+                            moe_plan.host_bytes,
+                            fit::system_ram_bytes(),
+                        );
+                        if let Some(why) = why {
+                            println!("[EULLM] {why}.");
+                        }
+                        no_mmap = read_in;
                     }
                     fit::MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers: gl } => {
                         println!(
