@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## 0.7.70 — 2026-10-12
+
+### Performance
+- **`--moe-cache auto` grows the cache further, down to what the prefetch asks for.** 0.7.60 left 3.4 GiB free beside the cache: the loader's 12% floor, 512 MiB and the prefetch's slots, counted one on top of the other. llama.cpp's prefetch asks for 1,817 MiB free (its 4 slots and 800 MiB for their compute), so the cache now takes what is left beyond the slots, 800 MiB and 256 MiB spare (8% of the card plus the spare when the prefetch is off). On an RTX 5070 Ti with Qwen3.8-Flash-Next IQ2_XS, no drafts, temperature 0: at 8,192 tokens of context the cache goes from 7.0 to 8.75 GiB (7.5 in 0.7.60) and answers from 66 to 69-70 tokens/s, with the same text; at 36,000 tokens writing goes from 60.7 to 67.0 and reading a 30,000-token prompt stays at 1,570 tokens/s (1,538 before), the prefetch still on, three such prompts in a row without an error. At 131,072 tokens the key-value cache takes 12 GiB, the cache stays at the planned 4.25 GiB and answers come at 52 tokens/s. With several slots nothing is left over and the cache stays as planned. A size given in MiB is used as given, which is also how to turn this off. Not tried with `--mtp`.
+
 ## 0.7.60 — 2026-10-12
 
 ### Performance

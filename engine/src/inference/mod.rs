@@ -374,8 +374,9 @@ fn gpu_memory() -> Option<(u64, u64)> {
 /// figure measured at a long context (`fit::ubatch_reserve_bytes`), and at
 /// 8,192 tokens of context the buffer takes about half of it. The context
 /// this load makes shows what is really free: a probe context with the
-/// planned cache gives the room, the cache takes it less a margin and what
-/// the prefetch's slots need at the first long prompt, and a second probe
+/// planned cache gives the room, the cache takes it less what the prefetch's
+/// slots and their compute need at the first long prompt (patch 0003 asks
+/// for 1,817 MiB free beside 4 slots) and a margin, and a second probe
 /// with the larger cache must still leave that margin. Whatever fails keeps
 /// the planned size. Not tried with drafts (`--mtp`), whose own context is
 /// made after this one, nor with a size given in MiB, which is used as given.
@@ -388,11 +389,16 @@ pub(crate) fn grow_moe_cache(
 ) -> u64 {
     // Granularity of the cache, as in `fit::plan_moe_cache`.
     const STEP: u64 = 256 << 20;
-    // Left free beyond the loader's floor: the first request makes buffers a
-    // bare context does not (the same reason `probe_and_shrink_context` asks
-    // for a margin).
-    const MARGIN: u64 = 512 << 20;
-    const MIN_FREE_VRAM_RATIO: f64 = 0.12;
+    // What llama.cpp's prefetch asks to be free when it makes its slots at the
+    // first long prompt, beside the slots: "4 slots of 256.2 MiB and 792 MiB
+    // left for the compute need 1817 MiB of free VRAM" (patch 0003). With the
+    // slots in place that much is all that is left, and it is enough.
+    const PREFETCH_COMPUTE_HEADROOM: u64 = 800 << 20;
+    // Left free beyond that for what the first request makes.
+    const MARGIN: u64 = 256 << 20;
+    // Without prefetch slots nothing is made after this context, and the
+    // floor `probe_and_shrink_context` asks of a context is the guide.
+    const NO_PREFETCH_FREE_RATIO: f64 = 0.08;
 
     let planned = config.moe_cache_bytes;
     let Some(grow) = config.moe_cache_grow else {
@@ -412,14 +418,18 @@ pub(crate) fn grow_moe_cache(
     let Some((free, total)) = measure(planned) else {
         return planned;
     };
-    let kept = (total as f64 * MIN_FREE_VRAM_RATIO) as u64 + MARGIN + grow.keep_bytes;
+    let kept = if grow.keep_bytes > 0 {
+        grow.keep_bytes + PREFETCH_COMPUTE_HEADROOM + MARGIN
+    } else {
+        (total as f64 * NO_PREFETCH_FREE_RATIO) as u64 + MARGIN
+    };
     let extra = free.saturating_sub(kept) / STEP * STEP;
     let target = (planned + extra).min(grow.max_bytes / STEP * STEP);
     if target <= planned {
         return planned;
     }
     match measure(target) {
-        Some((free_after, _)) if free_after >= kept.saturating_sub(MARGIN / 2) => {
+        Some((free_after, _)) if free_after >= kept.saturating_sub(MARGIN) => {
             tracing::info!(
                 "--moe-cache auto: {:.2} GiB of VRAM were left over after the plan, the cache goes from {:.2} to {:.2} GiB",
                 (free as f64) / f64::from(1u32 << 30),
