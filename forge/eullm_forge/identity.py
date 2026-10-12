@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -680,6 +682,91 @@ def fine_tune_identity(config: IdentityConfig) -> str:
     return adapter_path
 
 
+def _safetensors_header(path: Path) -> tuple[dict, int]:
+    """A .safetensors file's header and where its data starts.
+
+    The format is an 8-byte little-endian header length, a JSON header and
+    the raw bytes: read here with the standard library, so carrying tensors
+    needs neither torch nor the safetensors package.
+    """
+    with open(path, "rb") as f:
+        n = struct.unpack("<Q", f.read(8))[0]
+        return json.loads(f.read(n)), 8 + n
+
+
+def _weight_map(model_dir: Path) -> dict[str, str]:
+    """Tensor name -> shard file of a checkpoint directory, sharded or not."""
+    index = model_dir / "model.safetensors.index.json"
+    if index.is_file():
+        return json.loads(index.read_text())["weight_map"]
+    single = model_dir / "model.safetensors"
+    if single.is_file():
+        header, _ = _safetensors_header(single)
+        return {k: single.name for k in header if k != "__metadata__"}
+    return {}
+
+
+def carry_missing_tensors(
+    source_dir: str | Path,
+    output_dir: str | Path,
+    prefixes: tuple[str, ...] = ("mtp.",),
+    shard: str = "model-carried.safetensors",
+) -> list[str]:
+    """Copy into ``output_dir`` the tensors of ``source_dir`` it lacks, by prefix.
+
+    Qwen3.5 checkpoints carry a multi-token-prediction head (``mtp.*``) that
+    the transformers model class does not load, so a merged checkpoint saved
+    from it has none -- while its config still says ``mtp_num_hidden_layers:
+    1``. llama.cpp then converts 33 blocks, finds no tensors for the last one
+    and refuses the GGUF ("tensor 'blk.32.attn_norm.weight' not found"): on
+    2026-10-11 every exam of the Qwen3.5 students died that way at load. The
+    head is copied unchanged: it only drafts tokens for speculative decoding,
+    which the model then checks, so an untrained head costs speed, never
+    correctness. Tensors are copied byte for byte, one at a time, into one
+    extra shard listed in the index. Returns the names copied (none when
+    there is nothing to carry, so running it twice changes nothing).
+    """
+    src, out = Path(source_dir), Path(output_dir)
+    src_map, out_map = _weight_map(src), _weight_map(out)
+    missing = sorted(k for k in src_map if k.startswith(prefixes) and k not in out_map)
+    if not missing:
+        return []
+
+    entries, offset = [], 0
+    for name in missing:
+        header, base = _safetensors_header(src / src_map[name])
+        info = header[name]
+        start, end = info["data_offsets"]
+        entries.append((name, src / src_map[name], base + start, end - start, info))
+    new_header: dict = {"__metadata__": {"format": "pt"}}
+    for name, _, _, size, info in entries:
+        new_header[name] = {"dtype": info["dtype"], "shape": info["shape"],
+                            "data_offsets": [offset, offset + size]}
+        offset += size
+    raw = json.dumps(new_header, separators=(",", ":")).encode()
+    raw += b" " * (-len(raw) % 8)
+
+    tmp = out / (shard + ".partial")
+    with open(tmp, "wb") as w:
+        w.write(struct.pack("<Q", len(raw)))
+        w.write(raw)
+        for _, path, at, size, _ in entries:
+            with open(path, "rb") as r:
+                r.seek(at)
+                w.write(r.read(size))
+    os.replace(tmp, out / shard)
+
+    index_path = out / "model.safetensors.index.json"
+    index = (json.loads(index_path.read_text()) if index_path.is_file()
+             else {"metadata": {}, "weight_map": dict(out_map)})
+    index["weight_map"].update({name: shard for name in missing})
+    if "total_size" in index.get("metadata", {}):
+        index["metadata"]["total_size"] += offset
+    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    logger.info("  Carried %d tensors (%s) from %s", len(missing), ", ".join(prefixes), src)
+    return missing
+
+
 def merge_identity_adapter(
     base_model_path: str,
     adapter_path: str,
@@ -724,6 +811,9 @@ def merge_identity_adapter(
 
     Path(out).mkdir(parents=True, exist_ok=True)
     merged.save_pretrained(out)
+    # What the model class did not load is not in `merged` either: Qwen3.5's
+    # MTP head. Without it the GGUF of the merge does not load at all.
+    carry_missing_tensors(base_model_path, out)
 
     # The tokenizer must travel with the merged weights — the converter reads
     # it from the same directory. Prefer the adapter's copy (saved by
