@@ -482,9 +482,9 @@ In order:
    Alone, 64 questions decode in 546 instead of 623 ms (256-token state), 586
    instead of 670 (1024) and 808 instead of 898 (4096): 10-13%, where the
    passes fell from about 64 to 24. So a pass's own cost is not most of a
-   question's; the tokens are, at about 3,000 a second on a GCD for a 0.8B
-   model, which is slow for that size and points at the recurrent layers'
-   kernels on HIP. Against no grouping at all (`r-next5`'s "before"), sixteen
+   question's; the tokens are: 64 questions are about 6,400 tokens of their
+   own (the CPU bench's count), read at about 11,000 a second. Against no
+   grouping at all (`r-next5`'s "before"), sixteen
    clients asking 8 questions on a 256-token state now get 13.4 decisions a
    second instead of 9.3, and `shared_prefix`, the default, 5.3.
 4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
