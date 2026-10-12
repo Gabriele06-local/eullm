@@ -1,0 +1,102 @@
+CUDA: one warp per row for short bf16 matrix-vector products
+
+The low-rank "up" projection of the hyper-connections (320 -> 10240, bf16, one token) went through the generic
+mul_mat_vec_f kernel: a block of 160 threads per row, a shared-memory reduction and a __syncthreads for 320 numbers,
+17 us of a layer's 42 (twice a layer). For one-token products with at most 512 columns and at least 4096 rows
+the new kernel gives each row to a warp (8 rows to a block), with no shared memory. Same arithmetic in fp32, the sum
+in a different order. GGML_CUDA_MMVF_SHORT_ROWS=0 restores the generic kernel.
+
+diff --git a/ggml/src/ggml-cuda/mmvf.cu b/ggml/src/ggml-cuda/mmvf.cu
+--- a/ggml/src/ggml-cuda/mmvf.cu
++++ b/ggml/src/ggml-cuda/mmvf.cu
+@@ -510,6 +510,78 @@
+     }
+ }
+ 
++
++// Short rows, many of them (the low-rank "up" projection of the hyper-connections: 320 -> 10240, bf16):
++// one warp per row and no shared-memory reduction, 8 rows to a block. The generic kernel gives each row
++// a block of its own and spends a __syncthreads and a second warp reduction on 320 elements.
++template <int pairs_per_lane>
++static __global__ void mul_mat_vec_bf16_short_rows(
++        const nv_bfloat162 * __restrict__ x, const float2 * __restrict__ y, float * __restrict__ dst,
++        const int nrows, const int stride_row2) {
++    const int lane = threadIdx.x & 31;
++    const int row  = blockIdx.x*(blockDim.x >> 5) + (threadIdx.x >> 5);
++    ggml_cuda_pdl_sync();
++    if (row >= nrows) {
++        return;
++    }
++    const nv_bfloat162 * xr = x + (int64_t) row*stride_row2;
++    float acc = 0.0f;
++#pragma unroll
++    for (int i = 0; i < pairs_per_lane; ++i) {
++        const float2 xv = __bfloat1622float2(xr[lane + 32*i]);
++        const float2 yv = y[lane + 32*i];
++        acc = fmaf(xv.x, yv.x, acc);
++        acc = fmaf(xv.y, yv.y, acc);
++    }
++    ggml_cuda_pdl_lc();
++    acc = warp_reduce_sum<32>(acc);
++    if (lane == 0) {
++        dst[row] = acc;
++    }
++}
++
++static bool ggml_cuda_mmvf_short_rows_enabled() {
++    static const bool on = [] { const char * e = getenv("GGML_CUDA_MMVF_SHORT_ROWS"); return !(e && e[0] == '0'); }();
++    return on;
++}
++
++template <typename T>
++static bool mul_mat_vec_f_try_short_rows(
++        const T * x, const float * y, const int32_t * ids, const ggml_cuda_mm_fusion_args_device & fusion, float * dst,
++        const int64_t ncols, const int64_t nrows, const int64_t ncols_dst, const int64_t stride_row,
++        const int64_t nchannels_x, const int64_t nchannels_dst, const int64_t nsamples_x, const int64_t nsamples_dst,
++        cudaStream_t stream) {
++    if constexpr (std::is_same_v<T, nv_bfloat16>) {
++        const bool has_fusion = fusion.gate != nullptr || fusion.x_bias != nullptr || fusion.gate_bias != nullptr;
++        if (ids || has_fusion || ncols_dst != 1 || nchannels_x != 1 || nchannels_dst != 1 || nsamples_x != 1 || nsamples_dst != 1 ||
++            nrows < 4096 || ncols % 64 != 0 || ncols > 512 || stride_row % 2 != 0 ||
++            (reinterpret_cast<uintptr_t>(x) | reinterpret_cast<uintptr_t>(y)) % 8 != 0 || !ggml_cuda_mmvf_short_rows_enabled()) {
++            return false;
++        }
++        const int rows_per_block = 8;
++        const dim3 grid((nrows + rows_per_block - 1)/rows_per_block, 1, 1);
++        const dim3 block(32*rows_per_block, 1, 1);
++        const nv_bfloat162 * x2 = reinterpret_cast<const nv_bfloat162 *>(x);
++        const float2       * y2 = reinterpret_cast<const float2 *>(y);
++        switch (ncols/64) {
++            case 1: mul_mat_vec_bf16_short_rows<1><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 2: mul_mat_vec_bf16_short_rows<2><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 3: mul_mat_vec_bf16_short_rows<3><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 4: mul_mat_vec_bf16_short_rows<4><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 5: mul_mat_vec_bf16_short_rows<5><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 6: mul_mat_vec_bf16_short_rows<6><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 7: mul_mat_vec_bf16_short_rows<7><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            case 8: mul_mat_vec_bf16_short_rows<8><<<grid, block, 0, stream>>>(x2, y2, dst, (int) nrows, (int) (stride_row/2)); break;
++            default: return false;
++        }
++        CUDA_CHECK(cudaGetLastError());
++        return true;
++    } else {
++        GGML_UNUSED_VARS(x, y, ids, fusion, dst, ncols, nrows, ncols_dst, stride_row, nchannels_x, nchannels_dst, nsamples_x, nsamples_dst, stream);
++        return false;
++    }
++}
++
+ template <typename T, typename type_acc>
+ static void mul_mat_vec_f_cuda_switch_ncols_dst(
+         const T * x, const float * y, const int32_t * ids, const ggml_cuda_mm_fusion_args_device fusion, float * dst,
+@@ -522,6 +594,11 @@
+ 
+     const bool has_ids = ids != nullptr;
+ 
++    if (mul_mat_vec_f_try_short_rows<T>(x, y, ids, fusion, dst, ncols, nrows, ncols_dst, stride_row,
++                                        nchannels_x, nchannels_dst, nsamples_x, nsamples_dst, stream)) {
++        return;
++    }
++
+     if (has_ids && ncols_dst > 1) {
+         // Multi-token MUL_MAT_ID path only - single-token goes through regular path below
+         constexpr int c_ncols_dst = 1;
