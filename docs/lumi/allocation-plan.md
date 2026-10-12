@@ -458,6 +458,35 @@ In order:
    11-10-2026 (`same choice`, and `max shift`, the most a probability moved).
    What a question costs on the 0.8B, about 10 ms of decode whether alone or
    not, is the next thing to look at.
+
+   The decisions themselves (`r-choices`, next6, 11-10-2026): alone, `batched`
+   decided the same every time and no probability moved. Among other requests
+   a probability moved by up to 3 points (0.024-0.044) between repeats of one
+   request, and the same request decided all its questions the same way in
+   50-80% of its repeats (1 for 8 questions on a 1024-token state): the
+   borderline questions turn over. The 2B, never grouped, was identical every
+   time. Decision points count the share of questions decided otherwise
+   (`flipped`) from the next round.
+
+   The rounds of neighbouring lengths (`r-next7`, 11-10-2026, against
+   `r-choices` on the same day), Jev-Style 0.8B `batched`, decisions/s:
+
+   | request | 4 at once | 16 at once | 64 at once |
+   |---|---:|---:|---:|
+   | 256-token state, 8 questions | 11.5 → 12.3 | 11.8 → 13.4 | 12.0 → 13.7 |
+   | 256-token state, 64 questions | 1.6 → 2.0 | 1.6 → 2.0 | 1.6 → 2.0 |
+   | 1024-token state, 8 questions | 7.9 → 8.2 | 7.5 → 8.0 | 7.4 → 8.0 |
+   | 1024-token state, 64 questions | 1.2 → 1.8 | 1.2 → 1.8 | 1.5 → 1.8 |
+   | 4096-token state | about 3 and 1.1-1.2, as before | | |
+
+   Alone, 64 questions decode in 546 instead of 623 ms (256-token state), 586
+   instead of 670 (1024) and 808 instead of 898 (4096): 10-13%, where the
+   passes fell from about 64 to 24. So a pass's own cost is not most of a
+   question's; the tokens are, at about 3,000 a second on a GCD for a 0.8B
+   model, which is slow for that size and points at the recurrent layers'
+   kernels on HIP. Against no grouping at all (`r-next5`'s "before"), sixteen
+   clients asking 8 questions on a 256-token state now get 13.4 decisions a
+   second instead of 9.3, and `shared_prefix`, the default, 5.3.
 4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
    RAM, the direction Strata takes on consumer GPUs (the head-to-head with
    Strata stays on the RTX 5070 Ti, `docs/moe-offload-plan.md`). Objective
