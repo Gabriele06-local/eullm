@@ -600,6 +600,7 @@ impl AppState {
                     );
                 }
             }
+            let moe_cache_grow = plan.as_ref().and_then(|plan| plan.moe_cache_grow);
             let (gpu_layers, cpu_moe, n_cpu_moe, mmproj_placement, moe_cache_bytes) = match &plan {
                 Some(plan) => (
                     plan.gpu_layers,
@@ -703,6 +704,7 @@ impl AppState {
                 mtp_p_min: self.mtp_p_min,
                 mtp_model: self.mtp_model.clone(),
                 moe_cache_bytes,
+                moe_cache_grow,
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
                 load_threads: self.load_threads,

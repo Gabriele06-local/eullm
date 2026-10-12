@@ -2610,6 +2610,7 @@ async fn cmd_run(
     let mut n_cpu_moe = n_cpu_moe;
     // The expert cache `--moe-cache` comes to for the launch model, once sized.
     let mut moe_cache_bytes: u64 = 0;
+    let mut moe_cache_grow: Option<fit::MoeCacheGrow> = None;
     // The slots of `--moe-prefetch` the launch model gets, once it is known
     // whether its experts are in RAM and pinned.
     let mut moe_prefetch_slots: u32 = 0;
@@ -3020,6 +3021,7 @@ async fn cmd_run(
                 n_cpu_moe = cache.n_cpu_moe;
                 gpu_layers = -1;
                 moe_cache_bytes = cache.bytes;
+                moe_cache_grow = cache.grow;
                 if let Some(larger) = cache.n_ubatch {
                     n_ubatch = larger;
                     n_batch = inference::batch_for_ubatch(n_batch, larger);
@@ -3240,6 +3242,7 @@ async fn cmd_run(
             mtp_p_min,
             mtp_model: mtp_model.clone(),
             moe_cache_bytes,
+            moe_cache_grow,
             no_mmap,
             moe_prefetch_slots,
             load_threads,

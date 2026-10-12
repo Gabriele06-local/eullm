@@ -1756,6 +1756,13 @@ fn run_scheduler_loop(
     // cap the reserve at n_outputs_max_per_seq=1 per sequence, while our
     // host-side sampling path fell into the n_batch-sized default. The true
     // ceiling here is one output per concurrent slot.
+    // `--moe-cache auto`: the VRAM the plan left over goes to the cache, measured
+    // with the context this scheduler really makes.
+    config.moe_cache_bytes = super::grow_moe_cache(&backend, model, &config, |c| {
+        super::build_ctx_params(c, ctx_size)
+            .with_n_seq_max(sched_config.max_batch_size as u32)
+            .with_n_outputs_max(n_outputs_max)
+    });
     let ctx_params = super::build_ctx_params(&config, ctx_size)
         .with_n_seq_max(sched_config.max_batch_size as u32)
         .with_n_outputs_max(n_outputs_max);

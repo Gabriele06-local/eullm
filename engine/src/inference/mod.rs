@@ -366,6 +366,72 @@ fn gpu_memory() -> Option<(u64, u64)> {
     (total_sum > 0).then_some((free_sum, total_sum))
 }
 
+/// Grow the expert cache of `--moe-cache auto` into the VRAM the plan left
+/// over, and return the size to load with (the planned one when there is
+/// nothing to gain).
+///
+/// The plan charges the compute buffer of the larger micro-batch from a flat
+/// figure measured at a long context (`fit::ubatch_reserve_bytes`), and at
+/// 8,192 tokens of context the buffer takes about half of it. The context
+/// this load makes shows what is really free: a probe context with the
+/// planned cache gives the room, the cache takes it less a margin and what
+/// the prefetch's slots need at the first long prompt, and a second probe
+/// with the larger cache must still leave that margin. Whatever fails keeps
+/// the planned size. Not tried with drafts (`--mtp`), whose own context is
+/// made after this one, nor with a size given in MiB, which is used as given.
+/// `params_for` builds the context the caller will really make.
+pub(crate) fn grow_moe_cache(
+    backend: &LlamaBackend,
+    model: &LlamaModel,
+    config: &InferenceConfig,
+    params_for: impl Fn(&InferenceConfig) -> LlamaContextParams,
+) -> u64 {
+    // Granularity of the cache, as in `fit::plan_moe_cache`.
+    const STEP: u64 = 256 << 20;
+    // Left free beyond the loader's floor: the first request makes buffers a
+    // bare context does not (the same reason `probe_and_shrink_context` asks
+    // for a margin).
+    const MARGIN: u64 = 512 << 20;
+    const MIN_FREE_VRAM_RATIO: f64 = 0.12;
+
+    let planned = config.moe_cache_bytes;
+    let Some(grow) = config.moe_cache_grow else {
+        return planned;
+    };
+    if planned == 0 || config.mtp > 0 || config.mtp_model.is_some() {
+        return planned;
+    }
+    let measure = |bytes: u64| -> Option<(u64, u64)> {
+        let mut probe = config.clone();
+        probe.moe_cache_bytes = bytes;
+        let ctx = model.new_context(backend, params_for(&probe)).ok()?;
+        let memory = gpu_memory();
+        drop(ctx);
+        memory
+    };
+    let Some((free, total)) = measure(planned) else {
+        return planned;
+    };
+    let kept = (total as f64 * MIN_FREE_VRAM_RATIO) as u64 + MARGIN + grow.keep_bytes;
+    let extra = free.saturating_sub(kept) / STEP * STEP;
+    let target = (planned + extra).min(grow.max_bytes / STEP * STEP);
+    if target <= planned {
+        return planned;
+    }
+    match measure(target) {
+        Some((free_after, _)) if free_after >= kept.saturating_sub(MARGIN / 2) => {
+            tracing::info!(
+                "--moe-cache auto: {:.2} GiB of VRAM were left over after the plan, the cache goes from {:.2} to {:.2} GiB",
+                (free as f64) / f64::from(1u32 << 30),
+                (planned as f64) / f64::from(1u32 << 30),
+                (target as f64) / f64::from(1u32 << 30),
+            );
+            target
+        }
+        _ => planned,
+    }
+}
+
 /// Build context params with flash attention, n_batch, and KV cache types applied.
 pub(crate) fn build_ctx_params(
     config: &InferenceConfig,
@@ -565,6 +631,10 @@ pub struct InferenceConfig {
     /// model gets it except the MTP draft context, which reads no experts
     /// of the model's.
     pub moe_cache_bytes: u64,
+    /// Set when `--moe-cache auto` sized the cache: the load measures the VRAM
+    /// left once the context exists and grows the cache into it
+    /// (`grow_moe_cache`). `None` keeps the size as planned.
+    pub moe_cache_grow: Option<crate::fit::MoeCacheGrow>,
     /// `--no-mmap`: read the model into memory instead of mapping its file.
     /// Expert tensors kept in RAM then land in the GPU backend's pinned host
     /// buffer, which llama.cpp gives weights overridden to the CPU only when
@@ -609,6 +679,7 @@ impl Default for InferenceConfig {
             mtp_p_min: 0.0,
             mtp_model: None,
             moe_cache_bytes: 0,
+            moe_cache_grow: None,
             no_mmap: false,
             moe_prefetch_slots: 0,
             load_threads: crate::readahead::LoadThreads::default(),
@@ -1861,6 +1932,10 @@ impl InferenceEngine {
         // Q8 model plus its vision/audio projector on a 16 GB card, where the
         // text context was the thing that did not fit).
         config.context_size = Self::probe_and_shrink_context(&backend, &model, &config)?;
+        if let Some(ctx_size) = NonZeroU32::new(config.context_size) {
+            config.moe_cache_bytes =
+                grow_moe_cache(&backend, &model, &config, |c| build_ctx_params(c, ctx_size));
+        }
 
         Ok(Self {
             backend,
