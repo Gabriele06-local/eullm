@@ -1449,6 +1449,21 @@ pub fn prefetch_slots(slots: u32, read_into_memory: bool, cpu_moe: bool, n_cpu_m
     }
 }
 
+/// What the load may do with the VRAM that a cache sized by `--moe-cache auto`
+/// leaves over: the plan charges the compute buffer of a large micro-batch
+/// from a flat figure that is generous for most contexts, and the load can
+/// measure what is really free once the context exists
+/// (`inference::grow_moe_cache`). Only an `auto` cache carries it; a size
+/// given in MiB is used as given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MoeCacheGrow {
+    /// VRAM that stays free for what is made after the probe: the prefetch's
+    /// slots, which llama.cpp allocates at the first long prompt.
+    pub keep_bytes: u64,
+    /// The most the cache can hold: the experts kept in RAM.
+    pub max_bytes: u64,
+}
+
 /// Where a load with an expert cache puts its experts, and the cache's size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoeCachePlan {
@@ -1473,6 +1488,8 @@ pub struct MoeCachePlan {
     /// The slots are asked for all the same where the experts are pinned, and
     /// llama.cpp makes them at the first long prompt if there is room then.
     pub prefetch_bytes: u64,
+    /// Set for `--moe-cache auto`: see [`MoeCacheGrow`].
+    pub grow: Option<MoeCacheGrow>,
 }
 
 /// The micro-batch a load with an expert cache takes when `--n-ubatch` was
@@ -1605,6 +1622,10 @@ pub fn plan_moe_cache(
         host_bytes: in_ram,
         n_ubatch,
         prefetch_bytes,
+        grow: (request == MoeCache::Auto).then_some(MoeCacheGrow {
+            keep_bytes: prefetch_bytes,
+            max_bytes: in_ram,
+        }),
     })
 }
 
@@ -2337,6 +2358,9 @@ pub struct OffloadPlan {
     /// VRAM the expert cache left for the prefetch's slots (see
     /// [`MoeCachePlan::prefetch_bytes`]); `0` for none.
     pub moe_prefetch_bytes: u64,
+    /// Whether the load may grow the cache into the VRAM left over (see
+    /// [`MoeCacheGrow`]).
+    pub moe_cache_grow: Option<MoeCacheGrow>,
 }
 
 /// Size one load: where the projector goes, then MoE expert offload, then
@@ -2414,6 +2438,7 @@ pub fn plan_offload(
             moe_cache_host_bytes: cache.host_bytes,
             n_ubatch: cache.n_ubatch,
             moe_prefetch_bytes: cache.prefetch_bytes,
+            moe_cache_grow: cache.grow,
         };
     }
 
@@ -2497,6 +2522,7 @@ pub fn plan_offload(
         moe_cache_host_bytes: moe_host_bytes,
         n_ubatch: moe_n_ubatch,
         moe_prefetch_bytes: 0,
+        moe_cache_grow: None,
     }
 }
 
@@ -3490,6 +3516,13 @@ mod plan_offload_tests {
         let split = cache(MoeCache::Auto, card, false, 40).unwrap();
         assert!(!split.cpu_moe && split.n_cpu_moe == 40);
         assert!(split.bytes <= room - 8 * 400 * MIB);
+
+        // Only an automatic cache may grow into the VRAM left over, up to the
+        // experts in RAM; a size given in MiB is used as given.
+        let grow = auto.grow.expect("an automatic cache may grow");
+        assert_eq!(grow.max_bytes, auto.host_bytes);
+        assert_eq!(grow.keep_bytes, auto.prefetch_bytes);
+        assert_eq!(asked.grow, None);
 
         // The whole model fits on a 48 GB card: no expert is in RAM to cache.
         assert_eq!(cache(MoeCache::Auto, (40 * GIB, 48 * GIB), false, 0), None);
