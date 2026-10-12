@@ -876,7 +876,7 @@ const UBATCH_RESERVE_BYTES_PER_TOKEN: f64 = 0.75 * 1024.0 * 1024.0;
 /// `pub(crate)`: shared by two different reservations that must agree on
 /// what "the embedder's own overhead" costs — `api::fits_in_free_vram`'s
 /// runtime coexistence check for an ad-hoc `/api/embed`-loaded model, and
-/// `run_fit`/`run_fit_headless`/`run_moe_fit`'s `reserve_bytes` parameter,
+/// `run_fit`/`run_fit_headless`/`run_moe_fit_plan`'s `reserve_bytes` parameter,
 /// which protects a launch-time `--embedding-model` companion's footprint
 /// before the generation model's own sizing ever sees the VRAM it needs.
 pub(crate) const EMBEDDING_COMPUTE_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1268,7 +1268,7 @@ pub fn compute_moe_fit_plan(
 /// tensor layout parsed by [`parse_gguf_moe_layout`]/[`read_gguf_moe_layout`].
 ///
 /// Pure decision logic — no I/O — mirroring [`compute_fit`]'s split from
-/// [`run_fit`]. See [`run_moe_fit`] for the I/O-performing wrapper.
+/// [`run_fit`]. See [`run_moe_fit_plan`] for the I/O-performing wrapper.
 pub fn compute_moe_fit(
     vram: Option<(u64, u64)>,
     info: Option<&GgufInfo>,
@@ -1985,45 +1985,20 @@ fn run_fit_impl(
 }
 
 /// Run the MoE-aware fit flow: probe VRAM, read the GGUF header and tensor
-/// layout, and delegate to [`compute_moe_fit`].
+/// layout, and delegate to [`compute_moe_fit_plan`]: the decision, and the
+/// micro-batch and host bytes that go with it.
 ///
 /// Always non-interactive — unlike [`run_fit`], this never prompts. The
 /// caller runs it *before* `run_fit`: a MoE decision here always resolves to
 /// a loadable configuration (expert offload, in the worst case combined with
 /// a reduced layer split down to fully-CPU), so there is no "doesn't fit,
-/// continue anyway?" question left to ask. Only when this returns
+/// continue anyway?" question left to ask. Only when its decision is
 /// [`MoeFitDecision::NotMoe`] does the dense `run_fit` flow — with its
 /// prompt and its `--fit-strict` handling — take over.
 ///
 /// `reserve_bytes`: see the identical parameter on `run_fit_impl` — same
 /// purpose (protect a launch-time embedding companion's footprint), applied
 /// here before the MoE decision instead of the dense one.
-pub fn run_moe_fit(
-    model_path: &Path,
-    ctx_size: u32,
-    kv_bytes_per_elem_k: f64,
-    kv_bytes_per_elem_v: f64,
-    reserve_bytes: u64,
-) -> MoeFitDecision {
-    let info = read_gguf_info(model_path);
-    let file_size = model_file_bytes(model_path);
-    let layout = match (&info, file_size) {
-        (Some(i), size) if size > 0 => read_model_moe_layout(model_path, i.n_layers),
-        _ => None,
-    };
-    let vram = vram_bytes().map(|(free, total)| (free.saturating_sub(reserve_bytes), total));
-
-    compute_moe_fit(
-        vram,
-        info.as_ref(),
-        layout.as_ref(),
-        ctx_size,
-        kv_bytes_per_elem_k,
-        kv_bytes_per_elem_v,
-    )
-}
-
-/// [`run_moe_fit`] with [`compute_moe_fit_plan`]'s micro-batch and host bytes.
 pub fn run_moe_fit_plan(
     model_path: &Path,
     ctx_size: u32,
@@ -2051,7 +2026,7 @@ pub fn run_moe_fit_plan(
 }
 
 /// [`plan_moe_cache`] for the model at `model_path`, against the VRAM free
-/// right now less `reserve_bytes` — [`run_moe_fit`]'s counterpart for the
+/// right now less `reserve_bytes` — [`run_moe_fit_plan`]'s counterpart for the
 /// expert cache.
 #[allow(clippy::too_many_arguments)]
 pub fn run_moe_cache(
@@ -2248,7 +2223,7 @@ pub fn place_mmproj(
 
 /// [`place_mmproj`] against the live card and the model on disk.
 ///
-/// Reads exactly what [`run_moe_fit`] reads, so the two agree on what the
+/// Reads exactly what [`run_moe_fit_plan`] reads, so the two agree on what the
 /// model is. `reserve_bytes` is every other reservation already in force (a
 /// launch-time embedding companion), taken out of free VRAM before the
 /// projector is weighed against it; `mmproj_bytes` comes from
@@ -3224,7 +3199,7 @@ mod plan_offload_tests {
     }
 
     /// The sizing every API load ran before `plan_offload`, step for step:
-    /// `decide_mmproj_placement`, `run_moe_fit`, `run_fit_headless` and the
+    /// `decide_mmproj_placement`, `run_moe_fit_plan`, `run_fit_headless` and the
     /// ceiling, each against free VRAM less the reservations so far.
     #[allow(clippy::too_many_arguments)]
     fn sized_as_before(
@@ -4799,7 +4774,7 @@ mod moe_layout_tests {
 
     // ── Properties ───────────────────────────────────────────────────────
     //
-    // The other half of #490. This entry point is reached from `run_moe_fit`
+    // The other half of #490. This entry point is reached from `run_moe_fit_plan`
     // without passing through `compute_fit`, so the ceiling checked there
     // covers nothing here — which is exactly the kind of gap a rule closes
     // and an example does not.

@@ -480,9 +480,8 @@ fn control_texts(model: &LlamaModel, texts: &[&str]) -> Vec<String> {
             {
                 continue;
             }
-            let bytes = model.token_to_piece_bytes(token, 64, true, None);
-            if let Ok(bytes) = bytes
-                && let Ok(piece) = String::from_utf8(bytes)
+            let Ok(bytes) = model.token_to_piece_bytes(token, 64, true, None);
+            if let Ok(piece) = String::from_utf8(bytes)
                 && !piece.is_empty()
                 && !found.contains(&piece)
             {
