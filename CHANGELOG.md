@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.60 — 2026-10-12
 
 ### Performance
 - **`--moe-cache auto` uses the VRAM the plan left over.** The plan sizes the cache against a flat allowance for the larger micro-batch's buffer that is generous at short contexts; once the context exists the load now measures what is really free and grows the cache into it, keeping the loader's 12% floor, 512 MiB and the prefetch's slots, and checking it with a second probe. On an RTX 5070 Ti with Qwen3.8-Flash-Next IQ2_XS at 8,192 tokens of context the cache goes from 7.0 to 7.5 GiB and answers from 65.2 to 66.4 tokens/s with the same text; at 36,000 tokens, or with several slots, nothing is left over and the cache stays as planned. A size given in MiB is used as given, which is also how to turn this off. Not tried with `--mtp`.
