@@ -240,6 +240,27 @@ def test_a_new_round_measures_everything_again(tmp_path, capsys):
     assert Queue(q).counts()["todo"] == 4
 
 
+def test_a_round_can_plan_some_groups_of_a_campaign(tmp_path, capsys):
+    spec = {"campaign": "c", "groups": [
+        {"name": "load-old", "axes": {"model": ["a", "b"]}},
+        {"name": "load-together-a", "set": {"model": "a"}},
+        {"name": "load-together-b", "set": {"model": "b"}},
+        {"name": "load-q8", "set": {"model": "c"}}]}
+    path = tmp_path / "s.json"
+    path.write_text(json.dumps(spec))
+    q = str(tmp_path / "q")
+    assert campaign.main(["plan", str(path), "--queue", q, "--round", "r2",
+                          "--group", "load-together-*", "--group", "load-q8"]) == 0
+    assert "(round r2): 3 points, 3 new" in capsys.readouterr().out
+    groups = {Queue(q).load("todo", pid)["group"] for pid in Queue(q).ids("todo")}
+    assert groups == {"load-together-a", "load-together-b", "load-q8"}
+    # A name that matches no group plans nothing and says which groups there are.
+    assert campaign.main(["plan", str(path), "--queue", q, "--round", "r3",
+                          "--group", "load-togther-*"]) == 2
+    assert "no group matches load-togther-*" in capsys.readouterr().err
+    assert Queue(q).counts()["todo"] == 3
+
+
 def test_when_free_follows_alignment_and_overruns(tmp_path, engine):
     r = campaign.Runner(run_args(str(tmp_path / "q"), engine, devices="0-7"))
     now = time.time()

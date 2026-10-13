@@ -103,7 +103,9 @@ training split, never the test split the workload points grade on).
 
 A point's id is a hash of what it measures: planning a spec twice adds
 nothing, widening an axis adds only the new combinations, and `--round`
-measures everything again under a new label.
+measures everything again under a new label. `--group` (repeatable, shell
+patterns such as `'load-together-*'`) plans only those groups of a spec: a
+round of part of a campaign; a name that matches no group plans nothing.
 
 ## What a node does
 
