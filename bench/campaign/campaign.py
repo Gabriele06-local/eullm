@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import fnmatch
 import glob
 import hashlib
 import json
@@ -719,6 +720,15 @@ def cmd_plan(args):
     specs = load_specs(args.specs)
     for path, spec in specs:
         points = expand(spec, args.round, args.engine_label)
+        if args.group:
+            names = {p["group"] for p in points}
+            unmatched = [g for g in args.group if not fnmatch.filter(names, g)]
+            if unmatched:
+                print(f"{path}: no group matches {', '.join(unmatched)} "
+                      f"(groups: {', '.join(sorted(names))})", file=sys.stderr)
+                return 2
+            points = [p for p in points
+                      if any(fnmatch.fnmatchcase(p["group"], g) for g in args.group)]
         added = [p for p in points if q.add(p)]
         name = os.path.basename(path)
         if args.round:
@@ -1094,6 +1104,9 @@ def main(argv=None):
     p.add_argument("--engine-label",
                    help="run these points only in jobs submitted with EULLM_ENGINE_LABEL "
                         "set to this (one engine build): jobs of another build leave them")
+    p.add_argument("--group", action="append",
+                   help="only the groups of this name (repeatable; shell-style patterns, "
+                        "e.g. 'load-together-*'): a round of part of a campaign")
 
     p = sub.add_parser("pulls")
     p.add_argument("specs", nargs="+")

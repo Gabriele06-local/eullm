@@ -649,7 +649,8 @@ impl AppState {
                 tracing::info!("{why}");
             }
             // A model that goes to the GPUs whole and is more than half the
-            // memory is read in: mapped, it does not load (`fit::read_in_whole_on_gpu`).
+            // memory, or on a network file system, is read in: mapped, it
+            // loads slowly or not at all (`fit::read_in_whole_on_gpu`).
             if !load_no_mmap {
                 let whole_on_gpu = crate::fit::vram_bytes().is_some_and(|(_, total)| total > 0)
                     && crate::fit::every_layer_on_gpu(
@@ -663,6 +664,7 @@ impl AppState {
                     file_size,
                     whole_on_gpu,
                     crate::readahead::memory_for_cache(),
+                    crate::readahead::network_file_system(&gguf_path),
                     self.mmap,
                 ) {
                     tracing::info!("{why}");

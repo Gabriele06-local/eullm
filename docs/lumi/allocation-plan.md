@@ -219,9 +219,12 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    model in by itself when it goes to the GPUs whole and its files are more
    than half the memory the process may use (`fit::read_in_whole_on_gpu`);
    `--mmap` keeps it mapped. The `moe-` groups of c02 that failed loading can
-   be planned again on that engine: `r-next4` is that round (below), and the
-   235B, still mapped by the rule, took 19-32 minutes to load in five of its
-   twelve points.
+   be planned again on that engine: `r-next4` is that round (below). The 480B
+   and the 671B loaded read in, in 91 to 284 s; the 235B, still mapped by the
+   rule, took 11-32 minutes to load where two servers mapped it at once, and
+   failed after the runner's hour three times. Since 13-10-2026 a model that
+   goes to the GPUs whole from a network file system is read in whatever its
+   size; c09's `load-together-*` groups are the before/after.
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 
@@ -566,6 +569,11 @@ requests per server:
 | Q4_K_M, two servers of 4 GCDs | 70.1 | 91.1 (cv 79%) | 202 |
 | Q8_0, one server on 8 GCDs | 28.2 | 42.7 | 85.4 |
 
+The larger ones, read in on 8 GCDs, tokens/s: Qwen3-Coder-480B 27.1, 50.2
+and 75.9 at 1, 8 and 32 requests; DeepSeek-V3.1 21.5, 31.8 and 34 at 1, 4
+and 16. A day of the 235B Q8_0 under the graded workload (`moe-soak`): 36.5
+tokens/s, 49,013 requests, accuracy 0.96-0.99.
+
 Four more GCDs under one server add nothing (layer split, as on 12-09); the
 same four as a second server double the node (2.05× at 32). gpt-oss-120b the
 same way: 298 tokens/s on two GCDs at 32, 1181 as four servers of two GCDs on
@@ -574,16 +582,27 @@ then replicas, on the models it is for. Eighteen hours of the 235B as two
 servers under the graded workload (`moe-235b-soak-x2`): 74.4 tokens/s, 63,431
 requests, accuracy 0.95-0.99.
 
-The loads are the open item. Five of the twelve 235B points took 1161-1901 s
-to load, the other seven 32-102 s, and four replicas of gpt-oss-120b 761 s
-once against 57-61 s; 132 and 233 GiB are under half the node's memory, so
-the engine maps them (item 8). All the slow ones but one are points where
-several servers mapped one file at once (the two 4-GCD points, 1901 s each,
-likely side by side; two replicas of 4 GCDs, twice of three; four of
-gpt-oss-120b, once of two), the other the 233 GiB Q8_0, alone on its node;
-c09's single-server loads of the 235B never did it. Whether the slow points
-overlapped is in their start times, the check before the rule changes; c09
-measured reading in at the cost of mapping on the 235B (108 against 110 s).
+The loads were the open item. 132 and 233 GiB are under half the node's
+memory, so `next4` mapped the 235B (item 8), and the points' start times
+(job 22687047 on 10-10, 22675825-6 on 09-10) show which loads were slow:
+
+| load, from Lustre | seconds |
+|---|---:|
+| 235B Q4, one server of 8 GCDs | 59-102 |
+| 235B Q4, one server of 4 GCDs alone | 69 |
+| 235B Q4, two servers of 4 GCDs at once (side by side, or two replicas) | failed after an hour once; 667-1901, 86 once |
+| 235B Q8, one server of 8 GCDs | failed after an hour once; 1161, then 32-89 with the file in the page cache |
+| gpt-oss-120b, four servers of 2 GCDs at once | failed after an hour once; 761, then 57-61 with the file in the page cache |
+| 480B and 671B, read in | 91-284 |
+
+Mapping a file several servers map at once, or one near half the memory,
+is what Lustre does not survive; c09's single-server loads of the 235B
+never did it, and read in it costs the same (108 against 110 s). The
+three failed hours and the slow loads cost about 5 node-h. Since 13-10-2026
+the engine reads in every model that goes to the GPUs whole from a network
+file system, whatever its size (`fit::read_in_whole_on_gpu`); c09's
+`load-together-*` and `load-q8-235b` groups measure it against `--mmap`, on
+one node for about two hours (four if every mapped load fails its hour).
 
 **Q8_0 against Q4_K_M** (`c02 quant-one-gcd`): one request is 18% slower on
 Qwen3-8B, 24% on 14B, 28% on 32B, and level on Qwen3-30B-A3B (122 against

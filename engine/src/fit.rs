@@ -1709,33 +1709,54 @@ pub fn every_layer_on_gpu(
 /// Whether a model that goes to the GPUs whole is read into memory instead
 /// of mapped, and the line that says why when it is: when its files are more
 /// than half of the memory this process may fill (`memory`, the RAM or a
-/// Slurm job's `--mem`), unless `--mmap` keeps them mapped.
+/// Slurm job's `--mem`), or are on a network file system (`network`, as
+/// `readahead::network_file_system` names it), unless `--mmap` keeps them
+/// mapped.
 ///
 /// Measured on LUMI-G (c09, 07-10-2026 and 08-10-2026), loading cold from
 /// Lustre: Qwen3-Coder-480B Q4_K_M, 270 GiB on 8 GCDs of a 480 GiB job,
 /// never loaded mapped (six tries; one watched for 70 minutes, the file read
 /// into the page cache and then copied to the GPUs by one thread at 90 MB/s)
 /// and loaded read in, in 160 and 208 s; DeepSeek-V3.1 Q4_K_M the same, 226 s
-/// read in. Below half nothing is gained: Qwen3-235B, 132 GiB, 110 s mapped
-/// and 108 s read in; Qwen3.8-27B, 29 GiB, 46 s mapped and 51 s read in. The
-/// tokens per second were the same both ways.
+/// read in. One server alone below half gained nothing: Qwen3-235B, 132 GiB,
+/// 110 s mapped and 108 s read in; Qwen3.8-27B, 29 GiB, 46 s mapped and 51 s
+/// read in. The tokens per second were the same both ways.
+///
+/// Below half, servers mapping one file at once from a network file system
+/// were the slow case (c02, 09 and 10-10-2026, Lustre): two servers of the
+/// 235B starting together took 667 to 1,901 s to load, and once failed after
+/// the hour the runner waits; four of gpt-oss-120b, 59 GiB, failed the hour
+/// and then took 761 s, 57-61 s once the file was in the page cache; the
+/// 233 GiB Q8_0, alone but at the edge of half, failed the hour and then took
+/// 1,161 s. Read in by the rule above, the 480B and the 671B loaded in 91 to
+/// 284 s in the same job. A file on a local disk stays mapped, as before.
 pub fn read_in_whole_on_gpu(
     model_bytes: u64,
     whole_on_gpu: bool,
     memory: Option<u64>,
+    network: Option<&str>,
     keep_mapped: bool,
 ) -> Option<String> {
-    let memory = memory?;
-    if keep_mapped || !whole_on_gpu || model_bytes <= memory / 2 {
+    if keep_mapped || !whole_on_gpu {
         return None;
     }
+    if let Some(memory) = memory.filter(|&m| model_bytes > m / 2) {
+        return Some(format!(
+            "reading the model ({}) into memory instead of mapping its file: it goes to the \
+             GPUs whole and is more than half of the {} of memory this process may use, where \
+             a mapped file is read twice and copied to the GPUs a page at a time (--mmap keeps \
+             it mapped)",
+            gib(model_bytes),
+            gib(memory)
+        ));
+    }
+    let network = network?;
     Some(format!(
         "reading the model ({}) into memory instead of mapping its file: it goes to the GPUs \
-         whole and is more than half of the {} of memory this process may use, where a \
-         mapped file is read twice and copied to the GPUs a page at a time (--mmap keeps it \
-         mapped)",
-        gib(model_bytes),
-        gib(memory)
+         whole and its file is on {network}, where a mapped file is copied to the GPUs a page \
+         at a time as it is read, and servers mapping one file at once took up to half an hour \
+         to load (--mmap keeps it mapped)",
+        gib(model_bytes)
     ))
 }
 
@@ -3826,18 +3847,40 @@ mod plan_offload_tests {
 
     /// A model that goes to the GPUs whole is read in when its files are more
     /// than half the memory (LUMI-G's 480B: 270 GiB of a 480 GiB job), and
-    /// stays mapped below (the 235B's 132 GiB), when part of it stays on the
-    /// CPU, when the memory is not known, or with `--mmap`.
+    /// on a local disk stays mapped below (the 235B's 132 GiB), when part of
+    /// it stays on the CPU, when the memory is not known, or with `--mmap`.
     #[test]
     fn a_model_on_the_gpus_larger_than_half_the_memory_is_read_in() {
         let job = Some(480 * GIB);
-        let why = read_in_whole_on_gpu(270 * GIB, true, job, false).expect("read in");
+        let why = read_in_whole_on_gpu(270 * GIB, true, job, None, false).expect("read in");
         assert!(why.contains("270.00 GiB") && why.contains("--mmap keeps"), "{why}");
-        assert_eq!(read_in_whole_on_gpu(132 * GIB, true, job, false), None);
-        assert_eq!(read_in_whole_on_gpu(240 * GIB, true, job, false), None);
-        assert_eq!(read_in_whole_on_gpu(270 * GIB, false, job, false), None);
-        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, None, false), None);
-        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, job, true), None);
+        assert!(why.contains("half of the 480.00 GiB"), "{why}");
+        assert_eq!(read_in_whole_on_gpu(132 * GIB, true, job, None, false), None);
+        assert_eq!(read_in_whole_on_gpu(240 * GIB, true, job, None, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, false, job, None, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, None, None, false), None);
+        assert_eq!(read_in_whole_on_gpu(270 * GIB, true, job, None, true), None);
+    }
+
+    /// On a network file system any model that goes to the GPUs whole is
+    /// read in, whatever its size and whether or not the memory is known
+    /// (c02 on LUMI-G: servers mapping the 235B and gpt-oss-120b from Lustre
+    /// at once took up to half an hour); not one that leaves part of itself
+    /// on the CPU, and not with `--mmap`. Half the memory still says why
+    /// first.
+    #[test]
+    fn a_model_on_the_gpus_from_a_network_file_system_is_read_in() {
+        let job = Some(480 * GIB);
+        let lustre = Some("Lustre");
+        for size in [GIB, 59 * GIB, 132 * GIB, 233 * GIB] {
+            let why = read_in_whole_on_gpu(size, true, job, lustre, false).expect("read in");
+            assert!(why.contains("on Lustre") && why.contains("--mmap keeps"), "{why}");
+            assert!(read_in_whole_on_gpu(size, true, None, lustre, false).is_some());
+            assert_eq!(read_in_whole_on_gpu(size, false, job, lustre, false), None);
+            assert_eq!(read_in_whole_on_gpu(size, true, job, lustre, true), None);
+        }
+        let why = read_in_whole_on_gpu(270 * GIB, true, job, lustre, false).expect("read in");
+        assert!(why.contains("more than half"), "{why}");
     }
 
     /// All layers is `-1`, or one more than the model's blocks (the output
