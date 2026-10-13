@@ -7,8 +7,9 @@
 > Leonardo AI-Factory allocation, whose arithmetic this one repeats:
 > [`../leonardo-allocation-plan.md`](../leonardo-allocation-plan.md).
 >
-> Updated 05-10-2026. Last measured consumption: **0.0%** (12-09-2026) —
-> `tools/lumi/status.sh` recounts it from `sacct`.
+> Updated 13-10-2026. Last measured consumption: **532.6 node-h, 11.8%**
+> (12-10-2026) — `tools/lumi/status.sh` and `campaign.py budget` recount it
+> from `sacct`.
 
 ## The number that governs everything
 
@@ -37,6 +38,15 @@ the six nodes reach October's figure around 13-10. So the burst stops there:
 the queued links that would carry superseded engines (the unlabelled chain,
 `next3`, `next4`'s soaks) into the week are cancelled, and the queue goes back
 to one background chain plus a node for each new engine build.
+
+12-10-2026: 532.6 node-h spent, 225.9 behind the straight line, 145.4 billed
+in the last 24 hours. The six nodes' last job was due to end at about 10:00
+on 13-10 (about 586 node-h in all by then), a day the machine is left idle
+on purpose, and nothing was queued after it: no background chain for the rest
+of October, whose 750 leave about 164 node-h for 13-31 October, less than a
+node a day. A new engine build gets a node for its before/after round; the
+hours the straight line counts as behind stay in the allocation for the peaks
+of November to January.
 
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
@@ -209,7 +219,9 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    model in by itself when it goes to the GPUs whole and its files are more
    than half the memory the process may use (`fit::read_in_whole_on_gpu`);
    `--mmap` keeps it mapped. The `moe-` groups of c02 that failed loading can
-   be planned again on that engine.
+   be planned again on that engine: `r-next4` is that round (below), and the
+   235B, still mapped by the rule, took 19-32 minutes to load in five of its
+   twelve points.
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 
@@ -493,6 +505,93 @@ In order:
    (5).
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
+
+### The first rounds on the October engines (10 to 13-10-2026)
+
+`c01` on `next6` (the engine of 0.7.60, prompts read in the step) and `c02` on
+`next4` (the engine that reads large models in), all Q4_K_M unless named.
+
+**One GCD, f16 KV cache** (`c01 dense-one-gcd`), tokens/s at 1, 4, 16 and 32
+requests at once:
+
+| model | 1 | 4 | 16 | 32 | 32 over 1 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-4B | 149 | 322 | 921 | 1242 | 8.3× |
+| Qwen3-8B | 114 | 229 | 705 | 958 | 8.4× |
+| Qwen3-14B | 75.3 | 153 | 470 | 667 | 8.9× |
+| Mistral-Small-24B | 53.3 | 109 | 361 | 528 | 9.9× |
+| Qwen3-32B | 38 | 76 | 267 | 378 | 9.9× |
+| Qwen3.6-27B | 38.3 | 68 | 161 | 201 | 5.2× |
+
+The hybrid 27B (three layers in four recurrent) gains a little over half as
+much from batching as the attention-only models, and reads a prompt at half
+the 32B's rate (134 against 296 tokens/s alone; the first token after 600 ms
+at 32 against 113). On the 35B-A3B, also hybrid, `c07` found llama-server no
+faster (229 against EuLLM's 246 with sixteen at once), so the limit is likely
+llama.cpp's recurrent layers on gfx90a, not the scheduler; a `c07` point on
+the 27B would say.
+
+**A quantized KV cache costs speed on gfx90a and buys only memory**, the
+November anomaly, now on every model. At 32 requests q8_0 is 4-11% slower than
+f16 and q4_0 12-23% (on Qwen3.6-27B, whose cache is a quarter of its layers,
+1-3%); alone, 3-13%. Qwen3-8B at 32 requests holds 23.2 GiB with f16, 15.2
+with q8_0, 13.0 with q4_0. With 16,000 tokens of context the cost grows:
+decoding with q8_0 is 9-10% slower on Qwen3-14B and the 35B-A3B, 30-33% on
+Qwen3-8B and Qwen3-32B.
+
+**Long contexts** (`c01 long-context`, one GCD, one request). Prompt reading,
+tokens/s with 8,000 and 16,000 tokens, and the first token:
+
+| model | 8,000 | 16,000 | first token |
+|---|---:|---:|---:|
+| Qwen3-8B | 2202 | 1937 | 4.4 / 10.1 s |
+| Qwen3-14B | 1400 | 1156 | 7.0 / 16.8 s |
+| Qwen3-32B | 688 | 599 | 14.2 / 32.5 s |
+| Qwen3.6-35B-A3B | 2565 | 2534 | 3.0 / 6.1 s |
+
+After 16,000 tokens the dense models decode 21-34% slower than with no
+context, the 35B-A3B, whose attention is a quarter of its layers, 8%. With
+four such prompts at once the median first token comes after 2.6 times one
+prompt's (Qwen3-14B, 44.0 s at 16,000): the prompts are read one after
+another, oldest first, so the first answer starts after one prompt and not
+after four.
+
+**The 235B on a node** (`c02`, Qwen3-235B-A22B), tokens/s at 1, 8 and 32
+requests per server:
+
+| | 1 | 8 | 32 |
+|---|---:|---:|---:|
+| Q4_K_M, one server on 4 GCDs | 29 | 63.7 | 98.4 |
+| Q4_K_M, one server on 8 GCDs | 33 | 64.5 | 101 |
+| Q4_K_M, two servers of 4 GCDs | 70.1 | 91.1 (cv 79%) | 202 |
+| Q8_0, one server on 8 GCDs | 28.2 | 42.7 | 85.4 |
+
+Four more GCDs under one server add nothing (layer split, as on 12-09); the
+same four as a second server double the node (2.05× at 32). gpt-oss-120b the
+same way: 298 tokens/s on two GCDs at 32, 1181 as four servers of two GCDs on
+the node (3.96×). That is item 4's rule, the smallest split that fits and
+then replicas, on the models it is for. Eighteen hours of the 235B as two
+servers under the graded workload (`moe-235b-soak-x2`): 74.4 tokens/s, 63,431
+requests, accuracy 0.95-0.99.
+
+The loads are the open item. Five of the twelve 235B points took 1161-1901 s
+to load, the other seven 32-102 s, and four replicas of gpt-oss-120b 761 s
+once against 57-61 s; 132 and 233 GiB are under half the node's memory, so
+the engine maps them (item 8). All the slow ones but one are points where
+several servers mapped one file at once (the two 4-GCD points, 1901 s each,
+likely side by side; two replicas of 4 GCDs, twice of three; four of
+gpt-oss-120b, once of two), the other the 233 GiB Q8_0, alone on its node;
+c09's single-server loads of the 235B never did it. Whether the slow points
+overlapped is in their start times, the check before the rule changes; c09
+measured reading in at the cost of mapping on the 235B (108 against 110 s).
+
+**Q8_0 against Q4_K_M** (`c02 quant-one-gcd`): one request is 18% slower on
+Qwen3-8B, 24% on 14B, 28% on 32B, and level on Qwen3-30B-A3B (122 against
+121; 7% slower at 32). The batched rows are not compared: `next4` reads
+prompts between steps, `next6` in them. Under the graded workload
+gpt-oss-20b gave the same answer text to a repeated question 23-38% of the
+time, Qwen3 80-93%, at the same accuracy (0.93-0.98): its answers vary with
+sampling, its grades do not.
 
 ## Lines not to cross
 
