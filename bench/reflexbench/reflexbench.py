@@ -111,7 +111,14 @@ def run(method, dataset, details):
                         "method": method.name,
                         "id": item.id,
                         "needed": item.needed,
-                        "needed_ranks": [ranking.order.index(n) + 1 for n in item.needed],
+                        # rb_metrics.ranks, not order.index: a refused request
+                        # ranks nothing (order == []), and .index raised
+                        # ValueError, aborting a --details run over a set with
+                        # one unreadable request while the metrics scored it
+                        # fine. Refused tools count as the last offered here,
+                        # exactly as in the report.
+                        "needed_ranks": rb_metrics.ranks(
+                            ranking.order, item.needed, len(item.candidates)),
                         "candidates": len(item.candidates),
                         "top": ranking.order[:20],
                         "refused": ranking.refused,
