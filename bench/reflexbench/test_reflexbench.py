@@ -515,6 +515,50 @@ class BuildMethodsTest(unittest.TestCase):
             reflexbench.build_methods(self.args(methods="nope"), self.dataset)
 
 
+class RunDetailsTest(unittest.TestCase):
+    def test_a_refused_request_writes_its_ranks_instead_of_crashing(self):
+        """order.index raised ValueError on a refused request (order == []),
+        aborting a --details run over a set with one unreadable request --
+        the metrics scored the same ranking fine. The row keeps the metrics'
+        reading: a refused tool counts as the last of the offered."""
+        catalog = tools("a", "b", "c", "d")
+        item = rb_data.Item("m_0", "x" * 10759, catalog, ["c"])
+        dataset = rb_data.Dataset("bfcl-live-multiple", [item], False)
+
+        class Refused:
+            name = "reflex-b"
+            abstain = True
+
+            def rank(self, it):
+                return rb_methods.Ranking([], 0.0, server={"questions": 0}, refused=True)
+
+        buf = io.StringIO()
+        rankings = reflexbench.run(Refused(), dataset, buf)
+        self.assertEqual(len(rankings), 1)
+        row = json.loads(buf.getvalue().strip())
+        self.assertTrue(row["refused"])
+        self.assertEqual(row["needed_ranks"], [4])
+        self.assertEqual(row["top"], [])
+
+    def test_a_ranked_request_writes_positions(self):
+        catalog = tools("a", "b", "c", "d")
+        item = rb_data.Item("1", "r1", catalog, ["c", "a"])
+        dataset = rb_data.Dataset("s", [item], False)
+
+        class Fixed:
+            name = "bm25"
+            abstain = False
+
+            def rank(self, it):
+                return rb_methods.Ranking(["b", "c", "a", "d"], 5.0)
+
+        buf = io.StringIO()
+        reflexbench.run(Fixed(), dataset, buf)
+        row = json.loads(buf.getvalue().strip())
+        self.assertFalse(row["refused"])
+        self.assertEqual(row["needed_ranks"], [2, 3])
+
+
 class TableTest(unittest.TestCase):
     def test_every_row_has_every_column(self):
         full = rb_metrics.summarize(
