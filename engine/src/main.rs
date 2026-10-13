@@ -304,8 +304,10 @@ struct RuntimeOpts {
     /// Keep the model file mapped where --moe-cache would read it into
     /// memory to pin its experts, or where a model that goes to the GPUs whole
     /// is more than half the memory this process may use (the RAM, or a Slurm
-    /// job's --mem), which is otherwise read in: mapped, such a model did not
-    /// load in an hour on LUMI-G, read in it loaded in 3 to 4 minutes.
+    /// job's --mem) or is on a network file system (Lustre, NFS, GPFS...),
+    /// which is otherwise read in: mapped, such a model did not load in an
+    /// hour on LUMI-G, read in it loaded in 3 to 4 minutes; servers mapping
+    /// one smaller model from Lustre at once took up to half an hour.
     #[arg(long, conflicts_with = "no_mmap")]
     mmap: bool,
 
@@ -3188,7 +3190,8 @@ async fn cmd_run(
         api_mmproj = mmproj.clone();
 
         // A model that goes to the GPUs whole and is more than half the
-        // memory is read in: mapped, it does not load (`fit::read_in_whole_on_gpu`).
+        // memory, or on a network file system, is read in: mapped, it loads
+        // slowly or not at all (`fit::read_in_whole_on_gpu`).
         if !no_mmap {
             let whole_on_gpu = fit::vram_bytes().is_some_and(|(_, total)| total > 0)
                 && fit::every_layer_on_gpu(
@@ -3202,6 +3205,7 @@ async fn cmd_run(
                 fit::model_file_bytes(&gguf_path),
                 whole_on_gpu,
                 readahead::memory_for_cache(),
+                readahead::network_file_system(&gguf_path),
                 mmap,
             ) {
                 println!("[EULLM] {why}.");

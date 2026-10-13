@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Changed
+- **A model that goes to the GPUs whole is read into memory, not mapped, when its file is on a network file system** (Lustre, NFS, GPFS, BeeGFS, CephFS, SMB, 9p), whatever its size; until now only one larger than half the memory was. Mapped, the file is copied to the GPUs a page at a time as it is read, and on Lustre servers that map one file at once read it far slower than one alone. On LUMI-G two servers of Qwen3-235B Q4_K_M (132 GiB) starting together took 11 to 32 minutes to load, and once failed after an hour; four servers of gpt-oss-120b (59 GiB) failed after an hour, and took 13 minutes on the next try; one server of the 233 GiB Q8_0 failed after an hour too, and took 19 minutes on the next. In the same job the 480B and the 671B, already read in, loaded in 91 to 284 s. For one server alone reading in costs little either way: 108 s against 110 mapped for the 132 GiB model, 51 against 46 for a 29 GiB one. Models on a local disk stay mapped, as before. `--mmap` keeps the file mapped anyway; the log says when the model is read in, and why.
+
 ## 0.7.70 — 2026-10-12
 
 ### Performance
