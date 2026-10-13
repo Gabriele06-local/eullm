@@ -42,7 +42,10 @@ SCRIPT="$REPO_ROOT/forge/scripts/distill.py"
 
 # No --resume-from: distill.py reads output_dir from the YAML it already has to
 # load, and picks the highest step among the checkpoints it finds.
-CMD=(python "$SCRIPT"
+# python3, not bare python: stock systems and minimal images have only
+# python3 (no python-is-python3), while every venv has python3 too -- the
+# same convention as quantize_to_gguf.sh and rag_enterprise_batch.sh.
+CMD=(python3 "$SCRIPT"
      --config "$CONFIG"
      --dataset-dir "$DATA_DIR")
 
