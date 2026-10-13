@@ -63,7 +63,12 @@ class JudgeReward:
         for _ in range(2):
             try:
                 raw = _chat(self.url, prompt, self.max_tokens, self.timeout)
-            except (urllib.error.URLError, OSError, KeyError, ValueError):
+            # A malformed 200 is tried again, not crashed on: empty choices
+            # on slot exhaustion or a restart, null choices/message on a
+            # version or tool-call mismatch -- IndexError and TypeError, next
+            # to the KeyError/ValueError of a missing content or bad JSON.
+            except (urllib.error.URLError, OSError, KeyError, ValueError,
+                    IndexError, TypeError):
                 continue
             label = ReferenceGrader.parse(raw).label
             if label in GRADE_SCORES:

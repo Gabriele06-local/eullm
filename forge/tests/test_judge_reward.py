@@ -85,6 +85,40 @@ def test_an_unreachable_judge_leaves_the_answer_unscored():
     assert reward.unscored == 1
 
 
+@pytest.mark.parametrize("body", [
+    {"choices": []},                        # slot exhaustion, restart, proxy strip
+    {"choices": None},                      # version mismatch
+    {"choices": [{"message": None}]},       # tool-call shape mismatch
+])
+def test_a_malformed_200_is_unscored_not_a_crash(body):
+    """Empty or null choices raised IndexError/TypeError past the except that
+    catches the other malformed replies, aborting the whole GRPO step instead
+    of counting one unscored completion."""
+    seen = []
+    data = json.dumps(body).encode()
+
+    class H(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", 0))
+            seen.append(json.loads(self.rfile.read(length)))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *a):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        reward = JudgeReward(f"http://127.0.0.1:{srv.server_address[1]}")
+        assert reward(["x"], ["contenuto"], ["q"], ["r"], [""]) == [None]
+        assert reward.unscored == 1 and len(seen) == 2
+    finally:
+        srv.shutdown()
+
+
 def test_grpo_train_refuses_judged_prompts_without_a_judge(tmp_path):
     import importlib.util
     from pathlib import Path
