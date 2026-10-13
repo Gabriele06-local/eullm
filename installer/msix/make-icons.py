@@ -1,41 +1,68 @@
-# Regenerates installer/msix/Assets: python3 installer/msix/make-icons.py installer/msix/Assets
-# Needs Pillow (a local tool, not a build dependency: the PNGs are committed).
-# Draws the EuLLM app icon at 1024 px and writes the MSIX asset sizes.
-import math, sys, os
-from PIL import Image, ImageDraw
-NAVY=(26,35,50,255); YELLOW=(255,204,0,255); BLUE=(77,143,204,255); WHITE=(255,255,255,255)
-N=1024
-def star(d,cx,cy,r,col):
-    pts=[]
-    for i in range(10):
-        a=-math.pi/2+i*math.pi/5; rr=r if i%2==0 else r*0.42
-        pts.append((cx+rr*math.cos(a),cy+rr*math.sin(a)))
-    d.polygon(pts,fill=col)
-def icon(bg=True):
-    im=Image.new('RGBA',(N,N),(0,0,0,0)); d=ImageDraw.Draw(im)
-    if bg: d.rectangle((0,0,N-1,N-1),fill=NAVY)
-    c=N/2
-    for i in range(12):
-        a=-math.pi/2+i*2*math.pi/12
-        star(d,c+360*math.cos(a),c+360*math.sin(a),62,YELLOW)
-    hexr=210
-    hexpts=[(c+hexr*math.cos(math.pi/6+k*math.pi/3),c+hexr*math.sin(math.pi/6+k*math.pi/3)) for k in range(6)]
-    d.line(hexpts+[hexpts[0]],fill=WHITE if bg else BLUE,width=34,joint='curve')
-    nodes=[(c+130*math.cos(-math.pi/2+k*math.pi/3),c+130*math.sin(-math.pi/2+k*math.pi/3)) for k in range(6)]
-    for x,y in nodes:
-        d.line((c,c,x,y),fill=BLUE,width=26)
-    for x,y in nodes:
-        d.ellipse((x-34,y-34,x+34,y+34),fill=BLUE)
-    d.ellipse((c-58,c-58,c+58,c+58),fill=YELLOW)
-    return im
-out=sys.argv[1]; os.makedirs(out,exist_ok=True)
-big=icon()
-def save(img,name,size): img.resize(size,Image.LANCZOS).save(os.path.join(out,name),optimize=True)
-for s in (44,150): save(big,f'Square{s}x{s}Logo.png',(s,s))
-save(big,'StoreLogo.png',(50,50))
-# Taskbar / terminal size without the plate, as Windows expects for unplated targets.
-for s in (16,24,32,48,256):
-    save(icon(bg=False),f'Square44x44Logo.targetsize-{s}_altform-unplated.png',(s,s))
-wide=Image.new('RGBA',(310,150),NAVY); small=big.resize((130,130),Image.LANCZOS); wide.paste(small,(90,10),small)
-wide.save(os.path.join(out,'Wide310x150Logo.png'),optimize=True)
+# Regenerates installer/msix/Assets and installer/eullm.ico from the logo:
+#   python3 installer/msix/make-icons.py installer/msix/Assets
+# Needs Pillow (a local tool, not a build dependency: the images are committed).
+# The icon is the logo's mark (the "E" ribbons), cut out of
+# branding/eullm-logo-source.png as its first run of non-empty columns, so a
+# new logo there is all it takes to redraw every icon.
+import os
+import sys
 
+from PIL import Image
+
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+SOURCE = os.path.join(ROOT, "branding", "eullm-logo-source.png")
+WHITE = (255, 255, 255, 255)
+
+
+def mark(logo):
+    """The logo's mark: its leftmost run of columns that hold any ink."""
+    alpha = logo.split()[3]
+    ink = [any(alpha.getpixel((x, y)) > 20 for y in range(logo.height)) for x in range(logo.width)]
+    start = ink.index(True)
+    end = start
+    while end < len(ink) and ink[end]:
+        end += 1
+    cut = logo.crop((start, 0, end, logo.height))
+    return cut.crop(cut.getbbox())
+
+
+def square(img, size, fill, bg):
+    """`img` centred on a size x size canvas, its longer side `fill` of it."""
+    canvas = Image.new("RGBA", (size, size), bg)
+    scale = fill * size / max(img.size)
+    small = img.resize((max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+                       Image.LANCZOS)
+    canvas.alpha_composite(small, ((size - small.width) // 2, (size - small.height) // 2))
+    return canvas
+
+
+def main(out):
+    os.makedirs(out, exist_ok=True)
+    logo = Image.open(SOURCE).convert("RGBA")
+    logo = logo.crop(logo.getbbox())
+    m = mark(logo)
+
+    def save(img, name):
+        img.save(os.path.join(out, name), optimize=True)
+
+    # Plated tiles: the mark on white, as the logo itself is drawn.
+    for s in (44, 150):
+        save(square(m, s, 0.72, WHITE), f"Square{s}x{s}Logo.png")
+    save(square(m, 50, 0.72, WHITE), "StoreLogo.png")
+    # Taskbar / terminal sizes without the plate, as Windows expects for unplated targets.
+    for s in (16, 24, 32, 48, 256):
+        save(square(m, s, 0.92, (0, 0, 0, 0)), f"Square44x44Logo.targetsize-{s}_altform-unplated.png")
+    # The wide tile carries the whole logo.
+    wide = Image.new("RGBA", (310, 150), WHITE)
+    scale = min(280 / logo.width, 120 / logo.height)
+    small = logo.resize((round(logo.width * scale), round(logo.height * scale)), Image.LANCZOS)
+    wide.alpha_composite(small, ((310 - small.width) // 2, (150 - small.height) // 2))
+    save(wide, "Wide310x150Logo.png")
+    # The Inno Setup installer's icon (installer/eullm.iss: SetupIconFile, shortcuts).
+    square(m, 256, 0.92, (0, 0, 0, 0)).save(
+        os.path.join(ROOT, "installer", "eullm.ico"),
+        sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+
+
+if __name__ == "__main__":
+    main(sys.argv[1])
