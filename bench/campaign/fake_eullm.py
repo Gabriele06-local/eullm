@@ -223,12 +223,23 @@ def finetune(argv):
     return 0
 
 
+# What `eullm list` prints with two models installed (engine/src/main.rs,
+# cmd_list): the runner reads the table, not the words around it.
+LISTING = """Models in /tmp/fake-store [EULLM_MODELS_DIR]
+
+NAME                         SIZE   VRAM STATUS           DESCRIPTION
+qwen3-8b                   4.7 GB    6GB  ready            Qwen3 8B
+qwen3-4b                   2.3 GB    4GB  ready            Qwen3 4B
+
+Run one with: eullm run <NAME>   (e.g. eullm run qwen3-8b)"""
+
+
 def main(argv):
     if "--version" in argv:
         print("eullm 0.0.0-fake (test)")
         return 0
     if argv and argv[0] == "list":
-        print("qwen3-8b\nqwen3-4b")
+        print(LISTING)
         return 0
     if argv and argv[0] == "finetune":
         return finetune(argv[1:])

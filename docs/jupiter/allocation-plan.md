@@ -117,6 +117,16 @@ unlike Ubuntu's, does not make it so by default. `build_engine.sh` links the
 `eullm` binary alone with `-no-pie` (`cargo rustc ... -- -C link-arg=-no-pie`),
 as the release job for x64 CUDA and Leonardo do.
 
+The first job (2326280, 14-10-2026, 2.5 minutes of one node) blocked all 22
+points: none of the three models had been pulled. `setup.sh` and the runner
+took a model for installed when its id was any word `eullm list` printed,
+and with an empty store the command prints the EU catalog, where all three
+are; both now read only the table of installed models. The same job showed
+that **compute nodes do not reach the internet** (huggingface.co: no answer)
+and have no `git`: models and workload sets are fetched on a login node, and
+`submit.sh` hands the job the checkout's commit. Its four GPUs: GH200 120GB,
+97,871 MiB each, 680 W power limit, driver 610.57.04.
+
 ## Calendar, from the start date
 
 | weeks | work | GPU-h (cumulative) |

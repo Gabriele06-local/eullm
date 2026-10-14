@@ -17,6 +17,11 @@ shift
 : "${EULLM_BIN:?set EULLM_BIN to the CUDA eullm binary}"
 export EULLM_BIN EULLM_REPO
 export EULLM_ENGINE_LABEL="$LABEL"
+# The checkout's commit, read here: compute nodes have no git.
+EULLM_BENCH_REV=$(git -C "$EULLM_REPO" rev-parse --short HEAD)
+[ -z "$(git -C "$EULLM_REPO" status --porcelain --untracked-files=no)" ] ||
+    EULLM_BENCH_REV="$EULLM_BENCH_REV-dirty"
+export EULLM_BENCH_REV
 mkdir -p "$CAMPAIGN_DIR/logs"
 $CAMPAIGN status --queue "$CAMPAIGN_DIR" 2>/dev/null | head -3 || true
 jid=$(sbatch --parsable --account "$SBATCH_ACCOUNT" \

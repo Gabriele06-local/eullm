@@ -22,13 +22,14 @@ GPUS="${SLURM_GPUS_ON_NODE:-4}"
 
 echo "=== eullm on GH200: job ${SLURM_JOB_ID:-local} on $(hostname), $(date -Is) ==="
 printf '  %-12s %s\n' gpus "$GPUS" engine "$("$EULLM_BIN" --version 2>&1 | head -1)" \
-    label "${EULLM_ENGINE_LABEL:-(none)}" repo "$(git -C "$EULLM_REPO" rev-parse --short HEAD)" \
+    label "${EULLM_ENGINE_LABEL:-(none)}" repo "${EULLM_BENCH_REV:-?}" \
     llama-server "${LLAMA_SERVER_BIN:-none}" queue "$CAMPAIGN_DIR"
 nvidia-smi --query-gpu=index,name,memory.total,power.limit,driver_version --format=csv,noheader |
     sed 's/^/  /'
-# Whether a compute node reaches the internet: for what a later job may fetch.
-curl -s -o /dev/null -m 10 -w '  huggingface.co from a compute node: HTTP %{http_code}\n' \
-    https://huggingface.co || echo "  huggingface.co from a compute node: unreachable"
+# Whether a compute node reaches the internet: on 14-10-2026 it did not.
+HF=$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://huggingface.co || true)
+[ "${HF:-000}" = 000 ] && HF="unreachable" || HF="HTTP $HF"
+echo "  huggingface.co from a compute node: $HF"
 echo
 
 echo "=== 1. the c07 points ==="

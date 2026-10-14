@@ -226,6 +226,34 @@ def test_pulls_name_the_hf_ref_or_the_catalog_id(tmp_path, engine, capsys):
     assert capsys.readouterr().out.split() == ["qwen3-14b", "hf.co/Qwen/Qwen3-8B-GGUF:Q8_0"]
 
 
+def test_an_empty_store_lists_the_catalog_and_none_of_it_is_installed():
+    # What `eullm list` printed on JUPITER before anything was pulled: the
+    # catalog's ids are not installed models.
+    listing = """No models installed in /e/project1/p/u/eullm-models [EULLM_MODELS_DIR].
+
+Available models in EU catalog:
+  qwen3.6-27b                17GB  Qwen3.6 27B
+  qwen3-32b                  20GB  Qwen3 32B
+
+Pull with: eullm pull <model-name>
+Or run a local GGUF: eullm run ./path/to/model.gguf"""
+    assert campaign.installed_models(listing) == set()
+
+
+def test_a_model_whose_file_is_missing_is_not_installed():
+    listing = """Models in /m [default]
+
+NAME                         SIZE   VRAM STATUS           DESCRIPTION
+qwen3-8b                   4.7 GB    6GB  ready            Qwen3 8B
+qwen3-32b                 19.8 GB   20GB  ready (file missing) Qwen3 32B
+
+Run one with: eullm run <NAME>   (e.g. eullm run qwen3-8b)
+
+Not listed above — weights on disk, manifest unusable:
+  qwen3-14b                manifest.json: expected value"""
+    assert campaign.installed_models(listing) == {"qwen3-8b"}
+
+
 def test_a_new_round_measures_everything_again(tmp_path, capsys):
     spec = {"campaign": "c", "groups": [{"name": "g", "axes": {"model": ["a", "b"]}}]}
     path = tmp_path / "s.json"
