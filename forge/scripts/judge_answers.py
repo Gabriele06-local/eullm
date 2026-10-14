@@ -33,7 +33,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import Grade, ReferenceGrader  # noqa: E402
-from eullm_forge.eval.norm_exam import rubric_v2  # noqa: E402
+from eullm_forge.eval.norm_exam import rubric_v2, rubric_v3  # noqa: E402
 
 DEFAULT_MODEL = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 CSV_HEADER = ["timestamp", "label", "items", "correct", "partial", "wrong",
@@ -126,10 +126,11 @@ def grade_file(path: Path, grader: ReferenceGrader, *, batch_size: int = 1,
     the held-out exam names the article it asks about.
     """
     rows = [json.loads(line) for line in path.open(encoding="utf-8") if line.strip()]
-    if rubric == "v2":
+    if rubric in ("v2", "v3"):
+        version = rubric_v2 if rubric == "v2" else rubric_v3
         for r in rows:
-            r["rubric"] = rubric_v2(str(r.get("id", "")), r.get("rubric", ""),
-                                    r.get("reference", ""))
+            r["rubric"] = version(str(r.get("id", "")), r.get("rubric", ""),
+                                  r.get("reference", ""))
     prompts = [grader.prompt(r["question"], r.get("reference", ""), r["answer"],
                              r.get("rubric", "")) for r in rows]
     batch = getattr(grader.chat_fn, "batch", None)
@@ -229,9 +230,10 @@ def main() -> int:
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--quiet", action="store_true",
                     help="totals only — for the held-out exam (see legal_eval.py)")
-    ap.add_argument("--rubric", choices=["v1", "v2"], default="v1",
+    ap.add_argument("--rubric", choices=["v1", "v2", "v3"], default="v1",
                     help="v2: grade with the rubrics of 2026-10-03 (eullm_forge.eval.norm_exam."
-                         "rubric_v2) instead of the ones written into the answers")
+                         "rubric_v2) instead of the ones written into the answers; v3: v2 with "
+                         "the three-outcome rubric of 2026-10-14 for articles that do not exist")
     ap.add_argument("--graded-dir", type=Path,
                     help="write the graded files (and the CSV row) here instead of beside the "
                          "answers, so grades under another rubric do not overwrite these")

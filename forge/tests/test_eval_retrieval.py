@@ -251,6 +251,23 @@ def test_grade_file_writes_the_graded_copy(tmp_path):
     assert line["grade"] == "partial" and line["why"].startswith("Grade: partial")
 
 
+def test_grade_file_under_v3_puts_the_three_outcome_rubric_in_the_prompt(tmp_path):
+    from eullm_forge.eval.norm_exam import NONEXISTENT_RUBRIC
+    src = tmp_path / "answers-x.jsonl"
+    src.write_text(json.dumps({"id": "norm-inesistente-codice_civile-3434",
+                               "question": "Che cosa prevede l'art. 3434 del codice civile?",
+                               "answer": "Nei testi forniti non è presente l'art. 3434.",
+                               "reference": "Non esiste l'art. 3434 del codice civile.",
+                               "rubric": "Corretto solo se dice che l'articolo non esiste."})
+                   + "\n")
+    seen = []
+    judge_answers.grade_file(src, ReferenceGrader(lambda p: seen.append(p) or "Grade: correct"),
+                             rubric="v3", out_dir=tmp_path / "v3")
+    assert NONEXISTENT_RUBRIC in seen[0] and "Corretto solo se dice" not in seen[0]
+    line = json.loads((tmp_path / "v3" / "answers-x.graded.jsonl").read_text())
+    assert line["grade"] == "correct" and line["rubric"] == NONEXISTENT_RUBRIC
+
+
 @pytest.mark.parametrize("question, code", [
     ("Cosa prevede l'art. 29 del codice del processo amministrativo?",
      "codice_processo_amministrativo"),
