@@ -214,6 +214,47 @@ and 2326571), so deliverable 9 has to come from our own `nvidia-smi` power
 sampling in every job. Both jobs started three minutes after submission;
 `AllocTRES` bills a node as `billing=288` (its 288 cores).
 
+**The answer (job 2326997, `sbatch_load.slurm`, Qwen3.6-27B, GPU 0, one
+load at a time, seconds from process start to the first answer):**
+
+| case | how llama.cpp reads the file | s |
+|---|---|---:|
+| EuLLM, default (first on the node) | read in (the rule) | 54 |
+| EuLLM `--mmap` | mapped | 10 |
+| llama-server, default | mapped | 4 |
+| llama-server `--load-mode none` | read in | 48 |
+
+Reading in costs the same in either server, 48-54 s against 4-10 mapped:
+the slow part is llama.cpp's read-in path on GPFS (synchronous 1 MiB reads
+from one thread), not EuLLM, and EuLLM chose it by the network-file-system
+rule. The rule was right for Lustre and is wrong here. Still open, before
+the rule is changed in `engine/`: the rule exists because on Lustre several
+servers *mapping one file at once* were the slow case, so the same is
+measured on GPFS (`EULLM_LOAD_CASES=together`: four servers of the 35B-A3B,
+one per GPU, mapped first on a file the node has not read, then read in).
+
+## What the GPU probe found (job 2326998, 14-10-2026)
+
+`probe_env.sh` on a booster node (`jpbo-016-09`), as a batch job:
+
+* 288 cores (four Neoverse-V2 of 72), four GH200 of 97,871 MiB (95.0 GiB to
+  torch), 680 W each, all four joined by NVLink (NV6 between every pair).
+  GPU *i* sits by cores 72*i*-72*i*+71 and NUMA node *i* (its HBM is NUMA
+  node 4, 12, 20, 28): the two runs of a node pin to GPUs 0-1 with cores
+  0-143 and GPUs 2-3 with cores 144-287.
+* `booster`: whole nodes (`OverSubscribe=EXCLUSIVE`), default time 1 h, no
+  maximum, 5,884 nodes (5,257 allocated and 27 idle when it ran).
+* `module load PyTorch` alone works (Stages/2026, a Core package): Python
+  3.13.5, torch 2.9.1+cu128 built for sm_80/90/100/120,
+  `torch.cuda.is_available()` true with four devices, BF16 supported.
+  transformers, peft, accelerate, datasets and safetensors are not in it:
+  `forge/scripts/jupiter/setup_venv.sh` puts them in a venv on top of the
+  module (`--system-site-packages`, torch and numpy held at the module's
+  versions by a constraint), and `forge/scripts/jupiter/env.sh` loads both.
+* The teacher (30B-A3B, ~61 GiB in BF16) fits one GPU: two runs per node.
+* Compute nodes: no huggingface.co. Apptainer 1.5.4 is installed.
+* No `ConsumedEnergy` for any job in seven days.
+
 ### Where it stands (14-10-2026) and what is next
 
 On `$PROJECT/$USER`: the checkout, the engine `next10`
@@ -222,15 +263,15 @@ On `$PROJECT/$USER`: the checkout, the engine `next10`
 (`eullm-models/`), the queue with round `r-gh200` done (`campaign/`). Spent:
 about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
 
-1. EuLLM's load time on JUPITER (above): first, free, the existing server
-   logs of job 2326571 (whether the rule fired, and the time between
-   "Loading model" and "Allocating context"); then
-   `tools/jupiter/sbatch_load.slurm`, one node for 10-20 minutes.
-2. The GPU probe for Forge (`forge/scripts/jupiter/probe_env.sh` as a
-   15-minute batch job; it now loads the site's PyTorch module, without
-   which the system Python 3.9 has no torch), then the Forge venv on top of
-   the PyTorch module and week 1 of the calendar below.
-3. The DPA with JSC, before any personal data.
+1. EuLLM's load time: four servers loading at once on GPFS, mapped against
+   read in (`EULLM_LOAD_CASES=together`), then the change to
+   `fit::read_in_whole_on_gpu` in `engine/` (shared with LUMI's branch).
+2. The Forge venv (`setup_venv.sh`, login node), with the training
+   libraries matched to Leonardo's for the baseline, then week 1 of the
+   calendar below.
+3. The data JUPITER trains on: legislation, public benchmarks and the
+   ruling cards `export_clean_cards.py` lets out on Leonardo (no DPA, by
+   choice: no personal data here).
 
 ## Calendar, from the start date
 
@@ -245,12 +286,12 @@ about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
 Every week's runs are chains of short resumable jobs, as on Leonardo, until
 the placement probe says JUPITER rewards something else.
 
-## Job shape — to be fixed by the probe, not assumed
+## Job shape
 
-* **Unit of work: one run = 2 GPUs** (teacher, student). If nodes are
-  exclusive — likely on a JSC booster, to be confirmed — a job is one node
-  running **two runs side by side**, each pinned to its two GPUs and its two
-  Grace sockets' cores (`CUDA_VISIBLE_DEVICES`, `numactl`/`taskset`).
+* **Unit of work: one run = 2 GPUs** (teacher, student). Nodes are
+  exclusive (probe, 14-10-2026), so a job is one node running **two runs
+  side by side**: GPUs 0-1 with cores 0-143, GPUs 2-3 with cores 144-287
+  (`CUDA_VISIBLE_DEVICES`, `taskset`/`numactl`).
 * **Duration:** the shortest link the queue places quickly; Forge resumes
   from checkpoint, including the position in the data, so short links cost
   minutes.
