@@ -67,7 +67,13 @@ on the first day, and measure placement before committing to a job shape.
    Legislation (Normattiva, EUR-Lex: public domain) and public benchmarks
    are what JUPITER trains and evaluates on, which covers every throughput
    measurement (deliverables 1–5, 8): throughput does not depend on which
-   text is trained on. Case-law work stays on Leonardo.
+   text is trained on. Case-law work stays on Leonardo, with one way out:
+   the ruling cards, which hold the principles and not the case, after
+   `forge/scripts/export_clean_cards.py` has run on Leonardo — development
+   rulings, special-category and criminal appeals and any card still naming
+   a party, place or amount left out, and made-up references (numbers
+   50000–59999, which no real ruling has) in place of the real ones, with no
+   table back. Exams on real rulings stay off JUPITER too.
 3. **Environment probe**, `forge/scripts/jupiter/probe_env.sh`: aarch64,
    GPU count and memory, whether nodes are exclusive, how PyTorch is reached
    and whether its build has sm_90, transformers/peft/accelerate beside it,

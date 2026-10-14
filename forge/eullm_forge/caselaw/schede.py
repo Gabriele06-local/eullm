@@ -52,6 +52,18 @@ TASK = (
     "dice in una frase che cosa una risposta deve contenere per essere corretta.\n"
 )
 
+# What an appeal is about, read from OpenGA's OGGETTO_RICORSO, that puts a
+# ruling among the GDPR's special categories or criminal matters (art. 9 and
+# 10): antimafia measures, residence permits, health, minors and the like.
+# Such a ruling is never a teacher's privileged source (make_opd_prompts.py)
+# and its card never leaves the cluster that holds the rulings
+# (export_clean_cards.py).
+SENSITIVE_OGGETTO = (
+    r"antimafia|interditti|informativ[ae] prefettizi|soggiorno|cittadinanza|"
+    r"protezione internazionale|asilo|espulsion|rimpatri|sanit|salute|vaccin|disabil|"
+    r"invalidit|handicap|minor[ei]|adozion|stupefacent|penal|reato|condann|casellario|"
+    r"religio|culto|sindacal|orientamento sessuale|genetic|biometric")
+
 # What a cited provision looks like. Matched, not required: a norm in another
 # shape (an EU directive, a royal decree, "TUEL") is dropped from the card,
 # not the card refused -- the first version refused 458 of the first 3,100
