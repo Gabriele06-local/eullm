@@ -28,7 +28,9 @@ def _rec(code, num):
 def _known(mod):
     return mod.corpus_articles(NormIndex([
         _rec("codice_civile", 1453), _rec("codice_civile", 2043), _rec("codice_civile", 2969),
-        _rec("codice_procedura_civile", 360), _rec("codice_penale", 624)]))
+        _rec("codice_civile", 1443), _rec("codice_procedura_civile", 360),
+        _rec("codice_procedura_civile", 499), _rec("codice_penale", 624),
+        _rec("codice_procedura_penale", "420-quater"), _rec("costituzione", 3)]))
 
 
 def test_an_article_past_the_code_is_flagged_and_a_real_one_is_not():
@@ -58,6 +60,53 @@ def test_a_citation_whose_code_cannot_be_told_is_left_out():
     q = "Che cosa prevede l'art. 2043 del codice civile?"
     assert mod.invented("come l'art. 5 del d.lgs. 165/2001", q, _known(mod)) == []
     assert mod.invented("e l'art. 7 della legge n. 300/1970", q, _known(mod)) == []
+
+
+def test_a_code_in_a_source_list_belongs_to_the_citation_it_opens():
+    mod = _load()
+    known = _known(mod)
+    q = "Che cosa prevede l'art. 2043 del codice civile?"
+    assert mod.invented("art. 1443 s.s.; *Fonte: [Codice di procedura civile, art. 499]*",
+                        q, known) == []
+    assert mod.invented("[Codice civile, art. 2969.txt; Codice penale, art. 624.txt]",
+                        q, known) == []
+    assert mod.invented("art. 1453] e [artt. 624 Codice Penale]", q, known) == []
+    assert mod.invented("[Codice penale, art. 2969.txt]", q, known) == \
+        ["codice_penale art. 2969"]
+
+
+def test_costituzione_in_mora_is_not_the_constitution():
+    mod = _load()
+    known = _known(mod)
+    q = "Che cosa prevede l'art. 2043 del codice civile?"
+    assert mod.invented("art. 1453 - Costituzione in mora.txt", q, known) == []
+    assert mod.invented("gli articoli 1443 e 1453 in caso di mancata costituzione entro i termini",
+                        q, known) == []
+    assert mod.invented("l'art. 99 della Costituzione", q, known) == ["costituzione art. 99"]
+
+
+def test_the_first_code_named_wins_and_abbreviations_are_read():
+    mod = _load()
+    known = _known(mod)
+    q = "Che cosa prevede l'art. 2043 del codice civile?"
+    assert mod.invented("art. 625 o altri riferimenti al *Codice penale* e *Codice civile*",
+                        q, known) == ["codice_penale art. 625"]
+    assert mod.invented("Art. 420-quater cpp: il termine è sospeso", q, known) == []
+    assert mod.invented("Art. 999 cpp: il termine", q, known) == \
+        ["codice_procedura_penale art. 999"]
+
+
+def test_an_article_cited_without_its_code_counts_only_if_no_code_holds_it():
+    mod = _load()
+    known = _known(mod)
+    q = "Che cosa prevede l'art. 2043 del codice civile?"
+    assert mod.invented("l'art. 624 punisce il furto", q, known) == []
+    assert mod.invented("l'art. 9999 punisce il furto", q, known) == ["codice_civile art. 9999"]
+    assert mod.invented("art. 186-bis R.D. n° 267/40", q, known) == []
+    assert mod.invented("articolo 161-quater delle disposizioni per l'attuazione", q, known) == []
+    # the codes' own words are not another act
+    assert mod.invented("l'art. 9999 sul decreto ingiuntivo", q, known) == \
+        ["codice_civile art. 9999"]
 
 
 def test_the_script_prints_counts_only(tmp_path, capsys):
