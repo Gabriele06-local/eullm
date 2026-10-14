@@ -97,6 +97,19 @@ class Article:
                       re.search(r"\(\(\s*(.+?)\s*\)\)", ln)):
                 if m and _is_rubrica(m.group(1)):
                     return m.group(1)
+        # The third style, the c.p.a.'s bare title line ("Art. 29\nAzione di
+        # annullamento"): the same one record_heading reads, with its guards
+        # (no leading bracket or digit, no closing punctuation, short, a
+        # capital). Without it no termine_argomento question is ever asked
+        # about such an article -- the only kind asked by topic -- so the
+        # whole code misses its by-topic deadline coverage while retrieval
+        # boosts the very headings the exam cannot see.
+        if len(lines) > 1 and _HEADER.match(lines[0]):
+            cand = lines[1]
+            if (not cand.startswith("(") and not cand[:1].isdigit()
+                    and not cand.endswith((".", ";", ":", ","))
+                    and len(cand) < 100 and _is_rubrica(cand)):
+                return cand
         return ""
 
 

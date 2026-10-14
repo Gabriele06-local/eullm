@@ -141,6 +141,20 @@ def test_the_heading_is_read_in_both_styles():
         "Conclusione del procedimento"
 
 
+def test_the_cpa_bare_title_is_a_heading_too():
+    """The third style record_heading reads: "Art. 29\nAzione di
+    annullamento". Without it no termine_argomento question -- the only kind
+    asked by topic -- is ever built for such an article, and the whole code
+    misses its by-topic deadline coverage."""
+    arts = articles_from_records([CPA_ART29])
+    art = arts[("codice_processo_amministrativo", "29")]
+    assert art.heading == "Azione di annullamento"
+    exam = build_exam([CPA_ART29], per_code=10, seed=1)
+    topics = [it for it in exam if it.metadata["tipo"] == "termine_argomento"]
+    assert len(topics) == 1
+    assert "Azione di annullamento" in topics[0].question
+
+
 @pytest.fixture
 def exam():
     return build_exam(RECORDS, per_code=10, seed=1)
