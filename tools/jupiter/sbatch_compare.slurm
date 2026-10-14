@@ -81,11 +81,17 @@ from point import store_gguf; print(store_gguf('$m') or '')")
     sleep 2
 }
 
-for m in qwen3.6-27b qwen3.6-35b-a3b; do
-    conversation "$m" eullm
-    if [ -x "${LLAMA_SERVER_BIN:-}" ]; then
-        conversation "$m" llama-server
-    fi
-done
+# EULLM_SKIP_CONVERSATIONS=1: the points only. The conversations run on one
+# GPU while the other three wait, and job 2326571 already measured them.
+if [ "${EULLM_SKIP_CONVERSATIONS:-0}" = 1 ]; then
+    echo "(skipped: EULLM_SKIP_CONVERSATIONS=1)"
+else
+    for m in qwen3.6-27b qwen3.6-35b-a3b; do
+        conversation "$m" eullm
+        if [ -x "${LLAMA_SERVER_BIN:-}" ]; then
+            conversation "$m" llama-server
+        fi
+    done
+fi
 echo
 echo "=== done $(date -Is) ==="
