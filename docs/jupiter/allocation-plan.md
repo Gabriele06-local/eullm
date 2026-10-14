@@ -186,13 +186,33 @@ EuLLM is slow is still likely: 107 s for a 17 GB file is about 160 MB/s,
 where LUMI's Lustre gave 0.7-1.3 GB/s. The suspect is the engine's rule for
 network file systems (`fit::read_in_whole_on_gpu`: a model whole on the GPUs
 is read into memory instead of mapped), measured right on LUMI's Lustre and
-applied here to `$PROJECT` if `statfs` calls it a network file system
-(JSC's storage is IBM Storage Scale, GPFS; to be confirmed): llama.cpp's read-in
+applied here to `$PROJECT`, which `statfs` calls GPFS (magic 0x47504653):
+llama.cpp's read-in
 path is synchronous 1 MiB reads through four pinned buffers, from one
 thread. `tools/jupiter/sbatch_load.slurm` times six loads of one model on
 one GPU from process start to first answer: EuLLM by default and with
 `--mmap`, llama-server mapped, read in (`--load-mode none`) and with direct
 I/O, and EuLLM by default again.
+
+The server logs of job 2326571 say where the time goes. Every EuLLM load
+read the file in ("its file is on GPFS"), and all of it is spent between
+"Loading model" and "Allocating context", in llama.cpp's load: the sizing
+before it and the context after take milliseconds. Alone on the node,
+Qwen3.6-27B (16.8 GB) took 62 s and, after a dozen loads of the same file on
+that node, still 57 s (about 280 MB/s: GPFS kept none of it for the next
+load), and Qwen3.6-35B-A3B (22.1 GB) 166 s (130 MB/s). With other servers
+loading at the same time it took 88-172 s: three servers of the 27B that
+started at 19:05:53, 19:06:25 and 19:06:47 UTC all finished at 19:08:15.6,
+within 10 ms of one another, the later ones waiting for the first's reads of
+the same file (16.8 GB in 142 s, 118 MB/s for the node); a 32B and a 27B
+loading together ended 2.6 s apart. llama-server's logs hold no load lines:
+llama.cpp's own information lines are its verbosity 4, and llama-server
+shows 3 unless given `-lv 4`.
+
+Slurm keeps no energy for these jobs (`ConsumedEnergyRaw` empty for 2326280
+and 2326571), so deliverable 9 has to come from our own `nvidia-smi` power
+sampling in every job. Both jobs started three minutes after submission;
+`AllocTRES` bills a node as `billing=288` (its 288 cores).
 
 ### Where it stands (14-10-2026) and what is next
 
