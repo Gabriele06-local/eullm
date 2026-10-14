@@ -58,7 +58,9 @@ pub struct SchedulerConfig {
     /// falls back to a full re-prefill whenever the live resident slot's
     /// matched prefix is shorter than what an earlier checkpoint of the
     /// same conversation would cover — see the `--ctx-checkpoints` section
-    /// of the README.
+    /// of the README. A conversation's next turn needs none of it: each
+    /// slot's own recurrent state, kept just before its prompt's end
+    /// (`StateCheckpoint`), covers that whatever this is set to.
     pub ctx_checkpoints: usize,
     /// Minimum number of new tokens since the closest existing checkpoint
     /// of the same lineage before taking another one. Mirrors llama.cpp
@@ -175,6 +177,10 @@ struct PendingPrefill {
     /// From `prefill_setup`: the prompt's length and the answer's cap.
     n_tokens: u32,
     effective_max: u32,
+    /// Whether its recurrent state is kept on the way (`StateCheckpoint`):
+    /// on a model whose memory cannot be cut back, unless the request asked
+    /// for no cache (`cache_prompt: false`).
+    keep_states: bool,
 }
 
 /// A waiting prompt's part of one decode step (step 3): its tokens from
@@ -418,6 +424,149 @@ struct PromptCheckpoint {
     /// model.
     state: Vec<u8>,
     created_at: std::time::Instant,
+}
+
+/// The recurrent state of one slot's sequence after its first `tokens.len()`
+/// prompt tokens, taken while a prompt was read, on a model whose memory
+/// cannot be cut back to an earlier token (a hybrid model such as Qwen3.5 and
+/// Qwen3.6, three layers in four gated delta net, or a recurrent one).
+///
+/// Why. Such a model keeps one state per sequence, at its last token: a slot
+/// that read a conversation's previous turn can be reused only if the next
+/// prompt extends what it holds exactly, and a chat template does not. Qwen3's
+/// writes the empty thinking block (`<think>\n\n</think>\n\n`) after the
+/// assistant's header of the prompt and leaves it out of the turn when it is
+/// history: the next prompt shares all of the slot but the prompt's last 4
+/// tokens, and the whole conversation was read again, every turn (2,774
+/// tokens for 55 new on Qwen3.5-0.8B).
+///
+/// Only the recurrent part is kept (`LlamaStateSeqFlags::PARTIAL_ONLY`): the
+/// attention's cache still holds the earlier tokens and is cut back to
+/// `tokens.len()` as any model's is. On Qwen3.5-0.8B that is 20 MiB per
+/// checkpoint, whatever the context; a whole sequence's state would be all
+/// its keys and values as well. Taken where llama.cpp's server takes them
+/// (`--ctx-checkpoints`, its `checkpoint_offsets`): 4 tokens before the
+/// prompt's end, and a micro-batch before that (`checkpoint_cuts`).
+///
+/// Per slot (`StateCheckpoints`), since the attention's cache it goes with
+/// is that slot's. Valid while the slot still holds `tokens`: checked
+/// against the new prompt and what the slot shares with it when one is
+/// restored (`restore_state_checkpoint`), never assumed.
+struct StateCheckpoint {
+    tokens: Vec<LlamaToken>,
+    state: Vec<u8>,
+}
+
+/// Every slot's recurrent-state checkpoints, by seq_id; empty for a model
+/// whose memory can be cut back (see `StateCheckpoint`).
+type StateCheckpoints = Vec<Vec<StateCheckpoint>>;
+
+/// How many checkpoints a slot keeps: the two its last prompt left.
+const STATE_CHECKPOINTS_PER_SLOT: usize = 2;
+
+/// How many tokens before a prompt's end its recurrent state is kept: 4, the
+/// header of an answer a chat template may write again otherwise (Qwen3's
+/// empty thinking block), and a micro-batch more, as llama.cpp's server does.
+fn checkpoint_cuts(n_prompt: usize, n_ubatch: usize) -> [usize; 2] {
+    [
+        n_prompt.saturating_sub(4 + n_ubatch),
+        n_prompt.saturating_sub(4),
+    ]
+}
+
+/// The first place after `from` where a prompt of `n_prompt` tokens stops
+/// for a checkpoint, if any: what a chunk of it read from `from` ends at, at
+/// most.
+fn next_cut(from: usize, n_prompt: usize, n_ubatch: usize) -> Option<usize> {
+    checkpoint_cuts(n_prompt, n_ubatch)
+        .into_iter()
+        .filter(|&cut| cut > from && cut > 0)
+        .min()
+}
+
+/// Keeps the recurrent state of `seq_id` after `tokens`, its prompt so far,
+/// among the slot's checkpoints: the ones of another history go, and the
+/// oldest past `STATE_CHECKPOINTS_PER_SLOT`. Best effort, as
+/// `take_checkpoint`: a state that cannot be read is no checkpoint.
+fn keep_state_checkpoint(
+    ctx: &LlamaContext,
+    slot: &mut Vec<StateCheckpoint>,
+    seq_id: i32,
+    tokens: &[LlamaToken],
+) {
+    let flags = llama_cpp_2::LlamaStateSeqFlags::PARTIAL_ONLY;
+    let size = ctx.state_seq_get_size_ext(seq_id, flags);
+    if size == 0 {
+        return;
+    }
+    let mut state = vec![0u8; size];
+    // SAFETY: `state` is exactly the `size` bytes `state_seq_get_size_ext`
+    // just reported for this seq_id's state with these flags.
+    let written = unsafe { ctx.state_seq_get_data_ext(state.as_mut_ptr(), seq_id, flags) };
+    if written == 0 || written > state.len() {
+        return;
+    }
+    state.truncate(written);
+    slot.retain(|c| c.tokens.len() < tokens.len() && tokens.starts_with(&c.tokens));
+    if slot.len() >= STATE_CHECKPOINTS_PER_SLOT {
+        slot.remove(0);
+    }
+    tracing::debug!(
+        "Seq {seq_id}: kept its recurrent state at {} tokens ({} bytes)",
+        tokens.len(),
+        state.len(),
+    );
+    slot.push(StateCheckpoint {
+        tokens: tokens.to_vec(),
+        state,
+    });
+}
+
+/// For a slot that cannot cut its memory back to `reuse_len`, the prompt's
+/// tokens the slot shares with it: restores the longest of the slot's
+/// checkpoints that `tokens` and the slot both still begin with, leaving at
+/// least one token to read, and returns its length, where reading the
+/// prompt starts. `None` when no checkpoint fits, or its state would not
+/// load: then the slot is read from the start, as before.
+fn restore_state_checkpoint(
+    ctx: &mut LlamaContext,
+    slot: &[StateCheckpoint],
+    seq_id: i32,
+    tokens: &[LlamaToken],
+    reuse_len: usize,
+) -> Option<usize> {
+    let best = slot
+        .iter()
+        .filter(|c| {
+            !c.tokens.is_empty()
+                && c.tokens.len() <= reuse_len
+                && c.tokens.len() < tokens.len()
+                && tokens.starts_with(&c.tokens)
+        })
+        .max_by_key(|c| c.tokens.len())?;
+    // SAFETY: `best.state` came from `keep_state_checkpoint` on this context,
+    // with the same flags.
+    let restored = unsafe {
+        ctx.state_seq_set_data_ext(
+            &best.state,
+            seq_id,
+            llama_cpp_2::LlamaStateSeqFlags::PARTIAL_ONLY,
+        )
+    };
+    if !restored {
+        tracing::warn!(
+            "Seq {seq_id}: the recurrent state kept at {} tokens did not load",
+            best.tokens.len(),
+        );
+        return None;
+    }
+    tracing::info!(
+        "Seq {seq_id}: restored the recurrent state kept at {} tokens; reading {} of {}",
+        best.tokens.len(),
+        tokens.len() - best.tokens.len(),
+        tokens.len(),
+    );
+    Some(best.tokens.len())
 }
 
 /// The scheduler's loaded model, shared read-only outside the decode thread.
@@ -1880,6 +2029,12 @@ fn run_scheduler_loop(
     // Bounded pool of full-sequence-state snapshots (see `PromptCheckpoint`).
     // Empty and never grows when `sched_config.ctx_checkpoints == 0`.
     let mut checkpoints: Vec<PromptCheckpoint> = Vec::new();
+    // Every slot's recurrent-state checkpoints (`StateCheckpoint`), on a model
+    // whose memory cannot be cut back to an earlier token.
+    let keeps_states = model.is_hybrid() || model.is_recurrent();
+    let mut states: StateCheckpoints = (0..sched_config.max_batch_size)
+        .map(|_| Vec::new())
+        .collect();
     // Pre-allocate the decode batch once — reused every iteration to avoid
     // repeated malloc/free in the hot decode loop. A step holds the answers'
     // tokens and, with several slots, waiting prompts' up to `n_batch`.
@@ -2087,6 +2242,14 @@ fn run_scheduler_loop(
                     // (step 3), so a long prompt holds none of them up; here
                     // it is only checked and its slot prepared. With one
                     // slot, and so with the MTP head, it is read whole, here.
+                    // On a model whose memory cannot be cut back, a slot that
+                    // holds more than the prompt shares with it is first
+                    // brought back to its longest checkpoint of the prompt
+                    // (`StateCheckpoint`), and its recurrent state is kept on
+                    // the way through this prompt.
+                    let keep_states = keeps_states && cache_prompt;
+                    let slot_states = &mut states[seq_id as usize];
+                    slot_states.retain(|c| tokens.starts_with(&c.tokens));
                     if chunked {
                         let mut effective_reuse_len = reuse_len;
                         let mut fell_back = false;
@@ -2099,6 +2262,28 @@ fn run_scheduler_loop(
                             effective_reuse_len,
                             None,
                         );
+                        if setup.is_err()
+                            && effective_reuse_len > 0
+                            && keep_states
+                            && let Some(at) = restore_state_checkpoint(
+                                &mut ctx,
+                                slot_states,
+                                seq.seq_id,
+                                &tokens,
+                                effective_reuse_len,
+                            )
+                        {
+                            effective_reuse_len = at;
+                            setup = prefill_setup(
+                                &mut ctx,
+                                &scheduled.request,
+                                &seq,
+                                per_seq_ctx,
+                                &tokens,
+                                effective_reuse_len,
+                                None,
+                            );
+                        }
                         if let Err(ref e) = setup
                             && effective_reuse_len > 0
                         {
@@ -2129,6 +2314,7 @@ fn run_scheduler_loop(
                                     apart: false,
                                     n_tokens,
                                     effective_max,
+                                    keep_states,
                                 });
                             }
                             Err(e) => {
@@ -2151,7 +2337,32 @@ fn run_scheduler_loop(
                         &tokens,
                         effective_reuse_len,
                         mtp_state.as_mut(),
+                        keep_states.then_some(&mut *slot_states),
                     );
+                    if prefill_result.is_err()
+                        && effective_reuse_len > 0
+                        && keep_states
+                        && let Some(at) = restore_state_checkpoint(
+                            &mut ctx,
+                            slot_states,
+                            seq.seq_id,
+                            &tokens,
+                            effective_reuse_len,
+                        )
+                    {
+                        effective_reuse_len = at;
+                        prefill_result = prefill_sequence(
+                            &mut ctx,
+                            &config,
+                            &scheduled.request,
+                            &seq,
+                            per_seq_ctx,
+                            &tokens,
+                            effective_reuse_len,
+                            mtp_state.as_mut(),
+                            Some(&mut *slot_states),
+                        );
+                    }
                     if let Err(ref e) = prefill_result
                         && effective_reuse_len > 0
                     {
@@ -2166,6 +2377,7 @@ fn run_scheduler_loop(
                             &tokens,
                             effective_reuse_len,
                             mtp_state.as_mut(),
+                            keep_states.then_some(&mut *slot_states),
                         );
                     }
 
@@ -2311,7 +2523,13 @@ fn run_scheduler_loop(
                     waiting.push_back(pending);
                     continue;
                 }
-                let to = (pending.cursor + budget).min(pending.seq.prompt_tokens.len());
+                let n_prompt = pending.seq.prompt_tokens.len();
+                let mut to = (pending.cursor + budget).min(n_prompt);
+                if pending.keep_states
+                    && let Some(cut) = next_cut(pending.cursor, n_prompt, ctx.n_ubatch() as usize)
+                {
+                    to = to.min(cut);
+                }
                 budget -= to - pending.cursor;
                 parts.push(PromptPart {
                     pending,
@@ -2528,7 +2746,18 @@ fn run_scheduler_loop(
                 logit,
             } = part;
             let seq_id = pending.seq.seq_id;
-            if to < pending.seq.prompt_tokens.len() {
+            let n_prompt = pending.seq.prompt_tokens.len();
+            if to < n_prompt {
+                if pending.keep_states
+                    && checkpoint_cuts(n_prompt, ctx.n_ubatch() as usize).contains(&to)
+                {
+                    keep_state_checkpoint(
+                        &ctx,
+                        &mut states[seq_id as usize],
+                        seq_id,
+                        &pending.seq.prompt_tokens[..to],
+                    );
+                }
                 pending.cursor = to;
                 prefilling.push_back(pending);
                 continue;
@@ -2592,7 +2821,12 @@ fn run_scheduler_loop(
             } else {
                 ctx.n_ubatch()
             } as usize;
-            let chunk_end = (pending.cursor + chunk_size).min(n_prompt);
+            let mut chunk_end = (pending.cursor + chunk_size).min(n_prompt);
+            if pending.keep_states
+                && let Some(cut) = next_cut(pending.cursor, n_prompt, ctx.n_ubatch() as usize)
+            {
+                chunk_end = chunk_end.min(cut);
+            }
             let t = times.start();
             let read = prefill_chunk(
                 &mut ctx,
@@ -2609,6 +2843,16 @@ fn run_scheduler_loop(
             }
             match read {
                 Ok(()) if chunk_end < n_prompt => {
+                    if pending.keep_states
+                        && checkpoint_cuts(n_prompt, ctx.n_ubatch() as usize).contains(&chunk_end)
+                    {
+                        keep_state_checkpoint(
+                            &ctx,
+                            &mut states[seq_id as usize],
+                            seq_id,
+                            &pending.seq.prompt_tokens[..chunk_end],
+                        );
+                    }
                     pending.cursor = chunk_end;
                     prefilling.insert(at, pending);
                 }
@@ -2797,6 +3041,7 @@ fn prefill_sequence(
     tokens: &[LlamaToken],
     reuse_len: usize,
     mut mtp: Option<&mut MtpState<'_>>,
+    mut states: Option<&mut Vec<StateCheckpoint>>,
 ) -> Result<(u32, i32, u32), String> {
     let (n_tokens, effective_max_tokens) = prefill_setup(
         ctx,
@@ -2822,8 +3067,18 @@ fn prefill_sequence(
         config.context_size,
     );
 
-    for chunk_start in (reuse_len..tokens.len()).step_by(chunk_size) {
-        let chunk_end = (chunk_start + chunk_size).min(tokens.len());
+    // With `states`, a chunk also ends where the recurrent state is kept
+    // (`checkpoint_cuts`), and the state is kept there.
+    let n_ubatch = ctx.n_ubatch() as usize;
+    let mut chunk_start = reuse_len;
+    while chunk_start < tokens.len() {
+        let cut = states
+            .is_some()
+            .then(|| next_cut(chunk_start, tokens.len(), n_ubatch))
+            .flatten();
+        let chunk_end = (chunk_start + chunk_size)
+            .min(tokens.len())
+            .min(cut.unwrap_or(usize::MAX));
         prefill_chunk(
             ctx,
             seq.seq_id,
@@ -2832,6 +3087,12 @@ fn prefill_sequence(
             chunk_end,
             mtp.as_deref_mut(),
         )?;
+        if cut == Some(chunk_end)
+            && let Some(states) = states.as_deref_mut()
+        {
+            keep_state_checkpoint(ctx, states, seq.seq_id, &tokens[..chunk_end]);
+        }
+        chunk_start = chunk_end;
     }
 
     Ok((n_tokens, tokens.len() as i32, effective_max_tokens))
@@ -3276,9 +3537,9 @@ mod tests {
     use super::super::output::stop_prefix_holdback;
     use super::{
         CachedSlot, GenerateRequest, NotQueued, PieceOutcome, PromptCheckpoint, SchedulerHandle,
-        SendOutcome, StepTimes, StreamEvent, best_checkpoint, common_prefix_len, decode_passes,
-        drafts_kept, mtp_drafts, pick_slot, process_piece, prompt_budget, text_prefix_match,
-        try_send_piece,
+        SendOutcome, StepTimes, StreamEvent, best_checkpoint, checkpoint_cuts, common_prefix_len,
+        decode_passes, drafts_kept, mtp_drafts, next_cut, pick_slot, process_piece,
+        prompt_budget, text_prefix_match, try_send_piece,
     };
     use llama_cpp_2::token::LlamaToken;
     use std::time::{Duration, Instant};
@@ -3401,6 +3662,24 @@ mod tests {
 
     /// Off, nothing is timed: there is no clock to take a part's time from,
     /// and a window is never logged nor reset.
+    /// A prompt's recurrent state is kept 4 tokens before its end and a
+    /// micro-batch before that, where llama.cpp's server keeps it; a chunk
+    /// read from anywhere stops at the next of them, and none is past the
+    /// end, at the start, or behind where reading begins.
+    #[test]
+    fn a_prompt_stops_for_its_checkpoints_where_llama_server_takes_them() {
+        assert_eq!(checkpoint_cuts(2723, 512), [2207, 2719]);
+        assert_eq!(next_cut(0, 2723, 512), Some(2207));
+        assert_eq!(next_cut(2207, 2723, 512), Some(2719));
+        assert_eq!(next_cut(2719, 2723, 512), None);
+        // A turn read from a restored state keeps only the nearer one.
+        assert_eq!(next_cut(2300, 2769, 512), Some(2765));
+        // Short prompts: a cut at the start is none.
+        assert_eq!(next_cut(0, 100, 512), Some(96));
+        assert_eq!(next_cut(0, 4, 512), None);
+        assert_eq!(next_cut(0, 1, 512), None);
+    }
+
     #[test]
     fn steps_are_not_timed_unless_asked_for() {
         let mut times = StepTimes::new(false);

@@ -16,6 +16,14 @@
 //!     cargo test -p eullm-engine -- --ignored real_model_mtp --test-threads=1
 //! ```
 //!
+//! The hybrid test needs a model with a recurrent state per sequence, such as
+//! Qwen3.5-0.8B (about 30 s on four CPU cores):
+//!
+//! ```text
+//! EULLM_HYBRID_TEST_MODEL=/path/to/Qwen3.5-0.8B-Q4_K_M.gguf \
+//!     cargo test -p eullm-engine -- --ignored real_model_a_hybrid --test-threads=1
+//! ```
+//!
 //! The reasoning test needs a model whose chat template opens the reasoning
 //! block at the end of the prompt, such as Spark-X2.5-1.7B (about a minute
 //! on four CPU cores):
@@ -49,6 +57,14 @@ fn test_model() -> PathBuf {
 fn mtp_test_model() -> PathBuf {
     std::env::var("EULLM_MTP_TEST_MODEL")
         .expect("set EULLM_MTP_TEST_MODEL to a GGUF with MTP layers")
+        .into()
+}
+
+/// The GGUF the hybrid test runs on: one with a recurrent state per
+/// sequence, such as Qwen3.5-0.8B.
+fn hybrid_test_model() -> PathBuf {
+    std::env::var("EULLM_HYBRID_TEST_MODEL")
+        .expect("set EULLM_HYBRID_TEST_MODEL to a hybrid GGUF, such as Qwen3.5-0.8B")
         .into()
 }
 
@@ -1643,5 +1659,63 @@ async fn real_model_a_reasoning_block_the_template_opens_reaches_the_client_whol
                 "{case}: a tag left in {thinking:?} / {content:?}"
             );
         }
+    }
+}
+
+/// A conversation's next turn on a hybrid model (Qwen3.5 and Qwen3.6: a
+/// recurrent state per sequence, which cannot be cut back to an earlier
+/// token). The next prompt shares all of the slot's history but the first
+/// prompt's last 4 tokens, as the chat template that writes an empty
+/// thinking block after the assistant's header makes it; the state kept 4
+/// tokens before the first prompt's end (`StateCheckpoint`) is restored and
+/// only the new tokens are read. The answer must be the one the whole prompt
+/// read from the start gets, with one slot (the prompt read whole) and with
+/// two (read in the decode steps, a micro-batch at a time); and reading it
+/// must take a fraction of reading it whole, or nothing was restored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "needs a hybrid GGUF in EULLM_HYBRID_TEST_MODEL"]
+async fn real_model_a_hybrid_models_next_turn_restores_its_kept_state() {
+    let configure = |slots: usize| {
+        move |state: &mut AppState| {
+            state.ctx_size = 2048 * slots as u32;
+            state.batch_size = slots;
+            state.n_batch = 128;
+            state.n_ubatch = Some(32);
+        }
+    };
+    let ask = |prompt: &str, cache_prompt: bool| {
+        json!({
+            "model": "hybrid", "prompt": prompt, "raw": true, "stream": false,
+            "cache_prompt": cache_prompt,
+            "options": { "temperature": 0, "seed": 1, "num_predict": 16 },
+        })
+    };
+    let base = "The harbour office kept a ledger of every ship that entered the bay, \
+                with the hour, the cargo and the weather at the mouth of the river."
+        .repeat(8);
+    let first = format!("{base} alpha beta gamma delta");
+    let second = format!("{base} one two three four five six seven");
+
+    let fresh = start_on(&hybrid_test_model(), &["hybrid"], configure(1)).await;
+    let (status, whole) = fresh.generate(ask(&second, false)).await;
+    assert_eq!(status, 200, "{whole:?}");
+    assert_finished(&whole);
+    let whole_ns = whole.last().unwrap()["prompt_eval_duration"].as_u64().unwrap();
+
+    for slots in [1, 2] {
+        let server = start_on(&hybrid_test_model(), &["hybrid"], configure(slots)).await;
+        let (status, lines) = server.generate(ask(&first, true)).await;
+        assert_eq!(status, 200, "{lines:?}");
+        assert_finished(&lines);
+        let (status, next) = server.generate(ask(&second, true)).await;
+        assert_eq!(status, 200, "{next:?}");
+        assert_finished(&next);
+        assert_eq!(answer(&next), answer(&whole), "{slots} slots");
+        let next_ns = next.last().unwrap()["prompt_eval_duration"].as_u64().unwrap();
+        assert!(
+            next_ns * 4 < whole_ns,
+            "{slots} slots: the next turn read its prompt in {next_ns} ns, the whole one in \
+             {whole_ns} ns: the kept state was not restored"
+        );
     }
 }

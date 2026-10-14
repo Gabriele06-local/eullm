@@ -225,13 +225,11 @@ struct RuntimeOpts {
     /// snapshot mechanism). Every recurrent-state tensor scales by
     /// `(1 + N)`, so nonzero values can multiply resident memory by
     /// tens of GB and are not yet validated upstream past a small
-    /// synthetic test model. On hybrid/recurrent architectures without
-    /// this set, expect KV-cache prefix reuse to fall back to a full
-    /// re-prefill on every turn — this is a known, still-open upstream
-    /// limitation (llama.cpp's own server logs the identical
-    /// "forcing full prompt re-processing due to lack of cache data
-    /// (likely due to SWA or hybrid/recurrent memory)" fallback), not
-    /// an eullm-specific gap.
+    /// synthetic test model. Not needed for a conversation's next turn:
+    /// on these architectures the engine keeps each slot's recurrent
+    /// state 4 tokens before the end of every prompt it reads (where a
+    /// chat template writes the answer's header again) and restores it,
+    /// as llama.cpp's server does with its --ctx-checkpoints.
     #[arg(long, default_value_t = 0)]
     rs_seq: u32,
 

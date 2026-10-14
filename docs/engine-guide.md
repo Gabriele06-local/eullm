@@ -865,7 +865,37 @@ model samples.
 
 ## KV-cache reuse
 
-### KV-cache reuse on hybrid/recurrent models (Qwen3.5/3.6): a known upstream limitation, not an eullm gap
+### Hybrid models keep their state just before each prompt's end
+
+A hybrid model (Qwen3.5 and Qwen3.6: three layers in four are gated delta
+net, with one recurrent state per sequence) cannot cut its memory back to
+an earlier token. A slot that read a conversation's previous turn could be
+reused only if the next prompt extended what it held exactly, and over the
+API a chat template does not: Qwen3's writes the empty thinking block
+(`<think>\n\n</think>\n\n`) after the assistant's header of the prompt
+and leaves it out of the turn once it is history. The next prompt shared
+all of the slot but the previous prompt's last 4 tokens, and the whole
+conversation was read again, every turn.
+
+The engine now keeps each slot's recurrent state 4 tokens before the end of
+every prompt it reads, and a micro-batch before that, where llama.cpp's
+server keeps its checkpoints (`--ctx-checkpoints`, on there by default);
+the next turn restores the latest one its prompt still begins with and
+reads only what follows. Only the recurrent part is kept, 20 MiB a
+checkpoint on Qwen3.5-0.8B, more on larger models but not more with a
+longer context, two per slot; the attention's keys and values stay in the cache and are cut
+back as any model's are. On four CPU cores with Qwen3.5-0.8B, five turns
+over a 2,800-token document: from the second turn on each prompt was read
+in 0.4-0.7 s instead of 16-18 s, with the same answers as the prompt read
+from the start. A request with `cache_prompt: false` keeps none. Nothing
+to set: `--ctx-checkpoints` and `--rs-seq` below are not needed for it.
+`tools/lumi/multiturn_probe.py` measures it against any server.
+
+### KV-cache reuse on hybrid/recurrent models (Qwen3.5/3.6): how it was before
+
+What follows is how reuse on these models stood before the state was kept
+at each prompt's end (above), and why `--rs-seq` is not the answer; it
+still holds for a conversation edited further back than that.
 
 KV-cache prefix reuse (below) works correctly on hybrid attention+SSM
 architectures (Qwen3.5/3.6's Gated-DeltaNet+attention design, e.g.
