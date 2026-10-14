@@ -6,6 +6,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from eullm_forge.eval import NormIndex
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "check_cited_articles.py"
@@ -73,3 +75,24 @@ def test_the_script_prints_counts_only(tmp_path, capsys):
     assert "answers-m.jsonl: 2 answers | citing an article that does not exist 1 (50.0%) | " \
            "such citations 1" in out
     assert "Art. 2 e art. 9" not in out
+
+
+def test_show_prints_the_flagged_citation_with_its_context(tmp_path, capsys):
+    mod = _load()
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("".join(json.dumps(_rec("codice_civile", n)) + "\n" for n in (1, 2, 3)))
+    ans = tmp_path / "answers-m.jsonl"
+    ans.write_text(json.dumps({"question": "Che cosa prevede l'art. 2 del codice civile?",
+                               "answer": "Art. 2 e art. 9 c.c. sul punto."}) + "\n")
+    assert mod.main([str(ans), "--norms", str(norms), "--show", "5"]) == 0
+    assert "    codice_civile art. 9 | art. 9 c.c. sul punto." in capsys.readouterr().out
+
+
+def test_show_refuses_held_out_answers(tmp_path):
+    mod = _load()
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text(json.dumps(_rec("codice_civile", 1)) + "\n")
+    ans = tmp_path / "answers-m-heldout.jsonl"
+    ans.write_text("")
+    with pytest.raises(SystemExit):
+        mod.main([str(ans), "--norms", str(norms), "--show", "3"])
