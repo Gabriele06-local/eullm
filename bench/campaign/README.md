@@ -58,6 +58,7 @@ field. The ones that matter:
 | `gcds` | devices the point uses: 1, 2, 4, 8 |
 | `replica_gcds` | devices per server; `gcds / replica_gcds` servers (replicas) |
 | `exclusive` | alone on the node: the control for neighbour interference |
+| `cores` | `reserved`: the server runs on the cores of every device the point reserved (all 56 of a LUMI-G node for an `exclusive` point) instead of its own devices' seven, for loads whose experts the CPU computes (`c10-moe-ram`); needs the runner of 14-10-2026 |
 | `cold` | drop the model's files from the node's page cache before the server starts, so the load reads the file system whatever ran before (`load.cache` is then `evicted`); needs the runner of 07-10-2026 |
 | `batch`, `slot_ctx` / `ctx`, `kv` | the server's `--batch-size`, KV pool, `--cache-type-k/v` |
 | `concurrency` | requests in flight; default fills every slot of every server |

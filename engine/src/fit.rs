@@ -1379,7 +1379,7 @@ const MOE_CACHE_STEP_BYTES: u64 = 256 * 1024 * 1024;
 /// them, on a second stream of the GPU, instead of in between that layer's
 /// computations (llama.cpp patch `0003`, phase 6 of
 /// `docs/moe-offload-plan.md`). It applies to micro-batches of 512 tokens or
-/// more, on one CUDA GPU, to experts in the GPU's pinned host memory: a model
+/// more, on one CUDA or ROCm GPU, to experts in the GPU's pinned host memory: a model
 /// read into memory. Measured on Qwen3.8-Flash-Next IQ2_XS on an RTX 5070 Ti:
 /// with an `auto` cache 1 GiB smaller for four slots of 256 MiB, at the
 /// default micro-batch of 2048, a 33,200-token prompt read 42% faster (968
@@ -1404,7 +1404,8 @@ pub fn parse_moe_prefetch(s: &str) -> Result<u32, String> {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct MoePrefetch {
     /// The slots asked for; `0` without the prefetch, or where it cannot run
-    /// (one CUDA GPU, as for the expert cache: see [`moe_cache_support`]).
+    /// (one GPU of the CUDA backend, as for the expert cache: see
+    /// [`moe_cache_support`]).
     pub slots: u32,
     /// `--no-mmap`.
     pub no_mmap: bool,
@@ -1766,9 +1767,9 @@ pub fn read_in_whole_on_gpu(
     ))
 }
 
-/// Whether llama.cpp's expert cache can run on this machine: one GPU, a
-/// CUDA one. The cache refuses more than one device, and it has been
-/// measured on CUDA only. `Err` says why not, for the log.
+/// Whether llama.cpp's expert cache can run on this machine: one GPU of
+/// ggml's CUDA backend (see [`moe_cache_support_on`]). `Err` says why not,
+/// for the log.
 pub fn moe_cache_support() -> Result<(), String> {
     use llama_cpp_sys_2::{
         GGML_BACKEND_DEVICE_TYPE_GPU, ggml_backend_dev_count, ggml_backend_dev_get,
@@ -1794,11 +1795,21 @@ pub fn moe_cache_support() -> Result<(), String> {
             });
         }
     }
-    match gpus.as_slice() {
+    moe_cache_support_on(&gpus)
+}
+
+/// [`moe_cache_support`] for the GPUs ggml lists, by name. The cache
+/// refuses more than one device. What it runs on is ggml's CUDA backend
+/// (pinned host memory, a second stream for the prefetch, patches 0001 to
+/// 0004), which ggml also builds for HIP: its GPUs are `CUDA0` built with
+/// CUDA and `ROCm0` built for AMD's. ROCm is allowed since 14-10-2026, to be
+/// measured on LUMI's MI250X; other backends are refused.
+pub fn moe_cache_support_on(gpus: &[String]) -> Result<(), String> {
+    match gpus {
         [] => Err("no GPU".to_string()),
-        [name] if name.starts_with("CUDA") => Ok(()),
+        [name] if name.starts_with("CUDA") || name.starts_with("ROCm") => Ok(()),
         [name] => Err(format!(
-            "{name} is not a CUDA GPU, the only kind it has been measured on"
+            "{name} is not a GPU of the CUDA backend (CUDA or ROCm), the only one it runs on"
         )),
         _ => Err(format!(
             "{} GPUs, and llama.cpp's cache works with one",
@@ -2671,6 +2682,16 @@ pub(crate) fn context_reserve_bytes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_expert_cache_runs_on_one_gpu_of_the_cuda_backend_built_for_cuda_or_rocm() {
+        let gpus = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        assert!(moe_cache_support_on(&gpus(&["CUDA0"])).is_ok());
+        assert!(moe_cache_support_on(&gpus(&["ROCm0"])).is_ok());
+        assert!(moe_cache_support_on(&gpus(&["Vulkan0"])).unwrap_err().contains("Vulkan0"));
+        assert_eq!(moe_cache_support_on(&gpus(&[])).unwrap_err(), "no GPU");
+        assert!(moe_cache_support_on(&gpus(&["ROCm0", "ROCm1"])).unwrap_err().starts_with("2 GPUs"));
+    }
 
     /// Build a minimal valid GGUF header with a single `<arch>.block_count`
     /// metadata key of the given type, so the parser has something to read.

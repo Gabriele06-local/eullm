@@ -352,6 +352,26 @@ def test_a_runner_leaves_points_it_cannot_run_in_the_queue():
     assert not point.can_run({"kind": "throughput", "runtime": "unknown-server"})
 
 
+def test_a_point_can_take_the_cores_of_every_device_it_reserved():
+    import point
+
+    node = [str(d) for d in range(8)]
+    every = set(range(64))
+    # One GCD's seven cores, or with "cores": "reserved" the node's 56 for an
+    # exclusive point whose experts the CPU computes.
+    assert campaign.point_cores("lumi", ["0"], node, False, every) == "49-55"
+    assert campaign.point_cores("lumi", ["0"], node, True, every) == (
+        "49-55,57-63,17-23,25-31,1-7,9-15,33-39,41-47")
+    assert campaign.point_cores("lumi", ["0"], node, True, set(range(49, 56))) is None
+    assert campaign.point_cores("none", ["0"], node, True, every) is None
+    wide = normalize({"model": "m", "exclusive": True, "cores": "reserved"})
+    assert wide["runner"] == 6 and point.can_run(wide)
+    assert not point.can_run(wide | {"runner": 7})
+    assert "cores" not in normalize({"model": "m"})
+    with pytest.raises(SpecError):
+        normalize({"model": "m", "cores": "all"})
+
+
 def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
     import point
 
@@ -360,7 +380,8 @@ def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
     # A decision point planned for a build is measured for its choices too,
     # which a runner of before would leave out: it waits for one that can.
     decision = normalize({"model": "m", "kind": "decision", "engine_label": "next6"})
-    assert decision["runner"] == 5 and not point.can_run(decision | {"runner": 6}, "next6")
+    assert decision["runner"] == 5
+    assert not point.can_run(decision | {"runner": point.RUNNER_VERSION + 1}, "next6")
     assert normalize({"model": "m", "kind": "decision"})["runner"] == 2
     assert "engine_label" not in normalize({"model": "m", "engine_label": ""})
     plain = normalize({"model": "m"})
