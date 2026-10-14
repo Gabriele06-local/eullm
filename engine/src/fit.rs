@@ -1730,6 +1730,12 @@ pub fn every_layer_on_gpu(
 /// 233 GiB Q8_0, alone but at the edge of half, failed the hour and then took
 /// 1,161 s. Read in by the rule above, the 480B and the 671B loaded in 91 to
 /// 284 s in the same job. A file on a local disk stays mapped, as before.
+///
+/// Cold, alone on a node (c09 `load-together-*`, 13-10-2026), mapped against
+/// read in, seconds: two servers of the 235B Q4 2,448 against 113; four of
+/// gpt-oss-120b 1,789 against 53; eight of Qwen3-14B (9 GiB) 343 against 14.
+/// One server of the 235B Q8_0 took 204 mapped and 225 read in: alone, the
+/// file maps fine. With this rule and no flag: 121, 63, 16 and 209 s.
 pub fn read_in_whole_on_gpu(
     model_bytes: u64,
     whole_on_gpu: bool,

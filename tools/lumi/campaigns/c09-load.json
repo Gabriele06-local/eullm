@@ -19,7 +19,9 @@
     "map one file at once (two of the 235B, four of gpt-oss-120b, eight of Qwen3-14B) and the",
     "233 GiB Q8_0, each mapped (--mmap), read in (--no-mmap) and as the engine chooses (no flag),",
     "which since 13-10-2026 reads in any model that goes to the GPUs whole from a network file",
-    "system. In c02 (r-next4) the mapped loads took 11 to 32 minutes or failed after an hour."
+    "system. In c02 (r-next4) the mapped loads took 11 to 32 minutes or failed after an hour.",
+    "r-next8 (13-10-2026, job 22800286), mapped / read in / no flag, seconds: 235B x2 2448 / 113",
+    "/ 121, gpt-oss-120b x4 1789 / 53 / 63, Qwen3-14B x8 343 / 14 / 16, 235B Q8 alone 204 / 225 / 209."
   ],
   "pull": ["hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q8_K_XL", "hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
            "hf.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:Q4_K_M",
