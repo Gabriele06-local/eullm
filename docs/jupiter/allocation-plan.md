@@ -115,6 +115,12 @@ CUDA/13 module's toolkit is under its own prefix. `build.rs` now looks in the
 toolkit `CUDA_PATH` names first (backlog H4-H, the same gap Leonardo's Spack CUDA
 hit), and `build_engine.sh` checks before building that the toolkit has the
 static library.
+The second stopped one step later, at "relocation R_AARCH64_ADR_PREL_PG_HI21
+... recompile with -fPIC" in `ggml-cuda.cu.o`: rustc links the binary
+position-independent, the host code nvcc compiles is not, and the site's GCC,
+unlike Ubuntu's, does not make it so by default. `build_engine.sh` links the
+`eullm` binary alone with `-no-pie` (`cargo rustc ... -- -C link-arg=-no-pie`),
+as the release job for x64 CUDA and Leonardo do.
 
 ## Calendar, from the start date
 

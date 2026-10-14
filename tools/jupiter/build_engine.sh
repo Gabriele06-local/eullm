@@ -95,10 +95,21 @@ LCPP_STATUS=$(git -C "$EULLM_REPO" submodule status engine/vendor/llama-cpp-rs/l
 # ── Build ─────────────────────────────────────────────────────────────────
 # CMAKE_CUDA_ARCHITECTURES is not optional: without it nvcc compiles for what
 # it guesses, and the binary's device code is the question checked below.
+#
+# -no-pie, on the final binary only: rustc links it position-independent,
+# and the host code nvcc compiles from ggml-cuda's .cu files is not. Ubuntu's
+# gcc makes position-independent code by default, which is why the release
+# job for arm64 (the nvidia/cuda Ubuntu image) links without it; the GCC
+# module here does not, and the first build on 14-10-2026 stopped at
+# "relocation R_AARCH64_ADR_PREL_PG_HI21 ... recompile with -fPIC" in
+# ggml-cuda.cu.o. `cargo rustc` scopes the flag to
+# the eullm binary (proc-macros are shared objects and must stay PIC), as the
+# release job for x64 CUDA and Leonardo do (docs/cineca/leonardo.md, rows 5-6).
 log "building for sm_$CUDA_ARCHS into $CARGO_TARGET_DIR (tmux recommended)"
 cd "$EULLM_REPO"
 CMAKE_CUDA_ARCHITECTURES="$CUDA_ARCHS" \
-    cargo build --release --features "cuda,multimodal" -p eullm-engine
+    cargo rustc --release --features "cuda,multimodal" -p eullm-engine --bin eullm \
+    -- -C link-arg=-no-pie
 
 BIN="$CARGO_TARGET_DIR/release/eullm"
 [ -x "$BIN" ] || err "the build reported success but $BIN is not there"
