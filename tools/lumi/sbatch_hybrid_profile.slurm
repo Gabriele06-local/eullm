@@ -22,7 +22,7 @@
 #  3. The GPU kernels, by total time, while 1 and 32 sequences answer
 #     (rocprof): what grows with the sequences is what the 27B pays per
 #     sequence that the 32B does not.
-#  4. A conversation of five turns over a 6,000-token document
+#  4. Two conversations of five turns over a 6,000-token document each
 #     (multiturn_probe.py), on EuLLM (as it starts by default, and with
 #     --ctx-checkpoints 8) and on llama-server: `prompt_ms` per turn. On a
 #     hybrid model a server that cannot restore an earlier state reads the
@@ -117,7 +117,8 @@ conversation() {  # MODEL GGUF LABEL: five turns on one server, EuLLM or llama-s
     esac
     server=$!
     if wait_ready "$ready" "$server"; then
-        $TURNS --url "http://127.0.0.1:$PORT" --api "$api" --model "$m" --label "$label" --turns 5
+        $TURNS --url "http://127.0.0.1:$PORT" --api "$api" --model "$m" --label "$label" \
+            --turns 5 --conversations 2
     else
         echo "[!!] $label did not start: tail $OUT/$m.$label.log"
     fi
