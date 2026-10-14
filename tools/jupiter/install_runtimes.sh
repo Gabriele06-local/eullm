@@ -12,6 +12,12 @@ set -uo pipefail
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
+# No core files: on aarch64 ggml's CMake checks for SME by running a program
+# that executes `smstart`, which the Neoverse-V2 does not have; it dies of
+# SIGILL by design (CMake then builds with +nosme) and left a core dump in the
+# directory the script ran from (14-10-2026).
+ulimit -c 0
+
 RT="$CAMPAIGN_DIR/runtimes"
 BUILD="$RT/llama-build"
 LCPP="$EULLM_REPO/engine/vendor/llama-cpp-rs/llama-cpp-sys-2/llama.cpp"
