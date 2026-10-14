@@ -41,6 +41,16 @@
 # EULLM_LOAD_MODEL picks the model (default qwen3.6-27b, about 17 GB).
 # A booster node is billed whole: 4 GPU-hours an hour, for the time used.
 # Six loads of up to three minutes each: 10-20 minutes, 0.7-1.3 GPU-hours.
+#
+# EULLM_LOAD_CASES=together measures the other half of the rule instead:
+# four EuLLM servers, one per GPU, loading one file at once, first mapped
+# (--mmap), then read in (the default). On LUMI's Lustre, servers mapping one
+# file at once were the slow case (c09 load-together: four of gpt-oss-120b,
+# 1,789 s mapped against 53 s read in), which is why the rule reads in on
+# every network file system; this says whether GPFS does the same. Mapped
+# goes first, on a file this node has not read: the worst case for mapping.
+# Its default model is qwen3.6-35b-a3b (22 GB), loaded alone in 166 s read in
+# by job 2326571.
 
 #SBATCH --job-name=eullm-load
 #SBATCH --partition=booster
@@ -52,7 +62,12 @@ set -uo pipefail
 # shellcheck source=env.sh
 source "${EULLM_REPO:?submit with --export=ALL after sourcing tools/jupiter/env.sh}/tools/jupiter/env.sh"
 : "${EULLM_BIN:?set EULLM_BIN to the CUDA eullm binary}"
-MODEL="${EULLM_LOAD_MODEL:-qwen3.6-27b}"
+CASES="${EULLM_LOAD_CASES:-six}"
+if [ "$CASES" = together ]; then
+    MODEL="${EULLM_LOAD_MODEL:-qwen3.6-35b-a3b}"
+else
+    MODEL="${EULLM_LOAD_MODEL:-qwen3.6-27b}"
+fi
 OUT="$CAMPAIGN_DIR/logs/eullm-load-${SLURM_JOB_ID:-local}"
 PORT=$((18400 + ${SLURM_JOB_ID:-0} % 300))
 mkdir -p "$OUT"
@@ -77,9 +92,9 @@ CG="/sys/fs/cgroup$(sed -n 's/^0:://p' /proc/self/cgroup)"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader | sed 's/^/  /'
 echo
 
-wait_ready() {  # PATH PID: up to ten minutes for the server to answer, while it lives
+wait_ready() {  # PATH PID [PORT]: up to ten minutes for the server to answer, while it lives
     for _ in $(seq 1 1200); do
-        curl -sf "localhost:$PORT$1" >/dev/null 2>&1 && return 0
+        curl -sf "localhost:${3:-$PORT}$1" >/dev/null 2>&1 && return 0
         kill -0 "$2" 2>/dev/null || return 1
         sleep 0.5
     done
@@ -111,7 +126,7 @@ case_() {  # LABEL RUNTIME [ARGS...]: start, time the first answer, stop
         tail -5 "$log" | sed 's/^/    /'
         kill "$server" 2>/dev/null
         wait "$server" 2>/dev/null
-        ROWS+=("$(printf '%-12s %8s %8s %8s %s' "$label" - - - failed)")
+        ROWS+=("$(printf '%-16s %8s %8s %8s %s' "$label" - - - failed)")
         return
     fi
     t1=$(date +%s.%N)
@@ -128,29 +143,77 @@ try:
 except Exception:
     print('-')" "$answer")
     ROWS+=("$(awk -v l="$label" -v a="$t0" -v b="$t1" -v c="$t2" -v d="$load" \
-        'BEGIN { printf "%-12s %8.1f %8.1f %8.1f %8s", l, b - a, c - b, c - a, d }')")
+        'BEGIN { printf "%-16s %8.1f %8.1f %8.1f %8s", l, b - a, c - b, c - a, d }')")
     echo "  $label done: $(( ${t2%.*} - ${t0%.*} )) s"
     sleep 3
 }
 
-echo "=== the six loads, one after the other, on GPU 0 ==="
-case_ eullm eullm
-case_ eullm-mmap eullm --mmap
-if [ -x "${LLAMA_SERVER_BIN:-}" ]; then
-    case_ llama-auto llama-server
-    case_ llama-none llama-server --load-mode none
-    case_ llama-dio llama-server --load-mode dio
+together() {  # LABEL [ARGS...]: four EuLLM servers, one per GPU, loading at once
+    local label=$1 i t0 t1 load
+    shift
+    local servers=() clients=()
+    for i in 0 1 2 3; do
+        LABELS+=("$label.$i")
+        CUDA_VISIBLE_DEVICES=$i RUST_LOG=eullm=info "$EULLM_BIN" serve \
+            --port $((PORT + i)) --batch-size 1 --ctx-size 16384 "$@" \
+            >"$OUT/$label.$i.log" 2>&1 &
+        servers+=($!)
+    done
+    for i in 0 1 2 3; do
+        wait_ready /api/version "${servers[$i]}" $((PORT + i)) ||
+            echo "[!!] $label.$i: the server did not start; tail $OUT/$label.$i.log"
+    done
+    local body="{\"model\": \"$MODEL\", \"prompt\": \"Ciao.\", \"stream\": false, \"think\": false, \"options\": {\"num_predict\": 8}}"
+    t0=$(date +%s.%N)
+    for i in 0 1 2 3; do
+        (curl -s -m 1500 -H 'Content-Type: application/json' -d "$body" \
+            "localhost:$((PORT + i))/api/generate" >"$OUT/$label.$i.answer.json" 2>/dev/null
+         date +%s.%N >"$OUT/$label.$i.end") &
+        clients+=($!)
+    done
+    wait "${clients[@]}"
+    for i in 0 1 2 3; do
+        kill "${servers[$i]}" 2>/dev/null
+        wait "${servers[$i]}" 2>/dev/null
+        t1=$(cat "$OUT/$label.$i.end" 2>/dev/null || echo "$t0")
+        load=$("$PY" -c "import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(f\"{d['load_duration'] / 1e9:.1f}\" if d.get('load_duration') else '-')
+except Exception:
+    print('-')" "$OUT/$label.$i.answer.json")
+        ROWS+=("$(awk -v l="$label.$i" -v a="$t0" -v c="$t1" -v d="$load" \
+            'BEGIN { printf "%-16s %8s %8.1f %8s %8s", l, "-", c - a, "-", d }')")
+    done
+    echo "  $label done: $(( ${t1%.*} - ${t0%.*} )) s"
+    sleep 3
+}
+
+if [ "$CASES" = together ]; then
+    echo "=== four servers loading at once, one per GPU: mapped, then read in ==="
+    together together-mmap --mmap
+    together together-read
 else
-    echo "[!!] no llama-server: bash tools/jupiter/install_runtimes.sh on a login node"
+    echo "=== the six loads, one after the other, on GPU 0 ==="
+    case_ eullm eullm
+    case_ eullm-mmap eullm --mmap
+    if [ -x "${LLAMA_SERVER_BIN:-}" ]; then
+        case_ llama-auto llama-server
+        case_ llama-none llama-server --load-mode none
+        case_ llama-dio llama-server --load-mode dio
+    else
+        echo "[!!] no llama-server: bash tools/jupiter/install_runtimes.sh on a login node"
+    fi
+    case_ eullm-again eullm
 fi
-case_ eullm-again eullm
 
 echo
 echo "=== seconds from the start of the process ==="
-printf '%-12s %8s %8s %8s %8s\n' case ready answer total "eullm load"
+printf '%-16s %8s %8s %8s %8s\n' case ready answer total "eullm load"
 printf '%s\n' "${ROWS[@]}"
-echo "(ready: until the server answers; answer: the first request, 8 tokens;"
-echo " eullm load: load_duration in EuLLM's answer)"
+echo "(ready: until the server answers; answer: the first request, 8 tokens,"
+echo " for 'together' from the moment the four were sent; eullm load:"
+echo " load_duration in EuLLM's answer)"
 
 echo
 echo "=== the log lines that say how each one read the file ==="

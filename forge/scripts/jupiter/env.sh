@@ -1,0 +1,74 @@
+# Forge's environment on JUPITER Booster (JSC): source it, don't run it, from
+# a login shell or a job, as forge/scripts/leonardo/env.sh is on Leonardo.
+#
+#   source forge/scripts/jupiter/env.sh
+#
+# What the GPU probe found (job 2326998, 14-10-2026, probe_env.sh): `module
+# load PyTorch` alone gives Stages/2026, Python 3.13.5 and torch 2.9.1+cu128,
+# built for sm_80/90/100/120 and seeing the node's four GH200 (95 GiB each);
+# transformers, peft, accelerate, datasets and safetensors are not there.
+# So the site's PyTorch, and a venv on top of it with --system-site-packages
+# for the rest (setup_venv.sh), never a second torch from pip.
+#
+# The module's packages reach Python through PYTHONPATH, which comes before a
+# venv's own site-packages: an older package of the module would win over the
+# version the venv installed. The venv's site-packages is put first on
+# PYTHONPATH here, as JSC's venv template does.
+#
+# Everything of Forge's goes under $PROJECT/$USER/forge: the venv, the Hugging
+# Face cache (compute nodes have no internet: models are fetched on a login
+# node), the datasets and the runs. Not $SCRATCH: files idle for 90 days are
+# deleted there.
+
+JUPITER_PROJECT="${JUPITER_PROJECT:-e-aif-2026pg01-1434}"
+if [ -z "${PROJECT:-}" ] || [[ "$PROJECT" != *"$JUPITER_PROJECT"* ]]; then
+    jutil env activate -p "$JUPITER_PROJECT" >/dev/null 2>&1 || true
+fi
+: "${PROJECT:?no \$PROJECT: run 'jutil env activate -p $JUPITER_PROJECT' first}"
+export SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-$JUPITER_PROJECT}"
+
+if [ -z "${EULLM_REPO:-}" ]; then
+    EULLM_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+fi
+export EULLM_REPO
+export FORGE_HOME="${FORGE_HOME:-$PROJECT/$USER/forge}"
+export FORGE_VENV="${FORGE_VENV:-$FORGE_HOME/venv}"
+export FORGE_DATA_DIR="${FORGE_DATA_DIR:-$FORGE_HOME/datasets}"
+export FORGE_RUN_DIR="${FORGE_RUN_DIR:-$FORGE_HOME/runs}"
+export HF_HOME="${HF_HOME:-$FORGE_HOME/hf_home}"
+
+# In a job the Hugging Face stack is offline: a cache miss fails at once
+# instead of waiting on a network the node does not have.
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+fi
+
+# The site's PyTorch, quietly and without -u: Lmod's output does not survive
+# `set -u` (tools/jupiter/env.sh).
+if ! command -v module >/dev/null 2>&1 && [ -n "${LMOD_CMD:-}" ]; then
+    module() { eval "$("$LMOD_CMD" bash "$@")"; }
+fi
+if command -v module >/dev/null 2>&1; then
+    _forge_nounset=""
+    [[ $- == *u* ]] && _forge_nounset=1
+    set +u
+    module load "${FORGE_MODULES:-PyTorch}" >/dev/null 2>&1 ||
+        echo "[!!] module load ${FORGE_MODULES:-PyTorch} failed: see 'module spider PyTorch'" >&2
+    [ -n "$_forge_nounset" ] && set -u
+    unset _forge_nounset
+fi
+
+if [ -f "$FORGE_VENV/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "$FORGE_VENV/bin/activate"
+    for _forge_sp in "$FORGE_VENV"/lib/python*/site-packages; do
+        case ":${PYTHONPATH:-}:" in
+            *":$_forge_sp:"*) ;;
+            *) export PYTHONPATH="$_forge_sp${PYTHONPATH:+:$PYTHONPATH}" ;;
+        esac
+    done
+    unset _forge_sp
+fi
+
+mkdir -p "$FORGE_HOME" "$FORGE_DATA_DIR" "$FORGE_RUN_DIR/logs" "$HF_HOME"
