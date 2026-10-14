@@ -58,7 +58,7 @@ on the first day, and measure placement before committing to a job shape.
 
 1. **Account.** JuDoor registration, SSH key, 2FA; join the project when JSC
    sends it. Login is `login.jupiter.fz-juelich.de`.
-2. **No personal data until a DPA with JSC is signed — request it now.**
+2. **No personal data on JUPITER: the rulings stay on Leonardo.**
    The proposal answered "Does your proposal involve handling of personal
    data?: Yes", and the call's own form required the PI to confirm the data
    controller's responsibilities and noted that "they will need to make a
@@ -68,9 +68,11 @@ on the first day, and measure placement before committing to a job shape.
    JSC's standard form and says the system is used "not to process any
    personal data": that is the default, and the DPA is the way the call
    itself provides out of it. Pseudonymised court decisions are personal
-   data, so they do not go to JUPITER before the DPA is signed.
-   Legislation (Normattiva, EUR-Lex: public domain) and public benchmarks
-   are what JUPITER trains and evaluates on until then, which covers every
+   data, so they do not go to JUPITER without one -- and on 14-10-2026 we
+   chose not to ask for one: the rulings are processed on Leonardo, and
+   only what `export_clean_cards.py` lets out leaves it. Legislation
+   (Normattiva, EUR-Lex: public domain) and public benchmarks are what
+   JUPITER trains and evaluates on, which covers every
    throughput measurement (deliverables 1–5, 8): throughput does not depend
    on which
    text is trained on. Case-law work stays on Leonardo, with one way out:
@@ -280,7 +282,7 @@ energy figures. Its deadline and template are to be confirmed with EuroHPC
 1. Start and end dates, and the "pre-defined consumption pattern".
 2. Node sharing and billing: is a 2-GPU job billed 2 or 4 GPU-hours?
 3. Maximum walltime and the job-size/priority policy on `booster`.
-4. The DPA the proposal promised for pseudonymised court decisions: template, who signs, how long it takes. Until it is signed, no personal data.
+4. (Not asked, by choice on 14-10-2026: no DPA, so no personal data on JUPITER.)
 5. Energy accounting per job (Slurm `ConsumedEnergy` or site tooling).
 
 Sources: [JUPITER technical overview (JSC)](https://www.fz-juelich.de/en/ias/jsc/jupiter/tech),
