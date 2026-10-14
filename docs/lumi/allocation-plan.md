@@ -224,7 +224,8 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    rule, took 11-32 minutes to load where two servers mapped it at once, and
    failed after the runner's hour three times. Since 13-10-2026 a model that
    goes to the GPUs whole from a network file system is read in whatever its
-   size; c09's `load-together-*` groups are the before/after.
+   size: c09's `load-together-*` groups load several servers of one file in
+   14-121 s that way, in 343-2,448 s mapped (below).
 
 Items 0-2 are October. Items 4-6 December. Item 7 January.
 
@@ -602,9 +603,25 @@ is what Lustre does not survive; c09's single-server loads of the 235B
 never did it, and read in it costs the same (108 against 110 s). The
 three failed hours and the slow loads cost about 5 node-h. Since 13-10-2026
 the engine reads in every model that goes to the GPUs whole from a network
-file system, whatever its size (`fit::read_in_whole_on_gpu`); c09's
-`load-together-*` and `load-q8-235b` groups measure it against `--mmap`, on
-one node for about two hours (four if every mapped load fails its hour).
+file system, whatever its size (`fit::read_in_whole_on_gpu`). c09 measured it
+on that engine (`r-next8`, job 22800286, 13-10-2026, `next8`), cold and alone
+on a node, one load each, seconds and then tokens/s:
+
+| servers on one file | mapped | read in | the engine's choice |
+|---|---:|---:|---:|
+| two of the 235B Q4, 4 GCDs each | 2448 (55.1) | 113 (70.6) | 121 (70.2) |
+| four of gpt-oss-120b, 2 GCDs each | 1789 (350) | 53 (413) | 63 (414) |
+| eight of Qwen3-14B, one GCD each | 343 (589) | 14 (588) | 16 (590) |
+| one of the 235B Q8, 8 GCDs | 204 (28.2) | 225 (28.3) | 209 (26.6) |
+
+Several servers mapping one file load 20 to 28 times slower than reading it
+in, and the engine now reads it in by itself. One server alone maps even the
+233 GiB Q8_0 fine when it starts cold: its hour in c02 came after other
+points had filled the page cache. The mapped pairs of the 235B and the four
+gpt-oss-120b also answered slower once loaded, the 235B's first token after
+245 ms instead of 30; one run each, but it fits the token-embedding table,
+which llama.cpp keeps on the CPU and reads from the mapped file, being read
+from Lustre again. The round took about two node-hours.
 
 **Q8_0 against Q4_K_M** (`c02 quant-one-gcd`): one request is 18% slower on
 Qwen3-8B, 24% on 14B, 28% on 32B, and level on Qwen3-30B-A3B (122 against
