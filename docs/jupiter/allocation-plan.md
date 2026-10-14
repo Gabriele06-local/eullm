@@ -266,9 +266,16 @@ about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
 1. EuLLM's load time: four servers loading at once on GPFS, mapped against
    read in (`EULLM_LOAD_CASES=together`), then the change to
    `fit::read_in_whole_on_gpu` in `engine/` (shared with LUMI's branch).
-2. The Forge venv (`setup_venv.sh`, login node), with the training
-   libraries matched to Leonardo's for the baseline, then week 1 of the
-   calendar below.
+2. Forge: the venv is made (`setup_venv.sh`, 14-10-2026: torch 2.9.1 from
+   the module, transformers 5.19.0, peft 0.21.2, accelerate 1.15.0,
+   datasets 5.1.0 in the venv; `forge/venv-known-good-2026-10-14.txt`) and
+   Qwen3-30B-A3B-Base and Qwen3-4B-Base are in `forge/hf_home`.
+   `sbatch_teacher_probe.slurm` is the first GPU job: two distillation
+   micro-batch loops side by side (the teacher in BF16 alone on a GPU,
+   Leonardo's LoRA student on the next), the teacher generating with plain
+   Transformers, and the node's power every second. Then week 1 of the
+   calendar below, with the training libraries checked against Leonardo's
+   for the baseline.
 3. The data JUPITER trains on: legislation, public benchmarks and the
    ruling cards `export_clean_cards.py` lets out on Leonardo (no DPA, by
    choice: no personal data here).
