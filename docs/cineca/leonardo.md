@@ -163,7 +163,7 @@ users) costs nothing in GPU-hours and doesn't wait in the SLURM queue.
 |---|---|---|---|
 | 1 | `error while loading shared libraries: GLIBC_2.29 not found` (prebuilt binary) | RHEL 8.7's frozen glibc 2.28 vs. the CI runner's newer glibc | Build from source (see above) |
 | 2 | `error: linking with 'cc' failed`, `unable to find library -lcuda` (well before this, or `-lcudart_static`) | see rows 3-4 | — |
-| 3 | `could not find native static library 'cudart_static'` | `libcudart_static.a` lives under `$CUDA_HOME/targets/x86_64-linux/lib/`, not `$CUDA_HOME/lib64` (the path the module puts in `LIBRARY_PATH`) on this Spack-packaged CUDA install — logged as backlog item **H4-H** for a real upstream fix in `find_cuda_helper`/`build.rs` | `RUSTFLAGS="-L $CUDA_HOME/targets/x86_64-linux/lib"` |
+| 3 | `could not find native static library 'cudart_static'` | `libcudart_static.a` lives under `$CUDA_HOME/targets/x86_64-linux/lib/`, not `$CUDA_HOME/lib64` (the path the module puts in `LIBRARY_PATH`) on this Spack-packaged CUDA install — logged as backlog item **H4-H**, fixed in `build.rs` on 14-10-2026: it now searches the toolkit `CUDA_PATH`/`CUDA_HOME` name, `targets/<arch>/lib` included | `RUSTFLAGS="-L $CUDA_HOME/targets/x86_64-linux/lib"` (no longer needed) |
 | 4 | `unable to find library -lcuda` | `libcuda.so` (the *driver* lib) isn't the toolkit's job to provide; the toolkit ships a link-time-only stub for exactly this situation | add `-L $CUDA_HOME/targets/x86_64-linux/lib/stubs` too |
 | 5 | `relocation R_X86_64_32 cannot be used against local symbol; recompile with -fPIC` | `nvcc`-compiled device code isn't PIC by default; Rust binaries link as PIE (ASLR) by default — incompatible | `-C link-arg=-no-pie` on the final binary link (not full CUDA recompile) |
 | 6 | Same `-no-pie` flag broke *other*, unrelated crates (`displaydoc`, `yoke-derive`, `zerofrom-derive`, `zerovec-derive` — proc-macros/dylibs) with `undefined symbol: main` | `RUSTFLAGS` applies to *every* compilation unit in the graph, including proc-macros that get built as `.so` and don't want `-no-pie` at all | `cargo rustc -p eullm-engine --bin eullm -- -C link-arg=-no-pie` instead of `cargo build` — `cargo rustc`'s trailing flags apply only to the final target, not its dependency graph |
@@ -334,9 +334,11 @@ Two things worth fixing that this surfaced, neither blocking:
 
 ## Open items
 
-- Backlog **H4-H** (`docs/backlog-fix-e-hardening.md`) tracks a real fix for
-  the `cudart_static` search-path gap so future Spack-packaged CUDA builds
-  don't need the manual `RUSTFLAGS` workaround.
+- Backlog **H4-H** (`docs/backlog-fix-e-hardening.md`), the `cudart_static`
+  search-path gap, is fixed (14-10-2026, found again on JUPITER): `build.rs`
+  searches the toolkit `CUDA_PATH`/`CUDA_HOME` name, so a Spack-packaged
+  CUDA no longer needs the manual `RUSTFLAGS` workaround (row 4's `stubs/`
+  comes with it).
 - No CPU-only baseline was collected on Leonardo (the login-node attempt was
   killed by the shared node's resource limits, and this account has no
   `dcgp_usr_prod` budget for a proper isolated CPU run).

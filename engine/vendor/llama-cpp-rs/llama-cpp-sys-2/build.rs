@@ -36,6 +36,88 @@ macro_rules! debug_log {
     };
 }
 
+/// EuLLM: the variables that name a CUDA toolkit's root, or its nvcc.
+const CUDA_TOOLKIT_VARS: [&str; 6] = [
+    "CUDA_PATH",
+    "CUDA_HOME",
+    "CUDA_ROOT",
+    "CUDA_TOOLKIT_ROOT_DIR",
+    "CUDACXX",
+    "CMAKE_CUDA_COMPILER",
+];
+
+/// EuLLM: the library directories of the CUDA toolkit the environment names
+/// that hold `libcudart_static.a`, each followed by its `stubs/` (the
+/// link-time `libcuda.so` of a machine without the driver).
+///
+/// `find_cuda_helper::find_cuda_lib_dirs` reads no `CUDA_PATH` on Linux: it
+/// looks in `CUDA_LIBRARY_PATH`, `/opt/cuda` and `/usr/local/cuda{,-*}`, under
+/// `lib64` and `targets/x86_64-linux/lib`, which is where the nvidia/cuda
+/// images keep the static libraries. A toolkit from a site's module lives
+/// elsewhere, and the link stopped at "could not find native static library
+/// `cudart_static`": Spack's CUDA 12.2 on Leonardo keeps it under
+/// `targets/x86_64-linux/lib` of its own prefix (backlog H4-H), and the CUDA
+/// 13 module of JUPITER's GH200 nodes is under a prefix of its own too, on
+/// aarch64, whose target directory is `targets/sbsa-linux`. So: the roots in
+/// `CUDA_PATH`, `CUDA_HOME`, `CUDA_ROOT`, `CUDA_TOOLKIT_ROOT_DIR` and the
+/// toolkit of the nvcc CMake is given (`CUDACXX`, `CMAKE_CUDA_COMPILER`, as
+/// `<root>/bin/nvcc`), and in each `lib64`, `lib` and the `targets/` directory
+/// of the architecture built for. The first root that has the library wins at
+/// link time, as the toolkit nvcc compiled the device code with.
+fn cuda_toolkit_lib_dirs() -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for var in CUDA_TOOLKIT_VARS {
+        let Some(value) = env::var_os(var).filter(|v| !v.is_empty()) else {
+            continue;
+        };
+        let path = PathBuf::from(value);
+        let root = if var.ends_with("CXX") || var.ends_with("COMPILER") {
+            match path.parent().and_then(Path::parent) {
+                Some(root) => root.to_path_buf(),
+                None => continue,
+            }
+        } else {
+            path
+        };
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let targets: &[&str] = match env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+        Ok("x86_64") => &["x86_64-linux"],
+        Ok("aarch64") => &["sbsa-linux", "aarch64-linux"],
+        _ => &[],
+    };
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<PathBuf> = Vec::new();
+    for root in &roots {
+        let mut candidates = vec![root.join("lib64"), root.join("lib")];
+        candidates.extend(
+            targets
+                .iter()
+                .map(|t| root.join("targets").join(t).join("lib")),
+        );
+        for lib in candidates {
+            if !lib.join("libcudart_static.a").is_file() {
+                continue;
+            }
+            // lib64 is often a link to targets/<arch>/lib: one directory.
+            let real = lib.canonicalize().unwrap_or_else(|_| lib.clone());
+            if seen.contains(&real) {
+                continue;
+            }
+            seen.push(real);
+            let stubs = lib.join("stubs");
+            dirs.push(lib);
+            if stubs.is_dir() {
+                dirs.push(stubs);
+            }
+        }
+    }
+    dirs
+}
+
 fn emit_compiler_static_archive_search_path(archive: &str) {
     let compiler = cc::Build::new().get_compiler();
     let Ok(output) = Command::new(compiler.path())
@@ -1359,8 +1441,34 @@ fn main() {
         // Re-run build script if CUDA_PATH environment variable changes
         println!("cargo:rerun-if-env-changed=CUDA_PATH");
 
-        // Add CUDA library directories to the linker search path
+        // Add CUDA library directories to the linker search path. EuLLM: the
+        // toolkit the environment names first, then find_cuda_helper's
+        // default places (see cuda_toolkit_lib_dirs).
+        let mut cuda_lib_dirs = Vec::new();
+        if !cfg!(target_os = "windows") {
+            for var in CUDA_TOOLKIT_VARS {
+                println!("cargo:rerun-if-env-changed={var}");
+            }
+            println!("cargo:rerun-if-env-changed=CUDA_LIBRARY_PATH");
+            cuda_lib_dirs = cuda_toolkit_lib_dirs();
+        }
         for lib_dir in find_cuda_helper::find_cuda_lib_dirs() {
+            if !cuda_lib_dirs.contains(&lib_dir) {
+                cuda_lib_dirs.push(lib_dir);
+            }
+        }
+        if !cfg!(target_os = "windows")
+            && !cuda_lib_dirs
+                .iter()
+                .any(|d| d.join("libcudart_static.a").is_file())
+        {
+            println!(
+                "cargo:warning=libcudart_static.a is in none of {cuda_lib_dirs:?}: set CUDA_PATH \
+                 to the CUDA toolkit's root (the directory above bin/nvcc), or CUDA_LIBRARY_PATH \
+                 to the directory that holds it"
+            );
+        }
+        for lib_dir in &cuda_lib_dirs {
             println!("cargo:rustc-link-search=native={}", lib_dir.display());
         }
 
