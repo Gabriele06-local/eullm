@@ -623,6 +623,39 @@ gpt-oss-120b also answered slower once loaded, the 235B's first token after
 which llama.cpp keeps on the CPU and reads from the mapped file, being read
 from Lustre again. The round took about two node-hours.
 
+**Qwen3.6-27B** (`c07 rt27-*`, `r-27b`, job 22814646, and
+`sbatch_hybrid_profile.slurm`, job 22814618, 14-10-2026, one GCD, `next8`).
+The hybrid model against llama-server, tokens/s, with Qwen3-32B beside it:
+
+| requests | 27B EuLLM | 27B llama-server | 32B EuLLM | 32B llama-server |
+|---:|---:|---:|---:|---:|
+| 1 | 38 | 35.1 | 38 | 37.6 |
+| 4 | 66.2 | 61.3 | 75.7 | 75.1 |
+| 16 | 162 | 133 | 262 | 252 |
+| 32 | 198 | 112 (cv 49%) | 377 | 358 |
+| 16 clients, graded gsm8k | 141 | 124 | | |
+
+The 27B's ceiling is llama.cpp's, not the scheduler's: llama.cpp alone
+(`llama-batched-bench`, 128 tokens of prompt and 128 of answer a sequence)
+writes 33, 69, 172 and 190 tokens/s at 1, 4, 16 and 32 sequences, where
+the 32B goes on to 422. With 32 sequences answering the 27B spends twice
+the 32B's GPU time (rocprof, 20.3 s against 10.7): 22% in the gated delta
+net kernel (0.71 ms a call, 0.02 with one sequence), 22% in a
+matrix-vector kernel that the 32B does not run at 32, and 7% gathering the
+recurrent states. The matrix-vector one is the linear attention's output
+projection (`ssm_out`), whose input llama.cpp shapes one matrix per
+sequence, so its weights are read once per sequence (0.71 ms a call,
+0.05 with one): llama.cpp patch 0007 (14-10-2026) makes it one product.
+Reading a prompt, the two are level (llama-bench, 790 and 684 tokens/s at
+512 and 4,096 tokens on the 27B, 689 and 784 on the 32B).
+
+A conversation of five turns over a 6,000-token document (5,400 tokens of
+prompt, `multiturn_probe.py`): on the 27B EuLLM read every turn's prompt in
+6.5 s, `--ctx-checkpoints 8` no better, llama-server in 0.33-0.67 s from
+the second turn; on the 32B EuLLM in 10-70 ms and llama-server in 86-133.
+The recurrent state kept before each prompt's end (`next9`, 14-10-2026) is
+the fix; job 22821238 measures it.
+
 **Q8_0 against Q4_K_M** (`c02 quant-one-gcd`): one request is 18% slower on
 Qwen3-8B, 24% on 14B, 28% on 32B, and level on Qwen3-30B-A3B (122 against
 121; 7% slower at 32). The batched rows are not compared: `next4` reads
