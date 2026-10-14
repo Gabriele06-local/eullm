@@ -173,14 +173,24 @@ from the second turn Qwen3.6-27B reads each prompt in 53-69 ms, llama-server
 in 79-84; Qwen3.6-35B-A3B in 33-49 ms against 40-52. The first turn, the
 whole prompt, about 2.2 s for both on the 27B.
 
-**Loading is the gap**: EuLLM took 107-184 s to load a model where
-llama-server took 2-12 s (same files, same nodes), and the first turn of
-the 35B-A3B's first conversation waited 169 s for it. Not yet looked into.
-The likely cause is the engine's rule for network file systems
-(`fit::read_in_whole_on_gpu`: a model whole on the GPUs is read into memory
-instead of mapped), measured right on LUMI's Lustre and here applied to the
-file system of `$PROJECT`; `--mmap` against the default on one point
-answers it.
+**Loading**: the report's "load s" gave EuLLM 107-184 s and llama-server
+2-12 s, and the first turn of the 35B-A3B's first conversation waited 169 s
+for EuLLM. The two columns do not measure the same thing: the runner times
+the warm-up request once the server answers its readiness check, and
+`eullm serve` loads the model in that request, while llama-server loads it
+before `/health` answers, so llama-server's 2-12 s holds no load at all (the
+same holds for every runtime comparison of load times from the runner). That
+EuLLM is slow is still likely: 107 s for a 17 GB file is about 160 MB/s,
+where LUMI's Lustre gave 0.7-1.3 GB/s. The suspect is the engine's rule for
+network file systems (`fit::read_in_whole_on_gpu`: a model whole on the GPUs
+is read into memory instead of mapped), measured right on LUMI's Lustre and
+applied here to `$PROJECT` if `statfs` calls it a network file system
+(JSC's storage is IBM Storage Scale, GPFS; to be confirmed): llama.cpp's read-in
+path is synchronous 1 MiB reads through four pinned buffers, from one
+thread. `tools/jupiter/sbatch_load.slurm` times six loads of one model on
+one GPU from process start to first answer: EuLLM by default and with
+`--mmap`, llama-server mapped, read in (`--load-mode none`) and with direct
+I/O, and EuLLM by default again.
 
 ### Where it stands (14-10-2026) and what is next
 
@@ -190,11 +200,14 @@ On `$PROJECT/$USER`: the checkout, the engine `next10`
 (`eullm-models/`), the queue with round `r-gh200` done (`campaign/`). Spent:
 about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
 
-1. EuLLM's load time on JUPITER (above): one point with `--mmap` against
-   the default, and the server log's load lines.
-2. The GPU probe for Forge (`forge/scripts/jupiter/probe_env.sh`, one node,
-   15 minutes), then the Forge venv on top of the PyTorch module and week 1
-   of the calendar below.
+1. EuLLM's load time on JUPITER (above): first, free, the existing server
+   logs of job 2326571 (whether the rule fired, and the time between
+   "Loading model" and "Allocating context"); then
+   `tools/jupiter/sbatch_load.slurm`, one node for 10-20 minutes.
+2. The GPU probe for Forge (`forge/scripts/jupiter/probe_env.sh` as a
+   15-minute batch job; it now loads the site's PyTorch module, without
+   which the system Python 3.9 has no torch), then the Forge venv on top of
+   the PyTorch module and week 1 of the calendar below.
 3. The DPA with JSC, before any personal data.
 
 ## Calendar, from the start date
