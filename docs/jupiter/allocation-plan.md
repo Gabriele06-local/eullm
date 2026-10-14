@@ -103,6 +103,14 @@ five-turn conversations of `multiturn_probe.py`). The same points ran on the
 MI250X on 14-10-2026 (`r-27b-next10`), so the two machines compare row by
 row; a job is about three hours of one node, 12 GPU-hours at most.
 
+The first build (14-10-2026) stopped at the link with "could not find native
+static library `cudart_static`": the crate that finds CUDA for the build
+reads no `CUDA_PATH` on Linux and knows only `/usr/local/cuda`, while the
+CUDA/13 module's toolkit is under its own prefix. `build.rs` now looks in the
+toolkit `CUDA_PATH` names first (backlog H4-H, the same gap Leonardo's Spack CUDA
+hit), and `build_engine.sh` checks before building that the toolkit has the
+static library.
+
 ## Calendar, from the start date
 
 | weeks | work | GPU-h (cumulative) |

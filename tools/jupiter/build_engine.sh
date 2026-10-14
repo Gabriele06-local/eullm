@@ -31,6 +31,19 @@ log() { printf '\033[34m[..]\033[0m  %s\n' "$*"; }
 export CUDACXX="$CUDA_PATH/bin/nvcc" CMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc"
 export PATH="$CUDA_PATH/bin:$PATH"
 log "CUDA: $("$CUDACXX" --version | tail -1) at $CUDA_PATH"
+# cudart and cuBLAS are linked statically. llama-cpp-sys-2's build.rs looks
+# for them under $CUDA_PATH's lib64, lib and targets/sbsa-linux/lib: say
+# here, not after the build, if this toolkit has none.
+CUDART_STATIC=""
+for d in "$CUDA_PATH/lib64" "$CUDA_PATH/lib" "$CUDA_PATH/targets/sbsa-linux/lib"; do
+    if [ -f "$d/libcudart_static.a" ]; then
+        CUDART_STATIC="$d/libcudart_static.a"
+        break
+    fi
+done
+[ -n "$CUDART_STATIC" ] \
+    || err "no libcudart_static.a under $CUDA_PATH (lib64, lib, targets/sbsa-linux/lib): is CUDA_PATH the toolkit's root?"
+log "static cudart: $CUDART_STATIC"
 
 command -v gcc >/dev/null && command -v g++ >/dev/null || err "no gcc/g++: 'module load GCC'"
 GCC_MAJOR=$(gcc -dumpversion | cut -d. -f1)

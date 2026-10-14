@@ -2425,10 +2425,29 @@ diligenza manuale.
   Metodo che ha funzionato per la sezione `run`: generare la tabella dei
   flag da `--help` del binario invece di riscriverla a memoria.
 
-- [ ] **H4-H · Build CUDA da sorgente: il link statico di `cudart_static`
+- [x] **H4-H · Build CUDA da sorgente: il link statico di `cudart_static`
   non trova la lib su toolkit pacchettizzati via Spack** *(P3 — trovato il
   4 settembre facendo una build di test su Leonardo/CINECA, RTX A100,
   CUDA 12.2 via modulefile Spack)*
+
+  **Chiuso il 14-10-2026**, quando lo stesso errore ha fermato la prima
+  build su JUPITER (GH200, aarch64, CUDA 13 da modulo EasyBuild). La causa è
+  più larga di quanto scritto sotto: su Linux `find_cuda_helper` 0.2.0 (ancora
+  l'ultima versione) non legge affatto `CUDA_PATH`, solo
+  `CUDA_LIBRARY_PATH`, `/opt/cuda` e `/usr/local/cuda{,-*}`, e come target
+  conosce solo `targets/x86_64-linux`: ogni toolkit fuori da `/usr/local`
+  falliva, non solo quelli Spack. `build.rs` ora mette prima nei path del
+  linker le directory della toolkit indicata dall'ambiente
+  (`cuda_toolkit_lib_dirs`: radici da `CUDA_PATH`, `CUDA_HOME`, `CUDA_ROOT`,
+  `CUDA_TOOLKIT_ROOT_DIR` e dall'nvcc di `CUDACXX`/`CMAKE_CUDA_COMPILER`; in
+  ognuna `lib64`, `lib` e `targets/<arch>/lib`, con `sbsa-linux` per
+  aarch64, e i loro `stubs/`), poi quelle di `find_cuda_helper`, e stampa un
+  `cargo:warning` che nomina le directory cercate se in nessuna c'è
+  `libcudart_static.a`. Annotato come modifica EuLLM nel codice (`EuLLM:`),
+  dove le altre modifiche vendorizzate sono già. Le CI (immagini
+  nvidia/cuda, `/usr/local/cuda`) cercano come prima.
+
+  La descrizione originale:
   `engine/vendor/llama-cpp-rs/llama-cpp-sys-2/build.rs:1265-1267` popola i
   path di ricerca del linker chiamando la crate esterna `find_cuda_helper`
   (v0.2.0, dipendenza in `llama-cpp-sys-2/Cargo.toml:81`), poi
