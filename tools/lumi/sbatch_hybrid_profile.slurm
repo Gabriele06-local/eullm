@@ -27,7 +27,12 @@
 #     --ctx-checkpoints 8) and on llama-server: `prompt_ms` per turn. On a
 #     hybrid model a server that cannot restore an earlier state reads the
 #     whole conversation every turn; on the 32B the slot's cache is reused.
-#     Needs EULLM_BIN and LLAMA_SERVER_BIN; left out without them.
+#     Needs EULLM_BIN and LLAMA_SERVER_BIN; left out without them. With
+#     EULLM_BIN_BEFORE, an older engine has the same conversation first
+#     (label eullm-before), for a before and after on one node.
+#
+# PARTS picks the parts (default "1 2 3 4"): PARTS=4 has the conversations
+# alone, a few minutes.
 
 #SBATCH --job-name=eullm-hybrid-profile
 #SBATCH --partition=small-g
@@ -74,6 +79,8 @@ echo
 # Every load reads the model in (-lm none), as the engine does from Lustre.
 COMMON=(-ngl 99 -lm none)
 PORT=$((18700 + ${SLURM_JOB_ID:-0} % 300))
+PARTS=" ${PARTS:-1 2 3 4} "
+part() { [[ "$PARTS" == *" $1 "* ]]; }
 TURNS="$PY $EULLM_REPO/tools/lumi/multiturn_probe.py"
 
 wait_ready() {  # PATH PID: up to five minutes for the server to answer, while it lives
@@ -92,7 +99,7 @@ stop() {
 }
 
 conversation() {  # MODEL GGUF LABEL: five turns on one server, EuLLM or llama-server
-    local m=$1 gguf=$2 label=$3 api=eullm ready=/api/version server
+    local m=$1 gguf=$2 label=$3 api=eullm ready=/api/version server bin=$EULLM_BIN
     shift 3
     case "$label" in
         llama-server)
@@ -101,7 +108,10 @@ conversation() {  # MODEL GGUF LABEL: five turns on one server, EuLLM or llama-s
                 -c 16384 -np 1 -ngl 999 >"$OUT/$m.$label.log" 2>&1 &
             ;;
         *)
-            "$EULLM_BIN" serve --port "$PORT" --batch-size 1 --ctx-size 16384 "$@" \
+            [ "$label" = eullm-before ] && bin=$EULLM_BIN_BEFORE
+            # The scheduler's debug lines say which states it kept and restored.
+            RUST_LOG="eullm=info,eullm::inference::scheduler=debug" \
+                "$bin" serve --port "$PORT" --batch-size 1 --ctx-size 16384 "$@" \
                 >"$OUT/$m.$label.log" 2>&1 &
             ;;
     esac
@@ -119,15 +129,19 @@ for m in "${MODELS[@]}"; do
     if [ -z "$gguf" ]; then echo "[!!] $m is not in $EULLM_MODELS_DIR"; continue; fi
     echo "=== $m: $gguf ==="
 
-    echo "--- 1. batched-bench: 1 to 32 sequences ---"
-    "$BATCHED" -m "$gguf" "${COMMON[@]}" -fa on -c 16384 -b 2048 -ub 512 \
-        -npp 128 -ntg 128 -npl 1,4,16,32 2>"$OUT/$m.batched.log" | grep -E '^\|'
+    if part 1; then
+        echo "--- 1. batched-bench: 1 to 32 sequences ---"
+        "$BATCHED" -m "$gguf" "${COMMON[@]}" -fa on -c 16384 -b 2048 -ub 512 \
+            -npp 128 -ntg 128 -npl 1,4,16,32 2>"$OUT/$m.batched.log" | grep -E '^\|'
+    fi
 
-    echo "--- 2. llama-bench: prompts of 512 and 4096 tokens, 128 written ---"
-    "$BENCH" -m "$gguf" "${COMMON[@]}" -fa 1 -ub 512 -p 512,4096 -n 128 -r 3 -o md \
-        2>"$OUT/$m.bench.log"
+    if part 2; then
+        echo "--- 2. llama-bench: prompts of 512 and 4096 tokens, 128 written ---"
+        "$BENCH" -m "$gguf" "${COMMON[@]}" -fa 1 -ub 512 -p 512,4096 -n 128 -r 3 -o md \
+            2>"$OUT/$m.bench.log"
+    fi
 
-    if [ -n "$PROF" ]; then
+    if part 3 && [ -n "$PROF" ]; then
         for n in 1 32; do
             echo "--- 3. kernels while $n sequences answer (32 prompt, 128 answer tokens each) ---"
             dir="$OUT/$m.npl$n"
@@ -160,11 +174,18 @@ EOF
         done
     fi
 
-    if [ -x "${EULLM_BIN:-}" ] && [ -x "${LLAMA_SERVER_BIN:-}" ]; then
+    if ! part 4; then
+        :
+    elif [ -x "${EULLM_BIN:-}" ] && [ -x "${LLAMA_SERVER_BIN:-}" ]; then
         echo "--- 4. five turns over a 6,000-token document: prompt_ms per turn ---"
+        if [ -x "${EULLM_BIN_BEFORE:-}" ]; then
+            conversation "$m" "$gguf" eullm-before
+        fi
         conversation "$m" "$gguf" eullm
-        conversation "$m" "$gguf" eullm-ckpt8 --ctx-checkpoints 8
         conversation "$m" "$gguf" llama-server
+        # Which states the engine kept and restored, by the log.
+        grep -hE "kept its recurrent|restored the recurrent|reused prefill failed" \
+            "$OUT/$m.eullm.log" | sed 's/\x1b\[[0-9;]*m//g' | cut -c1-160 | tail -8
     else
         echo "--- 4. skipped: set EULLM_BIN (and LLAMA_SERVER_BIN, campaign_env.sh finds it) ---"
     fi
