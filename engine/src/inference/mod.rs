@@ -610,9 +610,10 @@ pub struct InferenceConfig {
     /// `server_prompt_checkpoint` snapshots (`--ctx-checkpoints`, default
     /// 32, `--checkpoint-min-step`, default 8192 tokens) with a graceful
     /// full-reprocessing fallback when no checkpoint covers the request.
-    /// eullm does not yet implement an equivalent bounded-checkpoint
-    /// mechanism; that is the correct future direction for this problem,
-    /// not raising `rs_seq`.
+    /// The scheduler does the same by itself: on these architectures it
+    /// keeps each slot's recurrent state 4 tokens before the end of the
+    /// prompt it reads, and a micro-batch before that, and the next turn
+    /// restores it (`scheduler::StateCheckpoint`). Not by raising `rs_seq`.
     ///
     /// Setting this nonzero allows rollback up to that many positions
     /// back, but recurrent-state tensors scale by a factor of
