@@ -3,7 +3,9 @@
 #
 #   llama-server  built from the engine's own llama.cpp submodule, at the same
 #                 commit and without EuLLM's patches — the same backend
-#                 without EuLLM's runtime, so a difference is EuLLM's
+#                 without EuLLM's runtime, so a difference is EuLLM's; with
+#                 llama-batched-bench and llama-bench from the same build,
+#                 llama.cpp measured alone (sbatch_hybrid_profile.slurm)
 #   Ollama        the latest release, with its ROCm libraries — the API the
 #                 engine is compatible with
 #
@@ -47,10 +49,12 @@ if [ "${SKIP_LLAMA:-0}" != "1" ]; then
     if HIPCXX="$ROCM_PATH/llvm/bin/clang" HIP_PATH="$ROCM_PATH" \
         cmake -S "$LCPP" -B "$BUILD" -DGGML_HIP=ON -DGPU_TARGETS=gfx90a \
             -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF >"$RT/llama-cmake.log" 2>&1 &&
-       cmake --build "$BUILD" --target llama-server -j "${BUILD_JOBS:-16}" \
-            >"$RT/llama-build.log" 2>&1; then
-        cp -f "$BUILD/bin/llama-server" "$RT/llama-server"
-        echo "[ok] $RT/llama-server ($(git -C "$LCPP" describe --tags --always 2>/dev/null))"
+       cmake --build "$BUILD" --target llama-server llama-batched-bench llama-bench \
+            -j "${BUILD_JOBS:-16}" >"$RT/llama-build.log" 2>&1; then
+        for tool in llama-server llama-batched-bench llama-bench; do
+            cp -f "$BUILD/bin/$tool" "$RT/$tool"
+            echo "[ok] $RT/$tool ($(git -C "$LCPP" describe --tags --always 2>/dev/null))"
+        done
     else
         echo "[!!] llama-server did not build: tail $RT/llama-cmake.log $RT/llama-build.log"
         FAILED+=("llama-server")
