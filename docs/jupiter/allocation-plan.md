@@ -58,16 +58,28 @@ on the first day, and measure placement before committing to a job shape.
 
 1. **Account.** JuDoor registration, SSH key, 2FA; join the project when JSC
    sends it. Login is `login.jupiter.fz-juelich.de`.
-2. **No personal data — signed.** The Principal Investigator's Agreement
-   signed on 14-10-2026 says the system is used "only for the purposes of
-   the projects for which access was granted and not to process any personal
-   data". Pseudonymised court decisions are personal data, so they do not go
-   to JUPITER — not after a DPA either, unless JSC agrees in writing to an
-   exception (the proposal had planned one; the agreement supersedes it).
+2. **No personal data until a DPA with JSC is signed — request it now.**
+   The proposal answered "Does your proposal involve handling of personal
+   data?: Yes", and the call's own form required the PI to confirm the data
+   controller's responsibilities and noted that "they will need to make a
+   data processing agreement with the production site"; we answered that we
+   would sign one "before any personal data is uploaded, and we will do
+   so". The Principal Investigator's Agreement signed on 14-10-2026 is
+   JSC's standard form and says the system is used "not to process any
+   personal data": that is the default, and the DPA is the way the call
+   itself provides out of it. Pseudonymised court decisions are personal
+   data, so they do not go to JUPITER before the DPA is signed.
    Legislation (Normattiva, EUR-Lex: public domain) and public benchmarks
-   are what JUPITER trains and evaluates on, which covers every throughput
-   measurement (deliverables 1–5, 8): throughput does not depend on which
-   text is trained on. Case-law work stays on Leonardo.
+   are what JUPITER trains and evaluates on until then, which covers every
+   throughput measurement (deliverables 1–5, 8): throughput does not depend
+   on which
+   text is trained on. Case-law work stays on Leonardo, with one way out:
+   the ruling cards, which hold the principles and not the case, after
+   `forge/scripts/export_clean_cards.py` has run on Leonardo — development
+   rulings, special-category and criminal appeals and any card still naming
+   a party, place or amount left out, and made-up references (numbers
+   50000–59999, which no real ruling has) in place of the real ones, with no
+   table back. Exams on real rulings stay off JUPITER too.
 3. **Environment probe**, `forge/scripts/jupiter/probe_env.sh`: aarch64,
    GPU count and memory, whether nodes are exclusive, how PyTorch is reached
    and whether its build has sm_90, transformers/peft/accelerate beside it,
@@ -152,11 +164,23 @@ the placement probe says JUPITER rewards something else.
 
 ## Lines not to cross
 
-* **No personal data at all** (signed PI agreement, 14-10-2026): no court
-  decisions, pseudonymised or not, and nothing derived from them that could
-  carry a name — OPD prompt files with case-law rows included. Only
-  legislation and public benchmarks. Nothing from the corpus is ever in a
-  repository.
+* **No personal data before the DPA** (signed PI agreement, 14-10-2026;
+  the proposal's Privacy & Data Governance answers): no court decisions,
+  pseudonymised or not, and nothing derived from them that could carry a
+  name — OPD prompt files with case-law rows included — only legislation,
+  public benchmarks and the cards `export_clean_cards.py` lets out. After
+  the DPA, still only pseudonymised text, as declared. Nothing from the
+  corpus is ever in a repository.
+* **What the proposal promised about the data, which binds us after the
+  DPA too**: names of parties and lawyers, tax codes, VAT numbers, IBANs,
+  addresses, phone numbers, emails and dates of birth replaced; links to
+  the original documents removed; surnames in case citations removed;
+  generated examples that still hold a placeholder or anything the
+  anonymiser would remove discarded; generated questions about a single
+  case filtered out; the corpus kept only on project storage, moved only
+  over SSH, never in a repository or a third-party service; raw data not
+  needed for training deleted at the end of the project; models evaluated
+  on 2025–2026 decisions never used for training.
 * **Export control and the AI Act** (same agreement): no work on the
   excluded topics, and the AI Act's obligations for general-purpose models
   apply to what we release; JSC is told of any relevant change of research
@@ -180,7 +204,7 @@ energy figures. Its deadline and template are to be confirmed with EuroHPC
 1. Start and end dates, and the "pre-defined consumption pattern".
 2. Node sharing and billing: is a 2-GPU job billed 2 or 4 GPU-hours?
 3. Maximum walltime and the job-size/priority policy on `booster`.
-4. Whether an exception for pseudonymised court decisions under a DPA is possible at all, given the PI agreement; until JSC says yes in writing, the answer is no.
+4. The DPA the proposal promised for pseudonymised court decisions: template, who signs, how long it takes. Until it is signed, no personal data.
 5. Energy accounting per job (Slurm `ConsumedEnergy` or site tooling).
 
 Sources: [JUPITER technical overview (JSC)](https://www.fz-juelich.de/en/ias/jsc/jupiter/tech),
