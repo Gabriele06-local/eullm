@@ -5,6 +5,9 @@
 > Proposal: *Porting and scaling a teacher–student verticalisation pipeline
 > for European domain-specific LLMs to Grace Hopper*. Technical Assessment:
 > accepted, "codes not installed — to be installed by the applicant".
+> **Activated 14-10-2026**, after the Principal Investigator's Agreement
+> (version 23.06.2025) was signed and sent — see "Lines not to cross" for
+> what it binds.
 > Sibling allocations: Leonardo Booster EHPC-AIF-2026PG01-1147 (Forge, ends
 > 02-11-2026, [`../leonardo-allocation-plan.md`](../leonardo-allocation-plan.md))
 > and LUMI-G EHPC-DEV-2026D09-278 (engine, inference only,
@@ -55,14 +58,16 @@ on the first day, and measure placement before committing to a job shape.
 
 1. **Account.** JuDoor registration, SSH key, 2FA; join the project when JSC
    sends it. Login is `login.jupiter.fz-juelich.de`.
-2. **Data processing agreement — the blocker for Italian court decisions.**
-   The proposal declares personal data (pseudonymised decisions are still
-   personal data) and promises a DPA with the hosting site *before any
-   personal data is uploaded*. Request it from JSC now. Until it is signed,
-   only legislation (Normattiva, EUR-Lex: public domain) and public
-   benchmarks go to JUPITER, which is enough for every throughput
-   measurement (deliverables 1–5, 8) — throughput does not depend on which
-   text is trained on.
+2. **No personal data — signed.** The Principal Investigator's Agreement
+   signed on 14-10-2026 says the system is used "only for the purposes of
+   the projects for which access was granted and not to process any personal
+   data". Pseudonymised court decisions are personal data, so they do not go
+   to JUPITER — not after a DPA either, unless JSC agrees in writing to an
+   exception (the proposal had planned one; the agreement supersedes it).
+   Legislation (Normattiva, EUR-Lex: public domain) and public benchmarks
+   are what JUPITER trains and evaluates on, which covers every throughput
+   measurement (deliverables 1–5, 8): throughput does not depend on which
+   text is trained on. Case-law work stays on Leonardo.
 3. **Environment probe**, `forge/scripts/jupiter/probe_env.sh`: aarch64,
    GPU count and memory, whether nodes are exclusive, how PyTorch is reached
    and whether its build has sm_90, transformers/peft/accelerate beside it,
@@ -104,9 +109,15 @@ the placement probe says JUPITER rewards something else.
 
 ## Lines not to cross
 
-* **Personal data only after the DPA**, and only pseudonymised, as declared.
-  Nothing from the corpus leaves the project storage; it is never in a
+* **No personal data at all** (signed PI agreement, 14-10-2026): no court
+  decisions, pseudonymised or not, and nothing derived from them that could
+  carry a name — OPD prompt files with case-law rows included. Only
+  legislation and public benchmarks. Nothing from the corpus is ever in a
   repository.
+* **Export control and the AI Act** (same agreement): no work on the
+  excluded topics, and the AI Act's obligations for general-purpose models
+  apply to what we release; JSC is told of any relevant change of research
+  topic.
 * **Only permissive base models** (Qwen Apache-2.0, as declared); the
   Qwen3.5 pair is checked against the Hub licence before download.
 * **No training on LUMI**: the same proposal told EuroHPC that LUMI DEV-278
@@ -126,7 +137,7 @@ energy figures. Its deadline and template are to be confirmed with EuroHPC
 1. Start and end dates, and the "pre-defined consumption pattern".
 2. Node sharing and billing: is a 2-GPU job billed 2 or 4 GPU-hours?
 3. Maximum walltime and the job-size/priority policy on `booster`.
-4. The DPA: template and who signs.
+4. Whether an exception for pseudonymised court decisions under a DPA is possible at all, given the PI agreement; until JSC says yes in writing, the answer is no.
 5. Energy accounting per job (Slurm `ConsumedEnergy` or site tooling).
 
 Sources: [JUPITER technical overview (JSC)](https://www.fz-juelich.de/en/ias/jsc/jupiter/tech),
