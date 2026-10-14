@@ -5,14 +5,17 @@
 # MI250X and the H100 compare row by row. Submit through submit.sh.
 #
 # A booster node is billed whole (OverSubscribe=EXCLUSIVE): 4 GPU-hours an
-# hour. The campaign stops starting points half an hour before the end
-# (--margin-s 1800) to leave the conversations their time.
+# hour, and only for the time used. The first full run (job 2326571,
+# 14-10-2026: 22 points, then the conversations) took 17 minutes; it asks
+# for an hour, which waits less in the queue than three, and stops starting
+# points 15 minutes before the end (--margin-s 900) to leave the
+# conversations theirs (two model loads each side).
 
 #SBATCH --job-name=eullm-gh200
 #SBATCH --partition=booster
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 
 set -uo pipefail
 # shellcheck source=env.sh
@@ -34,7 +37,7 @@ echo
 
 echo "=== 1. the c07 points ==="
 $CAMPAIGN run --queue "$CAMPAIGN_DIR" --devices "0-$((GPUS - 1))" --backend cuda \
-    --bind none --site jupiter-booster --engine "$EULLM_BIN" --margin-s 1800
+    --bind none --site jupiter-booster --engine "$EULLM_BIN" --margin-s 900
 
 echo
 echo "=== 2. five turns over a 6,000-token document, twice: prompt_ms per turn ==="
