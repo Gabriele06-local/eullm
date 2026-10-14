@@ -538,24 +538,26 @@ the 27B would say.
 November anomaly, now on every model. At 32 requests q8_0 is 4-11% slower than
 f16 and q4_0 12-23% (on Qwen3.6-27B, whose cache is a quarter of its layers,
 1-3%); alone, 3-13%. Qwen3-8B at 32 requests holds 23.2 GiB with f16, 15.2
-with q8_0, 13.0 with q4_0. With 16,000 tokens of context the cost grows:
+with q8_0, 13.0 with q4_0. With 19,500 tokens of context the cost grows:
 decoding with q8_0 is 9-10% slower on Qwen3-14B and the 35B-A3B, 30-33% on
 Qwen3-8B and Qwen3-32B.
 
-**Long contexts** (`c01 long-context`, one GCD, one request). Prompt reading,
-tokens/s with 8,000 and 16,000 tokens, and the first token:
+**Long contexts** (`c01 long-context`, one GCD, one request). The prompts are
+the runner's nominal 8,000 and 16,000 tokens, at 4 characters a token, which
+Qwen3 reads as about 9,700 and 19,500 (the c01 spec's note). Prompt reading,
+tokens/s, and the first token:
 
-| model | 8,000 | 16,000 | first token |
+| model | 9,700 | 19,500 | first token |
 |---|---:|---:|---:|
 | Qwen3-8B | 2202 | 1937 | 4.4 / 10.1 s |
 | Qwen3-14B | 1400 | 1156 | 7.0 / 16.8 s |
 | Qwen3-32B | 688 | 599 | 14.2 / 32.5 s |
 | Qwen3.6-35B-A3B | 2565 | 2534 | 3.0 / 6.1 s |
 
-After 16,000 tokens the dense models decode 21-34% slower than with no
+After 19,500 tokens the dense models decode 21-34% slower than with no
 context, the 35B-A3B, whose attention is a quarter of its layers, 8%. With
 four such prompts at once the median first token comes after 2.6 times one
-prompt's (Qwen3-14B, 44.0 s at 16,000): the prompts are read one after
+prompt's (Qwen3-14B, 44.0 s at 19,500): the prompts are read one after
 another, oldest first, so the first answer starts after one prompt and not
 after four.
 
