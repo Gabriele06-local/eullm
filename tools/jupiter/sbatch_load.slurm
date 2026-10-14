@@ -94,9 +94,11 @@ case_() {  # LABEL RUNTIME [ARGS...]: start, time the first answer, stop
     local log="$OUT/$label.log" answer="$OUT/$label.answer.json"
     t0=$(date +%s.%N)
     if [ "$runtime" = llama-server ]; then
+        # -lv 4: llama.cpp's own information lines (load_mode, buffer sizes)
+        # are verbosity 4, and llama-server shows 3; job 2326571's logs had none.
         ready=/health path=/completion body='{"prompt": "Ciao.", "n_predict": 8}'
         "$LLAMA_SERVER_BIN" --host 127.0.0.1 --port "$PORT" -m "$GGUF" --alias "$MODEL" \
-            -c 16384 -np 1 -ngl 999 --log-timestamps --log-prefix "$@" >"$log" 2>&1 &
+            -c 16384 -np 1 -ngl 999 -lv 4 --log-timestamps --log-prefix "$@" >"$log" 2>&1 &
     else
         ready=/api/version path=/api/generate
         body="{\"model\": \"$MODEL\", \"prompt\": \"Ciao.\", \"stream\": false, \"think\": false, \"options\": {\"num_predict\": 8}}"
