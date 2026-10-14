@@ -188,6 +188,10 @@ def engine_provenance(engine: str) -> dict:
 
 
 def bench_revision() -> str:
+    # Given by whoever submitted the job, where a compute node has no git
+    # (JUPITER's booster nodes).
+    if os.environ.get("EULLM_BENCH_REV"):
+        return os.environ["EULLM_BENCH_REV"]
     rev = sh(["git", "-C", REPO, "rev-parse", "--short", "HEAD"]).strip()
     dirty = sh(["git", "-C", REPO, "status", "--porcelain", "--untracked-files=no"]).strip()
     return (rev or "unknown") + ("-dirty" if dirty else "")
@@ -709,8 +713,28 @@ def node_hours(points, node_devices=8) -> float:
     return total
 
 
+def installed_models(listing: str) -> set:
+    """The models `eullm list` shows as installed: the first column of its
+    table, the rows under the NAME header up to the first blank line, less
+    those whose file is missing. Not every word it prints: with an empty
+    store it prints the EU catalog instead, whose ids are not installed. On
+    JUPITER (14-10-2026) reading every word took qwen3.6-27b, qwen3-32b and
+    qwen3.6-35b-a3b for installed, nothing was pulled, and a node's job
+    blocked all 22 points it had."""
+    models, in_table = set(), False
+    for line in listing.splitlines():
+        if not in_table:
+            in_table = line.split()[:4] == ["NAME", "SIZE", "VRAM", "STATUS"]
+            continue
+        if not line.strip():
+            break
+        if "(file missing)" not in line:
+            models.add(line.split()[0])
+    return models
+
+
 def missing_models(engine, specs) -> list:
-    listed = set(sh([engine, "list"], timeout=120).split())
+    listed = installed_models(sh([engine, "list"], timeout=120))
     return [(m, ref) for m, ref in pull_refs(specs) if m not in listed]
 
 

@@ -36,10 +36,18 @@ echo "engine $("$EULLM_BIN" --version 2>&1 | head -1)"
 echo
 echo "=== models ==="
 FAILED=()
-# Every word `eullm list` prints, as the runner reads it (missing_models).
-LISTED=" $("$EULLM_BIN" list 2>/dev/null | tr -s '[:space:]' ' ') "
+# Installed is a row of `eullm list`'s table, which starts with the id, its
+# file present: not any word it prints. With an empty store it prints the EU
+# catalog, indented, where these three ids are too; read as words, the first
+# job on 14-10-2026 found none of them on the node (campaign.py's
+# installed_models reads it the same way).
+LISTING=$("$EULLM_BIN" list 2>/dev/null)
+installed() {  # MODEL
+    awk -v m="$1" 'index($0, m " ") == 1 && !/\(file missing\)/ { found = 1 }
+        END { exit !found }' <<<"$LISTING"
+}
 for m in "${MODELS[@]}"; do
-    if [[ "$LISTED" == *" $m "* ]]; then
+    if installed "$m"; then
         echo "  $m: already there"
         continue
     fi

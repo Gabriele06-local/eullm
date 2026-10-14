@@ -43,6 +43,31 @@ has a copy — relicensing cannot revoke a licence already granted.
 - **CI/CD:** GitHub Actions CI (build + test + clippy/ruff for all 3 components on every push/PR). Release workflow builds cross-platform Engine binaries (Linux x64/arm64, macOS x64/arm64) on tag push, creates GitHub Release with SHA256 checksums.
 - **EU Infrastructure:** Hetzner (primary), OVH/Scaleway (secondary)
 
+## HPC sites
+
+Each site has its own document, read before working there; when sites are
+worked on in parallel, each has its own chat and its own branch. `engine/`
+and `bench/campaign/` are shared by all of them: a change there is made in
+one branch at a time and reaches the others through `main`, or two chats
+end up pushing over each other.
+
+- **LUMI-G** (EuroHPC EHPC-DEV-2026D09-278, `project_465003366`): engine
+  inference and benchmarks only, on MI250X (gfx90a). One node per new
+  engine build; spending is slowed down. `docs/lumi/allocation-plan.md`,
+  `docs/lumi/lumi-g.md`, `tools/lumi/`.
+- **JUPITER Booster** (EuroHPC EHPC-AIF-2026PG01-1434, JSC budget
+  `e-aif-2026pg01-1434`, 5,000 GPU-hours): Forge, with the engine as
+  deliverable 5, on GH200 (aarch64, sm_90). `booster` hands out whole nodes
+  only (a job pays 4 GPU-hours an hour), so short jobs are the lever, not
+  fewer GPUs; compute nodes have no internet and no `git`; no personal data
+  before the DPA with JSC. `docs/jupiter/allocation-plan.md`,
+  `tools/jupiter/`, `forge/scripts/jupiter/`.
+- **Leonardo** (CINECA, `AIFAC_P02_1147`): Forge distillation on A100 64GB.
+  Jobs of two hours at most and never a whole node: a job asking for part
+  of a node starts far sooner. `docs/cineca/leonardo.md`,
+  `docs/leonardo-runbook.md`, `forge/scripts/leonardo/`, and the job-shape
+  rules in `forge/CLAUDE.md`.
+
 ## Current Phase: Forge pipeline + first demo models
 
 Outstanding tasks:

@@ -5,14 +5,17 @@
 # MI250X and the H100 compare row by row. Submit through submit.sh.
 #
 # A booster node is billed whole (OverSubscribe=EXCLUSIVE): 4 GPU-hours an
-# hour. The campaign stops starting points half an hour before the end
-# (--margin-s 1800) to leave the conversations their time.
+# hour, and only for the time used. The first full run (job 2326571,
+# 14-10-2026: 22 points, then the conversations) took 17 minutes; it asks
+# for an hour, which waits less in the queue than three, and stops starting
+# points 15 minutes before the end (--margin-s 900) to leave the
+# conversations theirs (two model loads each side).
 
 #SBATCH --job-name=eullm-gh200
 #SBATCH --partition=booster
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --time=03:00:00
+#SBATCH --time=01:00:00
 
 set -uo pipefail
 # shellcheck source=env.sh
@@ -22,18 +25,19 @@ GPUS="${SLURM_GPUS_ON_NODE:-4}"
 
 echo "=== eullm on GH200: job ${SLURM_JOB_ID:-local} on $(hostname), $(date -Is) ==="
 printf '  %-12s %s\n' gpus "$GPUS" engine "$("$EULLM_BIN" --version 2>&1 | head -1)" \
-    label "${EULLM_ENGINE_LABEL:-(none)}" repo "$(git -C "$EULLM_REPO" rev-parse --short HEAD)" \
+    label "${EULLM_ENGINE_LABEL:-(none)}" repo "${EULLM_BENCH_REV:-?}" \
     llama-server "${LLAMA_SERVER_BIN:-none}" queue "$CAMPAIGN_DIR"
 nvidia-smi --query-gpu=index,name,memory.total,power.limit,driver_version --format=csv,noheader |
     sed 's/^/  /'
-# Whether a compute node reaches the internet: for what a later job may fetch.
-curl -s -o /dev/null -m 10 -w '  huggingface.co from a compute node: HTTP %{http_code}\n' \
-    https://huggingface.co || echo "  huggingface.co from a compute node: unreachable"
+# Whether a compute node reaches the internet: on 14-10-2026 it did not.
+HF=$(curl -s -o /dev/null -m 10 -w '%{http_code}' https://huggingface.co || true)
+[ "${HF:-000}" = 000 ] && HF="unreachable" || HF="HTTP $HF"
+echo "  huggingface.co from a compute node: $HF"
 echo
 
 echo "=== 1. the c07 points ==="
 $CAMPAIGN run --queue "$CAMPAIGN_DIR" --devices "0-$((GPUS - 1))" --backend cuda \
-    --bind none --site jupiter-booster --engine "$EULLM_BIN" --margin-s 1800
+    --bind none --site jupiter-booster --engine "$EULLM_BIN" --margin-s 900
 
 echo
 echo "=== 2. five turns over a 6,000-token document, twice: prompt_ms per turn ==="

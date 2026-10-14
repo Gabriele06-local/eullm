@@ -118,7 +118,7 @@ code), `install_runtimes.sh` (llama-server at the same llama.cpp commit),
 build) and `submit.sh` (one node: the points four at a time, then the
 five-turn conversations of `multiturn_probe.py`). The same points ran on the
 MI250X on 14-10-2026 (`r-27b-next10`), so the two machines compare row by
-row; a job is about three hours of one node, 12 GPU-hours at most.
+row; a job asks for an hour of one node and took 17 minutes (1.2 GPU-hours).
 
 The first build (14-10-2026) stopped at the link with "could not find native
 static library `cudart_static`": the crate that finds CUDA for the build
@@ -133,6 +133,69 @@ position-independent, the host code nvcc compiles is not, and the site's GCC,
 unlike Ubuntu's, does not make it so by default. `build_engine.sh` links the
 `eullm` binary alone with `-no-pie` (`cargo rustc ... -- -C link-arg=-no-pie`),
 as the release job for x64 CUDA and Leonardo do.
+
+The first job (2326280, 14-10-2026, 2.5 minutes of one node) blocked all 22
+points: none of the three models had been pulled. `setup.sh` and the runner
+took a model for installed when its id was any word `eullm list` printed,
+and with an empty store the command prints the EU catalog, where all three
+are; both now read only the table of installed models. The same job showed
+that **compute nodes do not reach the internet** (huggingface.co: no answer)
+and have no `git`: models and workload sets are fetched on a login node, and
+`submit.sh` hands the job the checkout's commit. Its four GPUs: GH200 120GB,
+97,871 MiB each, 680 W power limit, driver 610.57.04.
+
+### First measurements (job 2326571, 14-10-2026, `next10`)
+
+One GH200 a point, four points at a time, the c07 `rt27-*` points measured
+on LUMI's MI250X the same day (`r-27b-next10`, one GCD); EuLLM and
+llama-server at the same llama.cpp commit (b11482), Q4_K_M, tokens/s:
+
+| requests | 27B EuLLM | 27B llama-server | 32B EuLLM | 32B llama-server | 27B EuLLM on a GCD | 27B llama-server on a GCD |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 75.1 | 74.4 | 69.9 | 69.5 | 38.3 | 35.3 |
+| 4 | 204 | 188 | 199 | 200 | 67.8 | 61.5 |
+| 16 | 513 | 394 | 564 | 585 | 186 | 132 |
+| 32 | 700 | 392 | 875 | 778 | 240 | 111 |
+| 16 clients, 400 graded gsm8k | 432 | 343 | | | 165 | 126 |
+
+The engine's lead on the hybrid Qwen3.6-27B is not the MI250X's: on the
+GH200 it writes 30% more than llama-server with 16 requests, 79% more with
+32 (where llama-server stops scaling, 394 to 392, as on the GCD) and 26%
+more on the graded workload, at the same accuracy (0.9425 and 0.95, three
+questions in 400). The first token with 32 requests: 187 ms against 5,970.
+On the dense Qwen3-32B the two are level up to 16 and EuLLM 12% ahead at
+32. A 16,000-token prompt is read at the same speed (27B: 2,430 tokens/s
+against 2,398; 32B: 2,002 against 1,915). A GH200 is 2-3 times a GCD here
+(half an MI250X).
+
+Five turns over a 6,000-token document (`multiturn_probe.py`, one GPU):
+from the second turn Qwen3.6-27B reads each prompt in 53-69 ms, llama-server
+in 79-84; Qwen3.6-35B-A3B in 33-49 ms against 40-52. The first turn, the
+whole prompt, about 2.2 s for both on the 27B.
+
+**Loading is the gap**: EuLLM took 107-184 s to load a model where
+llama-server took 2-12 s (same files, same nodes), and the first turn of
+the 35B-A3B's first conversation waited 169 s for it. Not yet looked into.
+The likely cause is the engine's rule for network file systems
+(`fit::read_in_whole_on_gpu`: a model whole on the GPUs is read into memory
+instead of mapped), measured right on LUMI's Lustre and here applied to the
+file system of `$PROJECT`; `--mmap` against the default on one point
+answers it.
+
+### Where it stands (14-10-2026) and what is next
+
+On `$PROJECT/$USER`: the checkout, the engine `next10`
+(`eullm-target/next10/release/eullm`, commit 1fdf9c6), llama-server b11482
+(`campaign/runtimes/`), Qwen3.6-27B, Qwen3-32B and Qwen3.6-35B-A3B
+(`eullm-models/`), the queue with round `r-gh200` done (`campaign/`). Spent:
+about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
+
+1. EuLLM's load time on JUPITER (above): one point with `--mmap` against
+   the default, and the server log's load lines.
+2. The GPU probe for Forge (`forge/scripts/jupiter/probe_env.sh`, one node,
+   15 minutes), then the Forge venv on top of the PyTorch module and week 1
+   of the calendar below.
+3. The DPA with JSC, before any personal data.
 
 ## Calendar, from the start date
 
