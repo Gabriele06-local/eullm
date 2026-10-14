@@ -654,7 +654,31 @@ prompt, `multiturn_probe.py`): on the 27B EuLLM read every turn's prompt in
 6.5 s, `--ctx-checkpoints 8` no better, llama-server in 0.33-0.67 s from
 the second turn; on the 32B EuLLM in 10-70 ms and llama-server in 86-133.
 The recurrent state kept before each prompt's end (`next9`, 14-10-2026) is
-the fix; job 22821238 measures it.
+the fix. The same conversation on it (job 22821238, `eullm-before` the
+`next8` engine on the same GCD), prompt reading from the second turn:
+Qwen3.6-27B 0.17-0.45 s instead of 6.7 (llama-server 0.31-0.38),
+Qwen3.6-35B-A3B 0.10-0.13 s instead of 2.0 (llama-server 0.16-0.43). Each
+checkpoint holds 150 MiB on the 27B (156,894,364 bytes) and 63 MiB on the
+35B-A3B. The first turn, the server's first request, took 20-29% longer
+(10.2 s against 7.9, 2.9 against 2.4); on four CPU cores the cost of the
+checkpoints on a first prompt was about 5%, and the probe's second
+conversation measures it warm from now on.
+
+Patch 0007 (`next10`, `r-27b-next10`, job 22825342, same day), tokens/s,
+against `r-27b`:
+
+| | 27B EuLLM | 27B llama-server | 32B EuLLM (control) |
+|---|---:|---:|---:|
+| 1 request | 38 → 38.3 | 35.1 → 35.3 | 38 → 37 |
+| 4 at once | 66.2 → 67.8 | 61.3 → 61.5 | 75.7 → 75.1 |
+| 16 at once | 162 → 186 | 133 → 132 | 262 → 261 |
+| 32 at once | 198 → 240 | 112 → 111 | 377 → 378 |
+| 16 clients, graded gsm8k | 141 → 165 | 124 → 126 | |
+
+At 32 the 27B now writes 2.2 times llama-server's; it still gains 6.3x
+from 1 to 32 against the 32B's 10x. What is left is the gated delta net
+kernel itself (22% of the GPU time at 32) and the gathering of the
+recurrent states (7%).
 
 **Q8_0 against Q4_K_M** (`c02 quant-one-gcd`): one request is 18% slower on
 Qwen3-8B, 24% on 14B, 28% on 32B, and level on Qwen3-30B-A3B (122 against

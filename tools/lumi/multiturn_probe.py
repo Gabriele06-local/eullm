@@ -21,7 +21,10 @@ default.
 The conversation opens with a long document (--doc-tokens, nominal, at 4
 characters a token) and then asks one short question per turn; answers are
 greedy, without thinking, and short (--answer), so the turn's time is
-mostly its prompt.
+mostly its prompt. With --conversations 2 a second conversation, over a
+document that differs from its first token, follows the first: its first
+turn is read on a server already warm, where the first conversation's
+also pays for the server's first request.
 """
 
 from __future__ import annotations
@@ -85,22 +88,27 @@ def main() -> int:
     ap.add_argument("--doc-tokens", type=int, default=6000)
     ap.add_argument("--answer", type=int, default=48)
     ap.add_argument("--timeout", type=float, default=900)
+    ap.add_argument("--conversations", type=int, default=1)
     args = ap.parse_args()
 
-    doc = (PARAGRAPH * (args.doc_tokens * 4 // len(PARAGRAPH) + 1))[: args.doc_tokens * 4]
-    messages = [{"role": "user", "content": f"{doc}\n\n{QUESTIONS[0]}"}]
-    for n in range(args.turns):
-        t0 = time.time()
-        try:
-            answer, tokens, prompt_ms = turn(args, messages)
-        except Exception as e:  # one failed turn ends the conversation, and says why
-            print(json.dumps({"label": args.label, "turn": n + 1, "error": str(e)[:300]}))
-            return 1
-        wall = time.time() - t0
-        print(json.dumps({"label": args.label, "turn": n + 1, "prompt_tokens": tokens,
-                          "prompt_ms": prompt_ms, "wall_s": round(wall, 2)}), flush=True)
-        messages.append({"role": "assistant", "content": answer})
-        messages.append({"role": "user", "content": QUESTIONS[(n + 1) % len(QUESTIONS)]})
+    body = (PARAGRAPH * (args.doc_tokens * 4 // len(PARAGRAPH) + 1))[: args.doc_tokens * 4]
+    for c in range(args.conversations):
+        doc = f"Document {c + 1}. {body}"
+        messages = [{"role": "user", "content": f"{doc}\n\n{QUESTIONS[0]}"}]
+        for n in range(args.turns):
+            t0 = time.time()
+            try:
+                answer, tokens, prompt_ms = turn(args, messages)
+            except Exception as e:  # one failed turn ends the run, and says why
+                print(json.dumps({"label": args.label, "conversation": c + 1, "turn": n + 1,
+                                  "error": str(e)[:300]}))
+                return 1
+            wall = time.time() - t0
+            print(json.dumps({"label": args.label, "conversation": c + 1, "turn": n + 1,
+                              "prompt_tokens": tokens, "prompt_ms": prompt_ms,
+                              "wall_s": round(wall, 2)}), flush=True)
+            messages.append({"role": "assistant", "content": answer})
+            messages.append({"role": "user", "content": QUESTIONS[(n + 1) % len(QUESTIONS)]})
     return 0
 
 
