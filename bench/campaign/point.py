@@ -42,7 +42,7 @@ REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 # above this, or a kind or runtime this file does not know, and is left in
 # the queue for a runner that does: jobs keep the code they started with
 # for up to 48 hours, while plan adds points at any time.
-RUNNER_VERSION = 5
+RUNNER_VERSION = 6
 # The engine build this job runs, as `plan --engine-label` names it
 # (EULLM_ENGINE_LABEL, exported by submit_campaign.sh). A point planned with a
 # label runs only in a job with the same one, and a point planned without one
@@ -534,8 +534,13 @@ class Context:
     """What the runner gives a point: where it runs and what it may use."""
 
     def __init__(self, engine, backend, binding, physical, port_base, workdir,
-                 sampler=None, stop=None, model_seen=None, sets_dir=None, f32_dir=None):
+                 sampler=None, stop=None, model_seen=None, sets_dir=None, f32_dir=None,
+                 cores=None):
         self.engine, self.backend, self.binding = engine, backend, binding
+        # The cores every server of the point runs on, where the point takes
+        # those of all the devices it reserved (`"cores": "reserved"`);
+        # otherwise each server gets its own devices' (`cores_for`).
+        self.cores = cores
         self.physical = list(physical)  # physical ids, in order
         self.port_base, self.workdir = port_base, workdir
         self.sampler = sampler
@@ -570,7 +575,8 @@ def start_servers(p: dict, ctx: Context) -> list:
         env.update(extra_env)
         env["OLLAMA_HOST"] = f"127.0.0.1:{ctx.port_base + r}"
         server = Server(binary, ctx.port_base + r, args, env, log,
-                        cores_for(ctx.binding, group), runtime=p.get("runtime", "eullm"))
+                        ctx.cores or cores_for(ctx.binding, group),
+                        runtime=p.get("runtime", "eullm"))
         server.start()
         servers.append(server)
     return servers

@@ -24,7 +24,8 @@ scheduler it creates for the context. It is declared in a header of its
 own, ggml-backend-prefetch.h, so that the sources of the backends, which
 all include ggml-backend.h, are not rebuilt for it.
 
-Off unless set. One CUDA GPU and one copy of the graph: other backends hold
+Off unless set. One GPU of the CUDA backend (built for CUDA, or for HIP as
+"ROCm") and one copy of the graph: other backends hold
 on to what an asynchronous copy or an event takes until the next full
 synchronization (Vulkan a new event per record, Metal a copy of the host
 data per copy). The experts must be in the GPU's pinned host buffer, where
@@ -183,10 +184,10 @@ index ff3f07998..2684dfa9d 100644
 +    }
 +    // other backends hold on to what an asynchronous copy or an event takes until the next full
 +    // synchronization, which comes once per graph: Vulkan a new event per record, Metal a copy
-+    // of the host data per copy
++    // of the host data per copy; ROCm is the CUDA backend built for HIP
 +    const char * reg = ggml_backend_reg_name(ggml_backend_dev_backend_reg(gpu));
-+    if (strcmp(reg, "CUDA") != 0) {
-+        fprintf(stderr, "moe prefetch: off, it is written for CUDA, not %s\n", reg);
++    if (strcmp(reg, "CUDA") != 0 && strcmp(reg, "ROCm") != 0) {
++        fprintf(stderr, "moe prefetch: off, it is written for the CUDA backend (CUDA, ROCm), not %s\n", reg);
 +        return;
 +    }
 +    auto * pf = new ggml_backend_sched_prefetch();

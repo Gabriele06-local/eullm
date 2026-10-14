@@ -1,0 +1,52 @@
+{
+  "campaign": "c10-moe-ram",
+  "notes": [
+    "Large MoE models on ONE GCD, their experts in the node's 512 GB of RAM, against c02's",
+    "all-GPU splits of the same files (moe-235b-q4-split4, moe-480b, moe-671b on 8 GCDs,",
+    "gpt-oss-120b on 2): what a single 64 GB GPU beside a large RAM serves, objective (5).",
+    "Three ways to keep the experts in RAM, as extra_args:",
+    "  --moe-cache auto  the experts pinned in RAM, the most used cached in VRAM, misses copied",
+    "                    over the CPU-GPU link (llama.cpp PR #29887 and patches 0001-0004; on",
+    "                    ROCm from the engine of 14-10-2026, next11);",
+    "  --cpu-moe         every expert computed by the CPU, the rest on the GPU;",
+    "  (none)            what --fit chooses by itself: the experts of the last layers in RAM.",
+    "Exclusive: one point a node, for its RAM. cores 'reserved': the server runs on the 56",
+    "cores of the whole node, not the 7 of its GCD, since the CPU computes experts.",
+    "No --fit-strict: these loads do not fit the GPU by design.",
+    "DeepSeek-V3.1 (378 GiB) is the boundary: its experts may be more than the RAM can pin.",
+    "Same batches as the c02 groups they are compared with; prompt groups: one 8,000-token",
+    "prompt (nominal), the reading speed that the prefetch of patch 0003 is for."
+  ],
+  "pull": [
+    "hf.co/ggml-org/gpt-oss-120b-GGUF:MXFP4",
+    "hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
+    "hf.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:Q4_K_M",
+    "hf.co/unsloth/DeepSeek-V3.1-GGUF:Q4_K_M"
+  ],
+  "defaults": {"kind": "throughput", "repeats": 3, "gcds": 1, "exclusive": true,
+               "cores": "reserved", "slot_ctx": 4096},
+  "groups": [
+    {"name": "ram-gpt-oss-120b", "priority": 90, "est_s": 1800,
+     "set": {"model": "gpt-oss-120b-gguf-mxfp4"},
+     "axes": {"batch": [1, 16, 32],
+              "extra_args": [["--moe-cache", "auto"], ["--cpu-moe"], []]}},
+    {"name": "ram-235b-q4", "priority": 85, "est_s": 2400,
+     "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m"},
+     "axes": {"batch": [1, 8, 32],
+              "extra_args": [["--moe-cache", "auto"], ["--cpu-moe"], []]}},
+    {"name": "ram-480b", "priority": 80, "est_s": 3000,
+     "set": {"model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"},
+     "axes": {"batch": [1, 8, 32],
+              "extra_args": [["--moe-cache", "auto"], ["--cpu-moe"], []]}},
+    {"name": "ram-671b", "priority": 70, "est_s": 3600,
+     "set": {"model": "deepseek-v3.1-gguf-q4_k_m"},
+     "axes": {"batch": [1, 4, 16],
+              "extra_args": [["--moe-cache", "auto"], ["--cpu-moe"], []]}},
+    {"name": "ram-prompt", "priority": 60, "est_s": 2400,
+     "set": {"batch": 1, "slot_ctx": 16384, "prompt_tokens": 8000},
+     "axes": {"model": ["gpt-oss-120b-gguf-mxfp4", "qwen3-235b-a22b-gguf-q4_k_m",
+                        "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"],
+              "extra_args": [["--moe-cache", "auto"], ["--moe-cache", "auto", "--moe-prefetch", "0"],
+                             ["--cpu-moe"], []]}}
+  ]
+}
