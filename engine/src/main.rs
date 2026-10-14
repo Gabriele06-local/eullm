@@ -277,8 +277,8 @@ struct RuntimeOpts {
     /// asks for that many MiB. It speeds up writing, not the reading of a
     /// long prompt: on an RTX 5070 Ti, Qwen3.8-Flash-Next (IQ2_XS) wrote 49.4
     /// tokens/s with an 8,000 MiB cache against 22.4 without, and read a
-    /// prompt 17% slower. One CUDA GPU only; elsewhere the load says why and
-    /// runs without it. Experimental: the cache is llama.cpp PR #29887, which
+    /// prompt 17% slower. One GPU only, CUDA or ROCm (ROCm not measured yet);
+    /// elsewhere the load says why and runs without it. Experimental: the cache is llama.cpp PR #29887, which
     /// this build carries ahead of a llama.cpp release. Unless told
     /// otherwise, a load with a cache reads prompts 2048 tokens at a time
     /// (--n-ubatch) and reads the model into memory when the RAM can spare
@@ -313,7 +313,7 @@ struct RuntimeOpts {
     /// experts of the layers ahead into N slots of VRAM on a second stream
     /// of the GPU, while the layers before them compute, instead of halting
     /// the computing for every copy. 2 to 8 slots, 4 by default; 0 turns it
-    /// off. It works on one CUDA GPU, with the experts in pinned memory (a
+    /// off. It works on one GPU, CUDA or ROCm, with the experts in pinned memory (a
     /// model read into memory: --no-mmap, which --moe-cache chooses when the
     /// RAM can spare the experts), on micro-batches of 512 tokens or more.
     /// Each slot holds the largest expert tensor, and --moe-cache keeps that
@@ -2989,7 +2989,7 @@ async fn cmd_run(
                     cpu_moe,
                     n_cpu_moe,
                     n_ubatch_flag.is_none(),
-                    // The cache runs on one CUDA GPU, which is all the
+                    // The cache runs on one CUDA or ROCm GPU, which is all the
                     // prefetch needs besides pinned experts.
                     fit::MoePrefetch {
                         slots: moe_prefetch,
@@ -3212,7 +3212,7 @@ async fn cmd_run(
         }
 
         // The prefetch's slots, where experts are kept in RAM and pinned, on
-        // the one CUDA GPU it runs on (the expert cache's own condition).
+        // the one CUDA or ROCm GPU it runs on (the expert cache's own condition).
         moe_prefetch_slots = if fit::moe_cache_support().is_ok() {
             fit::prefetch_slots(moe_prefetch, no_mmap, cpu_moe, n_cpu_moe)
         } else {

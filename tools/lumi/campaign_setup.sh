@@ -16,6 +16,10 @@
 #                     until the models are there; `campaign.py unblock` after
 #                     pulling puts them back)
 #   ROUND=v0.7.21     a new round: every point of the specs measured again
+#   EULLM_ENGINE_LABEL=next10
+#                     the round's points run only in jobs submitted with the
+#                     same label (submit_campaign.sh reads it too), so a
+#                     queue can hold rounds of several engine builds
 
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=campaign_env.sh
@@ -71,7 +75,7 @@ $CAMPAIGN prefetch --queue "$CAMPAIGN_DIR" ||
 echo
 echo "=== plan ==="
 $CAMPAIGN plan "${SPECS[@]}" --queue "$CAMPAIGN_DIR" --engine "$EULLM_BIN" \
-    ${ROUND:+--round "$ROUND"}
+    ${ROUND:+--round "$ROUND"} ${EULLM_ENGINE_LABEL:+--engine-label "$EULLM_ENGINE_LABEL"}
 $CAMPAIGN unblock --queue "$CAMPAIGN_DIR" >/dev/null
 
 cat <<EOF

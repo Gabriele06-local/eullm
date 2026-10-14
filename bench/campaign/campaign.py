@@ -187,6 +187,18 @@ def engine_provenance(engine: str) -> dict:
     return info
 
 
+def point_cores(binding: str, used: list, reserved: list, wide: bool, allowed: set):
+    """The cores a point's servers run on, or None for no binding: those of
+    the physical devices it uses, or with `wide` (`"cores": "reserved"`) of
+    every device it reserved, all of a node's for an exclusive point, where
+    the CPU computes experts. None where they are not all this job's (a
+    partial allocation)."""
+    cores = cores_for(binding, reserved if wide else used)
+    if cores and not cores_set(cores) <= allowed:
+        return None
+    return cores
+
+
 def bench_revision() -> str:
     # Given by whoever submitted the job, where a compute node has no git
     # (JUPITER's booster nodes).
@@ -344,14 +356,15 @@ class Runner:
 
     def launch(self, p, use, reserved, duration, held=None):
         physical = [self.physical[d] for d in use]
-        cores = cores_for(self.args.bind, physical)
-        if cores and not cores_set(cores) <= self.allowed_cores:
-            cores = None  # a partial allocation: those cores are not ours
+        wide = p.get("cores") == "reserved"
+        cores = point_cores(self.args.bind, physical, [self.physical[d] for d in reserved],
+                            wide, self.allowed_cores)
         ctx = point.Context(
             self.args.engine, self.args.backend, self.args.bind if cores else "none",
             physical, self.args.port_base + 10 * min(reserved), self.logs,
             sampler=self.sampler, stop=self.stop, model_seen=self.model_seen,
             sets_dir=self.sets_dir, f32_dir=os.path.join(self.args.queue, "f32"),
+            cores=cores if wide else None,
         )
         run = Running(dict(p, duration_s=duration), use, reserved, duration, ctx,
                       self.expected_end(p, duration, time.time()))

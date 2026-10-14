@@ -54,9 +54,17 @@ def index():
      ["1176", "1375"]),
     ("Cosa dicono gli artt. 3 e 4 e 5 del codice civile?", "codice_civile",
      ["3", "4", "5"]),
+    # ...and with commas, which normalize_text strips before the patterns see
+    # them: "artt. 1176, 1375" named only 1176 while the answer side named both
+    ("Che cosa prevedono gli artt. 1176, 1375 del codice civile?", "codice_civile",
+     ["1176", "1375"]),
+    ("Cosa dicono gli artt. 3, 4 e 5 del codice civile?", "codice_civile",
+     ["3", "4", "5"]),
     # ...but a number with a unit after it is a quantity, not an article
     ("Che cosa prevede l'art. 1453 e 3 mesi del codice civile?", "codice_civile", ["1453"]),
     ("Cosa dice l'art. 12 e 2 commi del codice civile?", "codice_civile", ["12"]),
+    ("Cosa dice l'art. 12, 2 commi del codice civile?", "codice_civile", ["12"]),
+    ("Cosa prevede l'articolo 10, comma 2 del codice civile?", "codice_civile", ["10"]),
 ])
 def test_a_named_article_and_code_are_read_out_of_the_question(question, code, nums):
     assert named_code(question) == code
@@ -99,6 +107,9 @@ def test_a_two_article_question_retrieves_both_articles():
     ]
     index = NormIndex(records)
     found = index.by_article("Che cosa prevedono gli artt. 1176 e 1375 del codice civile?")
+    assert [r["text"] for r in found] == ["Art. 1176. Testo del millesette.",
+                                          "Art. 1375. Testo del milletre."]
+    found = index.by_article("Che cosa prevedono gli artt. 1176, 1375 del codice civile?")
     assert [r["text"] for r in found] == ["Art. 1176. Testo del millesette.",
                                           "Art. 1375. Testo del milletre."]
 
@@ -238,6 +249,23 @@ def test_grade_file_writes_the_graded_copy(tmp_path):
     assert [g.label for g in grades] == ["partial"]
     line = json.loads((tmp_path / "answers-x.graded.jsonl").read_text())
     assert line["grade"] == "partial" and line["why"].startswith("Grade: partial")
+
+
+def test_grade_file_under_v3_puts_the_three_outcome_rubric_in_the_prompt(tmp_path):
+    from eullm_forge.eval.norm_exam import NONEXISTENT_RUBRIC
+    src = tmp_path / "answers-x.jsonl"
+    src.write_text(json.dumps({"id": "norm-inesistente-codice_civile-3434",
+                               "question": "Che cosa prevede l'art. 3434 del codice civile?",
+                               "answer": "Nei testi forniti non è presente l'art. 3434.",
+                               "reference": "Non esiste l'art. 3434 del codice civile.",
+                               "rubric": "Corretto solo se dice che l'articolo non esiste."})
+                   + "\n")
+    seen = []
+    judge_answers.grade_file(src, ReferenceGrader(lambda p: seen.append(p) or "Grade: correct"),
+                             rubric="v3", out_dir=tmp_path / "v3")
+    assert NONEXISTENT_RUBRIC in seen[0] and "Corretto solo se dice" not in seen[0]
+    line = json.loads((tmp_path / "v3" / "answers-x.graded.jsonl").read_text())
+    assert line["grade"] == "correct" and line["rubric"] == NONEXISTENT_RUBRIC
 
 
 @pytest.mark.parametrize("question, code", [

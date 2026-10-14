@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="eullm-logo-github.png" alt="EULLM" width="560" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="eullm-logo-github-dark.png" />
+    <img src="eullm-logo-github.png" alt="EuLLM — Data Sovereignty" width="560" />
+  </picture>
 </p>
 
 <h3 align="center">Local AI that decides in milliseconds — on your hardware, trained for your domain.</h3>

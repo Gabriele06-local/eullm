@@ -173,7 +173,14 @@ def named_articles(text: str) -> list[str]:
     question about two articles was answered from one.
     """
     out = []
-    for m in _ARTICLE.finditer(normalize_text(text)):
+    # normalize_text strips ",", which is the other list separator: "artt.
+    # 1176, 1375" arrived as "artt 1176 1375", and _MORE -- which needs a
+    # comma or an e -- saw no list, so only 1176 was named while the answer
+    # side, reading raw text, named both. A comma between numbers is read as
+    # the "e" it means; quantities stay guarded by _UNIT ("art. 12, 2 commi"
+    # still names only 12), and "articolo 10, comma 2" names only 10, comma
+    # not being a number.
+    for m in _ARTICLE.finditer(normalize_text(text.replace(",", " e "))):
         out.append(_article_key(m.group(1), m.group(2) or ""))
         out.extend(_article_key(num, suffix or "")
                    for num, suffix in _MORE.findall(m.group(3) or ""))

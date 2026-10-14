@@ -194,21 +194,28 @@ def check_sources(answer: str, sources: list[str], question: str = "",
 
 
 class Api:
-    """The few RAG Enterprise endpoints this needs, with a bearer token."""
+    """The few RAG Enterprise endpoints this needs, with a bearer token.
+
+    The token expires: on 2026-10-14 a 27B answering at 61 s a question ran
+    for eight hours and the 466th query came back 401 "invalid or expired
+    token". So a 401 logs in again, once, and repeats the call.
+    """
 
     def __init__(self, url: str, timeout: float = 600.0):
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.token = ""
+        self._credentials: tuple[str, str] | None = None
 
     def _call(self, method: str, path: str, body: bytes | None = None,
               ctype: str = "application/json") -> dict | list:
-        req = urllib.request.Request(self.url + path, data=body, method=method)
-        if body is not None:
-            req.add_header("Content-Type", ctype)
-        if self.token:
-            req.add_header("Authorization", f"Bearer {self.token}")
+        relogged = False
         for attempt in range(3):
+            req = urllib.request.Request(self.url + path, data=body, method=method)
+            if body is not None:
+                req.add_header("Content-Type", ctype)
+            if self.token:
+                req.add_header("Authorization", f"Bearer {self.token}")
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as r:
                     raw = r.read()
@@ -218,6 +225,11 @@ class Api:
                 if e.code == 503 and attempt < 2:
                     time.sleep(10)
                     continue
+                if (e.code == 401 and not relogged and self._credentials
+                        and path != "/api/auth/login"):
+                    relogged = True
+                    self.login(*self._credentials)
+                    continue
                 raise SystemExit(f"[rag-eval] {method} {path}: HTTP {e.code} "
                                  f"{e.read()[:200].decode('utf-8', 'replace')}") from None
         raise SystemExit(f"[rag-eval] {method} {path}: still busy")
@@ -226,6 +238,7 @@ class Api:
         r = self._call("POST", "/api/auth/login",
                        json.dumps({"username": user, "password": password}).encode())
         self.token = r["access_token"]
+        self._credentials = (user, password)
 
     def documents(self) -> list[str]:
         r = self._call("GET", "/api/documents")

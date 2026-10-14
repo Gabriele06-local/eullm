@@ -48,6 +48,13 @@ node a day. A new engine build gets a node for its before/after round; the
 hours the straight line counts as behind stay in the allocation for the peaks
 of November to January.
 
+14-10-2026: 557.5 node-h spent (2,230 GPU-hours, `lumi-allocations`), about
+240 behind the straight line. The PI's decision: the allocation is spent to
+its end on work that leaves measurements, and if it runs out early, more is
+asked for. Round `r-next10` (`c01` + `c02` on the engine `next10`, 280
+points, about 250 node-h) went on two nodes that night, and `--moe-cache` on
+HIP was brought forward from January (`c10-moe-ram`, below).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
@@ -129,6 +136,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
+| `c10-moe-ram` | 48 | ~35 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -506,7 +514,17 @@ In order:
 4. **`--moe-cache` on HIP** (item 7 above): MoE experts in the node's host
    RAM, the direction Strata takes on consumer GPUs (the head-to-head with
    Strata stays on the RTX 5070 Ti, `docs/moe-offload-plan.md`). Objective
-   (5).
+   (5). Brought forward on 14-10-2026: the cache and the copies ahead are
+   ggml's CUDA backend, which ggml builds for HIP as `ROCm`, so the engine
+   (`fit::moe_cache_support_on`) and patch 0003 accept a ROCm GPU now.
+   `c10-moe-ram` serves gpt-oss-120b, Qwen3-235B, Qwen3-Coder-480B and
+   DeepSeek-V3.1 from one GCD, alone on the node, the server on its 56 cores
+   (the runner's `"cores": "reserved"`): with the cache, with every expert
+   on the CPU (`--cpu-moe`), and as `--fit` splits them by itself, against
+   `c02`'s splits over the GCDs whole. Next, phase 3 of the plan: the CPU
+   computing the experts the cache misses while the GPU works, as Strata
+   does, which suits a LUMI-G node: 64 cores and 512 GB of RAM beside its
+   GPUs.
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
 

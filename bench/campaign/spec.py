@@ -43,6 +43,13 @@ LABEL_RUNNER = 4
 # whether repeated requests made the same choices (`same_choices`), not only
 # the same digits: an older one would measure them without it.
 CHOICES_RUNNER = 5
+# Points whose servers take the cores of every device they reserved
+# (`"cores": "reserved"`) need the runner that reads it: an older one would
+# pin them to the seven cores of the device they use.
+CORES_RUNNER = 6
+# What `cores` may say: the cores of the devices the point reserved, all of
+# a node's for an exclusive point, where an expert's work is the CPU's.
+CORES = ("reserved",)
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -206,6 +213,10 @@ def normalize(raw: dict) -> dict:
             raise SpecError("a finetune point loads no server: cold does not apply")
         p["cold"] = bool(p["cold"])
         p["runner"] = max(p.get("runner", 1), EVICT_RUNNER)
+    if "cores" in raw:
+        if p["cores"] not in CORES:
+            raise SpecError(f"cores must be one of {CORES}, got {p['cores']!r}")
+        p["runner"] = max(p.get("runner", 1), CORES_RUNNER)
     p["extra_args"] = [str(a) for a in p["extra_args"]]
     for hint in HINTS:
         p.pop(hint, None)

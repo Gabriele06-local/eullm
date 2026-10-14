@@ -56,3 +56,13 @@ def test_the_wrapper_still_passes_the_config_and_the_data_dir():
     # trainer discover it 40 minutes in.
     assert 'err "missing $DATA_DIR/train.jsonl"' in text
     assert 'err "missing $DATA_DIR/val.jsonl"' in text
+
+
+def test_the_wrapper_names_an_interpreter_that_exists():
+    """Bare `python` is missing on stock systems and minimal images, which
+    have only python3; every venv has python3 too. The wrapper passed all
+    four pre-flight checks, printed "Launching:", then died at exec with
+    `python: command not found`, so no training ever started."""
+    code = _code()
+    assert "CMD=(python " not in code
+    assert "CMD=(python3 " in code

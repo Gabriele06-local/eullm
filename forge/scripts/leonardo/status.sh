@@ -214,6 +214,31 @@ awk -v total="$B_TOTAL" -v spent="${spent:-0}" -v used="${used:-0}" -v now="$now
     print ""
     print "   (saldo -b is the bill; it is a day behind these figures)"
 }'
+# The bill itself, where saldo is (Leonardo's login nodes). The figures above
+# are this script's own count, a day ahead of saldo and not the same thing:
+# on 2026-10-13 they said 63% used where saldo said 59.0%, and a catch-up
+# plan was first worked out on the wrong one. The even pace is the share of
+# the allocation's days gone by: below it, hours are being left behind.
+if command -v saldo >/dev/null 2>&1; then
+    D8='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+    read -r s_acct s_start s_end s_total _ s_used s_pct _ < <(saldo -b 2>/dev/null |
+        awk -v d="^$D8\$" '$2 ~ d && $3 ~ d {print; exit}')
+    if [ -n "${s_total:-}" ]; then
+        s0="$(date -d "$s_start" +%s)"; s1="$(date -d "$s_end 23:59" +%s)"
+        awk -v acct="$s_acct" -v total="$s_total" -v used="$s_used" -v pct="$s_pct" \
+            -v s0="$s0" -v s1="$s1" -v now="$now" -v stop="$s_end" 'BEGIN {
+            share = (now - s0) / (s1 - s0); if (share > 1) share = 1; even = total * share
+            gap = used - even; word = gap < 0 ? "behind" : "ahead"; if (gap < 0) gap = -gap
+            printf "   bill (saldo -b, %s): %.0f of %.0f local hours, %s%%; the even pace is %.1f%%:" \
+                   " %.0f local hours (%.0f node-hours) %s\n", acct, used, total, pct, share * 100,
+                   gap, gap / 32, word
+            days = (s1 - now) / 86400
+            if (days > 0)
+                printf "   to use the rest by %s: %.0f local hours a day (%.1f node-hours)\n",
+                       stop, (total - used) / days, (total - used) / days / 32
+        }'
+    fi
+fi
 
 echo
 echo "== GRPO =="

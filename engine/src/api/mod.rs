@@ -495,7 +495,7 @@ impl AppState {
                 None
             }
         });
-        // The prefetch runs where the expert cache does, on one CUDA GPU; it
+        // The prefetch runs where the expert cache does, on one CUDA or ROCm GPU; it
         // is on by default, so elsewhere it goes without a word.
         let moe_prefetch = if crate::fit::moe_cache_support().is_ok() {
             self.moe_prefetch
