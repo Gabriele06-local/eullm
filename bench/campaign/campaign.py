@@ -962,7 +962,7 @@ COLUMNS = (
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
     "extra_args", "trial", "vram_start_mib_max", "dec_together", "dec_same_choices",
-    "dec_largest_shift", "dec_flipped",
+    "dec_largest_shift", "dec_flipped", "env",
 )
 
 
@@ -979,6 +979,7 @@ def row_of(r: dict) -> dict:
                load_wall_s=load.get("wall_s"),
                engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"),
                extra_args=" ".join(p.get("extra_args", [])),
+               env=" ".join(f"{k}={v}" for k, v in sorted((p.get("env") or {}).items())),
                vram_start_mib_max=max((r.get("vram_at_start_mib") or {}).values(),
                                       default=None))
     t = r.get("throughput")
