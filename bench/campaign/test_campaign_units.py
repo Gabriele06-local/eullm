@@ -615,6 +615,26 @@ def test_the_report_puts_what_a_group_varies_beside_what_it_measured():
     assert "c08" not in text
 
 
+def test_the_report_tells_points_apart_by_their_environment():
+    import campaign
+    import report
+
+    def result(env, tok_s):
+        return campaign.row_of({"campaign": "c10", "group": "evict", "kind": "throughput",
+                                "outcome": "measured",
+                                "params": {"model": "m", "batch": 32, "env": env},
+                                "throughput": {"aggregate_tok_s_mean": tok_s}})
+
+    rows = [result({"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_EVICT": "lru"}, 12),
+            result({"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_TRACE": "{workdir}/t"}, 36)]
+    lines = report.report(rows, {}, {"c10"}).splitlines()
+    assert lines[1].split()[0] == "env"
+    # one row each, without the variable both set alike
+    assert any("LLAMA_MOE_CACHE_EVICT=lru" in line and "12" in line for line in lines)
+    assert any("LLAMA_MOE_CACHE_TRACE=" in line and "36" in line for line in lines)
+    assert not any("STATS" in line for line in lines)
+
+
 def test_leftover_servers_are_those_of_this_job_outside_every_running_point():
     import campaign
 

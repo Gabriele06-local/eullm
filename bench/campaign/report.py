@@ -16,7 +16,7 @@ from collections import defaultdict
 # columns, in this order.
 PARAMS = ("model", "runtime", "gcds", "replicas", "batch", "concurrency", "slot_ctx", "kv",
           "prompt_tokens", "decision_mode", "state_tokens", "questions", "extra_args",
-          "trial", "round")
+          "env", "trial", "round")
 
 # What each kind is read by: (column in summary.csv, heading).
 # Every kind that runs on the GPUs also shows the most VRAM a device held and
@@ -41,7 +41,7 @@ METRICS = {
                  ("ft_tok_s", "tok/s")),
 }
 
-SHORT = {"model": 34, "extra_args": 26}
+SHORT = {"model": 34, "extra_args": 26, "env": 34}
 
 
 def _number(v):
@@ -75,6 +75,11 @@ def table(rows, kind):
     varying = [p for p in PARAMS if len({r.get(p) for r in rows}) > 1]
     if not varying:
         varying = ["model"]
+    if "env" in varying:
+        # the variables every row sets alike say nothing about the row
+        common = set.intersection(*(set((r.get("env") or "").split()) for r in rows))
+        rows = [r | {"env": " ".join(v for v in (r.get("env") or "").split()
+                                     if v not in common)} for r in rows]
     metrics = METRICS.get(kind, ())
     by_config = defaultdict(list)
     for r in rows:
