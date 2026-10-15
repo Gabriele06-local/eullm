@@ -559,6 +559,31 @@ In order:
    reckon with. `ram-stats` (runner 7) records the cache's step statistics
    to say where the steps with many requests go.
 
+   What they said (`LLAMA_MOE_CACHE_STATS=64`, 15-10-2026). The link from
+   the node's RAM to a GCD carried the cache's copies at 16-24 GB/s. On the
+   235B with one request a step took 44 ms: 30 ms of the GPU computing the
+   94 layers, 12 ms copying the 2.5% of experts not in VRAM (200 MiB a
+   step). With eight, 8 tokens a step, 296 ms: 122 of computing and 170 of
+   copying 3.7 GiB, 88% of the experts in VRAM. With 32, the cache found
+   0.85% of the experts it was asked for: a step of 32 tokens wants more
+   experts than the cache holds, cycling through the layers in the same
+   order every step, which is the case where least-recently-used keeps
+   evicting what the next step needs, so every expert went over the link
+   (7.7 TB in the point). The 480B's working set is larger than its cache
+   even for one request (81% in VRAM, 2.5 GiB a step, 100 of 150 ms
+   copying). Two changes follow: the cache should stop evicting when a
+   step wants more than it holds, keeping what it has and copying the rest,
+   and the CPU's share is to be measured again (below) before phase 3.
+
+   **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
+   `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
+   x86-64's baseline and `build.rs` gave ggml no AVX, AVX2, FMA or F16C (the
+   published binaries are built for x86-64-v3). Everything the CPU computes
+   ran on those kernels: `--cpu-moe` above, and the experts `--fit`'s split
+   leaves in RAM, so both columns are low by that much; the cache's copies
+   and the GPU's work are not affected. The build now targets x86-64-v3, and
+   c10 is measured again on it (`next13`).
+
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
 
