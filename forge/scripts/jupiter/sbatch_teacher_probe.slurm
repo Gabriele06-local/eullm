@@ -18,6 +18,13 @@
 #         --output="$PROJECT/$USER/forge/runs/logs/teacher-probe-%j.out" \
 #         forge/scripts/jupiter/sbatch_teacher_probe.slurm
 #
+# PROBE_TEACHER and PROBE_STUDENT probe another pair (deliverable 7), e.g.
+#
+#     eullm && PROBE_TEACHER=Qwen/Qwen3.5-35B-A3B-Base PROBE_STUDENT=Qwen/Qwen3.5-4B-Base \
+#         sbatch --account e-aif-2026pg01-1434 \
+#         --output="$PROJECT/$USER/forge/runs/logs/teacher-probe-%j.out" \
+#         forge/scripts/jupiter/sbatch_teacher_probe.slurm
+#
 # Whole node: 4 GPU-hours an hour. Two teacher loads at once from GPFS, 30
 # micro-batches each, then three generations: 20-35 minutes, 1.5-2.5 GPU-hours.
 
@@ -35,6 +42,9 @@ EULLM_REPO="${EULLM_REPO:-$SLURM_SUBMIT_DIR}"
 source "$EULLM_REPO/forge/scripts/jupiter/env.sh"
 PROBE="$EULLM_REPO/forge/scripts/jupiter/teacher_probe.py"
 OUT="$FORGE_RUN_DIR/teacher-probe-${SLURM_JOB_ID:-local}"
+MODELS=()
+[ -n "${PROBE_TEACHER:-}" ] && MODELS+=(--teacher "$PROBE_TEACHER")
+[ -n "${PROBE_STUDENT:-}" ] && MODELS+=(--student "$PROBE_STUDENT")
 mkdir -p "$OUT"
 
 echo "=== Forge teacher probe: job ${SLURM_JOB_ID:-local} on $(hostname), $(date -Is) ==="
@@ -48,6 +58,11 @@ if ! python -c "import transformers, peft, accelerate, datasets; print('  import
     tr ':' '\n' <<<"${PYTHONPATH:-}" | sed 's/^/    /'
     exit 1
 fi
+echo "  pair: ${PROBE_TEACHER:-the default teacher} -> ${PROBE_STUDENT:-the default student}"
+# Qwen3.5's linear-attention layers have fast kernels only with these
+# packages; without them Transformers falls back to plain torch, slower.
+python -c "import fla" 2>/dev/null && echo "  flash-linear-attention: present" || echo "  flash-linear-attention: absent"
+python -c "import causal_conv1d" 2>/dev/null && echo "  causal-conv1d: present" || echo "  causal-conv1d: absent"
 
 # Power, every second, all four GPUs, until the end of the job.
 nvidia-smi --query-gpu=timestamp,index,power.draw,utilization.gpu,memory.used \
@@ -56,15 +71,15 @@ SAMPLER=$!
 phase() { echo "$(date +%s) $1" >>"$OUT/phases.txt"; echo; echo "=== $1 ($(date +%T)) ==="; }
 
 phase "1. two micro-batch loops side by side"
-CUDA_VISIBLE_DEVICES=0,1 taskset -c 0-143 python "$PROBE" step >"$OUT/step-a.log" 2>&1 &
+CUDA_VISIBLE_DEVICES=0,1 taskset -c 0-143 python "$PROBE" step "${MODELS[@]}" >"$OUT/step-a.log" 2>&1 &
 A=$!
-CUDA_VISIBLE_DEVICES=2,3 taskset -c 144-287 python "$PROBE" step >"$OUT/step-b.log" 2>&1 &
+CUDA_VISIBLE_DEVICES=2,3 taskset -c 144-287 python "$PROBE" step "${MODELS[@]}" >"$OUT/step-b.log" 2>&1 &
 B=$!
 wait "$A"; RA=$?
 wait "$B"; RB=$?
 for x in a b; do
     echo "--- pair $x"
-    grep -E '^RESULT|^torch' "$OUT/step-$x.log" | sed 's/^/  /'
+    grep -E '^RESULT|^torch|fast path|newly initialized|MISSING|UNEXPECTED' "$OUT/step-$x.log" | sort -u | sed 's/^/  /'
 done
 if [ "$RA" -ne 0 ] || [ "$RB" -ne 0 ]; then
     echo "[!!] a loop failed (exit $RA and $RB): the end of its log"
@@ -72,7 +87,7 @@ if [ "$RA" -ne 0 ] || [ "$RB" -ne 0 ]; then
 fi
 
 phase "2. the teacher generating, plain Transformers, GPU 0"
-CUDA_VISIBLE_DEVICES=0 taskset -c 0-71 python "$PROBE" generate >"$OUT/generate.log" 2>&1 ||
+CUDA_VISIBLE_DEVICES=0 taskset -c 0-71 python "$PROBE" generate "${MODELS[@]}" >"$OUT/generate.log" 2>&1 ||
     { echo "[!!] generation failed: the end of its log"; tail -15 "$OUT/generate.log" | sed 's/^/    /'; }
 grep -E '^RESULT' "$OUT/generate.log" | sed 's/^/  /'
 
