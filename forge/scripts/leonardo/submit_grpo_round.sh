@@ -13,15 +13,22 @@
 # What it queues, each step waiting on the one it needs:
 #
 #   1. LINKS GRPO links (sbatch_grpo.slurm, judge as reward), afterany;
-#   2. the merge of the adapter into START (serial partition);
-#   3. the GGUF Q4_K_M of the merged model, its F16 removed after
-#      (serial; $WORK is the constraint, not CPU time);
-#   4. the case-law exam on the bf16 weights (one GPU), after the merge:
+#   2. one packaging job on the serial partition: the merge of the adapter
+#      into START, then the GGUF Q4_K_M of the merged model, its F16 removed
+#      after ($WORK is the constraint, not CPU time). One job and not two:
+#      lrd_all_serial takes 10 queued jobs a user, and on 2026-10-15 the
+#      fourth round of the day was refused there half-submitted;
+#   4. the case-law exam on the bf16 weights (one GPU), after the packaging:
 #      a GRPO round on statutes must not cost the case law;
 #   5. the statute exam round on the development set with the GGUF and the
 #      released models' hybrid retrieval, graded under rubric v3 into the
 #      graded directory every other model is in, with a report against
-#      BASELINES (sbatch_exam_round.slurm), after the GGUF.
+#      BASELINES (sbatch_exam_round.slurm), after the packaging.
+#
+# A round takes 3 places on the serial partition (packaging, exam round and
+# the report the exam round queues later); with fewer free it is refused
+# before anything is submitted. LINKS=0 queues only steps 2-5, after AFTER
+# (afterany): the packaging and exams of a chain already queued.
 #
 # Written on 2026-10-15: the first judge-reward rounds were submitted as
 # training plus merge only, the GGUF and the exams were forgotten, and the
@@ -38,6 +45,7 @@
 #                  merge of the round START comes from; START is then not
 #                  checked, since it does not exist yet
 #   NO_CDS=1       skip the case-law exam
+#   SERIAL_LIMIT   jobs a user may queue on lrd_all_serial (default 10)
 #
 # Idempotent: a round whose GRPO jobs are already queued is not submitted
 # again, and one whose adapter is written skips the training.
@@ -63,10 +71,17 @@ check() { [ -e "$1" ] || { echo "[round] missing $2: $1" >&2; fail=1; }; }
 check "$PROMPTS" "prompts"
 check "$JUDGE" "judge GGUF"
 case "$LINKS$STEPS" in *[!0-9]*|"") echo "[round] LINKS and MAX_STEPS are numbers" >&2; fail=1 ;; esac
+[ "$LINKS" = 0 ] && [ -z "${AFTER:-}" ] && { echo "[round] LINKS=0 needs AFTER" >&2; fail=1; }
 [ "$fail" = 0 ] || exit 1
-if [ -n "$(squeue --me -h -n "eullm-grpo-$NAME" -o %i 2>/dev/null)" ]; then
+if [ "$LINKS" != 0 ] && [ -n "$(squeue --me -h -n "eullm-grpo-$NAME" -o %i 2>/dev/null)" ]; then
     echo "[round] $NAME: GRPO already queued, nothing submitted"
     exit 0
+fi
+serial=$(squeue --me -h -p lrd_all_serial -o %i 2>/dev/null | wc -l)
+if [ $((serial + 3)) -gt "${SERIAL_LIMIT:-10}" ]; then
+    echo "[round] $NAME: $serial jobs queued on lrd_all_serial, a round needs 3 of" \
+         "${SERIAL_LIMIT:-10}: nothing submitted, try when some have ended" >&2
+    exit 1
 fi
 
 sub() {  # sbatch that prints the job id; fails (and says so) when sbatch does
@@ -78,8 +93,11 @@ sub() {  # sbatch that prints the job id; fails (and says so) when sbatch does
 ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
 
 dep="${AFTER:+afterok:$AFTER}"
+[ "$LINKS" = 0 ] && dep="afterany:$AFTER"
 last=""
-if [ -f "$OUT/adapter/adapter_config.json" ]; then
+if [ "$LINKS" = 0 ]; then
+    echo "[round] $NAME: packaging and exams only, after job $AFTER"
+elif [ -f "$OUT/adapter/adapter_config.json" ]; then
     echo "[round] $NAME: adapter already written, training skipped"
 else
     for i in $(seq 1 "$LINKS"); do
@@ -92,19 +110,14 @@ else
     done
 fi
 
-merge=$(sub -J "eullm-merge-$NAME" -p lrd_all_serial -c 4 --mem=30G -t 01:00:00 \
+pkg=$(sub -J "eullm-package-$NAME" -p lrd_all_serial -c 4 --mem=30G -t 04:00:00 \
     -o "$G/logs/%x-%j.out" ${dep:+--dependency=$dep} \
-    --wrap "$ENVSH && PYTHONPATH=$REPO/forge python -c 'import sys; from eullm_forge.identity import merge_identity_adapter as m; m(*sys.argv[1:])' $START $OUT/adapter $OUT/merged") || exit 1
-echo "[round] merge: $merge"
-
-gguf=$(sub -J "eullm-gguf-$NAME" -p lrd_all_serial -c 4 --mem=30G -t 03:00:00 \
-    -o "$G/logs/%x-%j.out" --dependency="afterok:$merge" \
-    --wrap "$ENVSH && GGUF_NAME=$NAME LCPP_SKIP_UPDATE=1 bash $REPO/forge/scripts/quantize_to_gguf.sh $OUT/merged $OUT/gguf && rm -f $OUT/gguf/$NAME-f16.gguf") || exit 1
-echo "[round] gguf: $gguf"
+    --wrap "$ENVSH && PYTHONPATH=$REPO/forge python -c 'import sys; from eullm_forge.identity import merge_identity_adapter as m; m(*sys.argv[1:])' $START $OUT/adapter $OUT/merged && GGUF_NAME=$NAME LCPP_SKIP_UPDATE=1 bash $REPO/forge/scripts/quantize_to_gguf.sh $OUT/merged $OUT/gguf && rm -f $OUT/gguf/$NAME-f16.gguf") || exit 1
+echo "[round] merge + GGUF: $pkg"
 
 if [ "${NO_CDS:-0}" != 1 ]; then
     cds=$(CE_LABEL="$NAME-bf16" CE_MODEL="$OUT/merged" \
-          sub -J eullm-cds-exam --dependency="afterok:$merge" "$L/sbatch_cds_exam.slurm") || exit 1
+          sub -J eullm-cds-exam --dependency="afterok:$pkg" "$L/sbatch_cds_exam.slurm") || exit 1
     echo "[round] case-law exam: $cds"
 fi
 
@@ -115,6 +128,6 @@ exam=$(ROUND_MODELS="$NAME-q4=$OUT/merged" ROUND_GGUF="$NAME-q4=$OUT/gguf/$NAME-
        ROUND_JUDGE_ARGS="--rubric v3 --graded-dir $E/devbig-graded-v3" \
        ROUND_REPORT="$BASELINES" ROUND_REPORT_DIR="$E/devbig-graded-v3" \
        ROUND_REPORT_FILE="report-$NAME.txt" \
-       sub -J "eullm-exam-round-$NAME" --dependency="afterok:$gguf" "$L/sbatch_exam_round.slurm") || exit 1
+       sub -J "eullm-exam-round-$NAME" --dependency="afterok:$pkg" "$L/sbatch_exam_round.slurm") || exit 1
 echo "[round] statute exam round: $exam (report: $E/devbig-graded-v3/report-$NAME.txt)"
-echo "[round] $NAME: merged model will be $OUT/merged (job $merge)"
+echo "[round] $NAME: merged model will be $OUT/merged (job $pkg)"

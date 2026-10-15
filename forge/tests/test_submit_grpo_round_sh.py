@@ -21,7 +21,7 @@ def _exe(path: Path, body: str) -> None:
     path.chmod(0o755)
 
 
-def _setup(tmp_path: Path, queued: str = "") -> tuple[dict, Path]:
+def _setup(tmp_path: Path, queued: str = "", serial: int = 0) -> tuple[dict, Path]:
     work = tmp_path / "work"
     (work / "eullm_runs" / "grpo").mkdir(parents=True)
     (work / "eullm_runs" / "grpo" / "prompts-judge.jsonl").write_text("{}\n")
@@ -44,7 +44,13 @@ n=$(( $(wc -l < "{log}" 2>/dev/null || echo 0) + 100 ))
 }} >> "{log}"
 echo "$n"
 """)
-    _exe(bin_ / "squeue", f"#!/usr/bin/env bash\nprintf '%s' '{queued}'\n")
+    # -p lrd_all_serial: that many jobs; -n <name>: the queued GRPO chain, if any
+    _exe(bin_ / "squeue", f"""#!/usr/bin/env bash
+case "$*" in
+  *lrd_all_serial*) for i in $(seq 1 {serial}); do echo "$i"; done ;;
+  *) printf '%s' '{queued}' ;;
+esac
+""")
     env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}", "WORK": str(work)}
     return env, log
 
@@ -61,23 +67,39 @@ def test_the_round_is_queued_whole_and_in_order(tmp_path):
     assert r.returncode == 0, r.stderr + r.stdout
     calls = [ln.split("|") for ln in log.read_text().splitlines()]
     names = [next(a for a in c[1].split() if a.startswith("eullm-")) for c in calls]
-    assert names == ["eullm-grpo-jg-x"] * 3 + ["eullm-merge-jg-x", "eullm-gguf-jg-x",
-                                               "eullm-cds-exam", "eullm-exam-round-jg-x"]
+    assert names == ["eullm-grpo-jg-x"] * 3 + ["eullm-package-jg-x", "eullm-cds-exam",
+                                               "eullm-exam-round-jg-x"]
     ids = [c[0] for c in calls]
     # the first link waits on nothing, the next ones on the link before
     assert "--dependency" not in calls[0][1]
     assert f"--dependency=afterany:{ids[0]}" in calls[1][1]
     assert f"--dependency=afterany:{ids[1]}" in calls[2][1]
-    assert f"--dependency=afterany:{ids[2]}" in calls[3][1]          # merge after the last link
-    assert f"--dependency=afterok:{ids[3]}" in calls[4][1]           # GGUF after the merge
-    assert f"--dependency=afterok:{ids[3]}" in calls[5][1]           # case law after the merge
-    assert f"--dependency=afterok:{ids[4]}" in calls[6][1]           # statute exam after the GGUF
+    assert f"--dependency=afterany:{ids[2]}" in calls[3][1]       # packaging after the last link
+    assert f"--dependency=afterok:{ids[3]}" in calls[4][1]        # case law after the packaging
+    assert f"--dependency=afterok:{ids[3]}" in calls[5][1]        # statute exam after it too
+    assert "lrd_all_serial" in calls[3][1] and "merge_identity_adapter" in calls[3][1]
+    assert "quantize_to_gguf.sh" in calls[3][1] and "jg-x-f16.gguf" in calls[3][1]
     assert calls[0][2] == f"GRPO_MODEL={start}" and "--max-steps 750" in calls[0][3]
-    assert calls[5][4] == "CE_LABEL=jg-x-bf16"
-    assert calls[6][5].startswith("ROUND_MODELS=jg-x-q4=")
-    assert calls[6][6].endswith("/grpo/jg-x/gguf/jg-x-q4_k_m.gguf")
-    assert calls[6][7] == "ROUND_REPORT_FILE=report-jg-x.txt"
-    assert "rm -f" in calls[4][1] and "jg-x-f16.gguf" in calls[4][1]
+    assert calls[4][4] == "CE_LABEL=jg-x-bf16"
+    assert calls[5][5].startswith("ROUND_MODELS=jg-x-q4=")
+    assert calls[5][6].endswith("/grpo/jg-x/gguf/jg-x-q4_k_m.gguf")
+    assert calls[5][7] == "ROUND_REPORT_FILE=report-jg-x.txt"
+
+
+def test_a_full_serial_partition_refuses_the_round_before_anything_is_queued(tmp_path):
+    env, log = _setup(tmp_path, serial=8)
+    r = _run(env, "jg-x", str(Path(env["WORK"]) / "start"), "3", "750")
+    assert r.returncode == 1 and "lrd_all_serial" in r.stderr
+    assert not log.exists()
+
+
+def test_links_zero_packages_and_examines_a_chain_already_queued(tmp_path):
+    env, log = _setup(tmp_path, queued="555")
+    r = _run({**env, "AFTER": "555"}, "jg-x", str(Path(env["WORK"]) / "start"), "0", "750")
+    assert r.returncode == 0, r.stderr
+    calls = [ln.split("|") for ln in log.read_text().splitlines()]
+    assert "eullm-package-jg-x" in calls[0][1] and "--dependency=afterany:555" in calls[0][1]
+    assert len(calls) == 3 and not any("eullm-grpo" in c[1] for c in calls)
 
 
 def test_a_round_already_queued_is_not_submitted_again(tmp_path):
