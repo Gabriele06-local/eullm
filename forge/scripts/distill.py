@@ -433,6 +433,27 @@ def distill_loss(
 
 
 @torch.no_grad()
+def teacher_batch(teacher, batch: dict) -> dict:
+    """The batch on the device of the teacher's input embeddings.
+
+    The batch is moved to the student's device, and a teacher sharded over
+    several GPUs (``auto``, or ``split`` over two) takes it from there:
+    accelerate's hooks move each input to the GPU of the first layer. A
+    teacher whole on one GPU has no hooks, because accelerate places a model
+    that fits one device on it directly, and the inputs stay where they are:
+    JUPITER's GH200 split, the teacher alone on GPU 0 and the student on 1,
+    died at the first forward with "Expected all tensors to be on the same
+    device, but got index is on cuda:1" (jobs 2337122-2337123, 15-10-2026).
+    A teacher with no input embeddings to ask, or one whose weights are on
+    the meta device (offloaded, so hooks place them), keeps the batch as is.
+    """
+    get = getattr(teacher, "get_input_embeddings", None)
+    weight = getattr(get(), "weight", None) if callable(get) else None
+    if weight is None or weight.device.type == "meta":
+        return batch
+    return {k: v.to(weight.device, non_blocking=True) for k, v in batch.items()}
+
+
 def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
              max_batches: int) -> dict:
     """Distillation loss on held-out data, over a fixed prefix of the val set.
@@ -464,7 +485,7 @@ def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
                 break
             batch = {k: v.to(device, non_blocking=True)
                      for k, v in batch.items()}
-            t_logits = teacher(**batch).logits.detach().to(device)
+            t_logits = teacher(**teacher_batch(teacher, batch)).logits.detach().to(device)
             s_logits = student(**batch).logits
             _, parts = distill_loss(
                 s_logits, t_logits, batch["labels"],
@@ -924,7 +945,7 @@ def train(cfg: DistillConfig) -> None:
         for batch in epoch_batches(train_loader, epoch, skip, cfg.seed):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.no_grad():
-                t_out = teacher(**batch)
+                t_out = teacher(**teacher_batch(teacher, batch))
                 # With a sharded teacher the logits land on the GPU of the
                 # last pipeline stage — bring them to the student's device.
                 t_logits = t_out.logits.detach().to(device)
