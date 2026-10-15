@@ -33,24 +33,15 @@ import json
 import random
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import save_eval_set  # noqa: E402
 from eullm_forge.eval.norm_exam import articles_from_records, trained_articles  # noqa: E402
-from eullm_forge.eval.practical import (  # noqa: E402
-    PracticalRejected,
-    groups,
-    heldout,
-    messages,
-    parse_practical,
-    to_item,
-)
+from eullm_forge.eval.practical import generate, groups, heldout, to_item  # noqa: E402
 
 
 def ask(url: str, msgs: list[dict], max_tokens: int, temperature: float,
@@ -128,26 +119,16 @@ def main(argv: list[str] | None = None) -> int:
                   f"{time.monotonic() - t0:.0f} s", flush=True)
         teacher = args.teacher or Path(args.serve or "").stem or "teacher"
 
-        def work(n: int, group):
-            try:
-                raw = ask(urls[n % len(urls)], messages(group), args.max_tokens,
-                          args.temperature)
-            except (urllib.error.URLError, OSError, ValueError) as e:
-                return group, None, f"request:{type(e).__name__}"
-            try:
-                return group, parse_practical(raw, group), None
-            except PracticalRejected as e:
-                return group, None, e.reason
+        def ask_one(n: int, msgs: list[dict]) -> str:
+            return ask(urls[n % len(urls)], msgs, args.max_tokens, args.temperature)
 
-        with ThreadPoolExecutor(max_workers=args.parallel * len(urls)) as pool:
-            for group, parsed, why in pool.map(lambda x: work(*x), enumerate(todo)):
-                if why:
-                    stats["refused:" + why] += 1
-                    continue
-                split = "heldout" if heldout(group[0], args.heldout_share) else "dev"
-                (held if split == "heldout" else dev).append(
-                    to_item(group, parsed, split, teacher))
-                stats["multi" if len(parsed["articoli"]) > 1 else "single"] += 1
+        for group, parsed, why in generate(todo, ask_one, args.parallel * len(urls)):
+            if why:
+                stats["refused:" + why] += 1
+                continue
+            split = "heldout" if heldout(group[0], args.heldout_share) else "dev"
+            (held if split == "heldout" else dev).append(to_item(group, parsed, split, teacher))
+            stats["multi" if len(parsed["articoli"]) > 1 else "single"] += 1
 
     # the items in a stable order, whatever order the servers answered in
     dev.sort(key=lambda it: it.id)

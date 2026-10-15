@@ -20,14 +20,14 @@
 #      fourth round of the day was refused there half-submitted;
 #   4. the case-law exam on the bf16 weights (one GPU), after the packaging:
 #      a GRPO round on statutes must not cost the case law;
-#   5. the statute exam round on the development set with the GGUF and the
-#      released models' hybrid retrieval, graded under rubric v3 into the
-#      graded directory every other model is in, with a report against
-#      BASELINES (sbatch_exam_round.slurm), after the packaging.
+#   5. the statute exam on the development set with the GGUF and the released
+#      models' hybrid retrieval (two links), graded under rubric v3 into the
+#      graded directory every other model is in; and the practical exam
+#      ($WORK/eval/practical-dev.jsonl, when it exists) the same way, into
+#      $WORK/eval/practical-answers. Compare with compare_graded.py.
 #
-# A round takes 3 places on the serial partition (packaging, exam round and
-# the report the exam round queues later); with fewer free it is refused
-# before anything is submitted. LINKS=0 queues only steps 2-5, after AFTER
+# A round takes 1 place on the serial partition (the packaging); with none
+# free it is refused before anything is submitted. LINKS=0 queues only steps 2-5, after AFTER
 # (afterany): the packaging and exams of a chain already queued.
 #
 # Written on 2026-10-15: the first judge-reward rounds were submitted as
@@ -39,12 +39,11 @@
 #   GRPO_JUDGE_GGUF  judge (default Qwen3-30B-A3B-Instruct-2507 Q8_0 in $WORK/gguf)
 #   GRPO_LR        learning rate (default 1e-5)
 #   GRPO_EXTRA     more grpo_train.py options
-#   ROUND_BASELINES  labels the report compares against (default
-#                  "opd-v4abs-4b-q4-hyb", the published 4B)
 #   AFTER          a job id the first link waits for (afterok), e.g. the
 #                  merge of the round START comes from; START is then not
 #                  checked, since it does not exist yet
 #   NO_CDS=1       skip the case-law exam
+#   NO_PRACTICAL=1 skip the practical exam
 #   SERIAL_LIMIT   jobs a user may queue on lrd_all_serial (default 10)
 #
 # Idempotent: a round whose GRPO jobs are already queued is not submitted
@@ -62,7 +61,6 @@ OUT="$G/$NAME"
 PROMPTS="${GRPO_PROMPTS:-$G/prompts-judge.jsonl}"
 JUDGE="${GRPO_JUDGE_GGUF:-$WORK/gguf/qwen3-30b-a3b-instruct-2507/qwen3-30b-a3b-instruct-2507-q8_0.gguf}"
 LR="${GRPO_LR:-1e-5}"
-BASELINES="${ROUND_BASELINES:-opd-v4abs-4b-q4-hyb}"
 mkdir -p "$G/logs"
 
 fail=0
@@ -78,8 +76,8 @@ if [ "$LINKS" != 0 ] && [ -n "$(squeue --me -h -n "eullm-grpo-$NAME" -o %i 2>/de
     exit 0
 fi
 serial=$(squeue --me -h -p lrd_all_serial -o %i 2>/dev/null | wc -l)
-if [ $((serial + 3)) -gt "${SERIAL_LIMIT:-10}" ]; then
-    echo "[round] $NAME: $serial jobs queued on lrd_all_serial, a round needs 3 of" \
+if [ $((serial + 1)) -gt "${SERIAL_LIMIT:-10}" ]; then
+    echo "[round] $NAME: $serial jobs queued on lrd_all_serial, a round needs 1 of" \
          "${SERIAL_LIMIT:-10}: nothing submitted, try when some have ended" >&2
     exit 1
 fi
@@ -121,13 +119,28 @@ if [ "${NO_CDS:-0}" != 1 ]; then
     echo "[round] case-law exam: $cds"
 fi
 
-exam=$(ROUND_MODELS="$NAME-q4=$OUT/merged" ROUND_GGUF="$NAME-q4=$OUT/gguf/$NAME-q4_k_m.gguf" \
-       ROUND_PAIRS="$PROMPTS" ROUND_ITEMS="$E/norm-exam-devbig.jsonl" ROUND_OUT="$E/devbig-answers" \
-       ROUND_OPEN_ONLY=1 ROUND_EMBEDDER=Qwen/Qwen3-Embedding-0.6B \
-       ROUND_RERANKER=Qwen/Qwen3-Reranker-0.6B ROUND_OPEN_TAG=hyb ROUND_EXAM_LINKS=2 \
-       ROUND_JUDGE_ARGS="--rubric v3 --graded-dir $E/devbig-graded-v3" \
-       ROUND_REPORT="$BASELINES" ROUND_REPORT_DIR="$E/devbig-graded-v3" \
-       ROUND_REPORT_FILE="report-$NAME.txt" \
-       sub -J "eullm-exam-round-$NAME" --dependency="afterok:$pkg" "$L/sbatch_exam_round.slurm") || exit 1
-echo "[round] statute exam round: $exam (report: $E/devbig-graded-v3/report-$NAME.txt)"
+# The exams go to the GPU partition directly, each graded by its own judge
+# job: the round helper (sbatch_exam_round.slurm) would take two more places
+# on the serial partition, and a day's rounds did not fit (2026-10-15).
+NORMS="$WORK/norms/legislazione_*.chunks.jsonl"
+exam() {  # label items out-dir graded-dir links -> id of the judge job
+    local items=$1 out=$2 graded=$3 links=$4 d="afterok:$pkg" x i
+    mkdir -p "$out"
+    for i in $(seq 1 "$links"); do
+        x=$(EXAM_MODELS="$NAME-q4=$OUT/merged" EXAM_GGUF="$NAME-q4=$OUT/gguf/$NAME-q4_k_m.gguf" \
+            EXAM_ITEMS="$items" EXAM_OUT="$out" EXAM_NORMS="$NORMS" EXAM_OPEN_ONLY=1 \
+            EXAM_OPEN_TAG=hyb EXAM_EMBEDDER=Qwen/Qwen3-Embedding-0.6B \
+            EXAM_RERANKER=Qwen/Qwen3-Reranker-0.6B \
+            sub -J "eullm-exam-$NAME" --dependency="$d" "$L/sbatch_norm_exam.slurm") || return 1
+        d="afterany:$x"
+    done
+    sub --dependency="$d" --export="ALL,JUDGE_DIR=$out,JUDGE_QUIET=1,JUDGE_GLOB=answers-$NAME-q4-hyb.jsonl,JUDGE_ARGS=--rubric v3 --graded-dir $graded" \
+        "$L/sbatch_judge.slurm"
+}
+j1=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2) || exit 1
+echo "[round] statute exam, graded by job $j1 into $E/devbig-graded-v3"
+if [ -s "$E/practical-dev.jsonl" ] && [ "${NO_PRACTICAL:-0}" != 1 ]; then
+    j2=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1) || exit 1
+    echo "[round] practical exam, graded by job $j2 into $E/practical-answers"
+fi
 echo "[round] $NAME: merged model will be $OUT/merged (job $pkg)"
