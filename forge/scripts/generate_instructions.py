@@ -127,12 +127,79 @@ class TransformersGenerator:
         return texts, n_tokens
 
 
+class EullmGenerator:
+    """The same sampling through EULLM Engine servers, many requests at once.
+
+    Each conversation goes to one of the servers' ``/api/chat`` (Ollama's
+    API), round robin, ``concurrency`` of them in flight together, so the
+    engine's continuous batching keeps every server's slots busy. On JUPITER
+    one server runs on each GH200 (forge/scripts/jupiter/sbatch_gen_instruct.slurm):
+    deliverable 5 of EHPC-AIF-2026PG01-1434 is this backend against the
+    58-64 tok/s of `TransformersGenerator` on Leonardo, the same model.
+    Standard library only: nothing new in the environment.
+    """
+
+    def __init__(self, servers: list[str], model: str, max_new_tokens: int,
+                 concurrency: int, timeout_s: float = 1800):
+        if not servers:
+            raise ValueError("--servers is empty")
+        self.servers = [u.rstrip("/") for u in servers]
+        self.model = model
+        self.max_new_tokens = max_new_tokens
+        self.concurrency = max(1, concurrency)
+        self.timeout_s = timeout_s
+        self._next = 0
+
+    def _ask(self, url: str, messages: list[dict]) -> tuple[str, int]:
+        import urllib.request
+
+        body = {
+            "model": self.model, "messages": messages, "stream": False, "think": False,
+            # Qwen's recommended sampling for the 2507 Instruct models, as
+            # TransformersGenerator; no repeat penalty (the engine's default
+            # is Ollama's 1.1), so the two backends sample alike.
+            "options": {"temperature": 0.7, "top_p": 0.8, "top_k": 20,
+                        "repeat_penalty": 1.0, "num_predict": self.max_new_tokens},
+        }
+        req = urllib.request.Request(
+            f"{url}/api/chat", data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=self.timeout_s) as resp:
+            out = json.loads(resp.read())
+        return out.get("message", {}).get("content", ""), int(out.get("eval_count") or 0)
+
+    def generate(self, conversations: list[list[dict]]) -> tuple[list[str], int]:
+        from concurrent.futures import ThreadPoolExecutor
+
+        urls = []
+        for _ in conversations:
+            urls.append(self.servers[self._next % len(self.servers)])
+            self._next += 1
+
+        def one(i: int) -> tuple[str, int]:
+            try:
+                return self._ask(urls[i], conversations[i])
+            except Exception as exc:  # one failed request is one rejected pair
+                print(f"[gen] {urls[i]}: {type(exc).__name__}: {exc}", file=sys.stderr, flush=True)
+                return "", 0
+
+        with ThreadPoolExecutor(max_workers=self.concurrency) as pool:
+            results = list(pool.map(one, range(len(conversations))))
+        return [t for t, _ in results], sum(n for _, n in results)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--corpus", type=Path, required=True, help="train.jsonl — never val")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="Hub id (transformers) or the engine's model name (eullm)")
+    ap.add_argument("--backend", choices=("transformers", "eullm"), default="transformers")
+    ap.add_argument("--servers", default="",
+                    help="eullm: comma-separated server URLs, e.g. http://127.0.0.1:18500,...")
+    ap.add_argument("--concurrency", type=int, default=64,
+                    help="eullm: requests in flight at once, over all the servers")
     ap.add_argument("--limit", type=int, required=True, help="jobs to derive (pairs attempted)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=16)
@@ -170,7 +237,13 @@ def main() -> int:
     if not todo:
         return 0
 
-    gen = TransformersGenerator(args.model, args.max_new_tokens)
+    if args.backend == "eullm":
+        gen = EullmGenerator([u for u in args.servers.split(",") if u], args.model,
+                             args.max_new_tokens, args.concurrency)
+        print(f"[gen] EULLM Engine: {len(gen.servers)} servers, {args.model}, "
+              f"{gen.concurrency} requests at once", flush=True)
+    else:
+        gen = TransformersGenerator(args.model, args.max_new_tokens)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     # Longest prompts first inside the run: padding is per batch, so batching
     # similar lengths together wastes less, and an OOM shows up in the first
