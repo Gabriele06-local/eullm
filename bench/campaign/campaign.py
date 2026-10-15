@@ -984,11 +984,15 @@ def row_of(r: dict) -> dict:
     t = r.get("throughput")
     if t:
         reps = t.get("repeats") or [{}]
+        # Means across repeats, like the aggregate_tok_s_mean next to them:
+        # one stalled last repeat (Lustre, a noisy neighbour, cold-vs-warm)
+        # otherwise decides the ttft/decode/prefill the report compares
+        # engines on, while the headline number is the mean.
         row.update(agg_tok_s_mean=t.get("aggregate_tok_s_mean"),
                    agg_tok_s_cv_pct=t.get("aggregate_tok_s_cv_pct"),
-                   ttft_ms_p50=reps[-1].get("ttft_ms_p50"),
-                   decode_tok_s=reps[-1].get("decode_tok_s_mean"),
-                   prefill_tok_s=reps[-1].get("prefill_tok_s_mean"))
+                   ttft_ms_p50=point.mean([rep.get("ttft_ms_p50") for rep in reps]),
+                   decode_tok_s=point.mean([rep.get("decode_tok_s_mean") for rep in reps]),
+                   prefill_tok_s=point.mean([rep.get("prefill_tok_s_mean") for rep in reps]))
     w = r.get("workload")
     if w:
         row.update(agg_tok_s_mean=w.get("aggregate_tok_s"), duration_s=w.get("duration_s"),

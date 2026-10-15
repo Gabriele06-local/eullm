@@ -602,3 +602,40 @@ def test_leftover_servers_are_those_of_this_job_outside_every_running_point():
     got = campaign.orphan_servers(ps, keep_pgids={101}, job="7", cgroup_of=cgroups.get)
     # 101 is a running point's server, 404 is no server, 606 is another job's.
     assert got == [(202, "eullm"), (303, "ollama"), (505, "llama-server")]
+
+
+def test_collect_averages_throughput_latency_across_repeats():
+    """summary.csv carries means: one stalled last repeat (ttft 500 after 50
+    and 52) must not decide the ttft/decode/prefill the report compares
+    engines on, while the headline aggregate already is a mean."""
+    r = {"params": {"model": "m"}, "campaign": "c", "group": "g", "point": "p",
+         "kind": "throughput", "outcome": "measured", "job": "j", "host": "h",
+         "devices": [], "load": {},
+         "throughput": {"aggregate_tok_s_mean": 100.0, "aggregate_tok_s_cv_pct": 1.0,
+                        "repeats": [
+                            {"ttft_ms_p50": 50.0, "decode_tok_s_mean": 100.0,
+                             "prefill_tok_s_mean": 500.0},
+                            {"ttft_ms_p50": 52.0, "decode_tok_s_mean": 102.0,
+                             "prefill_tok_s_mean": 510.0},
+                            {"ttft_ms_p50": 500.0, "decode_tok_s_mean": 20.0,
+                             "prefill_tok_s_mean": 100.0}]},
+         "device_stats": {}}
+    row = campaign.row_of(r)
+    # point.mean rounds like every other stored number (r1)
+    assert row["ttft_ms_p50"] == pytest.approx(200.7)
+    assert row["decode_tok_s"] == pytest.approx(74.0)
+    assert row["prefill_tok_s"] == pytest.approx(370.0)
+
+
+def test_collect_keeps_a_single_repeat_latency_as_is():
+    """One repeat has no variance to average away: the row keeps its values,
+    None where the repeat did not measure."""
+    r = {"params": {}, "campaign": "c", "group": "g", "point": "p",
+         "kind": "throughput", "outcome": "measured", "job": "j", "host": "h",
+         "devices": [], "load": {},
+         "throughput": {"aggregate_tok_s_mean": 90.0, "aggregate_tok_s_cv_pct": None,
+                        "repeats": [{"ttft_ms_p50": 60.0}]},
+         "device_stats": {}}
+    row = campaign.row_of(r)
+    assert row["ttft_ms_p50"] == 60.0
+    assert row["decode_tok_s"] is None and row["prefill_tok_s"] is None
