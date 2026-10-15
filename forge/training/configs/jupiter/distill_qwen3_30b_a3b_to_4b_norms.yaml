@@ -11,7 +11,13 @@
 #   student.
 # * save_steps 100, not 300: at ~550 steps an hour (job 2334585) a two-hour
 #   link that is killed between saves loses at most ~11 minutes, not ~33.
-# Everything else is Leonardo's, so that steps/h compares (deliverable 2).
+# * Three epochs and 66 warm-up steps, not one and 1,000: the legislation
+#   corpus is 7,064 chunks (~1.5M tokens, ~210 tokens a chunk; 234 more held
+#   out, 15-10-2026), 442 steps an epoch at 16 micro-batches, 1,325 in all.
+#   Leonardo's 1,000 warm-up steps would never have reached the full rate;
+#   66 is 5% of the run. Evaluated every 200 steps, on the whole held-out set.
+# Everything else is Leonardo's. Steps/h do not compare with Leonardo's,
+# whose chunks were longer: the 2,048-token comparison is job 2334585's.
 teacher_model: Qwen/Qwen3-30B-A3B-Base
 teacher_adapter: null
 student_model: Qwen/Qwen3-4B-Base
@@ -44,13 +50,13 @@ gradient_accumulation_steps: 16
 learning_rate: 5.0e-5
 weight_decay: 0.01
 max_grad_norm: 1.0
-num_train_epochs: 1
+num_train_epochs: 3
 max_steps: -1
-warmup_steps: 1000
+warmup_steps: 66
 save_steps: 100
 save_total_limit: 3
-eval_steps: 1000
-eval_max_batches: 200
+eval_steps: 200
+eval_max_batches: 234
 logging_steps: 20
 kl_temperature: 2.0
 kl_alpha: 0.7

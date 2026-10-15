@@ -301,7 +301,8 @@ teacher without Leonardo's continued-pre-training adapter):
 student (`forge/training/configs/jupiter/`), each with the teacher in BF16
 alone on one GPU and the student on the next, on the legislation corpus
 (Leonardo's `$WORK/norms/legislazione_*.chunks.jsonl`, split into train and
-val by article with `make_norms_split.py`). The teacher is
+val by article with `make_norms_split.py`: 7,064 chunks to train on, ~1.5M
+tokens, and 234 held out, 15-10-2026; three epochs, 1,325 steps). The teacher is
 Qwen3-30B-A3B-Base **without** Leonardo's continued-pre-training adapter,
 which was trained on court decisions. Each link resumes from the newest
 checkpoint (`save_steps` 100), stops its runs after 110 minutes, and leaves
