@@ -41,6 +41,14 @@ echo "=== Forge teacher probe: job ${SLURM_JOB_ID:-local} on $(hostname), $(date
 echo "  python $(command -v python) ($(python --version 2>&1)), HF_HOME $HF_HOME, offline ${HF_HUB_OFFLINE:-0}"
 nvidia-smi --query-gpu=index,name,memory.total,power.limit --format=csv,noheader | sed 's/^/  /'
 
+# What the probe imports, before a GPU is used: a venv that does not import
+# stops the job here, with the path Python searched.
+if ! python -c "import transformers, peft, accelerate, datasets; print('  imports: transformers', transformers.__version__, 'peft', peft.__version__)"; then
+    echo "[!!] the venv does not import on this node; PYTHONPATH:"
+    tr ':' '\n' <<<"${PYTHONPATH:-}" | sed 's/^/    /'
+    exit 1
+fi
+
 # Power, every second, all four GPUs, until the end of the job.
 nvidia-smi --query-gpu=timestamp,index,power.draw,utilization.gpu,memory.used \
     --format=csv,noheader,nounits -l 1 >"$OUT/power.csv" 2>/dev/null &

@@ -62,13 +62,20 @@ fi
 if [ -f "$FORGE_VENV/bin/activate" ]; then
     # shellcheck disable=SC1091
     source "$FORGE_VENV/bin/activate"
+    # First, always: removed wherever it is and put back in front. Checking
+    # only that it was there was not enough: job 2327297 (14-10-2026),
+    # submitted from a shell with the venv active, imported the module's
+    # regex 2025.7.31 instead of the venv's (transformers 5.19 wants
+    # 2025.10.22 or later), where the same venv imported fine on the login
+    # node. Whatever reordered the path in the job, the venv now leads.
     for _forge_sp in "$FORGE_VENV"/lib/python*/site-packages; do
-        case ":${PYTHONPATH:-}:" in
-            *":$_forge_sp:"*) ;;
-            *) export PYTHONPATH="$_forge_sp${PYTHONPATH:+:$PYTHONPATH}" ;;
-        esac
+        _forge_pp=":${PYTHONPATH:-}:"
+        _forge_pp="${_forge_pp//:$_forge_sp:/:}"
+        _forge_pp="${_forge_pp#:}"
+        _forge_pp="${_forge_pp%:}"
+        export PYTHONPATH="$_forge_sp${_forge_pp:+:$_forge_pp}"
     done
-    unset _forge_sp
+    unset _forge_sp _forge_pp
 fi
 
 mkdir -p "$FORGE_HOME" "$FORGE_DATA_DIR" "$FORGE_RUN_DIR/logs" "$HF_HOME"
