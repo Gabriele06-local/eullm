@@ -1737,6 +1737,15 @@ pub fn every_layer_on_gpu(
 /// gpt-oss-120b 1,789 against 53; eight of Qwen3-14B (9 GiB) 343 against 14.
 /// One server of the 235B Q8_0 took 204 mapped and 225 read in: alone, the
 /// file maps fine. With this rule and no flag: 121, 63, 16 and 209 s.
+///
+/// GPFS (IBM Storage Scale) is the exception, measured on JUPITER's GH200
+/// nodes (`tools/jupiter/sbatch_load.slurm`, 14-10-2026), where reading in is
+/// the slow way: Qwen3.6-27B Q4_K_M (16.8 GB) on one GPU took 53 s read in,
+/// cold and again warm, against 10 s mapped (llama-server: 48 s read in, 4 s
+/// mapped); four servers of Qwen3.6-35B-A3B (22.1 GB), one per GPU, loading
+/// the file at once took 16 s each mapped, cold, and 34 s read in. Its files
+/// stay mapped below half the memory. The other network file systems keep
+/// the rule: none of them has been measured.
 pub fn read_in_whole_on_gpu(
     model_bytes: u64,
     whole_on_gpu: bool,
@@ -1757,7 +1766,8 @@ pub fn read_in_whole_on_gpu(
             gib(memory)
         ));
     }
-    let network = network?;
+    // GPFS maps faster than it reads in, alone or several at once (above).
+    let network = network.filter(|&fs| fs != "GPFS")?;
     Some(format!(
         "reading the model ({}) into memory instead of mapping its file: it goes to the GPUs \
          whole and its file is on {network}, where a mapped file is copied to the GPUs a page \
@@ -3908,6 +3918,26 @@ mod plan_offload_tests {
         }
         let why = read_in_whole_on_gpu(270 * GIB, true, job, lustre, false).expect("read in");
         assert!(why.contains("more than half"), "{why}");
+    }
+
+    /// GPFS is the network file system that stays mapped (JUPITER, 14-10-2026:
+    /// a 16.8 GB model 53 s read in against 10 s mapped, four servers of a
+    /// 22.1 GB one at once 34 s against 16), unless the model is more than
+    /// half the memory; the file systems nobody measured keep the rule.
+    #[test]
+    fn a_model_on_gpfs_stays_mapped_below_half_the_memory() {
+        let job = Some(480 * GIB);
+        let gpfs = Some("GPFS");
+        for size in [GIB, 16 * GIB, 22 * GIB, 233 * GIB] {
+            assert_eq!(read_in_whole_on_gpu(size, true, job, gpfs, false), None);
+            assert_eq!(read_in_whole_on_gpu(size, true, None, gpfs, false), None);
+        }
+        let why = read_in_whole_on_gpu(270 * GIB, true, job, gpfs, false).expect("read in");
+        assert!(why.contains("more than half"), "{why}");
+        for fs in ["NFS", "SMB", "BeeGFS", "CephFS", "9p"] {
+            let why = read_in_whole_on_gpu(16 * GIB, true, job, Some(fs), false).expect("read in");
+            assert!(why.contains(&format!("on {fs}")), "{why}");
+        }
     }
 
     /// All layers is `-1`, or one more than the model's blocks (the output
