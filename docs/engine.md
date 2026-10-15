@@ -2095,15 +2095,20 @@ The Engine uses [`tracing`](https://docs.rs/tracing) for structured logging. Con
 # Minimal (errors only)
 RUST_LOG=error eullm run ./model.gguf
 
-# Normal operation (recommended) — shows request params, context budget, cap warnings
-RUST_LOG=eullm_engine=info eullm run ./model.gguf
+# Normal operation (the default) — shows request params, context budget, cap warnings
+RUST_LOG=eullm=info eullm run ./model.gguf
 
 # Verbose — adds prefill chunk details, decode loop, batch scheduling
-RUST_LOG=eullm_engine=debug eullm run ./model.gguf
+RUST_LOG=eullm=debug eullm run ./model.gguf
 
-# Everything (very noisy, includes llama.cpp internals)
-RUST_LOG=trace eullm run ./model.gguf
+# llama.cpp's own log as well: what it loads where, and why it refuses a load
+# that the engine reports only as "null result from llama cpp"
+RUST_LOG=eullm=info,llama-cpp-2=info eullm run ./model.gguf
 ```
+
+The engine's target is `eullm` (the binary's name); `eullm_engine` matches
+nothing. llama.cpp's own log is dropped unless `RUST_LOG` names its target,
+`llama-cpp-2`; then all of it is shown, whatever level the filter gives it.
 
 ### What gets logged
 
