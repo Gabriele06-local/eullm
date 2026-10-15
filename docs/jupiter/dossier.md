@@ -188,7 +188,17 @@ measured downstream, in the instruction tuning.
 * **The packed distillation**, same corpus and held-out set, for the
   packed/unpacked comparison (queued).
 * **Instruction tuning** on the generated pairs, against Leonardo's
-  46-minute baseline (deliverable 4).
+  46-minute baseline (deliverable 4): `forge/scripts/jupiter/sbatch_sft.slurm`,
+  four runs on one node, one GPU each: the 4B and the 8B distilled on
+  legislation, and the same two Base models not distilled, on the same pairs
+  and recipe, so the comparison says what distillation adds. Each model is
+  then merged and asked the legal-it held-out questions (deliverable 6),
+  with Qwen3-4B-Instruct-2507 as the reference.
+* **More instruction pairs**: the generation job takes several seeds
+  (`FORGE_GEN_SEEDS`), each asking other questions of the same passages.
+* **Qwen3.5 track** (deliverable 7): Qwen3.5-35B-A3B-Base as teacher and
+  Qwen3.5-4B-Base as student, both Apache 2.0 on the Hub (checked
+  15-10-2026), downloaded on a login node before the first probe.
 
 ## 6. Energy
 
