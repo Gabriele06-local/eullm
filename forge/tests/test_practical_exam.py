@@ -54,13 +54,13 @@ def test_references_follow_the_law_and_its_codes(known):
 
 
 def test_groups_hold_an_article_and_what_it_refers_to(known):
-    out = groups(known, per_code=10, rng=random.Random(0))
+    out = groups(known, per_code=10, rng=random.Random(0), neighbours=False)
     heads = {(g[0].code, g[0].number) for g in out}
     assert heads == {("codice_civile", "1453"), ("codice_procedura_civile", "163")}
     assert all(len(g) >= 2 for g in out)
     # an article trained on is in no group, as head or as reference
-    out = groups(known, 10, random.Random(0), exclude=frozenset({("codice_civile", "1455"),
-                                                                 ("codice_civile", "2043")}))
+    out = groups(known, 10, random.Random(0), neighbours=False,
+                 exclude=frozenset({("codice_civile", "1455"), ("codice_civile", "2043")}))
     assert {(g[0].code, g[0].number) for g in out} == {("codice_procedura_civile", "163")}
 
 
@@ -96,7 +96,7 @@ def test_a_good_reply_is_an_item_graded_by_its_own_rubric(known):
     (_reply(domanda="Che cosa prevede l'art. 1453 del codice civile in caso di inadempimento?"),
      "names_article"),
     (_reply(articoli=[7]), "bad_articles"),
-    (_reply(articoli=[2]), "answer_misses_article"),
+    (_reply(articoli=[2]), "answer_misses_article"),      # cites neither 1455 nor any declared
     (_reply(risposta="Breve."), "length"),
     (_reply(domanda="Il contratto di [PERSONA_1] può essere risolto per inadempimento?"),
      "placeholder"),
@@ -158,3 +158,25 @@ def test_training_prompts_leave_out_every_article_of_a_practical_item(tmp_path, 
     save_eval_set([item], exam)
     assert mod.exam_articles([exam]) == {("codice_civile", "1453"), ("codice_civile", "1455"),
                                          ("codice_civile", "2043")}
+
+
+def test_an_article_that_refers_to_none_is_paired_with_the_next(known):
+    k = dict(known)
+    k[("codice_civile", "2044")] = _art("codice_civile", 2044, "Non è responsabile chi cagiona "
+                                         "il danno per legittima difesa.")
+    out = groups(k, per_code=10, rng=random.Random(0))
+    pairs = {tuple(a.number for a in g) for g in out}
+    assert ("2043", "2044") in pairs            # 2043 refers to none: its neighbour
+    assert ("1453", "1455", "2043") in pairs    # references still make their groups
+    # a code's quota takes the reference groups first
+    first = groups(k, per_code=1, rng=random.Random(0))
+    assert [tuple(a.number for a in g) for g in first if g[0].code == "codice_civile"] == \
+        [("1453", "1455", "2043")]
+
+
+def test_the_needed_articles_are_those_declared_and_cited(known):
+    g = [known[("codice_civile", "1453")], known[("codice_civile", "1455")],
+         known[("codice_civile", "2043")]]
+    # declared 1, 2 and 3; the answer cites 1453 and 2043 only
+    parsed = parse_practical(_reply(articoli=[1, 2, 3]), g)
+    assert [a.number for a in parsed["articoli"]] == ["1453", "2043"]
