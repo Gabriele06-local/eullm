@@ -133,3 +133,14 @@ def test_missing_inputs_stop_before_anything_is_queued(tmp_path):
     r = _run(env, "jg-x", "/no/such/model", "3", "750")
     assert r.returncode == 1 and "missing start model" in r.stderr
     assert not log.exists()
+
+
+def test_packaged_queues_only_the_exams_and_takes_no_serial_place(tmp_path):
+    env, log = _setup(tmp_path, serial=10)
+    r = _run({**env, "PACKAGED": "4242", "NO_CDS": "1"}, "jg-x", "/x", "0", "750")
+    assert r.returncode == 0, r.stderr
+    calls = [ln.split("|") for ln in log.read_text().splitlines()]
+    assert not any("lrd_all_serial" in c[1] for c in calls)
+    assert not any("eullm-grpo" in c[1] or "eullm-package" in c[1] for c in calls)
+    assert "--dependency=afterok:4242" in calls[0][1]          # the statute exam
+    assert len(calls) == 5                                      # 2 links + judge, 1 + judge
