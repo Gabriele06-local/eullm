@@ -268,8 +268,34 @@ generation in Transformers on GH200, then the same teacher as GGUF under
 EuLLM. The "load s" column again compares EuLLM's load with llama-server's
 warm-up request only.
 
-Spent on JUPITER by 15-10-2026 morning: 50.5 minutes of node time in eight
-jobs, **3.4 GPU-hours** of 5,000.
+### The first Forge numbers (job 2334585, 15-10-2026)
+
+`sbatch_teacher_probe.slurm` on one node, the Forge venv on the site's
+PyTorch (`teacher_probe.py`: random tokens, no corpus here yet, and the
+teacher without Leonardo's continued-pre-training adapter):
+
+* **Distillation step, two runs side by side** (deliverables 2 and 3):
+  the teacher (Qwen3-30B-A3B-Base, BF16, 56.9 GiB, 57.8 at peak) alone on
+  one GPU, the LoRA r128 student (Qwen3-4B-Base, 33.4 GiB at peak) with
+  checkpointing on the next, `cutoff_len` 2048. One micro-batch: median
+  0.411 s on GPUs 0-1 and 0.407 s on GPUs 2-3, at the same time: **548 and
+  553 optimiser steps an hour** at Leonardo's 16 micro-batches a step,
+  against ~380 there with the teacher split over two A100 and the student
+  on a third. Per GPU-hour: ~276 steps against ~127, 2.2 times. To be
+  confirmed by `distill.py` itself on real text, with the adapter.
+* **The teacher generating in plain Transformers**, BF16, one GPU, 256
+  tokens a sequence: 13.9 tok/s alone, 113.5 with 8 sequences, 346.9 with
+  32 (deliverable 5's baseline; Leonardo: 58-64 tok/s).
+* **Loading the teacher**: 201 s for 61 GB, two processes reading it at
+  once from GPFS, 12.8 s for the student: about 3.5 minutes of every job
+  link, to be counted in the link length.
+* **Energy**: 38.4 Wh for the 3.9 minutes of phase 1, mostly the load
+  (mean 586 W for the four GPUs), and 15.2 Wh for the 1.4 minutes of
+  generation (628 W). The method works; the per-step figure comes with
+  the real run.
+
+Spent on JUPITER by 15-10-2026 noon: 56 minutes of node time in nine
+jobs, about **3.8 GPU-hours** of 5,000.
 
 ## What the GPU probe found (job 2326998, 14-10-2026)
 
