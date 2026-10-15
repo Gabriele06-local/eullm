@@ -58,30 +58,14 @@ on the first day, and measure placement before committing to a job shape.
 
 1. **Account.** JuDoor registration, SSH key, 2FA; join the project when JSC
    sends it. Login is `login.jupiter.fz-juelich.de`.
-2. **No personal data on JUPITER: the rulings stay on Leonardo.**
-   The proposal answered "Does your proposal involve handling of personal
-   data?: Yes", and the call's own form required the PI to confirm the data
-   controller's responsibilities and noted that "they will need to make a
-   data processing agreement with the production site"; we answered that we
-   would sign one "before any personal data is uploaded, and we will do
-   so". The Principal Investigator's Agreement signed on 14-10-2026 is
-   JSC's standard form and says the system is used "not to process any
-   personal data": that is the default, and the DPA is the way the call
-   itself provides out of it. Pseudonymised court decisions are personal
-   data, so they do not go to JUPITER without one -- and on 14-10-2026 we
-   chose not to ask for one: the rulings are processed on Leonardo, and
-   only what `export_clean_cards.py` lets out leaves it. Legislation
-   (Normattiva, EUR-Lex: public domain) and public benchmarks are what
-   JUPITER trains and evaluates on, which covers every
-   throughput measurement (deliverables 1–5, 8): throughput does not depend
-   on which
-   text is trained on. Case-law work stays on Leonardo, with one way out:
-   the ruling cards, which hold the principles and not the case, after
-   `forge/scripts/export_clean_cards.py` has run on Leonardo — development
-   rulings, special-category and criminal appeals and any card still naming
-   a party, place or amount left out, and made-up references (numbers
-   50000–59999, which no real ruling has) in place of the real ones, with no
-   table back. Exams on real rulings stay off JUPITER too.
+2. **Data.** Legislation (Normattiva, EUR-Lex: public domain) and public
+   benchmarks cover every throughput measurement (deliverables 1–5, 8):
+   throughput does not depend on which text is trained on. The ruling cards
+   `forge/scripts/export_clean_cards.py` writes on Leonardo hold the
+   principles and not the case — development rulings, special-category and
+   criminal appeals and any card still naming a party, place or amount left
+   out, made-up references (numbers 50000–59999, which no real ruling has)
+   in place of the real ones, with no table back.
 3. **Environment probe**, `forge/scripts/jupiter/probe_env.sh`: aarch64,
    GPU count and memory, whether nodes are exclusive, how PyTorch is reached
    and whether its build has sm_90, transformers/peft/accelerate beside it,
@@ -358,8 +342,7 @@ about 1.3 GPU-hours (jobs 2326280 and 2326571). Next, in order:
    calendar below, with the training libraries checked against Leonardo's
    for the baseline.
 3. The data JUPITER trains on: legislation, public benchmarks and the
-   ruling cards `export_clean_cards.py` lets out on Leonardo (no DPA, by
-   choice: no personal data here).
+   ruling cards `export_clean_cards.py` writes on Leonardo.
 
 ## Calendar, from the start date
 
@@ -391,15 +374,8 @@ the placement probe says JUPITER rewards something else.
 
 ## Lines not to cross
 
-* **No personal data before the DPA** (signed PI agreement, 14-10-2026;
-  the proposal's Privacy & Data Governance answers): no court decisions,
-  pseudonymised or not, and nothing derived from them that could carry a
-  name — OPD prompt files with case-law rows included — only legislation,
-  public benchmarks and the cards `export_clean_cards.py` lets out. After
-  the DPA, still only pseudonymised text, as declared. Nothing from the
-  corpus is ever in a repository.
-* **What the proposal promised about the data, which binds us after the
-  DPA too**: names of parties and lawyers, tax codes, VAT numbers, IBANs,
+* **Court decisions, wherever they are processed: what the proposal
+  promised**: only pseudonymised text; names of parties and lawyers, tax codes, VAT numbers, IBANs,
   addresses, phone numbers, emails and dates of birth replaced; links to
   the original documents removed; surnames in case citations removed;
   generated examples that still hold a placeholder or anything the
@@ -431,8 +407,7 @@ energy figures. Its deadline and template are to be confirmed with EuroHPC
 1. Start and end dates, and the "pre-defined consumption pattern".
 2. Node sharing and billing: is a 2-GPU job billed 2 or 4 GPU-hours?
 3. Maximum walltime and the job-size/priority policy on `booster`.
-4. (Not asked, by choice on 14-10-2026: no DPA, so no personal data on JUPITER.)
-5. Energy accounting per job (Slurm `ConsumedEnergy` or site tooling).
+4. Energy accounting per job (Slurm `ConsumedEnergy` or site tooling).
 
 Sources: [JUPITER technical overview (JSC)](https://www.fz-juelich.de/en/ias/jsc/jupiter/tech),
 [GH200 node figures](https://www.nextplatform.com/2025/06/11/peeling-the-covers-off-germanys-exascale-jupiter-supercomputer/),

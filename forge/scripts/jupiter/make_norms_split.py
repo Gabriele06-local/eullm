@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """The legislation corpus as distill.py reads it: train.jsonl and val.jsonl.
 
-On JUPITER the distillation runs on legislation only (Normattiva, EUR-Lex:
-public domain): no personal data goes there (docs/jupiter/allocation-plan.md).
+On JUPITER this distillation runs on legislation only (Normattiva, EUR-Lex:
+public domain).
 Its source is Leonardo's ``$WORK/norms/legislazione_*.chunks.jsonl``, one
 chunk a line with ``code``, ``article_num`` and ``text``, copied over as it
 is. Not ``$WORK/datasets/``: those corpora hold court decisions.
