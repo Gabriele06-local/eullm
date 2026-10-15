@@ -42,7 +42,7 @@ REFLEXBENCH = os.path.join(os.path.dirname(HERE), "reflexbench")
 # above this, or a kind or runtime this file does not know, and is left in
 # the queue for a runner that does: jobs keep the code they started with
 # for up to 48 hours, while plan adds points at any time.
-RUNNER_VERSION = 6
+RUNNER_VERSION = 7
 # The engine build this job runs, as `plan --engine-label` names it
 # (EULLM_ENGINE_LABEL, exported by submit_campaign.sh). A point planned with a
 # label runs only in a job with the same one, and a point planned without one
@@ -573,6 +573,7 @@ def start_servers(p: dict, ctx: Context) -> list:
             os.makedirs(env["EULLM_AUDIT_DIR"], exist_ok=True)
         binary, args, extra_env = runtime_command(p, ctx.engine)
         env.update(extra_env)
+        env.update(p.get("env") or {})  # the point's own, e.g. LLAMA_MOE_CACHE_STATS
         env["OLLAMA_HOST"] = f"127.0.0.1:{ctx.port_base + r}"
         server = Server(binary, ctx.port_base + r, args, env, log,
                         ctx.cores or cores_for(ctx.binding, group),

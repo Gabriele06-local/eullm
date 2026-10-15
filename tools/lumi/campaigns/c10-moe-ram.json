@@ -15,7 +15,10 @@
     "No --fit-strict: these loads do not fit the GPU by design.",
     "DeepSeek-V3.1 (378 GiB) is the boundary: its experts may be more than the RAM can pin.",
     "Same batches as the c02 groups they are compared with; prompt groups: one 8,000-token",
-    "prompt (nominal), the reading speed that the prefetch of patch 0003 is for."
+    "prompt (nominal), the reading speed that the prefetch of patch 0003 is for.",
+    "ram-stats (added 15-10-2026, runner 7): the cache's step statistics in the server log",
+    "(LLAMA_MOE_CACHE_STATS=64: time to the routers, in the cache, copies and their rate, the",
+    "share of experts found in VRAM), for why the cache wins with one request and loses with 32."
   ],
   "pull": [
     "hf.co/ggml-org/gpt-oss-120b-GGUF:MXFP4",
@@ -42,6 +45,11 @@
      "set": {"model": "deepseek-v3.1-gguf-q4_k_m"},
      "axes": {"batch": [1, 4, 16],
               "extra_args": [["--moe-cache", "auto"], ["--cpu-moe"], []]}},
+    {"name": "ram-stats", "priority": 95, "est_s": 2400,
+     "set": {"extra_args": ["--moe-cache", "auto"], "repeats": 1,
+             "env": {"LLAMA_MOE_CACHE_STATS": "64"}},
+     "axes": {"model": ["qwen3-235b-a22b-gguf-q4_k_m", "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"],
+              "batch": [1, 8, 32]}},
     {"name": "ram-prompt", "priority": 60, "est_s": 2400,
      "set": {"batch": 1, "slot_ctx": 16384, "prompt_tokens": 8000},
      "axes": {"model": ["gpt-oss-120b-gguf-mxfp4", "qwen3-235b-a22b-gguf-q4_k_m",

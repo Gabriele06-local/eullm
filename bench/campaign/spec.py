@@ -50,6 +50,10 @@ CORES_RUNNER = 6
 # What `cores` may say: the cores of the devices the point reserved, all of
 # a node's for an exclusive point, where an expert's work is the CPU's.
 CORES = ("reserved",)
+# Points that give their servers environment variables (`env`, e.g. llama.cpp's
+# LLAMA_MOE_CACHE_STATS) need the runner that passes them on: an older one
+# would measure the point without them.
+ENV_RUNNER = 7
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -217,6 +221,12 @@ def normalize(raw: dict) -> dict:
         if p["cores"] not in CORES:
             raise SpecError(f"cores must be one of {CORES}, got {p['cores']!r}")
         p["runner"] = max(p.get("runner", 1), CORES_RUNNER)
+    if "env" in raw:
+        if not isinstance(p["env"], dict) or not all(
+                isinstance(k, str) and k for k in p["env"]):
+            raise SpecError(f"env must map variable names to values, got {p['env']!r}")
+        p["env"] = {k: str(v) for k, v in p["env"].items()}
+        p["runner"] = max(p.get("runner", 1), ENV_RUNNER)
     p["extra_args"] = [str(a) for a in p["extra_args"]]
     for hint in HINTS:
         p.pop(hint, None)

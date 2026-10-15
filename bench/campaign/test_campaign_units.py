@@ -366,10 +366,33 @@ def test_a_point_can_take_the_cores_of_every_device_it_reserved():
     assert campaign.point_cores("none", ["0"], node, True, every) is None
     wide = normalize({"model": "m", "exclusive": True, "cores": "reserved"})
     assert wide["runner"] == 6 and point.can_run(wide)
-    assert not point.can_run(wide | {"runner": 7})
+    assert not point.can_run(wide | {"runner": point.RUNNER_VERSION + 1})
     assert "cores" not in normalize({"model": "m"})
     with pytest.raises(SpecError):
         normalize({"model": "m", "cores": "all"})
+
+
+def test_a_point_gives_its_servers_the_environment_it_names(tmp_path, monkeypatch):
+    import point
+
+    started = []
+
+    class Recorder:
+        def __init__(self, binary, port, args, env, log, cores=None, runtime="eullm"):
+            started.append(env)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(point, "Server", Recorder)
+    p = normalize({"model": "m", "env": {"LLAMA_MOE_CACHE_STATS": 64}})
+    assert p["env"] == {"LLAMA_MOE_CACHE_STATS": "64"} and p["runner"] == 7
+    ctx = point.Context("/bin/eullm", "rocm", "none", ["3"], 0, str(tmp_path))
+    point.start_servers(p | {"id": "p1"}, ctx)
+    assert started[0]["LLAMA_MOE_CACHE_STATS"] == "64"
+    assert "env" not in normalize({"model": "m"})
+    with pytest.raises(SpecError):
+        normalize({"model": "m", "env": ["LLAMA_MOE_CACHE_STATS=64"]})
 
 
 def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
