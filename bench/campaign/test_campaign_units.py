@@ -395,6 +395,30 @@ def test_a_point_gives_its_servers_the_environment_it_names(tmp_path, monkeypatc
         normalize({"model": "m", "env": ["LLAMA_MOE_CACHE_STATS=64"]})
 
 
+def test_a_point_names_a_file_of_its_own_in_its_environment(tmp_path, monkeypatch):
+    import point
+
+    started = []
+
+    class Recorder:
+        def __init__(self, binary, port, args, env, log, cores=None, runtime="eullm"):
+            started.append(env)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(point, "Server", Recorder)
+    p = normalize({"model": "m", "env": {"LLAMA_MOE_CACHE_TRACE": "{workdir}/{point}.moe-trace",
+                                         "LLAMA_MOE_CACHE_STATS": "64"}})
+    # an older runner would pass the braces on
+    assert p["runner"] == 8 and point.RUNNER_VERSION >= 8
+    assert normalize({"model": "m", "env": {"LLAMA_MOE_CACHE_STATS": "64"}})["runner"] == 7
+    ctx = point.Context("/bin/eullm", "rocm", "none", ["3"], 0, str(tmp_path))
+    point.start_servers(p | {"id": "p1"}, ctx)
+    assert started[0]["LLAMA_MOE_CACHE_TRACE"] == f"{tmp_path}/p1.moe-trace"
+    assert started[0]["LLAMA_MOE_CACHE_STATS"] == "64"
+
+
 def test_a_point_planned_for_one_engine_build_runs_only_in_its_jobs():
     import point
 

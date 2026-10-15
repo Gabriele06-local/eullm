@@ -80,6 +80,8 @@ Timers in the cache's callbacks, reported per step and per layer: time waiting o
 - Two thirds of a step pass before each layer's routing is read back: the GPU computing the 48 layers, plus the waits at each read-back. How much of that is waiting decides phase 4, and is the next thing to measure.
 - A step of 20–21 ms is 48–50 tokens/s inside llama.cpp, the same as llama-server with the same cache (49.4). `speed_check` sees 44 through EuLLM, so 1–2 ms per token go to EuLLM's own work around the decode: to look at separately.
 
+**Eviction** (patch `0008`, 15-10-2026). With many sequences a step can want more experts than the cache holds, and the least recently used slot is then always an expert the next layers want: on LUMI-G with Qwen3-235B and 32 sequences the cache found 0.85% of its experts in VRAM and copied 50 GiB a step. The least recently used slot is now taken only while its expert went unused for a whole pass over the layers, otherwise the most recently used one outside the current layer. Chosen with `bench/moe_cache_sim` over LRU, decayed counts and Belady's bound (72% of the experts in VRAM instead of 0% at 32 sequences, on routing calibrated to LUMI; the same as LRU while a step fits); measured by `c10`'s `evict` group (`docs/lumi/allocation-plan.md`).
+
 ### Phase 2 — Pin the experts (small; a candidate for a first upstream PR)
 
 Register the expert ranges of the mmap with CUDA. `ggml_backend_cuda_register_host_buffer` exists (`ggml/src/ggml-cuda/ggml-cuda.cu`:5021, behind `GGML_CUDA_REGISTER_HOST`), and llama.cpp never calls it.

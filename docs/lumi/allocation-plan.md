@@ -137,7 +137,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 52 | ~25 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (20 points) only on an RCCL build, in jobs labelled `rccl` |
-| `c10-moe-ram` | 48 | ~35 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
+| `c10-moe-ram` | 66 | ~47 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -582,6 +582,20 @@ In order:
    copying). Two changes follow: the cache should stop evicting when a
    step wants more than it holds, keeping what it has and copying the rest,
    and the CPU's share is to be measured again (below) before phase 3.
+
+   The eviction (15-10-2026). `bench/moe_cache_sim` replays the experts the
+   routers choose through the cache's policies; on routing calibrated to
+   these statistics (it copies 50.7 GiB a step with LRU on the 235B at 32,
+   where LUMI copied 50.4) the eviction of llama.cpp patch 0008 keeps 72% of
+   the experts in VRAM at 32 instead of 0%, against 81% for Belady's bound,
+   and 57% for the 480B at 8 instead of 0%, the same as LRU wherever a step
+   fits. On the 235B at 32 that is 14 GiB copied a step instead of 51, about
+   0.7 s of copying instead of 2.4 at the measured 22 GB/s, so roughly
+   three times the 12.2 tokens/s, above `--fit`'s split (15.1). The `evict`
+   group of c10 (12 points, `next15`) measures it against
+   `LLAMA_MOE_CACHE_EVICT=lru`, and its points write the routing of the
+   235B and 480B at 1, 8 and 32 (`LLAMA_MOE_CACHE_TRACE`, a file per point
+   beside its log) to replay the policies on real choices.
 
    **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
    `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
