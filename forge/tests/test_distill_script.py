@@ -604,3 +604,43 @@ def test_the_tokenised_cache_fingerprint_is_stable_and_specific(tmp_path):
     assert base != fp(cfg, other, files, "train")                 # tokenizer
     data.write_text('{"text": "a rebuilt corpus"}\n')
     assert base != fp(cfg, Tok(), files, "train")                 # rebuilt corpus
+
+
+# ── the teacher's inputs ─────────────────────────────────────────────────
+# JUPITER (15-10-2026): a teacher whole on one GPU has no accelerate hooks to
+# move a batch that sits on the student's GPU, and the first forward died.
+
+class Moved:
+    """A stand-in tensor that records where it was sent."""
+
+    def __init__(self):
+        self.to_device = None
+
+    def to(self, device, non_blocking=False):
+        self.to_device = device
+        return self
+
+
+class WithEmbeddings:
+    def __init__(self, device):
+        self.emb = torch.nn.Embedding(VOCAB, 2, device=device)
+
+    def get_input_embeddings(self):
+        return self.emb
+
+
+def test_the_batch_goes_to_the_device_of_the_teachers_embeddings():
+    batch = {"input_ids": Moved(), "attention_mask": Moved(), "labels": Moved()}
+    out = distill.teacher_batch(WithEmbeddings("cpu"), batch)
+    assert {k: v.to_device for k, v in out.items()} == {k: torch.device("cpu") for k in batch}
+
+
+def test_a_teacher_on_the_meta_device_keeps_the_batch_for_its_hooks():
+    batch = {"input_ids": Moved()}
+    out = distill.teacher_batch(WithEmbeddings("meta"), batch)
+    assert out is batch and batch["input_ids"].to_device is None
+
+
+def test_a_teacher_without_input_embeddings_keeps_the_batch():
+    batch = {"input_ids": Moved()}
+    assert distill.teacher_batch(FakeModel(0.0), batch) is batch
