@@ -39,9 +39,10 @@
 #   GRPO_JUDGE_GGUF  judge (default Qwen3-30B-A3B-Instruct-2507 Q8_0 in $WORK/gguf)
 #   GRPO_LR        learning rate (default 1e-5)
 #   GRPO_EXTRA     more grpo_train.py options
-#   AFTER          a job id the first link waits for (afterok), e.g. the
-#                  merge of the round START comes from; START is then not
-#                  checked, since it does not exist yet
+#   AFTER          job id(s) the first link waits for (afterok; "a:b" for
+#                  two), e.g. the packaging of the round START comes from or
+#                  the job that writes GRPO_PROMPTS; START and the prompts are
+#                  then not checked, since they do not exist yet
 #   NO_CDS=1       skip the case-law exam
 #   NO_PRACTICAL=1 skip the practical exam
 #   SERIAL_LIMIT   jobs a user may queue on lrd_all_serial (default 10)
@@ -66,7 +67,8 @@ mkdir -p "$G/logs"
 fail=0
 check() { [ -e "$1" ] || { echo "[round] missing $2: $1" >&2; fail=1; }; }
 [ -n "${AFTER:-}" ] || check "$START/config.json" "start model"
-check "$PROMPTS" "prompts"
+# with AFTER, the prompts may be what that job writes (sbatch_practical_prompts.slurm)
+[ -n "${AFTER:-}" ] || check "$PROMPTS" "prompts"
 check "$JUDGE" "judge GGUF"
 case "$LINKS$STEPS" in *[!0-9]*|"") echo "[round] LINKS and MAX_STEPS are numbers" >&2; fail=1 ;; esac
 [ "$LINKS" = 0 ] && [ -z "${AFTER:-}" ] && { echo "[round] LINKS=0 needs AFTER" >&2; fail=1; }
