@@ -45,6 +45,9 @@
 #                  then not checked, since they do not exist yet
 #   NO_CDS=1       skip the case-law exam
 #   NO_PRACTICAL=1 skip the practical exam
+#   PACKAGED       the job id of a packaging already queued for NAME (LINKS=0):
+#                  only the exams are queued, after it, and no serial place is
+#                  taken -- to move a round's exams off the serial partition
 #   SERIAL_LIMIT   jobs a user may queue on lrd_all_serial (default 10)
 #
 # Idempotent: a round whose GRPO jobs are already queued is not submitted
@@ -71,14 +74,15 @@ check() { [ -e "$1" ] || { echo "[round] missing $2: $1" >&2; fail=1; }; }
 [ -n "${AFTER:-}" ] || check "$PROMPTS" "prompts"
 check "$JUDGE" "judge GGUF"
 case "$LINKS$STEPS" in *[!0-9]*|"") echo "[round] LINKS and MAX_STEPS are numbers" >&2; fail=1 ;; esac
-[ "$LINKS" = 0 ] && [ -z "${AFTER:-}" ] && { echo "[round] LINKS=0 needs AFTER" >&2; fail=1; }
+[ "$LINKS" = 0 ] && [ -z "${AFTER:-}${PACKAGED:-}" ] &&
+    { echo "[round] LINKS=0 needs AFTER or PACKAGED" >&2; fail=1; }
 [ "$fail" = 0 ] || exit 1
 if [ "$LINKS" != 0 ] && [ -n "$(squeue --me -h -n "eullm-grpo-$NAME" -o %i 2>/dev/null)" ]; then
     echo "[round] $NAME: GRPO already queued, nothing submitted"
     exit 0
 fi
 serial=$(squeue --me -h -p lrd_all_serial -o %i 2>/dev/null | wc -l)
-if [ $((serial + 1)) -gt "${SERIAL_LIMIT:-10}" ]; then
+if [ -z "${PACKAGED:-}" ] && [ $((serial + 1)) -gt "${SERIAL_LIMIT:-10}" ]; then
     echo "[round] $NAME: $serial jobs queued on lrd_all_serial, a round needs 1 of" \
          "${SERIAL_LIMIT:-10}: nothing submitted, try when some have ended" >&2
     exit 1
@@ -93,9 +97,11 @@ sub() {  # sbatch that prints the job id; fails (and says so) when sbatch does
 ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
 
 dep="${AFTER:+afterok:$AFTER}"
-[ "$LINKS" = 0 ] && dep="afterany:$AFTER"
+[ "$LINKS" = 0 ] && [ -n "${AFTER:-}" ] && dep="afterany:$AFTER"
 last=""
-if [ "$LINKS" = 0 ]; then
+if [ -n "${PACKAGED:-}" ]; then
+    echo "[round] $NAME: exams only, after packaging job $PACKAGED"
+elif [ "$LINKS" = 0 ]; then
     echo "[round] $NAME: packaging and exams only, after job $AFTER"
 elif [ -f "$OUT/adapter/adapter_config.json" ]; then
     echo "[round] $NAME: adapter already written, training skipped"
@@ -110,10 +116,14 @@ else
     done
 fi
 
-pkg=$(sub -J "eullm-package-$NAME" -p lrd_all_serial -c 4 --mem=30G -t 04:00:00 \
-    -o "$G/logs/%x-%j.out" ${dep:+--dependency=$dep} \
-    --wrap "$ENVSH && PYTHONPATH=$REPO/forge python -c 'import sys; from eullm_forge.identity import merge_identity_adapter as m; m(*sys.argv[1:])' $START $OUT/adapter $OUT/merged && GGUF_NAME=$NAME LCPP_SKIP_UPDATE=1 bash $REPO/forge/scripts/quantize_to_gguf.sh $OUT/merged $OUT/gguf && rm -f $OUT/gguf/$NAME-f16.gguf") || exit 1
-echo "[round] merge + GGUF: $pkg"
+if [ -n "${PACKAGED:-}" ]; then
+    pkg=$PACKAGED
+else
+    pkg=$(sub -J "eullm-package-$NAME" -p lrd_all_serial -c 4 --mem=30G -t 04:00:00 \
+        -o "$G/logs/%x-%j.out" ${dep:+--dependency=$dep} \
+        --wrap "$ENVSH && PYTHONPATH=$REPO/forge python -c 'import sys; from eullm_forge.identity import merge_identity_adapter as m; m(*sys.argv[1:])' $START $OUT/adapter $OUT/merged && GGUF_NAME=$NAME LCPP_SKIP_UPDATE=1 bash $REPO/forge/scripts/quantize_to_gguf.sh $OUT/merged $OUT/gguf && rm -f $OUT/gguf/$NAME-f16.gguf") || exit 1
+    echo "[round] merge + GGUF: $pkg"
+fi
 
 if [ "${NO_CDS:-0}" != 1 ]; then
     cds=$(CE_LABEL="$NAME-bf16" CE_MODEL="$OUT/merged" \
