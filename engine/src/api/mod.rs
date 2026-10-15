@@ -193,6 +193,9 @@ pub struct AppState {
     /// `--kv-unified`: one KV cache for every sequence of a model this
     /// server loads.
     pub kv_unified: bool,
+    /// `--split-mode`, `--tensor-split`, `--main-gpu`: how every model this
+    /// server loads goes across the GPUs (see `crate::gpu_split`).
+    pub gpu_split: crate::gpu_split::GpuSplit,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
     /// (see `SchedulerConfig::ctx_checkpoints`). 0 disables checkpointing.
     /// Applied to every model this server loads or swaps to.
@@ -711,6 +714,7 @@ impl AppState {
                 moe_prefetch_slots,
                 load_threads: self.load_threads,
                 kv_unified: self.kv_unified,
+                gpu_split: self.gpu_split.clone(),
             };
             if mmproj_path.is_some() {
                 tracing::info!("{}", mmproj_placement.describe());
@@ -2865,6 +2869,8 @@ pub struct ServeConfig {
     pub load_threads: crate::readahead::LoadThreads,
     /// `--kv-unified` (see `AppState::kv_unified`).
     pub kv_unified: bool,
+    /// `--split-mode`, `--tensor-split`, `--main-gpu` (see `AppState::gpu_split`).
+    pub gpu_split: crate::gpu_split::GpuSplit,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,
     /// Enable extra internal diagnostics for the Rust engine layer (NaN/Inf
@@ -3186,6 +3192,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         moe_prefetch: cfg.moe_prefetch,
         load_threads: cfg.load_threads,
         kv_unified: cfg.kv_unified,
+        gpu_split: cfg.gpu_split.clone(),
         ctx_checkpoints: cfg.ctx_checkpoints,
         checkpoint_min_step: cfg.checkpoint_min_step,
         rust_debug: cfg.rust_debug,
@@ -3366,6 +3373,7 @@ impl AppState {
             moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,
             load_threads: crate::readahead::LoadThreads::default(),
             kv_unified: false,
+            gpu_split: Default::default(),
             ctx_checkpoints: 0,
             checkpoint_min_step: 8192,
             rust_debug: false,

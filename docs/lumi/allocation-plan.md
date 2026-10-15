@@ -136,6 +136,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
+| `c03-split-modes` | 48 | ~23 | `--split-mode` layer, row and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`) |
 | `c10-moe-ram` | 48 | ~35 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
@@ -180,7 +181,10 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    llama.cpp's **experimental `Tensor` split** — real tensor parallelism, the
    one arrangement that could make a *single* request faster across GCDs. The
    12-09 conclusion that splitting adds no throughput was measured on layer
-   split only. This is c03.
+   split only. This is c03. Exposed on 15-10-2026 (`--split-mode`,
+   `--tensor-split`, `--main-gpu`, `crate::gpu_split`; no `none`, since one
+   GPU is chosen by making only it visible), and `c03-split-modes` measures
+   layer, row and tensor on 2, 4 and 8 GCDs at 1 and 16 requests.
 3. **The harness (WP0)** — done in `bench/campaign`: one schema
    (`eullm.bench/1`), TTFT, prefill and decode rates, cold/warm load, HBM per
    device, repeats with their spread, and provenance (engine version and

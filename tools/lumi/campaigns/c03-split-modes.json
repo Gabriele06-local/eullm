@@ -1,0 +1,39 @@
+{
+  "campaign": "c03-split-modes",
+  "notes": [
+    "WP3, multi-GPU without disproportionate overhead: the three ways llama.cpp lays one model",
+    "over several GCDs, --split-mode layer (the default, every split measured until now), row",
+    "and tensor (experimental tensor parallelism), on 2, 4 and 8 GCDs, against the same model",
+    "on one GCD (c01 dense-one-gcd, moe-one-gcd) and as replicas (c01 scale-replicas).",
+    "Layer split adds memory, not speed: four GCDs as layers wrote no faster than one",
+    "(12-09-2026, c01 scale-split, c02 split4 against split8). Row and tensor cut each weight",
+    "across the GCDs and are what could make one request faster; batch 1 is the point of the",
+    "campaign, batch 16 says what they cost or give with many requests.",
+    "Needs the engine of 15-10-2026 (next12): --split-mode. An architecture tensor parallelism",
+    "does not cover fails its load and says so; that is a measurement, not a failure to retry.",
+    "Exclusive: the split's GCDs talk to each other over the node's links, which a neighbour",
+    "on the same links would share."
+  ],
+  "pull": ["hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M"],
+  "defaults": {"kind": "throughput", "repeats": 3, "exclusive": true, "slot_ctx": 4096},
+  "groups": [
+    {"name": "split-32b", "priority": 90, "est_s": 1500,
+     "set": {"model": "qwen3-32b"},
+     "axes": {"gcds": [2, 4, 8], "batch": [1, 16],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "row"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "split-35b-a3b", "priority": 85, "est_s": 1500,
+     "set": {"model": "qwen3.6-35b-a3b"},
+     "axes": {"gcds": [2, 4, 8], "batch": [1, 16],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "row"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "split-235b", "priority": 80, "est_s": 2400,
+     "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m"},
+     "axes": {"gcds": [4, 8], "batch": [1, 16],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "row"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}}
+  ]
+}

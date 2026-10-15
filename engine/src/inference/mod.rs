@@ -663,6 +663,9 @@ pub struct InferenceConfig {
     pub load_threads: crate::readahead::LoadThreads,
     /// `--kv-unified`: one KV cache for every sequence instead of one each.
     pub kv_unified: bool,
+    /// `--split-mode`, `--tensor-split`, `--main-gpu`: how the model goes
+    /// across several GPUs (see `crate::gpu_split`).
+    pub gpu_split: crate::gpu_split::GpuSplit,
 }
 
 impl Default for InferenceConfig {
@@ -695,6 +698,7 @@ impl Default for InferenceConfig {
             moe_prefetch_slots: 0,
             load_threads: crate::readahead::LoadThreads::default(),
             kv_unified: false,
+            gpu_split: crate::gpu_split::GpuSplit::default(),
         }
     }
 }
@@ -1891,6 +1895,12 @@ impl InferenceEngine {
         } else {
             model_params
         };
+        // `--split-mode`, `--tensor-split`, `--main-gpu`: llama.cpp's
+        // defaults unless given.
+        if !config.gpu_split.is_default() {
+            tracing::info!("Split across the GPUs: {}", config.gpu_split.describe());
+        }
+        let model_params = config.gpu_split.apply(model_params)?;
         let mut model_params = pin!(model_params);
         // Patterns passed to `add_cpu_buft_override` are stored as raw pointers
         // (not copied) inside `model_params`, so they must outlive the
