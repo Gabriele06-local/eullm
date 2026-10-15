@@ -644,3 +644,71 @@ def test_a_teacher_on_the_meta_device_keeps_the_batch_for_its_hooks():
 def test_a_teacher_without_input_embeddings_keeps_the_batch():
     batch = {"input_ids": Moved()}
     assert distill.teacher_batch(FakeModel(0.0), batch) is batch
+
+
+# ── packed sequences ─────────────────────────────────────────────────────
+# JUPITER's legislation chunks are ~210 tokens: one a micro-batch ran at ~340
+# tokens/s. Packed, several share a sequence, and must not see one another.
+
+def test_documents_are_packed_up_to_the_cutoff_each_from_position_zero():
+    docs = [[1, 2, 3], [4, 5], [6, 7, 8, 9], [10]]
+    packs = distill.pack_examples(docs, cutoff=6, eos_id=None, seed=0)
+    assert all(len(p["input_ids"]) <= 6 for p in packs)
+    assert sorted(t for p in packs for t in p["input_ids"]) == list(range(1, 11))
+    for p in packs:
+        assert len(p["input_ids"]) == len(p["position_ids"]) == len(p["labels"])
+        starts = [i for i, pos in enumerate(p["position_ids"]) if pos == 0]
+        assert starts[0] == 0
+        # The first token of every later document is not a target.
+        assert all(p["labels"][i] == -100 for i in starts[1:])
+        assert all(p["labels"][i] == p["input_ids"][i]
+                   for i in range(len(p["labels"])) if i not in starts[1:])
+
+
+def test_each_document_ends_with_eos_and_a_long_one_is_cut():
+    packs = distill.pack_examples([[1, 2, 3, 4, 5, 6, 7, 8]], cutoff=4, eos_id=99, seed=0)
+    assert packs == [{"input_ids": [1, 2, 3, 4], "position_ids": [0, 1, 2, 3],
+                      "labels": [1, 2, 3, 4]}]
+    packs = distill.pack_examples([[1, 2], [3]], cutoff=10, eos_id=99, seed=0)
+    assert sum(p["input_ids"].count(99) for p in packs) == 2
+
+
+def test_the_packing_is_the_same_for_the_same_seed():
+    docs = [[i] * (i % 5 + 1) for i in range(1, 40)]
+    assert (distill.pack_examples(docs, 8, None, seed=3)
+            == distill.pack_examples(docs, 8, None, seed=3))
+
+
+def test_a_packed_batch_has_no_attention_mask_and_takes_one_sequence():
+    row = {"input_ids": [1, 2], "position_ids": [0, 1], "labels": [1, 2]}
+    out = distill.collate_packed([row])
+    assert set(out) == {"input_ids", "position_ids", "labels"}
+    assert out["input_ids"].shape == (1, 2)
+    with pytest.raises(ValueError):
+        distill.collate_packed([row, row])
+
+
+def test_a_packed_document_sees_only_itself():
+    """Logits of a document packed after another equal its logits alone,
+    in a real (tiny) Qwen3: transformers' packed-sequence mask is in effect.
+    Without use_cache=False the cache turns it off, and they differ."""
+    transformers = pytest.importorskip("transformers")
+    torch.manual_seed(0)
+    model = transformers.Qwen3ForCausalLM(transformers.Qwen3Config(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=8,
+        max_position_embeddings=128)).eval()
+    a, b = [5, 9, 3, 7, 11], [20, 21, 22, 23]
+    pack = distill.collate_packed(distill.pack_examples([a, b], 16, None, seed=0))
+    ids = pack["input_ids"][0].tolist()
+    start = len(ids) - len(b)
+    assert ids[start:] == b and start > 0  # b after a: the case that can leak
+    cfg = distill.DistillConfig(pack_sequences=True)
+    with torch.no_grad():
+        packed = model(input_ids=pack["input_ids"], position_ids=pack["position_ids"],
+                       **distill.model_kwargs(cfg)).logits[0, start:start + len(b)]
+        alone = model(input_ids=torch.tensor([b]), use_cache=False).logits[0]
+        leaky = model(input_ids=pack["input_ids"],
+                      position_ids=pack["position_ids"]).logits[0, start:start + len(b)]
+    torch.testing.assert_close(packed, alone, rtol=1e-4, atol=1e-4)
+    assert not torch.allclose(leaky, alone, atol=1e-4)  # with a cache, b sees a
