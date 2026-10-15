@@ -187,6 +187,12 @@ def test_a_question_about_one_case_is_rejected(question):
     "Cosa prevede la legge 7 agosto 1990, n. 241 sul silenzio assenso?",
     "Il d.lgs. 30 giugno 2003, n. 196 si applica ancora dopo il GDPR?",
     "Cosa stabilisce il d.P.R. 6 giugno 2001, n. 380 sulla SCIA?",
+    # ...and the full forms teachers write, not just the abbreviations
+    "Cosa stabilisce il decreto del Presidente della Repubblica 6 giugno 2001, n. 380?",
+    "Cosa dice il decreto ministeriale 2 gennaio 2024 in materia di appalti?",
+    "Cosa prevede la legge regionale 12 maggio 2005, n. 12?",
+    "Cosa prevede la legge costituzionale 11 marzo 1953, n. 1?",
+    "Cosa prevede il testo unico 22 dicembre 1986, n. 917?",
 ])
 def test_a_statute_named_by_its_date_is_not_a_case(question):
     pair = parse_generation(gen(domanda=question, risposta=GOOD_ANSWER), qa_job())
