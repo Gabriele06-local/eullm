@@ -20,6 +20,9 @@
 #                     the round's points run only in jobs submitted with the
 #                     same label (submit_campaign.sh reads it too), so a
 #                     queue can hold rounds of several engine builds
+#   GROUP='rccl-*'    plan only the groups of these names (shell-style
+#                     patterns, separated by spaces): a round of part of a
+#                     campaign, as c03's rccl groups on an RCCL build
 
 set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=campaign_env.sh
@@ -74,8 +77,14 @@ $CAMPAIGN prefetch --queue "$CAMPAIGN_DIR" ||
 
 echo
 echo "=== plan ==="
+# `read -a`, not an unquoted expansion: the patterns would be globbed against
+# the current directory.
+read -r -a PATTERNS <<<"${GROUP:-}"
+GROUP_ARGS=()
+for g in ${PATTERNS[@]+"${PATTERNS[@]}"}; do GROUP_ARGS+=(--group "$g"); done
 $CAMPAIGN plan "${SPECS[@]}" --queue "$CAMPAIGN_DIR" --engine "$EULLM_BIN" \
-    ${ROUND:+--round "$ROUND"} ${EULLM_ENGINE_LABEL:+--engine-label "$EULLM_ENGINE_LABEL"}
+    ${ROUND:+--round "$ROUND"} ${EULLM_ENGINE_LABEL:+--engine-label "$EULLM_ENGINE_LABEL"} \
+    ${GROUP_ARGS[@]+"${GROUP_ARGS[@]}"}
 $CAMPAIGN unblock --queue "$CAMPAIGN_DIR" >/dev/null
 
 cat <<EOF
