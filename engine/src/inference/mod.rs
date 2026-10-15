@@ -680,7 +680,7 @@ pub struct InferenceConfig {
     pub load_threads: crate::readahead::LoadThreads,
     /// `--kv-unified`: one KV cache for every sequence instead of one each.
     pub kv_unified: bool,
-    /// `--split-mode`, `--tensor-split`, `--main-gpu`: how the model goes
+    /// `--split-mode`, `--tensor-split`: how the model goes
     /// across several GPUs (see `crate::gpu_split`).
     pub gpu_split: crate::gpu_split::GpuSplit,
 }
@@ -1912,8 +1912,7 @@ impl InferenceEngine {
         } else {
             model_params
         };
-        // `--split-mode`, `--tensor-split`, `--main-gpu`: llama.cpp's
-        // defaults unless given.
+        // `--split-mode`, `--tensor-split`: llama.cpp's defaults unless given.
         if !config.gpu_split.is_default() {
             tracing::info!("Split across the GPUs: {}", config.gpu_split.describe());
         }
