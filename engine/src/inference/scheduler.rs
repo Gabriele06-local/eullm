@@ -1749,6 +1749,18 @@ fn run_scheduler_loop(
     } else {
         model_params
     };
+    // `--split-mode`, `--tensor-split`, `--main-gpu`: llama.cpp's defaults
+    // unless given.
+    if !config.gpu_split.is_default() {
+        tracing::info!("Split across the GPUs: {}", config.gpu_split.describe());
+    }
+    let model_params = match config.gpu_split.apply(model_params) {
+        Ok(params) => params,
+        Err(msg) => {
+            let _ = ready_tx.send(Err(msg.clone()));
+            return Err(msg.into());
+        }
+    };
     let mut model_params = pin!(model_params);
     // Patterns passed to `add_cpu_buft_override` are stored as raw pointers
     // (not copied) inside `model_params`, so they must outlive the

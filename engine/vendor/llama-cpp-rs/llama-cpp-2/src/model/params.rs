@@ -560,6 +560,43 @@ impl LlamaModelParams {
         self
     }
 
+    /// EuLLM: sets `tensor_split`, the share of the model each GPU takes, as
+    /// proportions in the order llama.cpp lists the GPUs (llama.cpp's
+    /// `--tensor-split 3,1`), padded with zeros to `llama_max_devices()`. An
+    /// empty slice clears it: llama.cpp then splits by each GPU's free memory.
+    ///
+    /// # Errors
+    /// Returns `LlamaCppError::MaxDevicesExceeded` with more proportions than
+    /// llama.cpp has room for.
+    pub fn with_tensor_split(mut self, split: &[f32]) -> Result<Self, LlamaCppError> {
+        if split.is_empty() {
+            self.tensor_split.clear();
+            self.params.tensor_split = null::<f32>();
+            return Ok(self);
+        }
+        let max_devices = crate::max_devices();
+        if split.len() > max_devices {
+            return Err(LlamaCppError::MaxDevicesExceeded(max_devices));
+        }
+        self.tensor_split.clear();
+        self.tensor_split.extend_from_slice(split);
+        self.tensor_split.resize(max_devices, 0.0);
+        // The vector's buffer stays where it is when the params move.
+        self.params.tensor_split = self.tensor_split.as_ptr();
+        Ok(self)
+    }
+
+    /// EuLLM: the `tensor_split` set by [`Self::with_tensor_split`] (or by
+    /// [`Self::fit_params`]), empty when there is none.
+    #[must_use]
+    pub fn tensor_split(&self) -> &[f32] {
+        if self.params.tensor_split.is_null() {
+            &[]
+        } else {
+            &self.tensor_split
+        }
+    }
+
     /// sets `devices`
     ///
     /// The devices are specified as indices that correspond to the ggml backend device indices.
@@ -777,6 +814,27 @@ mod tests {
             i32::from(LlamaSplitMode::Tensor),
             llama_cpp_sys_2::LLAMA_SPLIT_MODE_TENSOR as i32
         );
+    }
+
+    #[test]
+    fn tensor_split_is_padded_to_the_devices_and_can_be_cleared() {
+        let params = LlamaModelParams::default();
+        assert!(params.tensor_split().is_empty());
+        let max = crate::max_devices();
+        if max >= 2 {
+            let params = params.with_tensor_split(&[3.0, 1.0]).unwrap();
+            let split = params.tensor_split();
+            assert_eq!(split.len(), max);
+            assert_eq!(&split[..2], &[3.0, 1.0]);
+            assert!(split[2..].iter().all(|&x| x == 0.0));
+            // What llama.cpp reads is the same buffer.
+            assert_eq!(params.params.tensor_split, split.as_ptr());
+            let params = params.with_tensor_split(&[]).unwrap();
+            assert!(params.tensor_split().is_empty());
+            assert!(params.params.tensor_split.is_null());
+        }
+        let too_many = vec![1.0; max + 1];
+        assert!(LlamaModelParams::default().with_tensor_split(&too_many).is_err());
     }
 
     #[test]
