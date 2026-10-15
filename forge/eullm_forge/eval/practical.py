@@ -9,13 +9,15 @@ of different codes. This builds that exam from the text of the law:
 * a **group** is an article and up to ``max_refs`` of the articles its own
   text refers to ("ai sensi dell'articolo 1453", "dell'art. 2043 del codice
   civile") that the corpus holds -- related by the law itself, not by a
-  similarity score;
+  similarity score -- or, for an article that refers to none, it and the
+  next article of its code;
 * a teacher model reads the group and writes one practical question that the
   group answers, the articles a correct answer must cite, a reference answer
   that cites them and a one-line rubric (`messages`);
 * `parse_practical` refuses what is not usable rather than repairing it: a
   question that names an article (it would be asked by number again), an
-  answer that does not cite every article it says is needed, a placeholder;
+  answer that cites none of the articles it says are needed (those it does
+  cite are the ones a correct answer must), a placeholder;
 * `to_item` writes the exam item, ``norm-pratica-<code>-<article>``, so the
   judge, the paired comparison and the reports read it like every other kind.
 
@@ -102,27 +104,46 @@ def references(a: Article, known: dict[tuple[str, str], Article]) -> list[tuple[
     return out
 
 
+def _next(a: Article, ok: dict[tuple[str, str], Article]) -> tuple[str, str] | None:
+    """The article after ``a`` in its code, if the corpus holds it: "1453" -> "1454"."""
+    if not a.number.isdigit():
+        return None
+    k = (a.code, str(int(a.number) + 1))
+    return k if k in ok else None
+
+
 def groups(articles: dict[tuple[str, str], Article], per_code: int, rng: random.Random,
-           max_refs: int = 2,
-           exclude: frozenset[tuple[str, str]] = frozenset()) -> list[list[Article]]:
+           max_refs: int = 2, exclude: frozenset[tuple[str, str]] = frozenset(),
+           neighbours: bool = True) -> list[list[Article]]:
     """Up to ``per_code`` groups a code: an article and the articles it refers to.
 
-    Only usable articles (`norm_exam._usable`) with at least one reference to
-    another usable article take part; none of them may be in ``exclude`` (the
-    articles a model was trained on, `norm_exam.trained_articles`).
+    Only usable articles (`norm_exam._usable`) take part, and none in
+    ``exclude`` (the articles a model was trained on,
+    `norm_exam.trained_articles`). Groups an article's own references make
+    come first. With ``neighbours``, an article that refers to none is paired
+    with the next one of its code, which mostly stands in the same chapter and
+    rules the same institution; those fill a code's quota after the others.
+    On 2026-10-15 references alone gave 125 groups over 9 codes: the models
+    had been trained on most of the 6,472 articles, and a reference has to
+    land on one they had not.
     """
     ok = {k: a for k, a in articles.items()
           if a.code in CODE_LABELS and _usable(a) and k not in exclude}
-    by_code: dict[str, list[list[Article]]] = {}
+    by_ref: dict[str, list[list[Article]]] = {}
+    by_next: dict[str, list[list[Article]]] = {}
     for k in sorted(ok):
-        refs = [r for r in references(ok[k], ok)][:max_refs]
+        refs = references(ok[k], ok)[:max_refs]
         if refs:
-            by_code.setdefault(k[0], []).append([ok[k]] + [ok[r] for r in refs])
+            by_ref.setdefault(k[0], []).append([ok[k]] + [ok[r] for r in refs])
+        elif neighbours and (n := _next(ok[k], ok)):
+            by_next.setdefault(k[0], []).append([ok[k], ok[n]])
     out = []
-    for code in sorted(by_code):
-        pool = by_code[code]
+    for code in sorted(by_ref.keys() | by_next.keys()):
+        pool = by_ref.get(code, [])
+        rest = by_next.get(code, [])
         rng.shuffle(pool)
-        out.extend(pool[:per_code])
+        rng.shuffle(rest)
+        out.extend((pool + rest)[:per_code])
     return out
 
 
@@ -168,10 +189,12 @@ def parse_practical(raw: str, group: list[Article]) -> dict:
     if (not isinstance(idx, list) or not idx
             or not all(isinstance(i, int) and 1 <= i <= len(group) for i in idx)):
         raise PracticalRejected("bad_articles")
-    needed = [group[i - 1] for i in dict.fromkeys(idx)]
+    # What a correct answer must cite is what the teacher said is needed AND its
+    # own answer cites: on 2026-10-15 refusing every item whose answer left one
+    # declared article out threw away 33 of 125. One cited at least.
     cited = cited_articles(answer)
-    missing = [a for a in needed if a.number not in cited]
-    if missing:
+    needed = [a for a in (group[i - 1] for i in dict.fromkeys(idx)) if a.number in cited]
+    if not needed:
         raise PracticalRejected("answer_misses_article")
     return {"domanda": question, "risposta": answer, "rubrica": rubric, "articoli": needed}
 
