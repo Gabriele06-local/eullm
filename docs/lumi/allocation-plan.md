@@ -55,6 +55,17 @@ asked for. Round `r-next10` (`c01` + `c02` on the engine `next10`, 280
 points, about 250 node-h) went on two nodes that night, and `--moe-cache` on
 HIP was brought forward from January (`c10-moe-ram`, below).
 
+15-10-2026: round `r-next15` (`c01`, `c02`, `c06`, `c07`, `c08` on the
+engine `next15`, 566 points, up to 262 node-h) queued for the night and the
+day after, when nobody watches: the two nodes of the `evict` jobs go on to
+it, and each gets a second 48-hour link. Its reason is a build flag. `next13`
+is the first engine whose CPU code is not SSE2 (x86-64-v3), and every round
+before it measured EuLLM's CPU side (sampling, tokenizing, what `--fit`
+leaves on the CPU) on SSE2 against a llama-server that ggml builds for the
+login node's CPU (`GGML_NATIVE`, on by default: AVX2): `c07`'s comparisons
+were not on equal footing until now. `next15` also carries the expert
+cache's new eviction (llama.cpp patch 0008).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
