@@ -41,6 +41,11 @@ if [ -z "${EULLM_RUNS:-}" ] && [ -z "${WORK:-}" ]; then
     exit 2
 fi
 RUNS="${EULLM_RUNS:-$WORK/eullm_runs}"
+# The checkout's own logs/: where a job submitted without -o writes
+# (sbatch scripts say --output=logs/%x-%j.out, relative to where they were
+# submitted). GRPO chains submitted from $WORK/eullm log there, and links
+# that did their work were flagged as having done none (2026-10-15).
+REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
 SINCE="${1:-$(date -d '-24 hours' +%Y-%m-%dT%H:%M)}"
 PROBLEMS=0
 flag() { echo "[!!] $*"; PROBLEMS=$((PROBLEMS + 1)); }
@@ -97,7 +102,7 @@ while IFS='|' read -r id name state elapsed; do
                         # at the last step is the same case and was flagged
                         # as one that did no work. opd_train.py is the third
                         # of the shape: its save line wears the [opd] prefix.
-                        log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
+                        log="$(ls "$RUNS"/*/logs/"$name-$id".out "$REPO_LOGS/$name-$id.out" 2>/dev/null | head -1)"
                         if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
                             echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
                         elif [ -n "$log" ] && grep -qE "^\[(stage3|grpo|opd)\] adapter /" "$log"; then
@@ -246,7 +251,7 @@ echo "== GRPO =="
 # it stops itself (a NaN, or no group disagreeing any more). The last two
 # progress lines are enough to see whether reward is climbing.
 found=0
-for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out 2>/dev/null | head -3); do
+for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out "$REPO_LOGS"/eullm-grpo-*.out 2>/dev/null | head -3); do
     [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
     found=1
     echo "   ${log##*/}"
@@ -276,7 +281,6 @@ echo
 echo "== case-law exam =="
 # cds_answer.py's summary line per model; the judges' grades are in the
 # graded.csv beside the answers.
-REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
 found=0
 for log in $(ls -t "$REPO_LOGS"/eullm-cds-exam-*.out 2>/dev/null | head -6); do
     [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
