@@ -49,20 +49,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.eval import NormIndex, load_eval_set, open_book_prompt  # noqa: E402
 from eullm_forge.eval.norm_exam import build_exam, rubric_v2  # noqa: E402
-from eullm_forge.eval.retrieval import record_articles  # noqa: E402
 from eullm_forge.rl import DEADLINE_TYPES, JUDGED_TYPES  # noqa: E402
 
 KEPT = DEADLINE_TYPES | {"inesistente"}
 
 
 def exam_articles(paths: list[Path]) -> set[tuple[str, str]]:
-    """(code, article) of every item of the given exams."""
+    """(code, article) of every item of the given exams.
+
+    A practical item (`eval.practical`) is about a group of articles, listed
+    as "code:article" in its metadata: all of them are the exam's, not only
+    the one its id names.
+    """
     out = set()
     for path in paths:
         for it in load_eval_set(path):
             code, art = it.metadata.get("code"), it.metadata.get("articolo")
             if code and art:
                 out.add((code, str(art)))
+            for ref in it.metadata.get("gruppo") or []:
+                c, _, a = str(ref).partition(":")
+                if c and a:
+                    out.add((c, a))
     return out
 
 

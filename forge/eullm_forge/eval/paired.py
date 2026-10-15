@@ -36,7 +36,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KINDS = ("termine_argomento", "termine", "contenuto", "inesistente")
+KINDS = ("termine_argomento", "termine", "contenuto", "inesistente", "pratica")
 _KIND = re.compile(r"^norm-(" + "|".join(KINDS) + r")-")
 
 # What a person writes in the review sheet, read as the judge's labels.
