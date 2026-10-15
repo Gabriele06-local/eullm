@@ -136,7 +136,22 @@ fi
 # EULLM_AMDGPU_TARGETS is not optional here even though the build script treats
 # it as such: without it the HIP architecture is resolved from the GPUs in this
 # machine, and a login node has none.
-log "building for $EULLM_AMDGPU_TARGETS (this takes a while — tmux recommended)"
+#
+# The CPU half of llama.cpp is compiled for the instruction set Rust targets
+# (build.rs turns `-C target-cpu` and the target's features into ggml's
+# GGML_AVX2, GGML_FMA, ... and -march). Without a target-cpu that is x86-64's
+# baseline, SSE2, and ggml's CPU kernels ran without AVX2 or FMA in every
+# build of this script until 15-10-2026: the experts that --cpu-moe, --fit's
+# split or --n-cpu-moe leave in RAM are computed by them (c10: Qwen3-Coder-480B
+# with --cpu-moe wrote 0.6 tokens/s). The published binaries are built for
+# x86-64-v3 (AVX2, FMA, F16C, BMI2), which LUMI-G's EPYC 7A53 (Zen 3) runs:
+# the same here, so what is measured is what users get. A target-cpu of your
+# own in RUSTFLAGS is kept.
+case " ${RUSTFLAGS:-} " in
+    *target-cpu=*) ;;
+    *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-cpu=x86-64-v3" ;;
+esac
+log "building for $EULLM_AMDGPU_TARGETS, CPU code for ${RUSTFLAGS##*target-cpu=} (this takes a while — tmux recommended)"
 cd "$EULLM_REPO"
 ROCM_PATH="$ROCM_PATH" \
 HIPCXX="${HIPCXX:-$ROCM_PATH/llvm/bin/clang++}" \
