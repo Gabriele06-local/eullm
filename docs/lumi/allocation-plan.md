@@ -526,6 +526,36 @@ In order:
    does, which suits a LUMI-G node: 64 cores and 512 GB of RAM beside its
    GPUs.
 
+   First results (`r-moe-ram`, job 22846844, `next11`, 14/15-10-2026; the
+   prompt groups and part of DeepSeek still to run). On ROCm the experts
+   were pinned in every load, read into memory: 57 GiB of gpt-oss-120b,
+   128 of the 235B, 263 of the 480B, 367 of DeepSeek-V3.1. Tokens/s on ONE
+   GCD, the experts in RAM, against the same model on the GCDs it needs
+   whole (`c02`):
+
+   | model, requests | `--moe-cache auto` | `--fit`'s split | `--cpu-moe` | all on GPU |
+   |---|---:|---:|---:|---:|
+   | Qwen3-235B Q4_K_M, 1 | 21 | 6.3 | 3.7 | 29 (4 GCDs) |
+   | 235B, 8 | 28.3 | 12.2 | 4.2 | 63.7 |
+   | 235B, 32 | 12.2 | 15.1 | 9.1 | 98.4 |
+   | Qwen3-Coder-480B Q4_K_M, 1 | 6.6 | 3.3 | 0.6 | 27.1 (8 GCDs) |
+   | 480B, 8 | 3.7 | 7.3 | 3.0 | 50.2 |
+   | 480B, 32 | 8.1 | 8.5 | timed out | 75.9 |
+   | DeepSeek-V3.1 Q4_K_M, 16 | 2.7 | 5.7 | | 34 (8 GCDs) |
+   | gpt-oss-120b MXFP4, 1 | 42.3 | 87.3 | 20.6 | |
+   | gpt-oss-120b, 32 | 156 | 117 | 38.4 | 298 (2 GCDs) |
+
+   One request on the 235B gets 72% of four GCDs' speed from one GCD with
+   the cache, 3.3 times `--fit`'s split; with 32 the cache falls below the
+   split, as each step routes the tokens to more experts than it holds. A
+   model that nearly fits (gpt-oss-120b, 59 GiB) does best with `--fit`'s
+   split alone, until 32 requests. Every expert on the CPU (`--cpu-moe`,
+   all 56 cores) is the slowest in every row: the node's CPU computes the
+   experts far slower than the link copies them, which phase 3 has to
+   reckon with. `ram-stats` (runner 7) records the cache's step statistics
+   to say where the steps with many requests go.
+
+
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
 
 ### The first rounds on the October engines (10 to 13-10-2026)
