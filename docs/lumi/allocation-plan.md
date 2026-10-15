@@ -66,6 +66,17 @@ login node's CPU (`GGML_NATIVE`, on by default: AVX2): `c07`'s comparisons
 were not on equal footing until now. `next15` also carries the expert
 cache's new eviction (llama.cpp patch 0008).
 
+The same night (645.3 node-h spent, 198.5 behind the straight line, seven
+nodes busy) the two `next11` jobs of `c10` were cancelled: `c10-v3` measures
+all their points again on `next13`, and one of them had held a whole node
+for 9.8 hours on DeepSeek-V3.1 with `--cpu-moe` on SSE2 kernels, a token
+every few minutes per request. The request timeout (1,800 s) is per read,
+so a server that streams that slowly never reaches it; a limit on a point's
+whole duration is the runner's missing piece. The v3 points of the same
+model with `--cpu-moe` at 4 and 16 requests and the `next11` points left in
+the queue were moved to `parked/` (one request with `--cpu-moe` and the
+480B's points say what the CPU does with the experts).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
