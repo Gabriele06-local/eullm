@@ -54,6 +54,11 @@ CORES = ("reserved",)
 # LLAMA_MOE_CACHE_STATS) need the runner that passes them on: an older one
 # would measure the point without them.
 ENV_RUNNER = 7
+# `env` values that name the job's directory or the point ({workdir},
+# {point}, e.g. a trace file per point beside the server logs) need the
+# runner that fills them in: an older one would pass the braces on.
+ENV_PLACEHOLDERS = ("{workdir}", "{point}")
+ENV_PLACEHOLDER_RUNNER = 8
 WIDTHS = (1, 2, 4, 8)
 
 # Leonardo's prompt and length, verbatim (docs/cineca/leonardo.md): a
@@ -227,6 +232,8 @@ def normalize(raw: dict) -> dict:
             raise SpecError(f"env must map variable names to values, got {p['env']!r}")
         p["env"] = {k: str(v) for k, v in p["env"].items()}
         p["runner"] = max(p.get("runner", 1), ENV_RUNNER)
+        if any(ph in v for v in p["env"].values() for ph in ENV_PLACEHOLDERS):
+            p["runner"] = max(p["runner"], ENV_PLACEHOLDER_RUNNER)
     p["extra_args"] = [str(a) for a in p["extra_args"]]
     for hint in HINTS:
         p.pop(hint, None)

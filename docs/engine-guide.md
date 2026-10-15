@@ -668,7 +668,8 @@ eullm serve --default-model /models/Qwen3.8-Flash-Next-GSQ-RCO-IQ2_XS-00001-of-0
 ```
 
 **Where a decode step goes.** `LLAMA_MOE_CACHE_STATS=64` prints, every 64
-decode steps of up to 8 tokens, one line like this:
+decode steps that went through the cache (up to 32 tokens), one line like
+this:
 
 ```
 llama_moe_cache: 64 steps of 1.0 tokens: X ms/step = A ms to the routers of 48 layers + B ms in the cache + C ms after; M MiB/step copied, H% of the experts in VRAM; copying takes T ms/step (R GB/s)
@@ -683,9 +684,23 @@ llama_moe_cache: 64 steps of 1.0 tokens: X ms/step = A ms to the routers of 48 l
 - *M MiB copied* and *H% in VRAM*: what the experts not in VRAM cost.
 - *copying takes*: measured on one step in 8, which waits for its copies to
   finish so as to time them, and is left out of the times above.
+- *of the copies into a slot used within the pass*, when there are such
+  copies: the step wanted more experts than the cache holds (below).
+
+**What the cache evicts.** The slots are shared by all the layers, which
+come in the same order every step. While a step's experts fit, a miss takes
+the least recently used slot. When a step wants more experts than there
+are slots, the least recently used slot always holds an expert of one of
+the next layers, so evicting it would copy every expert of the step (on
+LUMI with Qwen3-235B and 32 requests, 50 GiB a step): the miss takes the
+most recently used slot outside its layer instead, and the slots filled
+early in the step stay for the next one. `LLAMA_MOE_CACHE_EVICT=lru` always
+takes the least recently used, to compare. `LLAMA_MOE_CACHE_TRACE=FILE`
+writes the experts every layer chose, for `bench/moe_cache_sim`, which
+replays them through the policies.
 
 The statistics cost a little speed: measure tokens per second without them.
-At exit the cache's totals print too. Both variables are read by the
+At exit the cache's totals print too. These variables are read by the
 patched llama.cpp, as diagnostics for this work rather than EuLLM settings,
 and may change or go once it is settled.
 
