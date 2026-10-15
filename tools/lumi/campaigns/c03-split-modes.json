@@ -15,7 +15,14 @@
     "on the same links would share.",
     "row was planned too and dropped on 15-10-2026: every load failed, as stock llama-bench's",
     "does (\"device ROCm0 does not support split buffers\"): llama.cpp's CUDA/ROCm backend no",
-    "longer has them. The row points already queued for next12 fail in seconds."
+    "longer has them. The row points already queued for next12 fail in seconds.",
+    "rccl-* (added 15-10-2026, after r-split): tensor beat layer on 2 GCDs and collapsed on",
+    "4 and 8. ggml's all-reduce goes through NCCL/RCCL when compiled in, else its internal one,",
+    "which only exists for two devices, else a generic exchange; the engine had no RCCL. These",
+    "groups measure tensor again on a build with it (build_engine.sh EULLM_RCCL=1), and on 2",
+    "GCDs the internal all-reduce in the same binary (GGML_CUDA_ALLREDUCE=internal) as control.",
+    "Labelled rccl in the spec, so only jobs submitted with EULLM_ENGINE_LABEL=rccl run them;",
+    "plan them alone: GROUP='rccl-*' ROUND=r-split-rccl EULLM_ENGINE_LABEL=rccl."
   ],
   "pull": ["hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M"],
   "defaults": {"kind": "throughput", "repeats": 3, "exclusive": true, "slot_ctx": 4096},
@@ -34,6 +41,17 @@
      "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m"},
      "axes": {"gcds": [4, 8], "batch": [1, 16],
               "extra_args": [["--fit-strict", "--split-mode", "layer"],
-                             ["--fit-strict", "--split-mode", "tensor"]]}}
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "rccl-tensor", "priority": 96, "est_s": 1500,
+     "set": {"engine_label": "rccl", "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"model": ["qwen3-32b", "qwen3.6-35b-a3b"], "gcds": [2, 4, 8], "batch": [1, 16]}},
+    {"name": "rccl-internal", "priority": 97, "est_s": 1500,
+     "set": {"engine_label": "rccl", "gcds": 2, "env": {"GGML_CUDA_ALLREDUCE": "internal"},
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"model": ["qwen3-32b", "qwen3.6-35b-a3b"], "batch": [1, 16]}},
+    {"name": "rccl-235b", "priority": 95, "est_s": 2400,
+     "set": {"engine_label": "rccl", "model": "qwen3-235b-a22b-gguf-q4_k_m",
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"gcds": [4, 8], "batch": [1, 16]}}
   ]
 }

@@ -1547,6 +1547,20 @@ fn main() {
             };
             println!("cargo:rustc-link-lib=dylib={name}");
         }
+
+        // EuLLM: an RCCL build. GGML_HIP_RCCL=ON in the environment reaches
+        // CMake through the loop over GGML_* variables above, and ggml-hip then
+        // calls RCCL (NCCL's interface) for the all-reduce of tensor
+        // parallelism; the binary has to link it too. Without RCCL that
+        // all-reduce has a fast path for exactly two GPUs and a generic one
+        // for more: on LUMI `--split-mode tensor` gained on two GCDs and fell
+        // to a fifth of layer split's speed on eight (c03, 15-10-2026).
+        println!("cargo:rerun-if-env-changed=GGML_HIP_RCCL");
+        let rccl = env::var("GGML_HIP_RCCL")
+            .is_ok_and(|v| matches!(v.to_ascii_uppercase().as_str(), "ON" | "1" | "TRUE" | "YES"));
+        if rccl {
+            println!("cargo:rustc-link-lib=dylib=rccl");
+        }
     }
 
     if cfg!(feature = "mkl") && !build_shared_libs {

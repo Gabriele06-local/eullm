@@ -27,6 +27,9 @@
 #                         records the engine it found when it started, and a
 #                         binary rebuilt under it would run its later points
 #                         with a different one than it reports.
+#   EULLM_RCCL=1          link RCCL (GGML_HIP_RCCL=ON): the all-reduce of
+#                         --split-mode tensor across more than two GCDs goes
+#                         through it instead of ggml's generic path (c03)
 
 set -euo pipefail
 
@@ -147,6 +150,10 @@ fi
 # x86-64-v3 (AVX2, FMA, F16C, BMI2), which LUMI-G's EPYC 7A53 (Zen 3) runs:
 # the same here, so what is measured is what users get. A target-cpu of your
 # own in RUSTFLAGS is kept.
+if [ "${EULLM_RCCL:-0}" = 1 ]; then
+    export GGML_HIP_RCCL=ON
+    log "RCCL build: tensor parallelism reduces across GCDs with RCCL"
+fi
 case " ${RUSTFLAGS:-} " in
     *target-cpu=*) ;;
     *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-cpu=x86-64-v3" ;;
@@ -183,6 +190,10 @@ if ! grep -q "amdhsa--${EULLM_AMDGPU_TARGETS}" <<<"$ARCHS"; then
 fi
 
 ok "device code present for: $(tr '\n' ' ' <<<"$ARCHS")"
+if [ "${GGML_HIP_RCCL:-}" = ON ]; then
+    grep -q librccl <<<"$LINKED" || err "an RCCL build that does not link librccl"
+    ok "links RCCL: $(grep -o 'librccl[^ ]*' <<<"$LINKED" | head -1)"
+fi
 ok "binary: $BIN"
 echo
 echo "Next: pull a model from a login node (compute nodes have no outbound"

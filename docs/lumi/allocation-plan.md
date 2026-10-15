@@ -136,7 +136,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
-| `c03-split-modes` | 32 | ~16 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`) |
+| `c03-split-modes` | 52 | ~25 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (20 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 48 | ~35 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
@@ -207,7 +207,11 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    `--bind none` is the before/after that says whether the engine should do
    it itself.
 6. **An RCCL build**, `GGML_HIP_RCCL=ON`, and `GGML_HIP_GRAPHS`: experiment
-   binaries, each one a round, never the default.
+   binaries, each one a round, never the default. RCCL has a measured
+   reason since 15-10-2026: tensor parallelism beyond two GCDs reduces
+   through it or through ggml's generic path (item 5 of the measured work,
+   below). `EULLM_RCCL=1 tools/lumi/build_engine.sh` builds it, and the
+   build fails if the binary does not link `librccl`.
 7. **`--moe-cache` on HIP.** It refuses any non-CUDA device and more than one
    GPU, and its pinned-memory patch is CUDA-only. Objective (5) on MoE.
 8. **Loading from Lustre: `--load-threads`** (07-10-2026, `c09`). c02's
@@ -587,6 +591,38 @@ In order:
    leaves in RAM, so both columns are low by that much; the cache's copies
    and the GPU's work are not affected. The build now targets x86-64-v3, and
    c10 is measured again on it (`next13`).
+5. **Split modes** (`c03`, item 2 above; objective (3)). Layer against
+   tensor (`r-split`, `next12`, 15-10-2026, one node a point), tokens/s:
+
+   | model | GCDs | 1, layer | 1, tensor | 16, layer | 16, tensor |
+   |---|---:|---:|---:|---:|---:|
+   | Qwen3-32B Q4_K_M | 2 | 38 | 43.3 | 265 | 324 |
+   | | 4 | 36.1 | 18.2 | 260 | 228 |
+   | | 8 | 34.4 | 7.8 | 252 | 91.5 |
+   | Qwen3.6-35B-A3B | 2 | 91.9 | 70.8 | 291 | 317 |
+   | | 4 | 82.6 | 25.5 | 285 | 283 |
+   | | 8 | 73.9 | 11.3 | 273 | 127 |
+   | Qwen3-235B Q4_K_M | 4 | 35.6 | 12.3 | 76.8 | 98.9 |
+   | | 8 | 33.3 | 4.2 | 75.7 | 55.3 |
+
+   Layer split loses a little with every GCD added, as on 12-09. Tensor is
+   the first arrangement that made one request faster across GCDs (the 32B
+   on two, +14%; +22% at 16), and the 235B at 16 on four GCDs gains 29%;
+   beyond two GCDs one request collapses, to an eighth to a quarter of
+   layer's speed on eight. Tensor loads were slow too: 414-1,131 s for the
+   235B against about 31 s.
+
+   The cause is in ggml (`ggml-cuda.cu`, `ggml_backend_cuda_comm_init`):
+   tensor parallelism sums partial results across the GPUs after every
+   cut layer, through NCCL (RCCL on ROCm) when it is compiled in; without
+   it, through an internal all-reduce that exists for exactly two devices
+   ("internal AllReduce init failed (n_devices != 2?)"); beyond two,
+   through a generic exchange of the meta-backend. The engine had no
+   RCCL, so 4 and 8 GCDs measured the generic one. An RCCL build
+   (`EULLM_RCCL=1 tools/lumi/build_engine.sh`, item 6 above) and c03's
+   `rccl-*` groups measure tensor again with it, and on two GCDs the
+   internal all-reduce in the same binary (`GGML_CUDA_ALLREDUCE=internal`)
+   as control: 20 points, about 9 node-hours.
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
