@@ -294,6 +294,22 @@ teacher without Leonardo's continued-pre-training adapter):
   generation (628 W). The method works; the per-step figure comes with
   the real run.
 
+### The distillation chain (from 15-10-2026)
+
+`forge/scripts/jupiter/submit_distill.sh N` submits N two-hour links of
+`sbatch_distill.slurm`: two `distill.py` runs a node, the 4B and the 8B
+student (`forge/training/configs/jupiter/`), each with the teacher in BF16
+alone on one GPU and the student on the next, on the legislation corpus
+(Leonardo's `$WORK/norms/legislazione_*.chunks.jsonl`, split into train and
+val by article with `make_norms_split.py`). The teacher is
+Qwen3-30B-A3B-Base **without** Leonardo's continued-pre-training adapter,
+which was trained on court decisions. Each link resumes from the newest
+checkpoint (`save_steps` 100), stops its runs after 110 minutes, and leaves
+the node's GPU power in `$FORGE_RUN_DIR/power/` (`energy.py` sums it).
+Checked here on CPU with tiny Qwen3 models and the venv's libraries:
+training, evaluation, checkpoints, resuming, the merge, and a finished run
+not started again.
+
 Spent on JUPITER by 15-10-2026 noon: 56 minutes of node time in nine
 jobs, about **3.8 GPU-hours** of 5,000.
 

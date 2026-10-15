@@ -1,0 +1,59 @@
+# JUPITER Booster (GH200): the Leonardo recipe
+# (leonardo/distill_qwen3_30b_a3b_to_4b*.yaml) on one GPU pair, two runs a
+# node (forge/scripts/jupiter/sbatch_distill.slurm). What differs, and why:
+#
+# * The teacher has no adapter: Leonardo's continued pre-training adapter
+#   was trained on court decisions, and no personal data goes to JUPITER.
+#   Base teacher, legislation only (Normattiva, EUR-Lex: make_norms_split.py).
+# * The teacher is alone on the pair's first GPU in BF16 (57 GiB of 95):
+#   teacher_gpus [0] of the two the job gives this run, the student on the
+#   second. Leonardo needed two A100 for the teacher and a third for the
+#   student.
+# * save_steps 100, not 300: at ~550 steps an hour (job 2334585) a two-hour
+#   link that is killed between saves loses at most ~11 minutes, not ~33.
+# Everything else is Leonardo's, so that steps/h compares (deliverable 2).
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+teacher_adapter: null
+student_model: Qwen/Qwen3-4B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+teacher_device_map: split
+teacher_gpus: [0]
+teacher_gib_per_gpu: 80
+student_device: cuda:1
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+dataset_dir: ./datasets/norms   # overridden by sbatch_distill.slurm (--dataset-dir)
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+output_dir: ./checkpoints/qwen3_4b_norms_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 1000
+save_steps: 100
+save_total_limit: 3
+eval_steps: 1000
+eval_max_batches: 200
+logging_steps: 20
+kl_temperature: 2.0
+kl_alpha: 0.7
+bf16: true
+gradient_checkpointing: true
+seed: 42
