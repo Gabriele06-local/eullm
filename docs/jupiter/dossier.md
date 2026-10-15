@@ -151,8 +151,9 @@ the legislation corpus (1,324 optimiser steps), in two-hour links.
   Fixed in `distill.py` (commit `ce822dc`) with a test.
 * Jobs 2337859, 2337861, 2338844: both runs train, unattended, link after
   link. At 1 h 39 min the 4B was at step 560 and the 8B at step 500
-  (evaluation at step 400: loss 0.989, KL 0.824, CE 1.376); in the third link
-  both were at step 1,180 of 1,324.
+  (evaluation at step 400: loss 0.989, KL 0.824, CE 1.376); the second link
+  ended with both at step 1,180 of 1,324, and the third resumes from the
+  checkpoint of step 1,100.
 * **Throughput lesson.** The legislation chunks are short (~210 tokens), and
   one chunk a micro-batch ran at 1.5–1.6 micro-batches a second, ~340
   tokens/s against ~5,000 with 2,048-token micro-batches: the fixed cost of
