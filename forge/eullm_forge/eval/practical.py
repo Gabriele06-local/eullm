@@ -31,6 +31,8 @@ import hashlib
 import json
 import random
 import re
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 
 from .abstain import _CITE, _MORE, _key, cited_articles
 from .dataset import EvalItem
@@ -224,3 +226,39 @@ def to_item(group: list[Article], parsed: dict, split: str, teacher: str = "") -
                   "articoli": [f"{a.code}:{a.number}" for a in needed],
                   "gruppo": [f"{a.code}:{a.number}" for a in group],
                   "split": split, "teacher": teacher})
+
+
+def generate(todo: list[list[Article]], ask: Callable[[int, list[dict]], str],
+             workers: int) -> Iterator[tuple[list[Article], dict | None, str | None]]:
+    """(group, parsed item or None, why it was refused or None) for each group.
+
+    ``ask(n, messages)`` returns the teacher's reply to the n-th group (it picks
+    the server); an exception it raises is a refusal "request:<type>", so one
+    failed request costs one item and not the run.
+    """
+    def work(n: int, group: list[Article]):
+        try:
+            raw = ask(n, messages(group))
+        except (OSError, ValueError) as e:
+            return group, None, f"request:{type(e).__name__}"
+        try:
+            return group, parse_practical(raw, group), None
+        except PracticalRejected as e:
+            return group, None, e.reason
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        yield from pool.map(lambda x: work(*x), enumerate(todo))
+
+
+def exam_articles(items: list[EvalItem]) -> frozenset[tuple[str, str]]:
+    """(code, article) of every item of an exam, a practical item's whole group included."""
+    out = set()
+    for it in items:
+        code, art = it.metadata.get("code"), it.metadata.get("articolo")
+        if code and art:
+            out.add((code, str(art)))
+        for ref in it.metadata.get("gruppo") or []:
+            c, _, a = str(ref).partition(":")
+            if c and a:
+                out.add((c, a))
+    return frozenset(out)

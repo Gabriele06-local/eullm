@@ -180,3 +180,46 @@ def test_the_needed_articles_are_those_declared_and_cited(known):
     # declared 1, 2 and 3; the answer cites 1453 and 2043 only
     parsed = parse_practical(_reply(articoli=[1, 2, 3]), g)
     assert [a.number for a in parsed["articoli"]] == ["1453", "2043"]
+
+
+def _load_prompts():
+    spec = importlib.util.spec_from_file_location(
+        "make_practical_prompts", SCRIPT.parent / "make_practical_prompts.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_training_prompts_are_judged_rows_beside_the_mixed_ones(tmp_path, known, monkeypatch,
+                                                                 capsys):
+    from eullm_forge.rl import JUDGED_TYPES
+    assert "pratica" in JUDGED_TYPES
+    mod = _load_prompts()
+    extra = _art("codice_civile", 2044, "Non risponde chi agisce per legittima difesa.")
+    arts = {**known, ("codice_civile", "2044"): extra}
+    norms = tmp_path / "legislazione_x.chunks.jsonl"
+    norms.write_text("".join(json.dumps({"code": a.code, "article_num": a.number,
+                                         "text": a.text, "chunk_index": 0},
+                                        ensure_ascii=False) + "\n"
+                             for a in arts.values()))
+    # the c.p.c. group's articles are an exam's: no prompt is written from them
+    g = [known[("codice_procedura_civile", "163")], known[("codice_civile", "1453")]]
+    exam = tmp_path / "practical-dev.jsonl"
+    from eullm_forge.eval import save_eval_set
+    save_eval_set([to_item(g, {"domanda": "q", "risposta": "r", "rubrica": "x",
+                               "articoli": [g[0]]}, "dev")], exam)
+    mix = tmp_path / "prompts-judge.jsonl"
+    mix.write_text(json.dumps({"id": "m1", "tipo": "termine", "prompt": []}) + "\n")
+    monkeypatch.setattr(mod, "ask", lambda url, msgs, mt, t: _reply(articoli=[1]))
+    out = tmp_path / "prompts-practical.jsonl"
+    assert mod.main(["--norms", str(norms), "--exclude-exam", str(exam), "--url", "http://x",
+                     "--parallel", "1", "--mix", str(mix), "--out", str(out)]) == 0
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
+    practical = [r for r in rows if r["tipo"] == "pratica"]
+    assert {r["id"] for r in rows} - {r["id"] for r in practical} == {"m1"}
+    # 163 and 1453 are an exam's: the one group left is 2043 with its neighbour 2044
+    assert [(r["code"], r["articolo"]) for r in practical] == [("codice_civile", "2043")]
+    for r in practical:
+        assert r["question"] and r["reference"] and r["rubric"]
+        assert "Domanda: " in r["prompt"][0]["content"]
+    assert "fornitore" not in capsys.readouterr().out
