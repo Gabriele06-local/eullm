@@ -69,9 +69,9 @@ mkdir -p "$G/logs"
 
 fail=0
 check() { [ -e "$1" ] || { echo "[round] missing $2: $1" >&2; fail=1; }; }
-[ -n "${AFTER:-}" ] || check "$START/config.json" "start model"
+[ -n "${AFTER:-}${PACKAGED:-}" ] || check "$START/config.json" "start model"
 # with AFTER, the prompts may be what that job writes (sbatch_practical_prompts.slurm)
-[ -n "${AFTER:-}" ] || check "$PROMPTS" "prompts"
+[ -n "${AFTER:-}${PACKAGED:-}" ] || check "$PROMPTS" "prompts"
 check "$JUDGE" "judge GGUF"
 case "$LINKS$STEPS" in *[!0-9]*|"") echo "[round] LINKS and MAX_STEPS are numbers" >&2; fail=1 ;; esac
 [ "$LINKS" = 0 ] && [ -z "${AFTER:-}${PACKAGED:-}" ] &&
