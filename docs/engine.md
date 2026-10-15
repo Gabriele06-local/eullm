@@ -94,9 +94,8 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--fit-strict` | false | Refuse to load rather than offload a partial split |
 | `--cpu-moe` | false | MoE models: all expert tensors on CPU RAM (sized automatically when unset) |
 | `--n-cpu-moe` | `0` | MoE models: expert tensors on CPU for the first N layers only |
-| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another), `row` (each weight cut by rows; KV cache on `--main-gpu`), `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible; there is no `none`: make one GPU visible instead |
+| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another) or `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible. No `none` (make one GPU visible instead) and no `row` (llama.cpp's CUDA and ROCm backends no longer support it) |
 | `--tensor-split` | (by free memory) | Each GPU's share of the model, as proportions, e.g. `3,1` |
-| `--main-gpu` | `0` | The GPU (index among those visible) for the KV cache and intermediate results with `--split-mode row` |
 | `--ctx-size, -c` | `4096` | Total context window (split across batch slots) |
 | `--threads, -t` | all CPUs | Number of CPU threads |
 | `--batch-size` | `1` | Concurrent requests served by the batching scheduler (raise `--ctx-size` with it) |

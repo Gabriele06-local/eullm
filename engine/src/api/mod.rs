@@ -193,7 +193,7 @@ pub struct AppState {
     /// `--kv-unified`: one KV cache for every sequence of a model this
     /// server loads.
     pub kv_unified: bool,
-    /// `--split-mode`, `--tensor-split`, `--main-gpu`: how every model this
+    /// `--split-mode`, `--tensor-split`: how every model this
     /// server loads goes across the GPUs (see `crate::gpu_split`).
     pub gpu_split: crate::gpu_split::GpuSplit,
     /// Max full-sequence-state checkpoints kept for prompt-prefix restore
@@ -2869,7 +2869,7 @@ pub struct ServeConfig {
     pub load_threads: crate::readahead::LoadThreads,
     /// `--kv-unified` (see `AppState::kv_unified`).
     pub kv_unified: bool,
-    /// `--split-mode`, `--tensor-split`, `--main-gpu` (see `AppState::gpu_split`).
+    /// `--split-mode`, `--tensor-split` (see `AppState::gpu_split`).
     pub gpu_split: crate::gpu_split::GpuSplit,
     pub ctx_checkpoints: usize,
     pub checkpoint_min_step: u32,

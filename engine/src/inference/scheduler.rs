@@ -1749,8 +1749,7 @@ fn run_scheduler_loop(
     } else {
         model_params
     };
-    // `--split-mode`, `--tensor-split`, `--main-gpu`: llama.cpp's defaults
-    // unless given.
+    // `--split-mode`, `--tensor-split`: llama.cpp's defaults unless given.
     if !config.gpu_split.is_default() {
         tracing::info!("Split across the GPUs: {}", config.gpu_split.describe());
     }

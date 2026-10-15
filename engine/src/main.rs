@@ -361,16 +361,16 @@ struct RuntimeOpts {
     kv_unified: bool,
 
     /// How a model goes across several GPUs: `layer` (the default) puts
-    /// whole layers on each GPU, run one after another; `row` cuts each
-    /// weight by rows across the GPUs, the KV cache and intermediate results
-    /// on --main-gpu; `tensor` cuts weights and KV cache across them and
-    /// runs every layer on all at once (llama.cpp's experimental tensor
-    /// parallelism; the load says which architectures lack it). Row and
-    /// tensor can make one request faster, where layer only adds memory: on
-    /// an MI250X a model on four GCDs as layers wrote no faster than on one.
-    /// No effect with one GPU visible; to use one GPU of several, make only
-    /// it visible (CUDA_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES).
-    #[arg(long, value_name = "layer|row|tensor", default_value = "layer",
+    /// whole layers on each GPU, run one after another; `tensor` cuts
+    /// weights and KV cache across them and runs every layer on all at once
+    /// (llama.cpp's experimental tensor parallelism; the load says which
+    /// architectures lack it). Tensor can make one request faster, where
+    /// layer only adds memory: on an MI250X a model on four GCDs as layers
+    /// wrote no faster than on one. No effect with one GPU visible; to use
+    /// one GPU of several, make only it visible (CUDA_VISIBLE_DEVICES,
+    /// ROCR_VISIBLE_DEVICES). llama.cpp's `row` is not offered: its CUDA and
+    /// ROCm backends no longer support it.
+    #[arg(long, value_name = "layer|tensor", default_value = "layer",
           value_parser = gpu_split::parse_split_mode)]
     split_mode: gpu_split::SplitMode,
 
@@ -379,12 +379,6 @@ struct RuntimeOpts {
     /// GPU's free memory.
     #[arg(long, value_name = "N0,N1,...", value_parser = gpu_split::parse_tensor_split)]
     tensor_split: Option<gpu_split::TensorSplit>,
-
-    /// The GPU, by its index among those visible, that holds the KV cache
-    /// and the intermediate results with --split-mode row (default: the
-    /// first).
-    #[arg(long, value_name = "INDEX")]
-    main_gpu: Option<u32>,
 
     /// Max full-sequence-state checkpoints kept for prompt-prefix
     /// restore (bounded alternative to --rs-seq for hybrid/recurrent
@@ -1045,7 +1039,6 @@ async fn main() {
                 kv_unified,
                 split_mode,
                 tensor_split,
-                main_gpu,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1073,7 +1066,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
-            let gpu_split = gpu_split::GpuSplit::from_flags(split_mode, tensor_split, main_gpu);
+            let gpu_split = gpu_split::GpuSplit::from_flags(split_mode, tensor_split);
             let n_batch = launch_n_batch(n_batch, n_ubatch.unwrap_or(inference::DEFAULT_N_UBATCH));
             let residency = residency_config(
                 &store,
@@ -1247,7 +1240,6 @@ async fn main() {
                 kv_unified,
                 split_mode,
                 tensor_split,
-                main_gpu,
                 ctx_checkpoints,
                 checkpoint_min_step,
                 ctx_size,
@@ -1275,7 +1267,7 @@ async fn main() {
                 auto_model,
                 auto_timeout_ms,
             } = opts;
-            let gpu_split = gpu_split::GpuSplit::from_flags(split_mode, tensor_split, main_gpu);
+            let gpu_split = gpu_split::GpuSplit::from_flags(split_mode, tensor_split);
             let n_batch = launch_n_batch(n_batch, n_ubatch.unwrap_or(inference::DEFAULT_N_UBATCH));
             let residency = residency_config(
                 &store,
