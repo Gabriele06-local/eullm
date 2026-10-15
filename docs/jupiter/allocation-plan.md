@@ -219,19 +219,57 @@ load at a time, seconds from process start to the first answer):**
 
 | case | how llama.cpp reads the file | s |
 |---|---|---:|
-| EuLLM, default (first on the node) | read in (the rule) | 54 |
-| EuLLM `--mmap` | mapped | 10 |
-| llama-server, default | mapped | 4 |
-| llama-server `--load-mode none` | read in | 48 |
+| EuLLM, default (first on the node) | read in (the rule) | 53.4 |
+| EuLLM `--mmap` | mapped | 9.9 |
+| llama-server, default | mapped | 3.9 |
+| llama-server `--load-mode none` | read in | 47.8 |
+| llama-server `--load-mode dio` | direct I/O | 360.2 |
+| EuLLM, default, again | read in | 53.1 |
 
-Reading in costs the same in either server, 48-54 s against 4-10 mapped:
-the slow part is llama.cpp's read-in path on GPFS (synchronous 1 MiB reads
-from one thread), not EuLLM, and EuLLM chose it by the network-file-system
-rule. The rule was right for Lustre and is wrong here. Still open, before
-the rule is changed in `engine/`: the rule exists because on Lustre several
-servers *mapping one file at once* were the slow case, so the same is
-measured on GPFS (`EULLM_LOAD_CASES=together`: four servers of the 35B-A3B,
-one per GPU, mapped first on a file the node has not read, then read in).
+Reading in costs the same in either server, 48-53 s against 4-10 mapped,
+and the same the second time (GPFS keeps nothing for it); direct I/O is
+seven times worse again. The slow part is llama.cpp's read-in path on GPFS
+(synchronous 1 MiB reads from one thread), not EuLLM, and EuLLM chose it by
+the network-file-system rule, written for Lustre.
+
+The rule exists because on Lustre several servers *mapping one file at
+once* were the slow case. On GPFS they are not (job 2327213,
+`EULLM_LOAD_CASES=together`, Qwen3.6-35B-A3B, 22.1 GB, four servers one per
+GPU loading at once): mapped first, on a file the node had not read, every
+one loaded in 15.7-15.9 s; read in, right after, in 34.0-34.2 s. Alone and
+read in, job 2326571 had taken 166 s for the same file. So on GPFS a model
+stays mapped, alone or four at once: the change proposed for
+`fit::read_in_whole_on_gpu` keeps the network rule for Lustre only (to be
+made in one branch, `engine/` being shared with LUMI's).
+
+### The c07 runtimes on GH200, second round (job 2327214, 14-10-2026)
+
+`r-gh200-rt`: Qwen3-8B, Qwen3-14B, Qwen3-32B and Qwen3.6-35B-A3B
+(Q4_K_M), EuLLM against llama-server, one GH200 a point: 40 points in
+14 min 47 s of one node (the 20 Ollama points blocked: no Ollama here).
+Tokens/s:
+
+| model | 1 request | 4 | 16 | 16 clients, 400 graded gsm8k (accuracy) |
+|---|---|---|---|---|
+| Qwen3-8B | 229 / 226 | 603 / 600 | 1,434 / 1,412 | 1,156 / 1,066 (0.92 / 0.9225) |
+| Qwen3-14B | 142 / 142 | 391 / 382 | 1,066 / 1,044 | 783 / 738 (0.95 / 0.96) |
+| Qwen3-32B | 70.3 / 70.2 | 201 / 200 | 589 / 588 | 439 / 421 (0.96 / 0.9475) |
+| Qwen3.6-35B-A3B | 218 / 216 | 485 / 476 | 888 / 723 | 646 / 576 (0.9325 / 0.94) |
+
+(EuLLM / llama-server.) Dense models are level on throughput; on the
+graded workload EuLLM is 4-9% ahead, and on the MoE 35B-A3B 23% ahead with
+16 requests and 12% on the graded run. A 16,000-token prompt is read at the
+same speed by both (decode 211 tok/s on the 35B-A3B, 124 on the 14B). For
+deliverable 5: one GH200 writes 888 tok/s with a 35B-A3B MoE under EuLLM,
+where Leonardo's synthetic-data generation ran at 58-64 tok/s with the
+30B-A3B in plain Transformers. Not yet the same model or precision (Q4_K_M
+GGUF against BF16): the like-for-like number is the teacher probe's
+generation in Transformers on GH200, then the same teacher as GGUF under
+EuLLM. The "load s" column again compares EuLLM's load with llama-server's
+warm-up request only.
+
+Spent on JUPITER by 15-10-2026 morning: 50.5 minutes of node time in eight
+jobs, **3.4 GPU-hours** of 5,000.
 
 ## What the GPU probe found (job 2326998, 14-10-2026)
 
