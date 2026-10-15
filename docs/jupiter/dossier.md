@@ -149,8 +149,10 @@ the legislation corpus (1,324 optimiser steps), in two-hour links.
   stopped at the first forward step. The teacher, alone on one GPU, gets no
   device hooks from Accelerate, and the batch stayed on the student's GPU.
   Fixed in `distill.py` (commit `ce822dc`) with a test.
-* Job 2337859: both runs train; at 1 h 39 min the 4B was at step 560 and the
-  8B at step 500 (evaluation at step 400: loss 0.989, KL 0.824, CE 1.376).
+* Jobs 2337859, 2337861, 2338844: both runs train, unattended, link after
+  link. At 1 h 39 min the 4B was at step 560 and the 8B at step 500
+  (evaluation at step 400: loss 0.989, KL 0.824, CE 1.376); in the third link
+  both were at step 1,180 of 1,324.
 * **Throughput lesson.** The legislation chunks are short (~210 tokens), and
   one chunk a micro-batch ran at 1.5–1.6 micro-batches a second, ~340
   tokens/s against ~5,000 with 2,048-token micro-batches: the fixed cost of
@@ -245,8 +247,9 @@ site's energy mix.
 
 1. Finish the legislation distillation chain; per-epoch GPU-hours and energy
    (deliverables 1, 8, 9).
-2. Synthetic instruction data with EULLM Engine, same model as Leonardo
-   (deliverable 5), then instruction tuning against the 46-minute baseline (4).
-3. The packed distillation, and a corpus large enough for the remaining
-   hours: generated data, ruling summaries from Leonardo, more legislation.
+2. Instruction tuning on the 4,272 generated pairs, against the 46-minute
+   baseline (deliverable 4).
+3. The packed distillation (queued) against the unpacked one, and a corpus
+   large enough for the remaining hours: more legislation, generated data,
+   ruling summaries from Leonardo.
 4. The Qwen3.5 teacher/student pair (deliverable 7).
