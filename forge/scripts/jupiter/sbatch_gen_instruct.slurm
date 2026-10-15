@@ -37,6 +37,7 @@ CORPUS="${FORGE_GEN_CORPUS:-$FORGE_DATA_DIR/norms/train.jsonl}"
 OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
 LIMIT="${FORGE_GEN_LIMIT:-20000}"
 STOP_MIN="${FORGE_GEN_STOP_MIN:-52}"
+SEEDS="${FORGE_GEN_SEEDS:-0}"
 JOB="${SLURM_JOB_ID:-local}"
 PORT=$((18500 + ${SLURM_JOB_ID:-0} % 200))
 LOGS="$FORGE_RUN_DIR/gen-instruct-$JOB"
@@ -45,7 +46,7 @@ export EULLM_AUDIT_DIR="$LOGS/audit"
 
 echo "=== instruction pairs with EULLM Engine: job $JOB on $(hostname), $(date -Is) ==="
 echo "  engine $("$EULLM_BIN" --version 2>&1 | head -1) ($EULLM_BIN)"
-echo "  corpus $CORPUS -> $OUT, up to $LIMIT pairs, stop after $STOP_MIN min"
+echo "  corpus $CORPUS -> $OUT, up to $LIMIT pairs a seed (seeds $SEEDS), stop after $STOP_MIN min"
 [ -f "$CORPUS" ] || { echo "[!!] no corpus $CORPUS"; exit 1; }
 MODEL=$("$EULLM_BIN" list 2>/dev/null | awk 'tolower($1) ~ /30b-a3b-instruct-2507/ && !/file missing/ { print $1; exit }')
 [ -n "$MODEL" ] || { echo "[!!] Qwen3-30B-A3B-Instruct-2507 is not in $EULLM_MODELS_DIR: pull it on a login node"; exit 1; }
@@ -91,11 +92,20 @@ for g in 0 1 2 3; do
         { echo "[!!] server $g did not answer: tail $LOGS/server$g.log"; tail -5 "$LOGS/server$g.log"; stop_servers; exit 1; }
 done
 
-python "$EULLM_REPO/forge/scripts/generate_instructions.py" \
-    --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
-    --concurrency 128 --batch-size 256 --max-new-tokens 1024 \
-    --corpus "$CORPUS" --out "$OUT" --limit "$LIMIT" --stop-after-min "$STOP_MIN"
-RC=$?
+# One pass a seed: a seed picks one task and one window of every passage,
+# so another seed asks other questions of the same corpus. Pairs already on
+# disk (same passage, same task) are skipped by their key.
+RC=0
+start=$(date +%s)
+for seed in $SEEDS; do
+    left=$(( STOP_MIN - ($(date +%s) - start) / 60 ))
+    [ "$left" -ge 3 ] || { echo "  no time left for seed $seed"; break; }
+    echo "--- seed $seed, at most $left min"
+    python "$EULLM_REPO/forge/scripts/generate_instructions.py" \
+        --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
+        --concurrency 128 --batch-size 256 --max-new-tokens 1024 --seed "$seed" \
+        --corpus "$CORPUS" --out "$OUT" --limit "$LIMIT" --stop-after-min "$left" || RC=$?
+done
 
 stop_servers
 kill "$SAMPLER" 2>/dev/null
