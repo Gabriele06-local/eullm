@@ -10,7 +10,8 @@ not here*, below).
 | Source | Content | Coverage | Licence / status |
 |---|---|---|---|
 | **ItalGiure** (Corte di Cassazione) | Full text of civil and criminal judgments | 2021-2026 | Judgments are public domain under art. 5 l. 633/1941 |
-| **Normattiva** | Codes and the Constitution | current consolidated text | Public domain, same basis |
+| **Normattiva** | Codes and the Constitution; for JUPITER also whole collections of the acts in force (`prepare_legislation.py --all-acts`) | current consolidated text | Public domain, same basis |
+| **EUR-Lex** (Publications Office of the EU) | Regulations and directives in force, Italian text, as published in the Official Journal (not consolidated) | 17,563 acts on 16-10-2026 | Official, freely reusable (Commission Decision 2011/833/EU) |
 | **OpenGA** (Giustizia Amministrativa) | Consiglio di Stato judgment **metadata** — 17 columns, no text | 2017-2026, monthly updates | CC BY 4.0 |
 | **Giustizia Amministrativa portal** | Full text of Consiglio di Stato judgments | addressed per-ruling from the OpenGA index | Public domain, same basis |
 
@@ -19,6 +20,12 @@ rulings for 2017-2024, about 240 bytes each. The full text lives on the
 institutional portal and is addressed by two fields the index carries —
 `NUMERO_RICORSO` becomes the request's `nrg` and `NUMERO_PROVVEDIMENTO` its
 `nomeFile`.
+
+EUR-Lex is listed through the Office's SPARQL endpoint and each act fetched
+from Cellar by content negotiation (Italian XHTML since 2014, HTML before);
+the fetcher is private like the others, and `forge/scripts/prepare_eurlex.py`
+turns the saved pages into chunks, one record per article, the recitals and
+every annex.
 
 ## How the corpus is partitioned
 
