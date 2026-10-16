@@ -78,4 +78,17 @@ if [ -f "$FORGE_VENV/bin/activate" ]; then
     unset _forge_sp _forge_pp
 fi
 
+# FORGE_EXTRA_LIBS: a --target directory that goes before even the venv, for
+# the jobs that need a library the venv must not carry. Qwen3.5 runs set it
+# to $FORGE_HOME/libs-qwen35 (setup_qwen35_libs.sh): a newer Triton than the
+# module's, which the Qwen3 jobs keep.
+if [ -n "${FORGE_EXTRA_LIBS:-}" ] && [ -d "$FORGE_EXTRA_LIBS" ]; then
+    _forge_pp=":${PYTHONPATH:-}:"
+    _forge_pp="${_forge_pp//:$FORGE_EXTRA_LIBS:/:}"
+    _forge_pp="${_forge_pp#:}"
+    _forge_pp="${_forge_pp%:}"
+    export PYTHONPATH="$FORGE_EXTRA_LIBS${_forge_pp:+:$_forge_pp}"
+    unset _forge_pp
+fi
+
 mkdir -p "$FORGE_HOME" "$FORGE_DATA_DIR" "$FORGE_RUN_DIR/logs" "$HF_HOME"
