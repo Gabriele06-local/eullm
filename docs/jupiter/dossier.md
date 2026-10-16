@@ -22,7 +22,7 @@ JUPITER, named by its Slurm job id.
 | System | JUPITER Booster: 4× GH200 (H100 96 GB HBM3, 72-core Neoverse-V2 Grace) a node, whole nodes only |
 | Spent so far | 21.3 GPU-hours by 15-10-2026 evening, and 13.0 more for the five jobs of the night to 16-10 (`tools/jupiter/budget.sh` gives the running total); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
 | Codes | EULLM Engine (Rust, llama.cpp), EULLM Forge (Python: PyTorch 2.9.1 of the site, Transformers 5.19, PEFT 0.21) |
-| Data on JUPITER | Legislation only (Normattiva, EUR-Lex: public domain) and public benchmarks. No personal data (§7) |
+| Data on JUPITER | Legislation (Normattiva, EUR-Lex) and public benchmarks; pseudonymised court decisions once JSC's data-protection addendum is signed, asked for on 15-10-2026 (§7) |
 
 ## 2. What the proposal committed to, and where each stands
 
@@ -59,7 +59,9 @@ JUPITER, named by its Slurm job id.
   import (venv path order, fixed).
 
 **16-10-2026**
-* JSC's data-protection form submitted: no personal data at JSC (§7).
+* JSC's data-protection assessment form for the pseudonymised court
+  decisions: a first submission wrongly declared none, withdrawn and
+  replaced (§7).
 * EU acts in force in Italian (17,563 regulations and directives) being
   fetched outside JUPITER for a larger legislation corpus; the processors
   (`prepare_eurlex.py`, `prepare_legislation.py --all-acts`) are in the
@@ -290,26 +292,35 @@ figures below with the site's energy mix.
 
 ## 7. Data governance
 
-* No personal data is processed on JUPITER. The Principal Investigator's
-  Agreement (14-10-2026) excludes it without a data processing agreement,
-  and none was requested, by choice: court decisions are processed on
-  Leonardo only.
-* JUPITER receives legislation (Normattiva, EUR-Lex: public domain), public
-  benchmarks and, later, ruling summaries that carry nothing of the case.
-* For the same reason the teacher on JUPITER is the Base model without the
-  continued-pre-training adapter trained on Leonardo, which saw court
-  decisions.
-* Data stays on the project storage and is moved only over SSH; no corpus
-  or generated data is ever in a code repository.
-* 16-10-2026, at JSC's request: the Data Protection Team's form on
-  processing personal data submitted, declaring none. The data are public
-  legislation (Normattiva open data, EUR-Lex in Italian), public benchmarks,
-  synthetic pairs generated on JUPITER from them and, possibly later,
-  summaries of legal principles with nothing of the case in them (no names,
-  no case numbers, made-up references), produced outside JSC and checked
-  before transfer. A reference to persons cannot be established; no court
-  decision is transferred. Processing pseudonymised court decisions at JSC
-  would need a new submission, the DPO's confirmation and JSC's addendum.
+* **What the proposal declared.** The project handles personal data:
+  pseudonymised Italian court decisions (Corte di Cassazione 2021–2026,
+  Consiglio di Stato 2017–2024), as the call's form required us to state,
+  and we committed to a data processing agreement with the production site
+  before any of it is uploaded. The Principal Investigator's Agreement
+  (14-10-2026) is JSC's standard form, which excludes personal data without
+  such an agreement.
+* **The agreement is being sought.** On 15-10-2026 JSC was asked by e-mail
+  for it; JSC answered with its Data Protection Team's assessment form, the
+  step before the addendum to its terms of use. On 16-10-2026 the form was
+  first submitted by mistake declaring no personal data; that submission is
+  withdrawn by e-mail to the Data Protection Team and replaced by one for
+  the pseudonymised decisions.
+* **Until the addendum is signed** JUPITER holds legislation (Normattiva,
+  EUR-Lex: public), public benchmarks, synthetic pairs generated from them
+  and ruling summaries that carry nothing of the case, and no court
+  decision is uploaded. The teacher on JUPITER is accordingly the Base
+  model, without the continued-pre-training adapter trained on the
+  decisions on Leonardo.
+* **The measures declared, which bind the processing once allowed:** names
+  of parties, lawyers and magistrates replaced; tax codes, VAT numbers,
+  IBANs, addresses, phone numbers, e-mail addresses and dates of birth
+  removed; surnames in case citations and links to the original documents
+  removed; a document still holding a structured identifier rejected by an
+  automatic check; generated examples about a single case, or still holding
+  a placeholder, discarded; the data only on the project's storage, moved
+  only over SSH, never in a repository or a third-party service, and deleted
+  at the end of the project; decisions of 2025–2026 used for evaluation
+  only, never for training.
 
 ## 8. Issues found and fixed
 
