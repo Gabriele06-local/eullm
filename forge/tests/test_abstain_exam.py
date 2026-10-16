@@ -95,6 +95,9 @@ def test_absent_takes_the_items_own_article_out_and_says_nothing():
                                "articolo": "9999"})
     assert "non è presente art. 9999" in legal_eval.retrieve(index, ghost, 2)[1]
     assert legal_eval.retrieve(index, ghost, 2, absent=True)[1] == ""
+    # --no-note: the same texts, and no note, as RAG Enterprise asks it
+    found, note = legal_eval.retrieve(index, ghost, 2, note=False)
+    assert note == "" and found == legal_eval.retrieve(index, ghost, 2)[0]
 
 
 def test_an_article_a_given_text_refers_to_is_in_hand():
