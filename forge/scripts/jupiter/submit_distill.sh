@@ -9,7 +9,9 @@
 # nothing is submitted if one check fails (forge/CLAUDE.md, rule 7): the
 # corpus, the models in the offline cache, the configs, and that no link of
 # the chain is already queued or running (FORGE_CHAIN_MORE=1 adds N links
-# behind the ones there).
+# behind the ones there). FORGE_CHAIN_AFTER=<job> makes the chain wait for
+# that job to end, whatever its outcome (a probe, say), so the allocation
+# never runs more than two nodes at once.
 
 set -euo pipefail
 N="${1:?give the number of two-hour links}"
@@ -51,9 +53,11 @@ if [ "$QUEUED" -gt 0 ] && [ "${FORGE_CHAIN_MORE:-0}" != 1 ]; then
     err "$QUEUED link(s) of the chain already queued or running: FORGE_CHAIN_MORE=1 to add $N more"
 fi
 
+DEP=singleton
+[ -z "${FORGE_CHAIN_AFTER:-}" ] || DEP="afterany:$FORGE_CHAIN_AFTER,singleton"
 mkdir -p "$FORGE_RUN_DIR/logs"
 for _ in $(seq 1 "$N"); do
-    sbatch --account "$SBATCH_ACCOUNT" --dependency=singleton \
+    sbatch --account "$SBATCH_ACCOUNT" --dependency="$DEP" \
         --output="$FORGE_RUN_DIR/logs/distill-%j.out" \
         "$HERE/sbatch_distill.slurm"
 done

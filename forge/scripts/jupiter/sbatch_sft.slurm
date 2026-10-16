@@ -24,8 +24,14 @@
 #         --output="$PROJECT/$USER/forge/runs/logs/sft-%j.out" \
 #         forge/scripts/jupiter/sbatch_sft.slurm
 #
+# FORGE_SFT_TAG puts the runs in $FORGE_RUN_DIR/sft-<tag> (another set of
+# pairs, other arms). With a held-out exam at FORGE_SFT_EXAM (default
+# $FORGE_DATA_DIR/eval/norm-exam.jsonl, make_norm_exam.py) every model also
+# sits it, into norm-exam.csv.
+#
 # Resumable: a rerun continues a run from its checkpoint, skips a finished
-# adapter, a merged model and an evaluation already done. Whole node: 4
+# adapter, a merged model and an evaluation already done, so rerunning it on
+# finished runs only adds what is missing (the exam, say). Whole node: 4
 # GPU-hours an hour.
 
 #SBATCH --job-name=forge-sft
@@ -43,12 +49,15 @@ ARMS="${FORGE_SFT_ARMS:-d4b=$RUNS/norms-4b/checkpoints/qwen3_4b_norms_distilled/
 PAIRS="${FORGE_SFT_PAIRS:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
 REF="${FORGE_SFT_REFERENCE:-Qwen/Qwen3-4B-Instruct-2507}"
 TRAIN_S="${FORGE_SFT_TRAIN_S:-5700}"
-SFT="$RUNS/sft"
+SFT="$RUNS/sft${FORGE_SFT_TAG:+-$FORGE_SFT_TAG}"
+EXAM="${FORGE_SFT_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
 JOB="${SLURM_JOB_ID:-local}"
 mkdir -p "$SFT" "$RUNS/power"
 
 echo "=== Forge instruction tuning: job $JOB on $(hostname), $(date -Is) ==="
-echo "  pairs $PAIRS ($(wc -l <"$PAIRS" 2>/dev/null || echo 0) lines), training at most ${TRAIN_S}s a run"
+echo "  pairs $PAIRS ($(wc -l <"$PAIRS" 2>/dev/null || echo 0) lines), training at most ${TRAIN_S}s a run, into $SFT"
+if [ -s "$EXAM" ]; then echo "  held-out exam $EXAM ($(wc -l <"$EXAM") questions; totals only in the logs)"
+else echo "  no held-out exam at $EXAM: make_norm_exam.py on a login node; the ten seed questions only"; fi
 [ -s "$PAIRS" ] || { echo "[!!] no pairs at $PAIRS: sbatch_gen_instruct.slurm first"; exit 1; }
 python -c "import transformers, peft; print('  imports: transformers', transformers.__version__, 'peft', peft.__version__)" ||
     { echo "[!!] the venv does not import on this node"; exit 1; }
@@ -59,13 +68,22 @@ have_model() {
     python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pretrained(sys.argv[1], local_files_only=True)" "$1" >/dev/null 2>&1
 }
 
+in_csv() { awk -F, -v l="$1" '$2 == l { found = 1 } END { exit !found }' "$2" 2>/dev/null; }
+
 evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers>
-    if awk -F, -v l="$1" '$2 == l { found = 1 } END { exit !found }' "$SFT/legal-eval.csv" 2>/dev/null; then
-        echo "[eval] $1 already in legal-eval.csv"; return 0
+    if in_csv "$1" "$SFT/legal-eval.csv"; then
+        echo "[eval] $1 already in legal-eval.csv"
+    else
+        python "$EULLM_REPO/forge/scripts/chat_smoke.py" "$2" --label "$1" --csv "$SFT/chat-smoke.csv"
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" \
+            --csv "$SFT/legal-eval.csv" --answers "$3/legal-eval-answers.jsonl" --quiet
     fi
-    python "$EULLM_REPO/forge/scripts/chat_smoke.py" "$2" --label "$1" --csv "$SFT/chat-smoke.csv"
-    python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" \
-        --csv "$SFT/legal-eval.csv" --answers "$3/legal-eval-answers.jsonl" --quiet
+    # The held-out exam drawn from the law (make_norm_exam.py), quiet: the
+    # logs hold totals, never a question.
+    if [ -s "$EXAM" ] && ! in_csv "$1" "$SFT/norm-exam.csv"; then
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" --items "$EXAM" \
+            --csv "$SFT/norm-exam.csv" --answers "$3/norm-exam-answers.jsonl" --quiet
+    fi
 }
 
 run_arm() {    # run_arm <name> <model>; runs on the GPU it is given
@@ -141,7 +159,7 @@ kill "$SAMPLER" 2>/dev/null
 wait "$SAMPLER" 2>/dev/null
 echo
 echo "times.csv: name, model, pairs, seconds of training, exit, job"
-for f in times legal-eval chat-smoke; do
+for f in times legal-eval norm-exam chat-smoke; do
     [ -f "$SFT/$f.csv" ] || continue
     echo "--- $f.csv"
     if command -v column >/dev/null; then column -s, -t <"$SFT/$f.csv"; else cat "$SFT/$f.csv"; fi | sed 's/^/  /'

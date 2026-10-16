@@ -58,6 +58,15 @@ fi
 # ── 3. The libraries, torch and numpy held at the module's ───────────────
 CONSTRAINTS="$FORGE_HOME/constraints-module.txt"
 printf 'torch==%s\nnumpy==%s\n' "$TORCH_V" "$NUMPY_V" >"$CONSTRAINTS"
+# Triton for flash-linear-attention: the module's if it has one, held there
+# like torch; otherwise the version torch 2.9.1 itself pins.
+if TRITON_V=$(python3 -c 'import triton; print(triton.__version__)' 2>/dev/null); then
+    log "site triton $TRITON_V, held"
+    printf 'triton==%s\n' "$TRITON_V" >>"$CONSTRAINTS"
+else
+    log "no triton in the module: installing triton==3.5.1 (torch 2.9.1's)"
+    python -m pip install --quiet -c "$CONSTRAINTS" triton==3.5.1
+fi
 log "installing requirements.txt (torch==$TORCH_V and numpy==$NUMPY_V held)"
 python -m pip install --quiet -c "$CONSTRAINTS" -r "$HERE/requirements.txt"
 
@@ -81,10 +90,16 @@ for name, dist in (("numpy", "numpy"), ("transformers", "transformers"), ("peft"
                    ("safetensors", "safetensors"), ("huggingface_hub", "huggingface-hub"),
                    ("tokenizers", "tokenizers"), ("yaml", "pyyaml"), ("click", "click"),
                    ("rich", "rich"), ("requests", "requests"), ("bs4", "beautifulsoup4"),
+                   ("triton", "triton"), ("fla", "fla-core"), ("einops", "einops"),
                    ("eullm_forge", "eullm-forge")):
     try:
         mod = importlib.import_module(name)
     except Exception as exc:  # report every failure, not the first
+        if name == "fla" and torch.cuda.device_count() == 0:
+            # fla asks Triton for the GPU when imported: on a login node
+            # without one it cannot import, and the teacher probe checks it.
+            print(f"  {name:<16}{md.version(dist):<14}installed; imports on a GPU node only")
+            continue
         bad.append(name)
         print(f"  {name:<16}FAILED ({type(exc).__name__}: {exc})")
         continue
