@@ -1,0 +1,65 @@
+# JUPITER Booster: the Qwen3.5 track (deliverable 7), the same recipe and
+# corpus as distill_qwen3_30b_a3b_to_4b_norms.yaml with the Qwen3.5 pair,
+# Qwen3.5-35B-A3B-Base teaching Qwen3.5-4B-Base (both Apache 2.0,
+# checked on the Hub 15-10-2026). What differs, and why:
+#
+# * Not packed: Qwen3.5's linear-attention layers carry a recurrent state
+#   along the sequence, and the per-document mask that packing relies on
+#   reaches only the attention layers, so packed documents would leak into
+#   each other. One chunk a micro-batch, as in the first Qwen3 run.
+# * The LoRA also covers the linear-attention projections (in_proj_qkv,
+#   in_proj_z, out_proj): three layers in four are linear attention, and
+#   the Qwen3 list alone would leave them untrained.
+# * save_steps 50: the teacher probe (job 2340254) measured a micro-batch at
+#   1.8 s on the reference PyTorch kernels, four times Qwen3's; with
+#   flash-linear-attention it should be far less, but a link that is killed
+#   between saves must not lose much either way.
+# The teacher takes 64.6 GiB of the 95 on its GPU (job 2340254).
+teacher_model: Qwen/Qwen3.5-35B-A3B-Base
+teacher_adapter: null
+student_model: Qwen/Qwen3.5-4B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+teacher_device_map: split
+teacher_gpus: [0]
+teacher_gib_per_gpu: 80
+student_device: cuda:1
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkv
+  - in_proj_z
+  - out_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+dataset_dir: ./datasets/norms   # overridden by sbatch_distill.slurm (--dataset-dir)
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+output_dir: ./checkpoints/qwen35_4b_norms_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 3
+max_steps: -1
+warmup_steps: 66
+save_steps: 50
+save_total_limit: 3
+eval_steps: 200
+eval_max_batches: 234
+logging_steps: 20
+kl_temperature: 2.0
+kl_alpha: 0.7
+bf16: true
+gradient_checkpointing: true
+seed: 42
