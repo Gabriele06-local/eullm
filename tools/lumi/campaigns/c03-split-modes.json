@@ -22,7 +22,13 @@
     "groups measure tensor again on a build with it (build_engine.sh EULLM_RCCL=1), and on 2",
     "GCDs the internal all-reduce in the same binary (GGML_CUDA_ALLREDUCE=internal) as control.",
     "Labelled rccl in the spec, so only jobs submitted with EULLM_ENGINE_LABEL=rccl run them;",
-    "plan them alone: GROUP='rccl-*' ROUND=r-split-rccl EULLM_ENGINE_LABEL=rccl."
+    "plan them alone: GROUP='rccl-*' ROUND=r-split-rccl EULLM_ENGINE_LABEL=rccl.",
+    "With RCCL (r-split-rccl, 16-10-2026) tensor no longer collapses beyond two GCDs: Qwen3-32B",
+    "on four writes 52.7 tokens/s to one request (layer 36.1) and 384 to 16 (layer 260); the",
+    "235B at 16 writes 110 on four and 107 on eight (layer 76.8, 75.7). rccl-batch, rccl-480b",
+    "and rccl-120b (added the same day) go on: 32 and 64 requests, the 480B on eight GCDs and",
+    "gpt-oss-120b on two and four, layer beside tensor in the same binary where c02 has no row.",
+    "Plan them alone: GROUP='rccl-batch rccl-480b rccl-120b' ROUND=r-split-rccl2."
   ],
   "pull": ["hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M"],
   "defaults": {"kind": "throughput", "repeats": 3, "exclusive": true, "slot_ctx": 4096},
@@ -52,6 +58,20 @@
     {"name": "rccl-235b", "priority": 95, "est_s": 2400,
      "set": {"engine_label": "rccl", "model": "qwen3-235b-a22b-gguf-q4_k_m",
              "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
-     "axes": {"gcds": [4, 8], "batch": [1, 16]}}
+     "axes": {"gcds": [4, 8], "batch": [1, 16]}},
+    {"name": "rccl-batch", "priority": 94, "est_s": 2400,
+     "set": {"engine_label": "rccl", "gcds": 4},
+     "axes": {"model": ["qwen3-32b", "qwen3-235b-a22b-gguf-q4_k_m"], "batch": [32, 64],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "rccl-480b", "priority": 93, "est_s": 3000,
+     "set": {"engine_label": "rccl", "gcds": 8, "model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"},
+     "axes": {"batch": [1, 16, 32],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "rccl-120b", "priority": 92, "est_s": 1500,
+     "set": {"engine_label": "rccl", "model": "gpt-oss-120b-gguf-mxfp4",
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"gcds": [2, 4], "batch": [1, 16, 32]}}
   ]
 }

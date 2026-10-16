@@ -27,9 +27,13 @@
 #                         records the engine it found when it started, and a
 #                         binary rebuilt under it would run its later points
 #                         with a different one than it reports.
-#   EULLM_RCCL=1          link RCCL (GGML_HIP_RCCL=ON): the all-reduce of
-#                         --split-mode tensor across more than two GCDs goes
-#                         through it instead of ggml's generic path (c03)
+#   EULLM_RCCL=0          build without RCCL. RCCL is linked by default since
+#                         16-10-2026 (GGML_HIP_RCCL=ON): --split-mode tensor
+#                         sums across the GCDs through it, and without it ggml
+#                         has an all-reduce for two GPUs only and a generic
+#                         exchange beyond (c03: Qwen3-32B on four GCDs, one
+#                         request, 18.2 tokens/s without, 52.7 with). Layer
+#                         split, the default, does not use it
 
 set -euo pipefail
 
@@ -150,9 +154,9 @@ fi
 # x86-64-v3 (AVX2, FMA, F16C, BMI2), which LUMI-G's EPYC 7A53 (Zen 3) runs:
 # the same here, so what is measured is what users get. A target-cpu of your
 # own in RUSTFLAGS is kept.
-if [ "${EULLM_RCCL:-0}" = 1 ]; then
+if [ "${EULLM_RCCL:-1}" = 1 ]; then
     export GGML_HIP_RCCL=ON
-    log "RCCL build: tensor parallelism reduces across GCDs with RCCL"
+    log "RCCL build: tensor parallelism reduces across GCDs with RCCL (EULLM_RCCL=0 to leave it out)"
 fi
 case " ${RUSTFLAGS:-} " in
     *target-cpu=*) ;;

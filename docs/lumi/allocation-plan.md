@@ -158,7 +158,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
-| `c03-split-modes` | 52 | ~25 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (20 points) only on an RCCL build, in jobs labelled `rccl` |
+| `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 66 | ~47 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
@@ -232,8 +232,9 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    binaries, each one a round, never the default. RCCL has a measured
    reason since 15-10-2026: tensor parallelism beyond two GCDs reduces
    through it or through ggml's generic path (item 5 of the measured work,
-   below). `EULLM_RCCL=1 tools/lumi/build_engine.sh` builds it, and the
-   build fails if the binary does not link `librccl`.
+   below). `tools/lumi/build_engine.sh` links it by default since
+   16-10-2026, once c03 had measured it (`EULLM_RCCL=0` leaves it out), and
+   fails a build that does not link `librccl`.
 7. **`--moe-cache` on HIP.** It refuses any non-CUDA device and more than one
    GPU, and its pinned-memory patch is CUDA-only. Objective (5) on MoE.
 8. **Loading from Lustre: `--load-threads`** (07-10-2026, `c09`). c02's
@@ -619,6 +620,24 @@ In order:
    235B and 480B at 1, 8 and 32 (`LLAMA_MOE_CACHE_TRACE`, a file per point
    beside its log) to replay the policies on real choices.
 
+   Measured (`r-moe-evict`, `next15`, jobs 22882007 and 22882178,
+   15/16-10-2026, one repeat each), tokens/s, the old eviction → the new:
+
+   | requests | Qwen3-235B Q4_K_M | Qwen3-Coder-480B Q4_K_M |
+   |---:|---:|---:|
+   | 1 | 20.6 → 19.8 | 6.5 → 6.7 |
+   | 8 | 28.2 → 26.9 | 3.8 → **7.3** |
+   | 32 | 11.9 → **22.3** | 7.1 → 7.5 |
+
+   Where the simulator saw a step overflow the cache (the 235B at 32, the
+   480B at 8) the new eviction writes 1.9 times as fast; where a step fits,
+   the two are level within one repeat's noise, as they should be, being
+   the same eviction there. The 235B at 32 now writes more than `--fit`'s
+   split did from one GCD (15.1, on the SSE2 kernels; `c10-v3` measures it
+   again), nearly a quarter of what four GCDs whole write (98.4). The 480B
+   at 32 hardly moves: a step wants more than twice the experts its cache
+   holds, and the simulator gave it 28% of them in VRAM at best.
+
    **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
    `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
    x86-64's baseline and `build.rs` gave ggml no AVX, AVX2, FMA or F16C (the
@@ -659,6 +678,34 @@ In order:
    `rccl-*` groups measure tensor again with it, and on two GCDs the
    internal all-reduce in the same binary (`GGML_CUDA_ALLREDUCE=internal`)
    as control: 20 points, about 9 node-hours.
+
+   With RCCL (`r-split-rccl`, `next14`, job 22880434, 15/16-10-2026),
+   tokens/s, tensor without RCCL (`next12`) → with it, layer beside:
+
+   | model | GCDs | 1, tensor | 1, layer | 16, tensor | 16, layer |
+   |---|---:|---:|---:|---:|---:|
+   | Qwen3-32B | 2 | 43.3 → 45.4 | 38 | 324 → 321 | 265 |
+   | | 4 | 18.2 → **52.7** | 36.1 | 228 → **384** | 260 |
+   | | 8 | 7.8 → 18.1 | 34.4 | 91.5 → 165 | 252 |
+   | Qwen3.6-35B-A3B | 2 | 70.8 → 71.7 | 91.9 | 317 → 315 | 291 |
+   | | 4 | 25.5 → 53.9 | 82.6 | 283 → 304 | 285 |
+   | | 8 | 11.3 → 23.1 | 73.9 | 127 → 275 | 273 |
+   | Qwen3-235B Q4_K_M | 4 | 12.3 → 26.8 | 35.6 | 98.9 → **110** | 76.8 |
+   | | 8 | 4.2 → 11.1 | 33.3 | 55.3 → **107** | 75.7 |
+
+   On two GCDs RCCL and ggml's own all-reduce are level (the control, the
+   internal one in the same binary: 43.2 and 324 on the 32B, 71.4 and 317
+   on the 35B-A3B). Beyond two, RCCL is what tensor parallelism was
+   missing: the dense 32B on four GCDs answers one request 46% faster than
+   layer split and 39% faster than one GCD alone (about 38), and writes 48%
+   more with 16; the 235B with 16 requests writes 41-43% more than layer
+   split on four GCDs and on eight. Eight GCDs are still too many for one
+   request (the reductions cross the node's slower links), and the small
+   MoE gains nothing with one: its experts are small matrices to cut. Loads
+   are as slow as before (416-1,128 s for the 235B against about 31). RCCL
+   is linked by default in LUMI builds from 16-10-2026 (`EULLM_RCCL=0` to
+   leave it out); layer split does not use it. `rccl-batch`, `rccl-480b`
+   and `rccl-120b` go on to 32 and 64 requests, the 480B and gpt-oss-120b.
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
