@@ -27,7 +27,8 @@
 # FORGE_SFT_TAG puts the runs in $FORGE_RUN_DIR/sft-<tag> (another set of
 # pairs, other arms). With a held-out exam at FORGE_SFT_EXAM (default
 # $FORGE_DATA_DIR/eval/norm-exam.jsonl, make_norm_exam.py) every model also
-# sits it, into norm-exam.csv.
+# sits it, into norm-exam.csv; with FORGE_SFT_NORMS (legislation chunk files)
+# it sits it open book too, as "<label>-open".
 #
 # Resumable: a rerun continues a run from its checkpoint, skips a finished
 # adapter, a merged model and an evaluation already done, so rerunning it on
@@ -83,6 +84,16 @@ evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers>
     if [ -s "$EXAM" ] && ! in_csv "$1" "$SFT/norm-exam.csv"; then
         python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" --items "$EXAM" \
             --csv "$SFT/norm-exam.csv" --answers "$3/norm-exam-answers.jsonl" --quiet
+    fi
+    # The same exam open book (FORGE_SFT_NORMS: legislation chunk files): each
+    # question with the articles BM25 finds for it in front, as "<label>-open".
+    # Closed book, no model knew the articles (16-10-2026); this asks whether
+    # it can read them.
+    if [ -s "$EXAM" ] && [ -n "${FORGE_SFT_NORMS:-}" ] && ! in_csv "$1-open" "$SFT/norm-exam.csv"; then
+        # shellcheck disable=SC2086
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1-open" --items "$EXAM" \
+            --norms $FORGE_SFT_NORMS --csv "$SFT/norm-exam.csv" \
+            --answers "$3/norm-exam-open-answers.jsonl" --quiet
     fi
 }
 
