@@ -94,9 +94,8 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--fit-strict` | false | Refuse to load rather than offload a partial split |
 | `--cpu-moe` | false | MoE models: all expert tensors on CPU RAM (sized automatically when unset) |
 | `--n-cpu-moe` | `0` | MoE models: expert tensors on CPU for the first N layers only |
-| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another), `row` (each weight cut by rows; KV cache on `--main-gpu`), `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible; there is no `none`: make one GPU visible instead |
+| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another) or `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible. No `none` (make one GPU visible instead) and no `row` (llama.cpp's CUDA and ROCm backends no longer support it) |
 | `--tensor-split` | (by free memory) | Each GPU's share of the model, as proportions, e.g. `3,1` |
-| `--main-gpu` | `0` | The GPU (index among those visible) for the KV cache and intermediate results with `--split-mode row` |
 | `--ctx-size, -c` | `4096` | Total context window (split across batch slots) |
 | `--threads, -t` | all CPUs | Number of CPU threads |
 | `--batch-size` | `1` | Concurrent requests served by the batching scheduler (raise `--ctx-size` with it) |
@@ -2095,15 +2094,20 @@ The Engine uses [`tracing`](https://docs.rs/tracing) for structured logging. Con
 # Minimal (errors only)
 RUST_LOG=error eullm run ./model.gguf
 
-# Normal operation (recommended) — shows request params, context budget, cap warnings
-RUST_LOG=eullm_engine=info eullm run ./model.gguf
+# Normal operation (the default) — shows request params, context budget, cap warnings
+RUST_LOG=eullm=info eullm run ./model.gguf
 
 # Verbose — adds prefill chunk details, decode loop, batch scheduling
-RUST_LOG=eullm_engine=debug eullm run ./model.gguf
+RUST_LOG=eullm=debug eullm run ./model.gguf
 
-# Everything (very noisy, includes llama.cpp internals)
-RUST_LOG=trace eullm run ./model.gguf
+# llama.cpp's own log as well: what it loads where, and why it refuses a load
+# that the engine reports only as "null result from llama cpp"
+RUST_LOG=eullm=info,llama-cpp-2=info eullm run ./model.gguf
 ```
+
+The engine's target is `eullm` (the binary's name); `eullm_engine` matches
+nothing. llama.cpp's own log is dropped unless `RUST_LOG` names its target,
+`llama-cpp-2`; then all of it is shown, whatever level the filter gives it.
 
 ### What gets logged
 

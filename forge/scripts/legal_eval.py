@@ -150,7 +150,8 @@ def load_model(auto_cls, path: str, n_gpus: int, fallback_cls=None):
     return model.to("cuda") if n_gpus == 1 else model
 
 
-def retrieve(index, item, k: int, absent: bool = False) -> tuple[list[dict], str]:
+def retrieve(index, item, k: int, absent: bool = False,
+             note: bool = True) -> tuple[list[dict], str]:
     """The texts an item is asked with, and the note on a missing article.
 
     With ``absent`` the item's own article (``metadata`` code and articolo,
@@ -159,7 +160,8 @@ def retrieve(index, item, k: int, absent: bool = False) -> tuple[list[dict], str
     place; no note is given, since a RAG whose retrieval missed gives none.
     """
     if not absent:
-        return index.search(item.question, k), index.missing_article_note(item.question)
+        found = index.search(item.question, k)
+        return found, (index.missing_article_note(item.question) if note else "")
     code, number = item.metadata.get("code"), item.metadata.get("articolo")
     found = [r for r in index.search(item.question, k + 6)
              if not (r.get("code") == code and number in index.articles_of(r))]
@@ -229,6 +231,11 @@ def main() -> int:
                     help="legislazione_*.chunks.jsonl files: ask OPEN BOOK, "
                          "with the retrieved norms in the prompt")
     ap.add_argument("--k", type=int, default=3, help="norms retrieved per question")
+    ap.add_argument("--no-note", action="store_true",
+                    help="never tell the model an article it asks about is not in the texts: "
+                         "RAG Enterprise does not, and on 2026-10-16 a model that answered every "
+                         "absent article right with the note (0:0 against the published 8B) "
+                         "lost 43 of them without it, inside RAG Enterprise")
     ap.add_argument("--absent", action="store_true",
                     help="with --norms: take each item's own article out of the texts "
                          "(the abstention exam; see ABSTENTION above)")
@@ -286,7 +293,8 @@ def main() -> int:
     for it in items:
         content = it.question
         if index:
-            found, note = retrieve(index, it, args.k, absent=args.absent)
+            found, note = retrieve(index, it, args.k, absent=args.absent,
+                                   note=not args.no_note)
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)

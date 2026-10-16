@@ -65,7 +65,7 @@ field. The ones that matter:
 | `prompt_tokens` | a synthetic prompt of about this many tokens, prefix cache defeated |
 | `sets`, `min/max_duration_s` | workload: which sets, and how long; it stretches to the time free |
 | `extra_args` | anything else for `eullm serve` (`--fit-strict` in the shipped specs) |
-| `env` | environment variables for the point's servers, e.g. `{"LLAMA_MOE_CACHE_STATS": "64"}`; needs the runner of 15-10-2026 |
+| `env` | environment variables for the point's servers, e.g. `{"LLAMA_MOE_CACHE_STATS": "64"}`; needs the runner of 15-10-2026. In a value, `{workdir}` is the job's directory of server logs and `{point}` the point's id (`"LLAMA_MOE_CACHE_TRACE": "{workdir}/{point}.moe-trace"`: a file per point beside its log), which needs runner 8 |
 | `priority`, `est_s` | scheduling only; not part of a point's identity |
 
 A `decision` point serves a decision model alone (`eullm serve

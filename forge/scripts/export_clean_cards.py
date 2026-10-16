@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ruling cards with nothing of the case left in them: what may leave Leonardo.
+"""The ruling cards with nothing of the case left in them: case law without personal data.
 
     python forge/scripts/export_clean_cards.py \\
         $WORK/eullm_runs/cds/schede.jsonl $WORK/eullm_runs/cds/schede-b.jsonl \\
@@ -7,8 +7,7 @@
         --out $WORK/eullm_runs/cds/schede-clean.jsonl
 
 The Consiglio di Stato rulings are pseudonymised, not anonymous: personal
-data. JUPITER's PI agreement (signed 2026-10-14) forbids processing any, so
-the rulings never go there. A card (cds_schede.py) is what a teacher distils
+data. A card (cds_schede.py) is what a teacher distils
 out of a ruling -- principles in the abstract, norms applied, outcome,
 questions -- and it was written to hold the law and not the case. This keeps
 only the cards that are, checked rather than assumed, and takes off what

@@ -57,13 +57,30 @@ pub const fn has_gpu_backend() -> bool {
 ///
 /// Also silences llama.cpp's own log lines (CUDA graph warmup etc.) once,
 /// here, rather than per-model-load: `void_logs` takes `&mut LlamaBackend`,
-/// which a shared, already-cloned `Arc` can no longer offer.
+/// which a shared, already-cloned `Arc` can no longer offer. Unless asked
+/// for: see [`llama_log_wanted`].
 pub fn init_shared_backend()
 -> Result<std::sync::Arc<LlamaBackend>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Initializing llama.cpp backend...");
     let mut backend = LlamaBackend::init()?;
-    backend.void_logs();
+    if llama_log_wanted(std::env::var("RUST_LOG").ok().as_deref()) {
+        tracing::info!("llama.cpp's log goes to the log (RUST_LOG names llama-cpp-2)");
+        llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
+    } else {
+        backend.void_logs();
+    }
     Ok(std::sync::Arc::new(backend))
+}
+
+/// Whether llama.cpp's own log lines are wanted: when `RUST_LOG` names
+/// their tracing target, `llama-cpp-2` (`RUST_LOG=eullm=info,llama-cpp-2=info`).
+/// They say why llama.cpp refuses a load, which the engine reports only as
+/// "null result": on LUMI every `--split-mode row` load failed that way
+/// (c03, 15-10-2026). Off otherwise, as before: the bindings hand the lines
+/// to tracing without asking its filter first, so `eullm=info` would not
+/// keep them out.
+fn llama_log_wanted(rust_log: Option<&str>) -> bool {
+    rust_log.is_some_and(|filter| filter.contains("llama-cpp-2"))
 }
 
 /// The one backend every test in this binary shares, for the reason
@@ -663,7 +680,7 @@ pub struct InferenceConfig {
     pub load_threads: crate::readahead::LoadThreads,
     /// `--kv-unified`: one KV cache for every sequence instead of one each.
     pub kv_unified: bool,
-    /// `--split-mode`, `--tensor-split`, `--main-gpu`: how the model goes
+    /// `--split-mode`, `--tensor-split`: how the model goes
     /// across several GPUs (see `crate::gpu_split`).
     pub gpu_split: crate::gpu_split::GpuSplit,
 }
@@ -1895,8 +1912,7 @@ impl InferenceEngine {
         } else {
             model_params
         };
-        // `--split-mode`, `--tensor-split`, `--main-gpu`: llama.cpp's
-        // defaults unless given.
+        // `--split-mode`, `--tensor-split`: llama.cpp's defaults unless given.
         if !config.gpu_split.is_default() {
             tracing::info!("Split across the GPUs: {}", config.gpu_split.describe());
         }
@@ -3202,6 +3218,14 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
     const GIB: u64 = 1024 * MIB;
+
+    #[test]
+    fn llama_cpps_log_is_shown_only_when_rust_log_names_it() {
+        assert!(!llama_log_wanted(None));
+        assert!(!llama_log_wanted(Some("eullm=info")));
+        assert!(!llama_log_wanted(Some("debug")));
+        assert!(llama_log_wanted(Some("eullm=info,llama-cpp-2=info")));
+    }
 
     /// The margin rejection exactly as the probe prints it.
     fn margin_text(free: u64, total: u64) -> String {

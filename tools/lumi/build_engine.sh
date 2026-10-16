@@ -27,6 +27,13 @@
 #                         records the engine it found when it started, and a
 #                         binary rebuilt under it would run its later points
 #                         with a different one than it reports.
+#   EULLM_RCCL=0          build without RCCL. RCCL is linked by default since
+#                         16-10-2026 (GGML_HIP_RCCL=ON): --split-mode tensor
+#                         sums across the GCDs through it, and without it ggml
+#                         has an all-reduce for two GPUs only and a generic
+#                         exchange beyond (c03: Qwen3-32B on four GCDs, one
+#                         request, 18.2 tokens/s without, 52.7 with). Layer
+#                         split, the default, does not use it
 
 set -euo pipefail
 
@@ -136,7 +143,26 @@ fi
 # EULLM_AMDGPU_TARGETS is not optional here even though the build script treats
 # it as such: without it the HIP architecture is resolved from the GPUs in this
 # machine, and a login node has none.
-log "building for $EULLM_AMDGPU_TARGETS (this takes a while — tmux recommended)"
+#
+# The CPU half of llama.cpp is compiled for the instruction set Rust targets
+# (build.rs turns `-C target-cpu` and the target's features into ggml's
+# GGML_AVX2, GGML_FMA, ... and -march). Without a target-cpu that is x86-64's
+# baseline, SSE2, and ggml's CPU kernels ran without AVX2 or FMA in every
+# build of this script until 15-10-2026: the experts that --cpu-moe, --fit's
+# split or --n-cpu-moe leave in RAM are computed by them (c10: Qwen3-Coder-480B
+# with --cpu-moe wrote 0.6 tokens/s). The published binaries are built for
+# x86-64-v3 (AVX2, FMA, F16C, BMI2), which LUMI-G's EPYC 7A53 (Zen 3) runs:
+# the same here, so what is measured is what users get. A target-cpu of your
+# own in RUSTFLAGS is kept.
+if [ "${EULLM_RCCL:-1}" = 1 ]; then
+    export GGML_HIP_RCCL=ON
+    log "RCCL build: tensor parallelism reduces across GCDs with RCCL (EULLM_RCCL=0 to leave it out)"
+fi
+case " ${RUSTFLAGS:-} " in
+    *target-cpu=*) ;;
+    *) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }-C target-cpu=x86-64-v3" ;;
+esac
+log "building for $EULLM_AMDGPU_TARGETS, CPU code for ${RUSTFLAGS##*target-cpu=} (this takes a while — tmux recommended)"
 cd "$EULLM_REPO"
 ROCM_PATH="$ROCM_PATH" \
 HIPCXX="${HIPCXX:-$ROCM_PATH/llvm/bin/clang++}" \
@@ -168,6 +194,10 @@ if ! grep -q "amdhsa--${EULLM_AMDGPU_TARGETS}" <<<"$ARCHS"; then
 fi
 
 ok "device code present for: $(tr '\n' ' ' <<<"$ARCHS")"
+if [ "${GGML_HIP_RCCL:-}" = ON ]; then
+    grep -q librccl <<<"$LINKED" || err "an RCCL build that does not link librccl"
+    ok "links RCCL: $(grep -o 'librccl[^ ]*' <<<"$LINKED" | head -1)"
+fi
 ok "binary: $BIN"
 echo
 echo "Next: pull a model from a login node (compute nodes have no outbound"

@@ -1,19 +1,25 @@
-//! How a model is laid out over several GPUs: `--split-mode`,
-//! `--tensor-split` and `--main-gpu`, llama.cpp's `llama_model_params` fields
-//! of the same names (llama-server's `-sm`, `-ts`, `-mg`).
+//! How a model is laid out over several GPUs: `--split-mode` and
+//! `--tensor-split`, llama.cpp's `llama_model_params` fields of the same
+//! names (llama-server's `-sm` and `-ts`).
 //!
 //! The engine used llama.cpp's defaults until 15-10-2026: every layer whole
 //! on one GPU, the layers dealt out by each GPU's free memory, so a request
 //! runs through the GPUs one after another. On LUMI's MI250X that added no
 //! throughput over one GCD (12-09-2026), and a second server on the same
-//! GCDs doubled it (`docs/lumi/allocation-plan.md`). Row and tensor splits
-//! cut each weight across the GPUs, which can make one request faster
-//! instead; the `c03` campaign measures them. With one GPU visible none of
-//! this changes anything.
+//! GCDs doubled it (`docs/lumi/allocation-plan.md`). The tensor split cuts
+//! each weight across the GPUs, which can make one request faster instead;
+//! the `c03` campaign measures it. With one GPU visible none of this changes
+//! anything.
 //!
-//! No `none` mode: the sizing (`fit::vram_bytes`) counts every visible GPU,
-//! and one GPU is chosen by making only it visible (`CUDA_VISIBLE_DEVICES`,
-//! `ROCR_VISIBLE_DEVICES`), as the campaign runner does.
+//! Not offered:
+//! - `none`: the sizing (`fit::vram_bytes`) counts every visible GPU, and one
+//!   GPU is chosen by making only it visible (`CUDA_VISIBLE_DEVICES`,
+//!   `ROCR_VISIBLE_DEVICES`), as the campaign runner does;
+//! - `row`: llama.cpp's CUDA backend, which is also its ROCm backend, no
+//!   longer provides the split buffers it needs at the commit EuLLM pins, and
+//!   the load fails ("device ROCm0 does not support split buffers", stock
+//!   llama-bench on LUMI, 15-10-2026; only SYCL and Hexagon still have them);
+//! - `--main-gpu`: llama.cpp reads it only with `none` and `row`.
 
 use llama_cpp_2::model::params::{LlamaModelParams, LlamaSplitMode};
 
@@ -23,9 +29,6 @@ pub enum SplitMode {
     /// Whole layers per GPU, one GPU after another (llama.cpp's default).
     #[default]
     Layer,
-    /// Each weight cut by rows across the GPUs; the KV cache and the
-    /// intermediate results on `--main-gpu`.
-    Row,
     /// Weights and KV cache cut across the GPUs, which work on every layer
     /// together (llama.cpp's experimental tensor parallelism; not every
     /// architecture has it, and the load says so).
@@ -36,7 +39,6 @@ impl SplitMode {
     fn llama(self) -> LlamaSplitMode {
         match self {
             SplitMode::Layer => LlamaSplitMode::Layer,
-            SplitMode::Row => LlamaSplitMode::Row,
             SplitMode::Tensor => LlamaSplitMode::Tensor,
         }
     }
@@ -44,22 +46,24 @@ impl SplitMode {
     fn name(self) -> &'static str {
         match self {
             SplitMode::Layer => "layer",
-            SplitMode::Row => "row",
             SplitMode::Tensor => "tensor",
         }
     }
 }
 
-/// `--split-mode layer|row|tensor`.
+/// `--split-mode layer|tensor`.
 pub fn parse_split_mode(s: &str) -> Result<SplitMode, String> {
     match s.trim().to_ascii_lowercase().as_str() {
         "layer" => Ok(SplitMode::Layer),
-        "row" => Ok(SplitMode::Row),
         "tensor" => Ok(SplitMode::Tensor),
         "none" => Err("`none` is not offered: make one GPU visible instead \
                        (CUDA_VISIBLE_DEVICES, ROCR_VISIBLE_DEVICES)"
             .to_string()),
-        other => Err(format!("expected layer, row or tensor, got `{other}`")),
+        "row" => Err("`row` is not offered: llama.cpp's CUDA and ROCm backends no longer \
+                      have the split buffers it needs, and the load fails; `tensor` cuts \
+                      the weights across the GPUs instead"
+            .to_string()),
+        other => Err(format!("expected layer or tensor, got `{other}`")),
     }
 }
 
@@ -88,23 +92,20 @@ pub fn parse_tensor_split(s: &str) -> Result<TensorSplit, String> {
     Ok(TensorSplit(split))
 }
 
-/// The three flags together, as a load applies them.
+/// The flags together, as a load applies them.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GpuSplit {
     pub mode: SplitMode,
     /// Empty: llama.cpp splits by each GPU's free memory.
     pub tensor_split: Vec<f32>,
-    /// `None` leaves llama.cpp's (the first GPU).
-    pub main_gpu: Option<u32>,
 }
 
 impl GpuSplit {
-    /// The three flags as `RuntimeOpts` holds them.
-    pub fn from_flags(mode: SplitMode, tensor_split: Option<TensorSplit>, main_gpu: Option<u32>) -> Self {
+    /// The flags as `RuntimeOpts` holds them.
+    pub fn from_flags(mode: SplitMode, tensor_split: Option<TensorSplit>) -> Self {
         GpuSplit {
             mode,
             tensor_split: tensor_split.map(|t| t.0).unwrap_or_default(),
-            main_gpu,
         }
     }
 
@@ -115,16 +116,13 @@ impl GpuSplit {
 
     /// The model's parameters with the split set.
     pub fn apply(&self, params: LlamaModelParams) -> Result<LlamaModelParams, String> {
-        let mut params = params.with_split_mode(self.mode.llama());
-        if let Some(main_gpu) = self.main_gpu {
-            params = params.with_main_gpu(i32::try_from(main_gpu).unwrap_or(i32::MAX));
-        }
         params
+            .with_split_mode(self.mode.llama())
             .with_tensor_split(&self.tensor_split)
             .map_err(|e| format!("--tensor-split: {e}"))
     }
 
-    /// For the load log and the banner: `row, 3:1, main GPU 1`.
+    /// For the load log: `tensor, 3:1`.
     pub fn describe(&self) -> String {
         let mut parts = vec![self.mode.name().to_string()];
         if !self.tensor_split.is_empty() {
@@ -136,9 +134,6 @@ impl GpuSplit {
                     .join(":"),
             );
         }
-        if let Some(main_gpu) = self.main_gpu {
-            parts.push(format!("main GPU {main_gpu}"));
-        }
         parts.join(", ")
     }
 }
@@ -148,11 +143,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_split_modes_parse_and_none_says_what_to_do_instead() {
+    fn the_split_modes_parse_and_the_others_say_what_to_do_instead() {
         assert_eq!(parse_split_mode("layer"), Ok(SplitMode::Layer));
-        assert_eq!(parse_split_mode("Row"), Ok(SplitMode::Row));
-        assert_eq!(parse_split_mode("tensor"), Ok(SplitMode::Tensor));
+        assert_eq!(parse_split_mode("Tensor"), Ok(SplitMode::Tensor));
         assert!(parse_split_mode("none").unwrap_err().contains("VISIBLE_DEVICES"));
+        assert!(parse_split_mode("row").unwrap_err().contains("split buffers"));
         assert!(parse_split_mode("columns").is_err());
     }
 
@@ -170,12 +165,11 @@ mod tests {
     #[test]
     fn the_split_reaches_the_model_parameters() {
         assert!(GpuSplit::default().is_default());
-        let split = GpuSplit::from_flags(SplitMode::Row, Some(TensorSplit(vec![3.0, 1.0])), Some(1));
+        let split = GpuSplit::from_flags(SplitMode::Tensor, Some(TensorSplit(vec![3.0, 1.0])));
         assert!(!split.is_default());
-        assert_eq!(split.describe(), "row, 3:1, main GPU 1");
+        assert_eq!(split.describe(), "tensor, 3:1");
         let params = split.apply(LlamaModelParams::default()).unwrap();
-        assert_eq!(params.split_mode(), Ok(LlamaSplitMode::Row));
-        assert_eq!(params.main_gpu(), 1);
+        assert_eq!(params.split_mode(), Ok(LlamaSplitMode::Tensor));
         if llama_cpp_2::max_devices() >= 2 {
             assert_eq!(&params.tensor_split()[..2], &[3.0, 1.0]);
         }

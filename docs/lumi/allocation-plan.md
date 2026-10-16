@@ -55,6 +55,28 @@ asked for. Round `r-next10` (`c01` + `c02` on the engine `next10`, 280
 points, about 250 node-h) went on two nodes that night, and `--moe-cache` on
 HIP was brought forward from January (`c10-moe-ram`, below).
 
+15-10-2026: round `r-next15` (`c01`, `c02`, `c06`, `c07`, `c08` on the
+engine `next15`, 566 points, up to 262 node-h) queued for the night and the
+day after, when nobody watches: the two nodes of the `evict` jobs go on to
+it, and each gets a second 48-hour link. Its reason is a build flag. `next13`
+is the first engine whose CPU code is not SSE2 (x86-64-v3), and every round
+before it measured EuLLM's CPU side (sampling, tokenizing, what `--fit`
+leaves on the CPU) on SSE2 against a llama-server that ggml builds for the
+login node's CPU (`GGML_NATIVE`, on by default: AVX2): `c07`'s comparisons
+were not on equal footing until now. `next15` also carries the expert
+cache's new eviction (llama.cpp patch 0008).
+
+The same night (645.3 node-h spent, 198.5 behind the straight line, seven
+nodes busy) the two `next11` jobs of `c10` were cancelled: `c10-v3` measures
+all their points again on `next13`, and one of them had held a whole node
+for 9.8 hours on DeepSeek-V3.1 with `--cpu-moe` on SSE2 kernels, a token
+every few minutes per request. The request timeout (1,800 s) is per read,
+so a server that streams that slowly never reaches it; a limit on a point's
+whole duration is the runner's missing piece. The v3 points of the same
+model with `--cpu-moe` at 4 and 16 requests and the `next11` points left in
+the queue were moved to `parked/` (one request with `--cpu-moe` and the
+480B's points say what the CPU does with the experts).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
@@ -136,8 +158,8 @@ sustained load; dense and MoE; one device to a full node).
 | `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
-| `c03-split-modes` | 48 | ~23 | `--split-mode` layer, row and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`) |
-| `c10-moe-ram` | 48 | ~35 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
+| `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
+| `c10-moe-ram` | 66 | ~47 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -184,7 +206,11 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    split only. This is c03. Exposed on 15-10-2026 (`--split-mode`,
    `--tensor-split`, `--main-gpu`, `crate::gpu_split`; no `none`, since one
    GPU is chosen by making only it visible), and `c03-split-modes` measures
-   layer, row and tensor on 2, 4 and 8 GCDs at 1 and 16 requests.
+   layer and tensor on 2, 4 and 8 GCDs at 1 and 16 requests. Row split is
+   not there to measure: every load failed (`r-split`, next12), and so does
+   stock llama-bench, "device ROCm0 does not support split buffers"; the
+   CUDA backend that ggml builds for ROCm no longer has them (only SYCL and
+   Hexagon do), so `row` and `--main-gpu` were dropped from the engine.
 3. **The harness (WP0)** — done in `bench/campaign`: one schema
    (`eullm.bench/1`), TTFT, prefill and decode rates, cold/warm load, HBM per
    device, repeats with their spread, and provenance (engine version and
@@ -203,7 +229,12 @@ open on `main` at 0.7.20, and each one ends a round with a before/after.
    `--bind none` is the before/after that says whether the engine should do
    it itself.
 6. **An RCCL build**, `GGML_HIP_RCCL=ON`, and `GGML_HIP_GRAPHS`: experiment
-   binaries, each one a round, never the default.
+   binaries, each one a round, never the default. RCCL has a measured
+   reason since 15-10-2026: tensor parallelism beyond two GCDs reduces
+   through it or through ggml's generic path (item 5 of the measured work,
+   below). `tools/lumi/build_engine.sh` links it by default since
+   16-10-2026, once c03 had measured it (`EULLM_RCCL=0` leaves it out), and
+   fails a build that does not link `librccl`.
 7. **`--moe-cache` on HIP.** It refuses any non-CUDA device and more than one
    GPU, and its pinned-memory patch is CUDA-only. Objective (5) on MoE.
 8. **Loading from Lustre: `--load-threads`** (07-10-2026, `c09`). c02's
@@ -558,6 +589,123 @@ In order:
    experts far slower than the link copies them, which phase 3 has to
    reckon with. `ram-stats` (runner 7) records the cache's step statistics
    to say where the steps with many requests go.
+
+   What they said (`LLAMA_MOE_CACHE_STATS=64`, 15-10-2026). The link from
+   the node's RAM to a GCD carried the cache's copies at 16-24 GB/s. On the
+   235B with one request a step took 44 ms: 30 ms of the GPU computing the
+   94 layers, 12 ms copying the 2.5% of experts not in VRAM (200 MiB a
+   step). With eight, 8 tokens a step, 296 ms: 122 of computing and 170 of
+   copying 3.7 GiB, 88% of the experts in VRAM. With 32, the cache found
+   0.85% of the experts it was asked for: a step of 32 tokens wants more
+   experts than the cache holds, cycling through the layers in the same
+   order every step, which is the case where least-recently-used keeps
+   evicting what the next step needs, so every expert went over the link
+   (7.7 TB in the point). The 480B's working set is larger than its cache
+   even for one request (81% in VRAM, 2.5 GiB a step, 100 of 150 ms
+   copying). Two changes follow: the cache should stop evicting when a
+   step wants more than it holds, keeping what it has and copying the rest,
+   and the CPU's share is to be measured again (below) before phase 3.
+
+   The eviction (15-10-2026). `bench/moe_cache_sim` replays the experts the
+   routers choose through the cache's policies; on routing calibrated to
+   these statistics (it copies 50.7 GiB a step with LRU on the 235B at 32,
+   where LUMI copied 50.4) the eviction of llama.cpp patch 0008 keeps 72% of
+   the experts in VRAM at 32 instead of 0%, against 81% for Belady's bound,
+   and 57% for the 480B at 8 instead of 0%, the same as LRU wherever a step
+   fits. On the 235B at 32 that is 14 GiB copied a step instead of 51, about
+   0.7 s of copying instead of 2.4 at the measured 22 GB/s, so roughly
+   three times the 12.2 tokens/s, above `--fit`'s split (15.1). The `evict`
+   group of c10 (12 points, `next15`) measures it against
+   `LLAMA_MOE_CACHE_EVICT=lru`, and its points write the routing of the
+   235B and 480B at 1, 8 and 32 (`LLAMA_MOE_CACHE_TRACE`, a file per point
+   beside its log) to replay the policies on real choices.
+
+   Measured (`r-moe-evict`, `next15`, jobs 22882007 and 22882178,
+   15/16-10-2026, one repeat each), tokens/s, the old eviction → the new:
+
+   | requests | Qwen3-235B Q4_K_M | Qwen3-Coder-480B Q4_K_M |
+   |---:|---:|---:|
+   | 1 | 20.6 → 19.8 | 6.5 → 6.7 |
+   | 8 | 28.2 → 26.9 | 3.8 → **7.3** |
+   | 32 | 11.9 → **22.3** | 7.1 → 7.5 |
+
+   Where the simulator saw a step overflow the cache (the 235B at 32, the
+   480B at 8) the new eviction writes 1.9 times as fast; where a step fits,
+   the two are level within one repeat's noise, as they should be, being
+   the same eviction there. The 235B at 32 now writes more than `--fit`'s
+   split did from one GCD (15.1, on the SSE2 kernels; `c10-v3` measures it
+   again), nearly a quarter of what four GCDs whole write (98.4). The 480B
+   at 32 hardly moves: a step wants more than twice the experts its cache
+   holds, and the simulator gave it 28% of them in VRAM at best.
+
+   **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
+   `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
+   x86-64's baseline and `build.rs` gave ggml no AVX, AVX2, FMA or F16C (the
+   published binaries are built for x86-64-v3). Everything the CPU computes
+   ran on those kernels: `--cpu-moe` above, and the experts `--fit`'s split
+   leaves in RAM, so both columns are low by that much; the cache's copies
+   and the GPU's work are not affected. The build now targets x86-64-v3, and
+   c10 is measured again on it (`next13`).
+5. **Split modes** (`c03`, item 2 above; objective (3)). Layer against
+   tensor (`r-split`, `next12`, 15-10-2026, one node a point), tokens/s:
+
+   | model | GCDs | 1, layer | 1, tensor | 16, layer | 16, tensor |
+   |---|---:|---:|---:|---:|---:|
+   | Qwen3-32B Q4_K_M | 2 | 38 | 43.3 | 265 | 324 |
+   | | 4 | 36.1 | 18.2 | 260 | 228 |
+   | | 8 | 34.4 | 7.8 | 252 | 91.5 |
+   | Qwen3.6-35B-A3B | 2 | 91.9 | 70.8 | 291 | 317 |
+   | | 4 | 82.6 | 25.5 | 285 | 283 |
+   | | 8 | 73.9 | 11.3 | 273 | 127 |
+   | Qwen3-235B Q4_K_M | 4 | 35.6 | 12.3 | 76.8 | 98.9 |
+   | | 8 | 33.3 | 4.2 | 75.7 | 55.3 |
+
+   Layer split loses a little with every GCD added, as on 12-09. Tensor is
+   the first arrangement that made one request faster across GCDs (the 32B
+   on two, +14%; +22% at 16), and the 235B at 16 on four GCDs gains 29%;
+   beyond two GCDs one request collapses, to an eighth to a quarter of
+   layer's speed on eight. Tensor loads were slow too: 414-1,131 s for the
+   235B against about 31 s.
+
+   The cause is in ggml (`ggml-cuda.cu`, `ggml_backend_cuda_comm_init`):
+   tensor parallelism sums partial results across the GPUs after every
+   cut layer, through NCCL (RCCL on ROCm) when it is compiled in; without
+   it, through an internal all-reduce that exists for exactly two devices
+   ("internal AllReduce init failed (n_devices != 2?)"); beyond two,
+   through a generic exchange of the meta-backend. The engine had no
+   RCCL, so 4 and 8 GCDs measured the generic one. An RCCL build
+   (`EULLM_RCCL=1 tools/lumi/build_engine.sh`, item 6 above) and c03's
+   `rccl-*` groups measure tensor again with it, and on two GCDs the
+   internal all-reduce in the same binary (`GGML_CUDA_ALLREDUCE=internal`)
+   as control: 20 points, about 9 node-hours.
+
+   With RCCL (`r-split-rccl`, `next14`, job 22880434, 15/16-10-2026),
+   tokens/s, tensor without RCCL (`next12`) → with it, layer beside:
+
+   | model | GCDs | 1, tensor | 1, layer | 16, tensor | 16, layer |
+   |---|---:|---:|---:|---:|---:|
+   | Qwen3-32B | 2 | 43.3 → 45.4 | 38 | 324 → 321 | 265 |
+   | | 4 | 18.2 → **52.7** | 36.1 | 228 → **384** | 260 |
+   | | 8 | 7.8 → 18.1 | 34.4 | 91.5 → 165 | 252 |
+   | Qwen3.6-35B-A3B | 2 | 70.8 → 71.7 | 91.9 | 317 → 315 | 291 |
+   | | 4 | 25.5 → 53.9 | 82.6 | 283 → 304 | 285 |
+   | | 8 | 11.3 → 23.1 | 73.9 | 127 → 275 | 273 |
+   | Qwen3-235B Q4_K_M | 4 | 12.3 → 26.8 | 35.6 | 98.9 → **110** | 76.8 |
+   | | 8 | 4.2 → 11.1 | 33.3 | 55.3 → **107** | 75.7 |
+
+   On two GCDs RCCL and ggml's own all-reduce are level (the control, the
+   internal one in the same binary: 43.2 and 324 on the 32B, 71.4 and 317
+   on the 35B-A3B). Beyond two, RCCL is what tensor parallelism was
+   missing: the dense 32B on four GCDs answers one request 46% faster than
+   layer split and 39% faster than one GCD alone (about 38), and writes 48%
+   more with 16; the 235B with 16 requests writes 41-43% more than layer
+   split on four GCDs and on eight. Eight GCDs are still too many for one
+   request (the reductions cross the node's slower links), and the small
+   MoE gains nothing with one: its experts are small matrices to cut. Loads
+   are as slow as before (416-1,128 s for the 235B against about 31). RCCL
+   is linked by default in LUMI builds from 16-10-2026 (`EULLM_RCCL=0` to
+   leave it out); layer split does not use it. `rccl-batch`, `rccl-480b`
+   and `rccl-120b` go on to 32 and 64 requests, the 480B and gpt-oss-120b.
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
