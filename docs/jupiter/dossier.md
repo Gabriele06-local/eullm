@@ -12,7 +12,7 @@ repository) and updated as the work goes; the working notes behind it are in
 `docs/jupiter/allocation-plan.md`. Every figure below comes from a job on
 JUPITER, named by its Slurm job id.
 
-**Last updated: 15-10-2026, evening.**
+**Last updated: 16-10-2026, morning.**
 
 ## 1. At a glance
 
@@ -20,7 +20,7 @@ JUPITER, named by its Slurm job id.
 |---|---|
 | Awarded | 06-10-2026; first job on 14-10-2026 |
 | System | JUPITER Booster: 4× GH200 (H100 96 GB HBM3, 72-core Neoverse-V2 Grace) a node, whole nodes only |
-| Spent so far | 21.3 GPU-hours by 15-10-2026 evening (`tools/jupiter/budget.sh`); 64.5 GPU-hours a day spend the rest by 31-12-2026 |
+| Spent so far | 21.3 GPU-hours by 15-10-2026 evening, and 13.0 more for the five jobs of the night to 16-10 (`tools/jupiter/budget.sh` gives the running total); 64.5 GPU-hours a day spend the rest by 31-12-2026 |
 | Codes | EULLM Engine (Rust, llama.cpp), EULLM Forge (Python: PyTorch 2.9.1 of the site, Transformers 5.19, PEFT 0.21) |
 | Data on JUPITER | Legislation only (Normattiva, EUR-Lex: public domain) and public benchmarks. No personal data (§7) |
 
@@ -28,15 +28,15 @@ JUPITER, named by its Slurm job id.
 
 | # | Deliverable | Leonardo baseline (A100 64 GB) | Status on JUPITER |
 |---|---|---|---|
-| 1 | The pipeline runs on aarch64 + GH200, unattended, evaluation included | runs end to end | First distillation chain ran unattended over three links (§5.3) |
+| 1 | The pipeline runs on aarch64 + GH200, unattended, evaluation included | runs end to end | Distillation, instruction tuning, generation and evaluation ran unattended overnight, job after job (§5.3, §5.5) |
 | 2 | Distillation throughput per step, teacher in BF16 on one GPU | ~380 optimiser steps/h, teacher on 2 GPUs + student on a 3rd | **548–553 steps/h** with 2,048-token micro-batches, teacher alone on one GPU (§5.2) |
 | 3 | Two runs per node (2 GPUs each) | 1 run per 3 GPUs | **Done**: two runs side by side at the same speed (§5.2, §5.3) |
-| 4 | Instruction tuning time | 4B, 3,400 examples, 2 epochs: 46 min on one GPU | To do |
+| 4 | Instruction tuning time | 4B, 3,400 examples, 2 epochs: 46 min on one GPU | **24.4 min** for the 4B on 4,272 pairs, 2 epochs, one GH200: 0.34 s a pair against 0.81, 2.4× per GPU; the 8B 28 min; four runs side by side (§5.5) |
 | 5 | A faster inference backend for synthetic data generation | 58 tok/s on 3 A100, 30B-A3B-Instruct in plain Transformers | **Done: 2,279 tok/s on one node (4 GH200), same model, EULLM Engine: 39× per node** (§5.4) |
-| 6 | Quality on the fixed held-out set | e.g. the 5.11 → 5.92 perplexity regression it caught | Held-out legislation set built (234 chunks); evaluated during the runs |
-| 7 | Go/no-go on the Qwen3.5 family | — | To do |
-| 8 | GPU-hours per distillation epoch and per complete vertical | — | First measurement from the running chain |
-| 9 | Energy use and carbon footprint | — | GPU power sampled in every job (§6) |
+| 6 | Quality on the fixed held-out set | e.g. the 5.11 → 5.92 perplexity regression it caught | Ten seed questions: no difference between the models (0.39–0.46 keyword coverage). A 217-question exam drawn from the text of the law, being sat by every model (§5.5) |
+| 7 | Go/no-go on the Qwen3.5 family | — | Probe: the pair loads and generates as fast as Qwen3; a training step took 1.79 s on the reference kernels, the fast ones now installed; distillation on legislation queued (§5.6) |
+| 8 | GPU-hours per distillation epoch and per complete vertical | — | Legislation, 3 epochs: **2.98 GPU-hours an epoch a run** unpacked, **0.52 packed** (§5.3) |
+| 9 | Energy use and carbon footprint | — | GPU energy per job: generation, instruction tuning, distillation (§6) |
 
 ## 3. Log
 
@@ -57,6 +57,20 @@ JUPITER, named by its Slurm job id.
 * Jobs 2327213, 2327214: loads four at once; second round of the runtime
   comparison (40 points). Job 2327297: Forge probe, stopped at its first
   import (venv path order, fixed).
+
+**16-10-2026**
+* Venv: flash-linear-attention 0.5.2 for Qwen3.5's linear attention (on the
+  module's Triton 3.5.1); Qwen3.5-9B-Base downloaded; the held-out exam drawn
+  from the legislation (217 questions). Queued: every model on the exam,
+  instruction tuning on 9,223 pairs, the Qwen3.5 probe with the fast
+  kernels, then the Qwen3.5 distillation (§5.7).
+
+**15-10-2026, night**
+* Job 2338844: third link; both legislation runs complete and merged.
+  Job 2339283: the same runs packed, in 47 minutes (§5.3).
+* Job 2340154: instruction tuning, four runs on one node, then the ten seed
+  questions (§5.5). Job 2340155: 4,951 more pairs (§5.4).
+* Job 2340254: the Qwen3.5 pair on GH200 (§5.6).
 
 **15-10-2026**
 * Job 2339281: 4,272 instruction pairs generated from the legislation corpus
@@ -140,7 +154,7 @@ Loading the 61 GB teacher takes ~3.5 minutes per job (two processes reading
 it at once). The teacher generating with plain Transformers in BF16 on one
 GH200: 13.9 tok/s alone, 113.5 with 8 sequences, 346.9 with 32.
 
-### 5.3 First distillation on legislation (running)
+### 5.3 First distillation on legislation
 
 Two arms on one node, 4B and 8B students, the Base teacher, three epochs over
 the legislation corpus (1,324 optimiser steps), in two-hour links.
@@ -159,8 +173,20 @@ the legislation corpus (1,324 optimiser steps), in two-hour links.
   tokens/s against ~5,000 with 2,048-token micro-batches: the fixed cost of
   each forward was the whole cost. Sequence packing (several chunks in one
   2,048-token sequence, each attending only to itself; commit `ebc56c4`)
-  is implemented and tested, and is expected to cut the same run from ~3.7
-  hours to well under one.
+  was added and the same runs repeated packed (job 2339283).
+
+| | unpacked (2337859, 2337861, 2338844) | packed (2339283) |
+|---|---|---|
+| Node time, both runs, 3 epochs | 4 h 28 min | **47 min** |
+| GPU-hours an epoch, one run | 2.98 | **0.52** |
+| Optimiser steps | 1,324 | 206 |
+| 4B, held-out loss / KL / CE | 1.021 / 0.854 / 1.412 (step 1,200) | 1.013 / 0.888 / 1.304 (step 200) |
+| 8B, held-out loss / KL / CE | 0.938 / 0.762 / 1.347 (step 1,200) | 0.923 / 0.790 / 1.232 (step 200) |
+
+Packed reaches the same held-out loss in a sixth of the node time: KL to
+the teacher slightly higher, cross-entropy on the text lower. Packing is
+the default for short-document corpora from now on, for the models it is
+correct for (not Qwen3.5, §5.6).
 
 ### 5.4 Synthetic instruction data with EULLM Engine (deliverable 5)
 
@@ -183,31 +209,79 @@ answering, 11 were about a single case, 3 were not valid JSON. The weights
 differ in precision (Q8_0 against BF16); the quality of the pairs is
 measured downstream, in the instruction tuning.
 
-### 5.5 Prepared, not yet run
+Job 2340155 asked the same passages again with three more seeds: 4,951 new
+pairs in 10 min 52 s of node time (0.22 kWh), 9,223 in all. Fewer than three
+times 4,272, because a short passage asked the same task gives the same
+question, which the generator skips as already done; more pairs need more
+text, not more seeds.
 
-* **The packed distillation**, same corpus and held-out set, for the
-  packed/unpacked comparison (queued).
-* **Instruction tuning** on the generated pairs, against Leonardo's
-  46-minute baseline (deliverable 4): `forge/scripts/jupiter/sbatch_sft.slurm`,
-  four runs on one node, one GPU each: the 4B and the 8B distilled on
-  legislation, and the same two Base models not distilled, on the same pairs
-  and recipe, so the comparison says what distillation adds. Each model is
-  then merged and asked the legal-it held-out questions (deliverable 6),
-  with Qwen3-4B-Instruct-2507 as the reference.
-* **More instruction pairs**: the generation job takes several seeds
-  (`FORGE_GEN_SEEDS`), each asking other questions of the same passages.
-* **Qwen3.5 track** (deliverable 7): Qwen3.5-35B-A3B-Base as teacher and
-  Qwen3.5-4B-Base as student, both Apache 2.0 on the Hub (checked
-  15-10-2026), downloaded on a login node before the first probe.
+### 5.5 Instruction tuning (deliverable 4) and the first held-out check (6)
+
+Job 2340154: Leonardo's stage 3 (LoRA r32, 2 epochs, the identity examples
+mixed in) on the 4,272 pairs, four runs side by side on one node, one GH200
+each; then each model merged and asked the ten legal-it seed questions
+(keyword coverage), with Qwen3-4B-Instruct-2507 as the reference.
+
+| run | training on one GH200 | keyword coverage | ended its turn |
+|---|---|---|---|
+| 4B distilled on legislation | 24.4 min | 0.385 | 10/10 |
+| 4B Base, not distilled | 24.5 min | 0.410 | 9/10 |
+| 8B distilled on legislation | 28.3 min | 0.447 | 10/10 |
+| 8B Base, not distilled | 27.2 min | 0.455 | 10/10 |
+| Qwen3-4B-Instruct-2507 (reference) | — | 0.448 | 3/10 |
+
+Leonardo's figure is 46 minutes for 3,400 pairs on one A100: 0.81 s a pair,
+here 0.34 s, **2.4 times per GPU**, and four runs at once on a node.
+
+On the ten questions no model is ahead of another: the spread is what ten
+questions give by chance, and distillation on 1.5M tokens of legislation
+shows nothing there. Ten questions cannot tell, so the exam drawn from the
+law (217 questions on article contents, deadlines and articles that do not
+exist; reported in totals only) is now sat by every model (§5.7).
+
+### 5.6 The Qwen3.5 pair on GH200 (deliverable 7)
+
+Job 2340254, Qwen3.5-35B-A3B-Base teaching Qwen3.5-4B-Base (Apache 2.0,
+same 248,320-token vocabulary), two pairs side by side on one node:
+
+| | Qwen3.5 (2340254) | Qwen3 (2334585) |
+|---|---|---|
+| Teacher load / memory | 69 s / 64.6 GiB | ~200 s / 57 GiB |
+| 2,048-token micro-batch | 1.79 s | 0.41 s |
+| Optimiser steps an hour at 16 | 125 | 548–553 |
+| Teacher generating, 1 / 8 / 32 sequences | 11.4 / 92.7 / 369.6 tok/s | 13.9 / 113.5 / 346.9 tok/s |
+
+Transformers loads the multimodal checkpoints as text-only models, and
+generation runs as fast as Qwen3's. Training was four times slower because
+the linear-attention layers (three in four) ran Transformers' reference
+PyTorch path: flash-linear-attention was not installed. It is now (0.5.2,
+on the module's Triton). Packing is not used for Qwen3.5: its
+linear-attention layers carry a state along the sequence that the
+per-document mask does not reset.
+
+### 5.7 Running on 16-10-2026
+
+* Every model of §5.5 on the 217-question exam.
+* Instruction tuning on the 9,223 pairs: the 4B distilled unpacked and
+  packed, the 4B Base, the 8B packed (packed against unpacked, distilled
+  against not, and more pairs).
+* The Qwen3.5 probe again with the fast kernels, then the Qwen3.5
+  distillation on legislation, 4B and 9B students, in two-hour links.
 
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
 every Forge job samples the GPUs' power with `nvidia-smi` (every 1–5 s) and
 sums it (`forge/scripts/jupiter/energy.py`). Idle, a node's four GPUs draw
-~390 W together (job 2327297). The per-step and per-epoch figures come with the
-distillation chain; the carbon footprint will be derived from them with the
-site's energy mix.
+~390 W together (job 2327297). The carbon footprint will be derived from the
+figures below with the site's energy mix.
+
+| job | what | GPU energy |
+|---|---|---|
+| 2339281 | 4,272 instruction pairs, EULLM Engine | 0.20 kWh (1,359 W mean) |
+| 2340155 | 4,951 more pairs | 0.22 kWh (1,357 W mean) |
+| 2340154 | four instruction-tuning runs and their evaluation | 1.21 kWh in 1.43 h (844 W mean: the evaluations leave the GPUs mostly idle) |
+| 2340254 | Qwen3.5 probe | 29 Wh training loops, 15 Wh generating |
 
 ## 7. Data governance
 
@@ -234,7 +308,8 @@ site's energy mix.
 | 15-10 | Engine read models into memory on GPFS, 5× slower than mapping | GPFS models stay mapped (`ca0d19d`) |
 | 15-10 | Forge venv: the module's older packages shadowed the venv's in jobs | venv first on the path in every job, imports checked before using a GPU |
 | 15-10 | Teacher alone on one GPU received its inputs on the student's GPU | inputs moved to the teacher's device (`ce822dc`) |
-| 15-10 | Short documents left the GPUs idle (~340 tokens/s) | sequence packing (`ebc56c4`) |
+| 15-10 | Short documents left the GPUs idle (~340 tokens/s) | sequence packing (`ebc56c4`): the same runs in a sixth of the time |
+| 16-10 | Qwen3.5's linear attention ran on Transformers' reference PyTorch path, 4× slower than Qwen3 | flash-linear-attention 0.5.2 in the venv |
 
 ## 9. Resource use
 
@@ -252,15 +327,20 @@ site's energy mix.
 | **completed** | | **~69.5 min of node time ≈ 4.6 GPU-hours** |
 | 2337859, 2337861 | distillation chain on legislation, links 1–2 | 3 h 43 min |
 | 2339281 | synthetic instruction data, EULLM Engine | 10 min 2 s |
-| 2338844 | distillation chain, link 3 | running |
+| 2338844 | distillation chain, link 3 | 44 min 52 s |
+| 2339283 | distillation on legislation, packed | 47 min 12 s |
+| 2340154 | instruction tuning, four runs, evaluation | 1 h 27 min 30 s |
+| 2340155 | 4,951 more instruction pairs | 10 min 52 s |
+| 2340254 | Qwen3.5 probe | 5 min 14 s |
 
 ## 10. Next
 
-1. Finish the legislation distillation chain; per-epoch GPU-hours and energy
-   (deliverables 1, 8, 9).
-2. Instruction tuning on the 4,272 generated pairs, against the 46-minute
-   baseline (deliverable 4).
-3. The packed distillation (queued) against the unpacked one, and a corpus
-   large enough for the remaining hours: more legislation, generated data,
-   ruling summaries from Leonardo.
-4. The Qwen3.5 teacher/student pair (deliverable 7).
+1. The exam results of every model; instruction tuning on 9,223 pairs
+   (deliverables 4, 6).
+2. The Qwen3.5 distillation on legislation and its exam, against Qwen3's
+   (deliverable 7).
+3. A corpus large enough for the remaining hours: more legislation
+   (EUR-Lex in Italian, the rest of Normattiva) and ruling summaries from
+   Leonardo; generated pairs grow with the text, not with seeds (§5.4).
+4. One complete vertical unattended, corpus to GGUF to evaluation, timed
+   (deliverables 1, 8).
