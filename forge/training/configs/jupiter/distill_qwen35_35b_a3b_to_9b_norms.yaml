@@ -15,6 +15,9 @@
 #   flash-linear-attention it should be far less, but a link that is killed
 #   between saves must not lose much either way.
 # The teacher takes 64.6 GiB of the 95 on its GPU (job 2340254).
+# Needs FORGE_EXTRA_LIBS=$FORGE_HOME/libs-qwen35 at submission
+# (setup_qwen35_libs.sh): flash-linear-attention refuses the module's Triton
+# 3.5.1 on Hopper (wrong gradients, fla issue #640; jobs 2349818-2349820).
 teacher_model: Qwen/Qwen3.5-35B-A3B-Base
 teacher_adapter: null
 student_model: Qwen/Qwen3.5-9B-Base
