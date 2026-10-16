@@ -41,9 +41,10 @@ python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pret
     { echo "[!!] $GRADER is not in the offline cache: prefetch_models.py on a login node"; exit 1; }
 
 # answers-<set>-<model>.jsonl: judge_answers.py takes the label from the name.
-for f in "$RUNS"/sft*/*/norm-exam-answers.jsonl; do
+for f in "$RUNS"/sft*/*/norm-exam-answers.jsonl "$RUNS"/sft*/*/norm-exam-open-answers.jsonl; do
     [ -s "$f" ] || continue
     model=$(basename "$(dirname "$f")") set=$(basename "$(dirname "$(dirname "$f")")")
+    case "$f" in *-open-answers.jsonl) model="$model-open" ;; esac
     ln -sf "$f" "$JUDGE/answers/answers-$set-$model.jsonl"
 done
 FILES=("$JUDGE"/answers/answers-*.jsonl)
