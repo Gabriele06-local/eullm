@@ -4,7 +4,10 @@
 #
 #     bash tools/jupiter/budget.sh [END_DATE] [TOTAL_GPU_HOURS]
 #
-# END_DATE defaults to 2026-12-31 and TOTAL_GPU_HOURS to 5000 (the award).
+# END_DATE defaults to 2026-12-15 and TOTAL_GPU_HOURS to 5000 (the award).
+# The allocation runs two months from its activation (14-10-2026), so the
+# plan ends mid-December; JuDoor shows 31-12-2026, kept as the margin
+# (bash tools/jupiter/budget.sh 2026-12-31 for the rate to that date).
 # A booster job holds whole nodes and pays for every GPU of them, so a job's
 # GPU-hours are its elapsed time times the GPUs it was given (gres/gpu in
 # AllocTRES): 4 an hour per node. Running jobs count up to now; queued ones
@@ -12,7 +15,7 @@
 # official figure; this one is for steering.
 
 set -uo pipefail
-END="${1:-2026-12-31}"
+END="${1:-2026-12-15}"
 TOTAL="${2:-5000}"
 ACCOUNT="${SBATCH_ACCOUNT:-e-aif-2026pg01-1434}"
 START="${JUPITER_START:-2026-10-14}"
