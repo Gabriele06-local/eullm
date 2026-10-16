@@ -25,6 +25,7 @@
 // Build: c++ -O2 -std=c++17 -o moe_cache_sim moe_cache_sim.cpp
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -350,6 +351,114 @@ struct policy_lfu : policy {
     }
 };
 
+// stale-mru when a pass overflows the cache, but among the stale slots the
+// one whose expert has the lowest decayed count (kept for every expert, as
+// lfu-decay) instead of the least recently used: on the c10 traces of
+// 16-10-2026 the counts won where the steps fit and lost where they did not.
+// `window` bounds how many stale slots, from the least recently used, are
+// compared (0: all of them), as a cache in llama.cpp could afford per miss.
+// With `behind`, a full pass also goes by the counts: the miss takes the
+// slot with the lowest count among those used earlier in this pass (their
+// next use is a pass away), the most recently used only if there is none
+// ("lfu-pass").
+struct policy_stale_lfu : policy {
+    lru_list lru;
+    std::vector<uint64_t> last_t;  // [slot] plan of the last use
+    std::vector<double> count;     // [layer*n_expert + expert] at count_t
+    std::vector<uint64_t> count_t;
+    uint64_t t = 0;
+    uint64_t pass_len;
+    double log_d;
+    int32_t window;
+    bool behind;
+    std::string label;
+    int32_t last_il = INT32_MAX;
+    uint64_t pass_start = 0;
+
+    policy_stale_lfu(int32_t l, int32_t e, int32_t s, uint64_t pass_len, double half_life_plans, int32_t window,
+                     bool behind) :
+        policy(l, e, s), lru(s), last_t(s, 0), count((size_t) l*e, 0), count_t((size_t) l*e, 0),
+        pass_len(pass_len), log_d(std::log(0.5)/half_life_plans), window(window), behind(behind),
+        label(std::string(behind ? "lfu-pass" : "stale-lfu") + (window > 0 ? "/" + std::to_string(window) : "")) {}
+    const char * name() const override { return label.c_str(); }
+
+    double score(size_t k) const { return count[k]*std::exp(log_d*(double) (t - count_t[k])); }
+
+    void plan(size_t, int32_t il, const int32_t * ids, size_t n, size_t & hits, size_t & misses) override {
+        ++t;
+        if (il <= last_il) {
+            pass_start = t;
+        }
+        last_il = il;
+        distinct(ids, n);
+        for (int32_t e : uniq) {
+            const size_t k = (size_t) il*n_expert + e;
+            count[k] = score(k) + 1.0;
+            count_t[k] = t;
+        }
+        int32_t first = -1;
+        for (int32_t e : uniq) {
+            const int32_t s = slot_of[(size_t) il*n_expert + e];
+            if (s >= 0) {
+                lru.touch(s);
+                last_t[s] = t;
+                if (first < 0) {
+                    first = s;
+                }
+                hits++;
+            }
+        }
+        std::sort(uniq.begin(), uniq.end());
+        for (int32_t e : uniq) {
+            if (slot_of[(size_t) il*n_expert + e] >= 0) {
+                continue;
+            }
+            int32_t s = lru.head;
+            if (key_of[s] >= 0 && t - last_t[s] < pass_len) {
+                s = first >= 0 ? lru.prev[first] : lru.tail;
+                if (behind && last_t[s] >= pass_start) {
+                    // the slots used earlier in this pass, the latest first
+                    double best = score(key_of[s]);
+                    int32_t seen = 1;
+                    for (int32_t c = lru.prev[s]; c >= 0 && last_t[c] >= pass_start && (window == 0 || seen < window);
+                         c = lru.prev[c], ++seen) {
+                        const double sc = score(key_of[c]);
+                        if (sc < best) {
+                            best = sc;
+                            s = c;
+                        }
+                    }
+                }
+            } else if (key_of[s] >= 0) {
+                // the stale slots are the head of the list; the lowest count among them
+                double best = score(key_of[s]);
+                int32_t seen = 1;
+                for (int32_t c = lru.next[s]; c >= 0 && (window == 0 || seen < window); c = lru.next[c], ++seen) {
+                    if (key_of[c] < 0) {
+                        s = c;
+                        break;
+                    }
+                    if (t - last_t[c] < pass_len) {
+                        break;
+                    }
+                    const double sc = score(key_of[c]);
+                    if (sc < best) {
+                        best = sc;
+                        s = c;
+                    }
+                }
+            }
+            assign(s, il, e);
+            lru.touch(s);
+            last_t[s] = t;
+            if (first < 0) {
+                first = s;
+            }
+            misses++;
+        }
+    }
+};
+
 // Belady's: the slot whose expert is next chosen furthest in the future
 // goes. Needs the whole trace, so it is a bound, not a policy.
 struct policy_opt : policy {
@@ -551,6 +660,9 @@ void run(const trace & t, const run_opts & o, const std::string & label) {
     ps.emplace_back(new policy_lru(t.n_layer, t.n_expert, slots));
     ps.emplace_back(new policy_stale_mru(t.n_layer, t.n_expert, slots, pass_len));
     ps.emplace_back(new policy_lfu(t.n_layer, t.n_expert, slots, o.half_life*pass_len));
+    ps.emplace_back(new policy_stale_lfu(t.n_layer, t.n_expert, slots, pass_len, o.half_life*pass_len, 0, false));
+    ps.emplace_back(new policy_stale_lfu(t.n_layer, t.n_expert, slots, pass_len, o.half_life*pass_len, 0, true));
+    ps.emplace_back(new policy_stale_lfu(t.n_layer, t.n_expert, slots, pass_len, o.half_life*pass_len, 32, true));
     std::vector<std::vector<std::pair<int32_t, size_t>>> nu;
     if (o.opt) {
         nu = next_uses(t);
