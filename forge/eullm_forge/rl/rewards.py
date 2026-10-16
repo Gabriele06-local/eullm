@@ -34,7 +34,9 @@ DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente"})
 # Kinds no program can check: what an article provides is graded by a judge
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
-JUDGED_TYPES = frozenset({"contenuto"})
+# "pratica": the practical questions of eval.practical, as GRPO prompts
+# (make_practical_prompts.py), have no verifiable answer either.
+JUDGED_TYPES = frozenset({"contenuto", "pratica"})
 
 #: How many different deadlines a right answer may name: the one asked, and
 #: one more for the article that also mentions, say, a notice period.

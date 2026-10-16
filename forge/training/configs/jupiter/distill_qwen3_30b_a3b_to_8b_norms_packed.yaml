@@ -1,0 +1,55 @@
+# distill_qwen3_30b_a3b_to_8b_norms.yaml with the legislation chunks packed
+# into sequences of up to 2,048 tokens (pack_sequences, distill.py), each
+# chunk seeing only itself. Unpacked, a ~210-token chunk a micro-batch ran
+# at 1.6 micro-batches a second, ~340 tokens/s (job 2337859): the fixed cost
+# of each forward was the whole cost. Packed, the 7,064 chunks make ~780
+# sequences, ~2,300 micro-batches and ~145 optimiser steps in three epochs,
+# each step ~32,000 tokens, as Leonardo's were with its longer chunks; the
+# step counts below are scaled to that. Its own output directory, so the
+# unpacked run is not touched and the two compare on the same held-out set.
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+teacher_adapter: null
+student_model: Qwen/Qwen3-8B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+teacher_device_map: split
+teacher_gpus: [0]
+teacher_gib_per_gpu: 80
+student_device: cuda:1
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+dataset_dir: ./datasets/norms   # overridden by sbatch_distill.slurm (--dataset-dir)
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+pack_sequences: true
+max_train_samples: null
+output_dir: ./checkpoints/qwen3_8b_norms_packed_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 3
+max_steps: -1
+warmup_steps: 7
+save_steps: 25
+save_total_limit: 3
+eval_steps: 25
+eval_max_batches: 40
+logging_steps: 5
+kl_temperature: 2.0
+kl_alpha: 0.7
+bf16: true
+gradient_checkpointing: true
+seed: 42

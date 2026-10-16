@@ -29,11 +29,14 @@
 # Usage — login node first, it costs nothing:
 #   bash forge/scripts/jupiter/probe_env.sh 2>&1 | tee probe-login.txt
 #
-# Then with GPUs, which is the only way to answer 1-3 honestly (a few
-# GPU-minutes; use the project id JSC gives, and the partition the login
-# probe lists if `booster` is not it):
-#   srun -A <project> -p booster --gres=gpu:4 -N1 -t 00:15:00 \
-#        bash forge/scripts/jupiter/probe_env.sh 2>&1 | tee probe-node.txt
+# Then with GPUs, which is the only way to answer 1-3 honestly. A batch job,
+# so the terminal stays free and the report lands in a file; `booster` bills
+# the whole node, 4 GPU-hours an hour, for the few minutes this takes:
+#   sbatch -A e-aif-2026pg01-1434 -p booster -N1 --gres=gpu:4 -t 00:15:00 \
+#       -J forge-probe -o "$PROJECT/$USER/probe-node-%j.txt" \
+#       --wrap "bash $PWD/forge/scripts/jupiter/probe_env.sh"
+# PROBE_MODULES (exported before sbatch) names the modules that bring
+# PyTorch, if `module load PyTorch` alone is refused.
 
 set -uo pipefail
 
@@ -118,6 +121,46 @@ if command -v curl >/dev/null 2>&1; then
         item "huggingface.co" "NOT reachable from here — stage models from a login node"
     fi
 fi
+
+say "the site's PyTorch, loaded for the checks below"
+# The system python3 is 3.9 with none of the training packages (login probe,
+# 14-10-2026): unloaded, the checks below would only say "torch MISSING".
+# PROBE_MODULES names what to load ("GCC OpenMPI PyTorch", say); unset,
+# `module load PyTorch` is tried, and if Lmod refuses, its spider says which
+# modules have to come first. Quietly and without -u: Lmod's output does not
+# survive `set -u` (tools/jupiter/env.sh).
+if ! command -v module >/dev/null 2>&1 && [ -n "${LMOD_CMD:-}" ]; then
+    module() { eval "$("$LMOD_CMD" bash "$@")"; }
+fi
+if command -v module >/dev/null 2>&1; then
+    set +u
+    mods="${PROBE_MODULES:-PyTorch}"
+    # shellcheck disable=SC2086  # a list of module names
+    if module load $mods >/dev/null 2>&1; then
+        item "module load $mods" "ok"
+    elif [ -z "${PROBE_MODULES:-}" ]; then
+        # The first line of modules spider names for the newest PyTorch,
+        # loaded before it; printed, so the report says what was guessed.
+        newest=$(module -t spider PyTorch 2>&1 | grep -E '^PyTorch/' | sort -V | tail -1)
+        spider=$(module spider "$newest" 2>&1)
+        need=$(awk '/You will need to load/ { f = 1; next }
+            f && NF { print; exit }' <<<"$spider" | sed 's/^ *//')
+        # shellcheck disable=SC2086
+        if [ -n "$need" ] && module load $need "$newest" >/dev/null 2>&1; then
+            item "module load PyTorch" "refused alone; loaded with what spider names: $need $newest"
+        else
+            item "module load PyTorch" "REFUSED — what $newest needs first:"
+            grep -v '^\s*$' <<<"$spider" | sed 's/^/    /' | head -20
+            echo "  (then: PROBE_MODULES='<those> PyTorch' bash $0)"
+        fi
+    else
+        item "module load $mods" "REFUSED"
+    fi
+    echo "  loaded:"
+    module list 2>&1 | grep -v '^\s*$' | sed 's/^/    /' | head -20
+    set -u
+fi
+item "python3" "$(command -v python3) ($(python3 --version 2>&1))"
 
 say "python packages, as currently reachable"
 python3 - <<'PY' 2>&1 | sed 's/^/  /'

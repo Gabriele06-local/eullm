@@ -41,6 +41,11 @@ if [ -z "${EULLM_RUNS:-}" ] && [ -z "${WORK:-}" ]; then
     exit 2
 fi
 RUNS="${EULLM_RUNS:-$WORK/eullm_runs}"
+# The checkout's own logs/: where a job submitted without -o writes
+# (sbatch scripts say --output=logs/%x-%j.out, relative to where they were
+# submitted). GRPO chains submitted from $WORK/eullm log there, and links
+# that did their work were flagged as having done none (2026-10-15).
+REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
 SINCE="${1:-$(date -d '-24 hours' +%Y-%m-%dT%H:%M)}"
 PROBLEMS=0
 flag() { echo "[!!] $*"; PROBLEMS=$((PROBLEMS + 1)); }
@@ -97,7 +102,7 @@ while IFS='|' read -r id name state elapsed; do
                         # at the last step is the same case and was flagged
                         # as one that did no work. opd_train.py is the third
                         # of the shape: its save line wears the [opd] prefix.
-                        log="$(ls "$RUNS"/*/logs/"$name-$id".out 2>/dev/null | head -1)"
+                        log="$(ls "$RUNS"/*/logs/"$name-$id".out "$REPO_LOGS/$name-$id.out" 2>/dev/null | head -1)"
                         if [ -n "$log" ] && grep -q "nothing left to do" "$log"; then
                             echo "   $id $name: ended in $elapsed with nothing left to do (fine)"
                         elif [ -n "$log" ] && grep -qE "^\[(stage3|grpo|opd)\] adapter /" "$log"; then
@@ -214,6 +219,31 @@ awk -v total="$B_TOTAL" -v spent="${spent:-0}" -v used="${used:-0}" -v now="$now
     print ""
     print "   (saldo -b is the bill; it is a day behind these figures)"
 }'
+# The bill itself, where saldo is (Leonardo's login nodes). The figures above
+# are this script's own count, a day ahead of saldo and not the same thing:
+# on 2026-10-13 they said 63% used where saldo said 59.0%, and a catch-up
+# plan was first worked out on the wrong one. The even pace is the share of
+# the allocation's days gone by: below it, hours are being left behind.
+if command -v saldo >/dev/null 2>&1; then
+    D8='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]'
+    read -r s_acct s_start s_end s_total _ s_used s_pct _ < <(saldo -b 2>/dev/null |
+        awk -v d="^$D8\$" '$2 ~ d && $3 ~ d {print; exit}')
+    if [ -n "${s_total:-}" ]; then
+        s0="$(date -d "$s_start" +%s)"; s1="$(date -d "$s_end 23:59" +%s)"
+        awk -v acct="$s_acct" -v total="$s_total" -v used="$s_used" -v pct="$s_pct" \
+            -v s0="$s0" -v s1="$s1" -v now="$now" -v stop="$s_end" 'BEGIN {
+            share = (now - s0) / (s1 - s0); if (share > 1) share = 1; even = total * share
+            gap = used - even; word = gap < 0 ? "behind" : "ahead"; if (gap < 0) gap = -gap
+            printf "   bill (saldo -b, %s): %.0f of %.0f local hours, %s%%; the even pace is %.1f%%:" \
+                   " %.0f local hours (%.0f node-hours) %s\n", acct, used, total, pct, share * 100,
+                   gap, gap / 32, word
+            days = (s1 - now) / 86400
+            if (days > 0)
+                printf "   to use the rest by %s: %.0f local hours a day (%.1f node-hours)\n",
+                       stop, (total - used) / days, (total - used) / days / 32
+        }'
+    fi
+fi
 
 echo
 echo "== GRPO =="
@@ -221,7 +251,7 @@ echo "== GRPO =="
 # it stops itself (a NaN, or no group disagreeing any more). The last two
 # progress lines are enough to see whether reward is climbing.
 found=0
-for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out 2>/dev/null | head -3); do
+for log in $(ls -t "$RUNS"/grpo/logs/eullm-grpo-*.out "$REPO_LOGS"/eullm-grpo-*.out 2>/dev/null | head -3); do
     [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue
     found=1
     echo "   ${log##*/}"
@@ -251,7 +281,6 @@ echo
 echo "== case-law exam =="
 # cds_answer.py's summary line per model; the judges' grades are in the
 # graded.csv beside the answers.
-REPO_LOGS="${EULLM_REPO_LOGS:-$(cd "$(dirname "$0")/../../.." 2>/dev/null && pwd)/logs}"
 found=0
 for log in $(ls -t "$REPO_LOGS"/eullm-cds-exam-*.out 2>/dev/null | head -6); do
     [ -n "$(find "$log" -newermt "${SINCE/T/ }" 2>/dev/null)" ] || continue

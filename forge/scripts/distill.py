@@ -54,6 +54,7 @@ import argparse
 import hashlib
 import json
 import os
+import random
 import shutil
 import sys
 import time
@@ -134,6 +135,10 @@ class DistillConfig:
     val_file: str = "val.jsonl"
     cutoff_len: int = 2048
     max_train_samples: Optional[int] = None  # None = all
+    # Several documents in one sequence of up to `cutoff_len` tokens, each
+    # seeing only itself (see `pack_examples`). Off by default: Leonardo's
+    # corpus has chunks near the cutoff, and its configs are left as they are.
+    pack_sequences: bool = False
 
     # Training
     output_dir: str = "~/checkpoints/qwen3_7b_legal_it_distilled"
@@ -433,6 +438,27 @@ def distill_loss(
 
 
 @torch.no_grad()
+def teacher_batch(teacher, batch: dict) -> dict:
+    """The batch on the device of the teacher's input embeddings.
+
+    The batch is moved to the student's device, and a teacher sharded over
+    several GPUs (``auto``, or ``split`` over two) takes it from there:
+    accelerate's hooks move each input to the GPU of the first layer. A
+    teacher whole on one GPU has no hooks, because accelerate places a model
+    that fits one device on it directly, and the inputs stay where they are:
+    JUPITER's GH200 split, the teacher alone on GPU 0 and the student on 1,
+    died at the first forward with "Expected all tensors to be on the same
+    device, but got index is on cuda:1" (jobs 2337122-2337123, 15-10-2026).
+    A teacher with no input embeddings to ask, or one whose weights are on
+    the meta device (offloaded, so hooks place them), keeps the batch as is.
+    """
+    get = getattr(teacher, "get_input_embeddings", None)
+    weight = getattr(get(), "weight", None) if callable(get) else None
+    if weight is None or weight.device.type == "meta":
+        return batch
+    return {k: v.to(weight.device, non_blocking=True) for k, v in batch.items()}
+
+
 def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
              max_batches: int) -> dict:
     """Distillation loss on held-out data, over a fixed prefix of the val set.
@@ -464,8 +490,9 @@ def evaluate(student, teacher, val_loader, cfg: DistillConfig, device,
                 break
             batch = {k: v.to(device, non_blocking=True)
                      for k, v in batch.items()}
-            t_logits = teacher(**batch).logits.detach().to(device)
-            s_logits = student(**batch).logits
+            extra = model_kwargs(cfg)
+            t_logits = teacher(**teacher_batch(teacher, batch), **extra).logits.detach().to(device)
+            s_logits = student(**batch, **extra).logits
             _, parts = distill_loss(
                 s_logits, t_logits, batch["labels"],
                 kl_alpha=cfg.kl_alpha, kl_temperature=cfg.kl_temperature,
@@ -514,6 +541,68 @@ def tokenize_fingerprint(cfg: DistillConfig, tokenizer, data_files: dict, split:
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
 
+def pack_examples(docs: list[list[int]], cutoff: int, eos_id: Optional[int],
+                  seed: int) -> list[dict]:
+    """Documents packed into sequences of at most ``cutoff`` tokens.
+
+    Why: a micro-batch of one short document leaves the GPU idle. On
+    JUPITER's legislation corpus (~210 tokens a chunk) a step of the 30B-A3B
+    teacher and a LoRA student ran at 1.6 micro-batches a second, ~340
+    tokens/s, where 2,048-token micro-batches had run at ~5,000 (jobs
+    2334585 and 2337859): the fixed cost of a forward was the whole cost.
+
+    How each document stays itself: its ``position_ids`` start again at 0,
+    and with no ``attention_mask`` and no cache transformers builds a mask
+    where a token sees only the tokens of its own document
+    (``masking_utils.find_packed_sequence_indices``), for the teacher and the
+    student alike. The first token of every document after the first is
+    labelled -100, so nothing is trained to guess it from the document
+    before. Each document ends with ``eos_id`` (when there is one), so the
+    model still sees where documents end; one longer than ``cutoff`` is cut.
+
+    Documents are shuffled with ``seed`` and filled first-fit in that order,
+    so the packing is the same every time it is built from the same data.
+    """
+    order = list(range(len(docs)))
+    random.Random(seed).shuffle(order)
+    packs: list[dict] = []
+    cur_ids: list[int] = []
+    cur_pos: list[int] = []
+    cur_lab: list[int] = []
+    for i in order:
+        ids = list(docs[i])
+        if eos_id is not None and (not ids or ids[-1] != eos_id):
+            ids.append(eos_id)
+        ids = ids[:cutoff]
+        if not ids:
+            continue
+        if cur_ids and len(cur_ids) + len(ids) > cutoff:
+            packs.append({"input_ids": cur_ids, "position_ids": cur_pos, "labels": cur_lab})
+            cur_ids, cur_pos, cur_lab = [], [], []
+        labels = list(ids)
+        if cur_ids:
+            labels[0] = -100
+        cur_ids += ids
+        cur_pos += list(range(len(ids)))
+        cur_lab += labels
+    if cur_ids:
+        packs.append({"input_ids": cur_ids, "position_ids": cur_pos, "labels": cur_lab})
+    return packs
+
+
+def collate_packed(batch: list[dict]) -> dict:
+    """One packed sequence as a batch of one: no attention mask, on purpose."""
+    if len(batch) != 1:
+        raise ValueError("pack_sequences takes per_device_train_batch_size: 1")
+    return {k: torch.tensor([v], dtype=torch.long) for k, v in batch[0].items()}
+
+
+def model_kwargs(cfg: DistillConfig) -> dict:
+    """What every forward gets beside the batch: with packed sequences, no
+    cache, or transformers builds an ordinary causal mask across documents."""
+    return {"use_cache": False} if cfg.pack_sequences else {}
+
+
 def build_dataloaders(cfg: DistillConfig, tokenizer):
     data_files = {
         "train": str(Path(cfg.dataset_dir) / cfg.train_file),
@@ -547,6 +636,28 @@ def build_dataloaders(cfg: DistillConfig, tokenizer):
         )
         for split, ds in raw.items()
     }
+    if cfg.pack_sequences:
+        eos = tokenizer.eos_token_id
+        packed = {
+            split: pack_examples(list(ds["input_ids"]), cfg.cutoff_len, eos,
+                                 cfg.seed if split == "train" else 0)
+            for split, ds in tokenized.items()
+        }
+        for split, rows in packed.items():
+            n_docs = len(tokenized[split])
+            n_tok = sum(len(r["input_ids"]) for r in rows)
+            print(f"[data] {split}: {n_docs} documents packed into {len(rows)} "
+                  f"sequences, {n_tok / max(len(rows), 1):.0f} tokens each on average",
+                  file=sys.stderr)
+        train_loader = DataLoader(
+            packed["train"], batch_size=1, shuffle=True,
+            collate_fn=collate_packed, num_workers=2, pin_memory=True,
+        )
+        val_loader = DataLoader(
+            packed["validation"], batch_size=1, shuffle=False,
+            collate_fn=collate_packed, num_workers=2, pin_memory=True,
+        )
+        return train_loader, val_loader
     collator = DataCollatorForLanguageModeling(tokenizer, mlm=False)
     train_loader = DataLoader(
         tokenized["train"], batch_size=cfg.per_device_train_batch_size,
@@ -924,11 +1035,11 @@ def train(cfg: DistillConfig) -> None:
         for batch in epoch_batches(train_loader, epoch, skip, cfg.seed):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with torch.no_grad():
-                t_out = teacher(**batch)
+                t_out = teacher(**teacher_batch(teacher, batch), **model_kwargs(cfg))
                 # With a sharded teacher the logits land on the GPU of the
                 # last pipeline stage — bring them to the student's device.
                 t_logits = t_out.logits.detach().to(device)
-            s_out = student(**batch)
+            s_out = student(**batch, **model_kwargs(cfg))
             loss, parts = distill_loss(
                 s_out.logits, t_logits, batch["labels"],
                 kl_alpha=cfg.kl_alpha, kl_temperature=cfg.kl_temperature,

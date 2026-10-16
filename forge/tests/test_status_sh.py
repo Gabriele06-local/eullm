@@ -288,6 +288,24 @@ def test_the_allocation_left_and_the_pace_to_use_it_are_shown(tmp_path, runs, mo
                                         ended=[])
 
 
+def test_the_bill_from_saldo_is_shown_with_the_even_pace(tmp_path, runs):
+    """2026-10-13: a catch-up plan was worked out on this script's 63% while
+    saldo, the bill, said 59.0%. Where saldo is, its figure is shown too."""
+    bin_ = tmp_path / "bin"
+    bin_.mkdir(exist_ok=True)
+    _exe(bin_ / "saldo", """#!/usr/bin/env bash
+echo "---------------------------------------------------------------------"
+echo "account                start         end         total        localCluster   totConsumed     totConsumed     monthTotal     monthConsumed"
+echo "                                             (local h)   Consumed(local h)     (local h)               %      (local h)         (local h)"
+echo "---------------------------------------------------------------------"
+echo "AIFAC_P02_1147      20000101    29991231         40000               23616         23616            59.0         19672               6818"
+""")
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[])
+    assert "bill (saldo -b, AIFAC_P02_1147): 23616 of 40000 local hours, 59.0%; " \
+           "the even pace is" in out
+    assert "ahead" in out and "to use the rest by 29991231:" in out
+
+
 def test_opd_progress_and_case_law_results_are_shown(tmp_path, runs, monkeypatch):
     """2026-10-06: the user asked how to tell that a pilot's first link had run."""
     logs = runs.parent / "opd" / "logs"
@@ -309,3 +327,17 @@ def test_opd_progress_and_case_law_results_are_shown(tmp_path, runs, monkeypatch
     assert "     [opd] time is up at step 33" in out and "step 2/60" not in out
     assert "   [cds-exam] v04-4b-q4: 1200 questions; source ruling retrieved 0.350" in out
     assert "nothing wrong found" in out
+
+
+def test_a_grpo_link_logged_in_the_checkout_is_read_there(tmp_path, runs, monkeypatch):
+    # chains submitted from $WORK/eullm without -o write to its logs/
+    repo_logs = tmp_path / "repo-logs"
+    repo_logs.mkdir()
+    (repo_logs / "eullm-grpo-jg-q35-9b-r2n-85.out").write_text(
+        "[grpo] adapter already at /w/eullm_runs/grpo/jg-q35-9b-r2n/adapter: nothing "
+        "left to do (move it away to train again)\n")
+    monkeypatch.setenv("EULLM_REPO_LOGS", str(repo_logs))
+    out = run_status(tmp_path, queue=[],
+                     ended=[("85", "eullm-grpo-jg-q35-9b-r2n", "COMPLETED", "00:01:17")])
+    assert "85 eullm-grpo-jg-q35-9b-r2n: ended in 00:01:17 with nothing left to do" in out
+    assert "a link that short did no work" not in out

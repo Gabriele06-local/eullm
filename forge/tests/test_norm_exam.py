@@ -16,12 +16,14 @@ import pytest
 from eullm_forge.eval import EvalItem, NormIndex, keyword_coverage
 from eullm_forge.eval.norm_exam import (
     CONTENT_RUBRIC,
+    NONEXISTENT_RUBRIC,
     _deadline_keyword,
     all_deadlines,
     articles_from_records,
     build_exam,
     retrieval_hits,
     rubric_v2,
+    rubric_v3,
     trained_articles,
 )
 from eullm_forge.eval.retrieval import named_code
@@ -137,6 +139,20 @@ def test_the_heading_is_read_in_both_styles():
     assert arts[("codice_civile", "2")].heading == "Termine di prova"
     assert arts[("legge_procedimento_amministrativo", "2")].heading == \
         "Conclusione del procedimento"
+
+
+def test_the_cpa_bare_title_is_a_heading_too():
+    """The third style record_heading reads: "Art. 29\nAzione di
+    annullamento". Without it no termine_argomento question -- the only kind
+    asked by topic -- is ever built for such an article, and the whole code
+    misses its by-topic deadline coverage."""
+    arts = articles_from_records([CPA_ART29])
+    art = arts[("codice_processo_amministrativo", "29")]
+    assert art.heading == "Azione di annullamento"
+    exam = build_exam([CPA_ART29], per_code=10, seed=1)
+    topics = [it for it in exam if it.metadata["tipo"] == "termine_argomento"]
+    assert len(topics) == 1
+    assert "Azione di annullamento" in topics[0].question
 
 
 @pytest.fixture
@@ -586,3 +602,20 @@ def test_version_2_rubrics_accept_true_context_and_every_deadline_of_the_article
     assert "termine di 60 giorni" in two and "20 giorni" in two
     assert rubric_v2("norm-inesistente-codice_civile-999", "Corretto solo se dice che "
                      "l'articolo non esiste.") == "Corretto solo se dice che l'articolo non esiste."
+
+
+def test_version_3_grades_an_abstention_on_a_nonexistent_article_by_what_it_says():
+    """Version 1 asked for "it does not exist" and failed "it is not in the
+    texts": the rubric, not the answer, decided. Version 3 accepts any wording
+    that says the article is missing and attributes nothing to it, keeps a
+    generic refusal apart, and leaves the other kinds to version 2."""
+    old = "Corretto solo se dice che l'articolo non esiste."
+    assert rubric_v3("norm-inesistente-codice_civile-3434", old) == NONEXISTENT_RUBRIC
+    for phrase in ("non compare nei testi", "non è stato trovato", "numero è probabilmente errato",
+                   "Parziale se rifiuta in modo generico", "Sbagliato se descrive un contenuto"):
+        assert phrase in NONEXISTENT_RUBRIC, phrase
+    assert NONEXISTENT_RUBRIC.count("Corretto:") == 3 and "Parziale:" in NONEXISTENT_RUBRIC
+    assert rubric_v3("norm-contenuto-codice_civile-1", "old") == CONTENT_RUBRIC
+    assert rubric_v3("norm-termine-codice_civile-2", "Corretto solo se indica il termine di "
+                     "60 giorni.") == rubric_v2("norm-termine-codice_civile-2", "Corretto solo "
+                                                "se indica il termine di 60 giorni.")

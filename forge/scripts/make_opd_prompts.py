@@ -54,11 +54,9 @@ from eullm_forge.caselaw.prompts import (  # noqa: E402
     privileged_prompt,
     ruling_label,
 )
+from eullm_forge.caselaw.schede import SENSITIVE_OGGETTO  # noqa: E402
 
-SENSITIVE = (r"antimafia|interditti|informativ[ae] prefettizi|soggiorno|cittadinanza|"
-             r"protezione internazionale|asilo|espulsion|rimpatri|sanit|salute|vaccin|disabil|"
-             r"invalidit|handicap|minor[ei]|adozion|stupefacent|penal|reato|condann|casellario|"
-             r"religio|culto|sindacal|orientamento sessuale|genetic|biometric")
+SENSITIVE = SENSITIVE_OGGETTO
 
 
 def read_jsonl(paths) -> list[dict]:

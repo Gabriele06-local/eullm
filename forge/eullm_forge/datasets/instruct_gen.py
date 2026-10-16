@@ -156,8 +156,16 @@ RE_CASE_NUMBER = re.compile(
     r"\b(?:ricorso|sentenza|ordinanza|r\.g\.)\s*n\.?\s*\d", re.IGNORECASE
 )
 RE_ACT_BEFORE_DATE = re.compile(
-    r"(?:legge|l\.|decreto(?:[- ]legge|\s+legislativo)?|d\.\s*lgs\.?|d\.\s*l\.|"
-    r"d\.\s*p\.\s*r\.|dpr|regolamento|direttiva|codice)\s*(?:\(\w+\)\s*)?$",
+    # The acts a date can name: abbreviations and the full forms teachers
+    # write ("decreto del Presidente della Repubblica 6 giugno 2001, n.
+    # 380", "decreto ministeriale", "legge regionale", "legge
+    # costituzionale", "testo unico"). A missing form rejects a valid
+    # statute question as a case after the teacher was paid to write it.
+    r"(?:legge(?:\s+regionale|\s+costituzionale)?|l\.(?:\s*r\.)?|"
+    r"decreto(?:[- ]legge|\s+legislativo|\s+ministeriale|"
+    r"\s+del\s+Presidente\s+della\s+Repubblica)?|"
+    r"d\.\s*lgs\.?|d\.\s*l\.|d\.\s*m\.|d\.\s*p\.\s*r\.|dpr|"
+    r"regolamento|direttiva|codice|testo\s+unico|t\.\s*u\.)\s*(?:\(\w+\)\s*)?$",
     re.IGNORECASE,
 )
 

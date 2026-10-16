@@ -59,9 +59,10 @@ end up pushing over each other.
   `e-aif-2026pg01-1434`, 5,000 GPU-hours): Forge, with the engine as
   deliverable 5, on GH200 (aarch64, sm_90). `booster` hands out whole nodes
   only (a job pays 4 GPU-hours an hour), so short jobs are the lever, not
-  fewer GPUs; compute nodes have no internet and no `git`; no personal data
-  before the DPA with JSC. `docs/jupiter/allocation-plan.md`,
-  `tools/jupiter/`, `forge/scripts/jupiter/`.
+  fewer GPUs; compute nodes have no internet and no `git`.
+  `docs/jupiter/allocation-plan.md`,
+  `tools/jupiter/`, `forge/scripts/jupiter/`. Every result, fix and job
+  goes into `docs/jupiter/dossier.md` too, the record that is sent out.
 - **Leonardo** (CINECA, `AIFAC_P02_1147`): Forge distillation on A100 64GB.
   Jobs of two hours at most and never a whole node: a job asking for part
   of a node starts far sooner. `docs/cineca/leonardo.md`,

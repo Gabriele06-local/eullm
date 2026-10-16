@@ -1,0 +1,38 @@
+# What the Forge venv on JUPITER adds to the site's PyTorch module
+# (setup_venv.sh). torch and numpy are the module's and are held there by a
+# constraint, never installed from here.
+#
+# Latest stable on PyPI as checked on 14-10-2026, each with a wheel for
+# aarch64 and Python 3.13 where it has compiled code. For the comparison
+# with Leonardo (deliverables 2 and 4) the training libraries should be the
+# ones Leonardo's runs used: check them against
+# $WORK/eullm_venv-known-good-2026-10-01.txt there before the baseline runs.
+
+transformers==5.19.0
+peft==0.21.2
+accelerate==1.15.0
+datasets==5.1.0
+safetensors==0.8.0
+huggingface-hub==2.2.0
+tokenizers==0.23.3
+
+# eullm_forge's own light dependencies (it is installed with --no-deps, so
+# that spaCy and the rest of what this site does not need stay out).
+click==8.5.0
+rich==15.0.0
+pyyaml==6.0.3
+requests==2.34.2
+beautifulsoup4==4.15.0
+
+# Qwen3.5's linear-attention kernels (deliverable 7). Without them
+# Transformers runs the reference PyTorch path, "more than an order of
+# magnitude" slower for chunk_gated_delta_rule on an H100; the teacher probe
+# (job 2340254) measured a Qwen3.5 micro-batch at 1.8 s against Qwen3's 0.41.
+# Pure Python on Triton (checked on PyPI 16-10-2026); fla-core without the
+# [cuda] extra, so pip does not touch torch. Triton itself is the module's,
+# or triton==3.5.1, the one torch 2.9.1 pins, if the module has none
+# (setup_venv.sh). causal-conv1d has no aarch64 wheel and is left out: its
+# PyTorch fallback is a small convolution.
+fla-core==0.5.2
+flash-linear-attention==0.5.2
+einops==0.8.2

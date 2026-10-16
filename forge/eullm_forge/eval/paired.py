@@ -36,7 +36,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-KINDS = ("termine_argomento", "termine", "contenuto", "inesistente")
+KINDS = ("termine_argomento", "termine", "contenuto", "inesistente", "pratica")
 _KIND = re.compile(r"^norm-(" + "|".join(KINDS) + r")-")
 
 # What a person writes in the review sheet, read as the judge's labels.
@@ -218,6 +218,22 @@ def compare(a: Graded, base: Graded) -> Comparison:
     return Comparison(a.label, base.label, len(ids), b, c, mcnemar_p(b, c), bl, cl,
                       mcnemar_p(bl, cl), {k: (v[0], v[1]) for k, v in sorted(by_kind.items())},
                       longer / discordant if discordant else None, va, vb, len(shared))
+
+
+def cohen_kappa(pairs: list[tuple[str, str]]) -> float:
+    """Cohen's kappa of two raters over the same items: agreement beyond chance.
+
+    1 is total agreement, 0 what two raters labelling at random with their own
+    label frequencies would reach; it can be negative. With one label only on
+    both sides chance agreement is 1 and kappa is defined here as 1.0.
+    """
+    n = len(pairs)
+    if n == 0:
+        return float("nan")
+    observed = sum(a == b for a, b in pairs) / n
+    ca, cb = Counter(a for a, _ in pairs), Counter(b for _, b in pairs)
+    chance = sum(ca[k] * cb[k] for k in ca.keys() | cb.keys()) / (n * n)
+    return 1.0 if chance == 1 else (observed - chance) / (1 - chance)
 
 
 def human_agreement(rows: list[dict], models: dict[str, Graded]) -> dict:

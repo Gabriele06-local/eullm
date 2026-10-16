@@ -34,11 +34,16 @@ HEARTBEAT_INTERVAL="${HEARTBEAT_INTERVAL:-60}"
 # growing", and one number is easier to eyeball in a log than four.
 _heartbeat_rss_gib() {
     local pids
-    # Anchor on the python interpreter, not on the word alone: a bare
-    # 'llamafactory|distill' also matches the shell that happens to carry
-    # those words in its own command line — a `tail` on the log, or this
-    # very script — and silently reports their RSS as the job's.
-    pids="$(pgrep -u "$(id -u)" -d, -f 'python[^ ]* .*(llamafactory|distill)' \
+    # Anchor on the trainer's interpreter and entry point, not on a word
+    # alone: a bare 'llamafactory|distill' also matches the shell that
+    # happens to carry those words in its own command line — a `tail` on
+    # the log, or this very script — and silently reports their RSS as the
+    # job's. Every long job is named: distill.py (phase 2), stage3_sft.py,
+    # opd_train.py, grpo_train.py under accelerate, and llamafactory-cli
+    # (phase 1, no python prefix). A trainer missing here reads as
+    # 'rss ? GiB' for its whole run, which is how stage 3, OPD, GRPO and
+    # phase 1 went blind.
+    pids="$(pgrep -u "$(id -u)" -d, -f 'python[^ ]* .*(llamafactory|distill|stage3_sft|opd_train|grpo_train)|accelerate .*grpo_train|llamafactory-cli train' \
             2>/dev/null)" || true
     [ -z "$pids" ] && { printf '?'; return; }
     ps -o rss= -p "$pids" 2>/dev/null |

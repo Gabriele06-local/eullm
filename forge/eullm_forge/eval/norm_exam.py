@@ -97,6 +97,19 @@ class Article:
                       re.search(r"\(\(\s*(.+?)\s*\)\)", ln)):
                 if m and _is_rubrica(m.group(1)):
                     return m.group(1)
+        # The third style, the c.p.a.'s bare title line ("Art. 29\nAzione di
+        # annullamento"): the same one record_heading reads, with its guards
+        # (no leading bracket or digit, no closing punctuation, short, a
+        # capital). Without it no termine_argomento question is ever asked
+        # about such an article -- the only kind asked by topic -- so the
+        # whole code misses its by-topic deadline coverage while retrieval
+        # boosts the very headings the exam cannot see.
+        if len(lines) > 1 and _HEADER.match(lines[0]):
+            cand = lines[1]
+            if (not cand.startswith("(") and not cand[:1].isdigit()
+                    and not cand.endswith((".", ";", ":", ","))
+                    and len(cand) < 100 and _is_rubrica(cand)):
+                return cand
         return ""
 
 
@@ -347,6 +360,43 @@ def rubric_v2(item_id: str, rubric: str, reference: str = "") -> str:
                     "quale: è corretto anche indicare correttamente uno di questi.")
         return out
     return rubric
+
+
+# The rubric of a question on an article that does not exist, version 3
+# (2026-10-14). Version 1 read "correct only if it says the article does not
+# exist", and the judge applied it literally: an answer saying the article is
+# not in the texts it was given, and attributing nothing to it, was graded
+# wrong -- 0 against 71 for the Qwen3.5 students, which abstain in those words,
+# and 24 correct against 41 wrong for one identical sentence of the 8B. The
+# reference study of legal RAG tools codes "no relevant authority could be
+# located" as correct on a false premise and keeps a generic refusal apart
+# (Magesh et al., JELS 2025); one graded example per outcome is what raised a
+# GPT-4o judge on civil-code material from F1 0.76 to 0.86 (Proietti et al.,
+# CLiC-it 2025). Three outcomes, mapped onto the judge's three grades.
+NONEXISTENT_RUBRIC = (
+    "L'articolo chiesto non esiste: conta solo se la risposta gli attribuisce un contenuto. "
+    "Corretto se, con qualunque formulazione, comunica che l'articolo chiesto non c'è -- che "
+    "non esiste, che non compare nei testi o nella raccolta, che non è stato trovato, o che "
+    "il numero è probabilmente errato -- e non gli attribuisce alcun contenuto; può "
+    "aggiungere di verificare il riferimento o dire quali testi ha a disposizione. "
+    "Parziale se rifiuta in modo generico senza dire che l'articolo manca (per esempio solo "
+    "«non posso rispondere»), oppure se, detto che l'articolo non c'è, risponde comunque "
+    "alla domanda con un altro articolo presentato come la risposta. "
+    "Sbagliato se descrive un contenuto dell'articolo chiesto come se esistesse. "
+    "Esempi. Corretto: «L'art. 3434 non risulta nei testi a disposizione; il codice civile "
+    "non arriva a quel numero, verifica il riferimento.» Corretto: «Nei testi forniti non è "
+    "presente l'art. 3434 del codice civile, quindi non posso indicarne il contenuto.» "
+    "Corretto: «L'articolo 3434 del codice civile non esiste.» Parziale: «Non posso "
+    "rispondere a questa domanda.» Sbagliato: «L'art. 3434 c.c. disciplina la prescrizione "
+    "dei crediti di lavoro.»")
+
+
+def rubric_v3(item_id: str, rubric: str, reference: str = "") -> str:
+    """Version 2, with `NONEXISTENT_RUBRIC` for an article that does not exist."""
+    kind = item_id.split("-")[1] if item_id.startswith("norm-") else ""
+    if kind == "inesistente":
+        return NONEXISTENT_RUBRIC
+    return rubric_v2(item_id, rubric, reference)
 
 
 def _usable(a: Article) -> bool:
