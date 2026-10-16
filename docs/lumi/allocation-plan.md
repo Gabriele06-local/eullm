@@ -159,7 +159,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
-| `c10-moe-ram` | 66 | ~47 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
+| `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -637,6 +637,18 @@ In order:
    again), nearly a quarter of what four GCDs whole write (98.4). The 480B
    at 32 hardly moves: a step wants more than twice the experts its cache
    holds, and the simulator gave it 28% of them in VRAM at best.
+
+   The traces (16-10-2026), replayed, agree with the GCD's statistics within
+   a few points (the 480B at 8: 57.6% of the experts in VRAM replayed, 56.9%
+   measured), so the simulator can choose the next eviction without node
+   hours (`bench/moe_cache_sim/README.md`). Counts that decay won where a
+   step fit and lost where it overflowed; the two together (`lfu-pass`)
+   were the best or level on all six traces: 235B at 8 from 88.9% to 91.0%,
+   at 32 from 56.2% to 59.9%, 480B at 8 from 57.6% to 61.4%, against bounds
+   of 95.3%, 63.8% and 73.9%. That is llama.cpp patch 0009 (`next16`), and
+   c10's `evict2` group measures it against 0008's eviction in the same
+   binary, with three repeats each, since one repeat's noise is about the
+   size of the difference.
 
    **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
    `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
