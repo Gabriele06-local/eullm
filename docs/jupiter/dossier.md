@@ -59,6 +59,11 @@ JUPITER, named by its Slurm job id.
   import (venv path order, fixed).
 
 **16-10-2026**
+* JSC's data-protection form submitted: no personal data at JSC (§7).
+* EU acts in force in Italian (17,563 regulations and directives) being
+  fetched outside JUPITER for a larger legislation corpus; the processors
+  (`prepare_eurlex.py`, `prepare_legislation.py --all-acts`) are in the
+  repository.
 * Venv: flash-linear-attention 0.5.2 for Qwen3.5's linear attention (on the
   module's Triton 3.5.1); Qwen3.5-9B-Base downloaded; the held-out exam drawn
   from the legislation (217 questions). Queued: every model on the exam,
@@ -296,6 +301,15 @@ figures below with the site's energy mix.
   decisions.
 * Data stays on the project storage and is moved only over SSH; no corpus
   or generated data is ever in a code repository.
+* 16-10-2026, at JSC's request: the Data Protection Team's form on
+  processing personal data submitted, declaring none. The data are public
+  legislation (Normattiva open data, EUR-Lex in Italian), public benchmarks,
+  synthetic pairs generated on JUPITER from them and, possibly later,
+  summaries of legal principles with nothing of the case in them (no names,
+  no case numbers, made-up references), produced outside JSC and checked
+  before transfer. A reference to persons cannot be established; no court
+  decision is transferred. Processing pseudonymised court decisions at JSC
+  would need a new submission, the DPO's confirmation and JSC's addendum.
 
 ## 8. Issues found and fixed
 
