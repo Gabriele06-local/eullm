@@ -20,7 +20,7 @@ JUPITER, named by its Slurm job id.
 |---|---|
 | Awarded | 06-10-2026; first job on 14-10-2026 |
 | System | JUPITER Booster: 4× GH200 (H100 96 GB HBM3, 72-core Neoverse-V2 Grace) a node, whole nodes only |
-| Spent so far | 21.3 GPU-hours by 15-10-2026 evening, and 13.0 more for the five jobs of the night to 16-10 (`tools/jupiter/budget.sh` gives the running total); 64.5 GPU-hours a day spend the rest by 31-12-2026 |
+| Spent so far | 21.3 GPU-hours by 15-10-2026 evening, and 13.0 more for the five jobs of the night to 16-10 (`tools/jupiter/budget.sh` gives the running total); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
 | Codes | EULLM Engine (Rust, llama.cpp), EULLM Forge (Python: PyTorch 2.9.1 of the site, Transformers 5.19, PEFT 0.21) |
 | Data on JUPITER | Legislation only (Normattiva, EUR-Lex: public domain) and public benchmarks. No personal data (§7) |
 
