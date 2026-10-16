@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import json
 import re
 import sys
 from html.parser import HTMLParser
@@ -31,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from prepare_legislation import write_collection  # noqa: E402
+from prepare_legislation import chunk_records  # noqa: E402
 
 from eullm_forge.datasets.chunk import ChunkConfig  # noqa: E402
 
@@ -135,8 +136,12 @@ def parse_act(html: str, celex: str) -> list[dict]:
     return out
 
 
-def read_acts(src: Path) -> dict[str, list[dict]]:
-    acts: dict[str, list[dict]] = {}
+def iter_acts(src: Path):
+    """(code, records) for every act in ``src``, one at a time.
+
+    One at a time because the 17,563 acts are ~2 GB compressed: held all at
+    once they would ask a login node for tens of GB.
+    """
     files = sorted(src.glob("*.html.gz")) + sorted(src.glob("*.html"))
     for path in files:
         celex = path.name.split(".")[0]
@@ -147,10 +152,35 @@ def read_acts(src: Path) -> dict[str, list[dict]]:
             print(f"[warn] {path.name}: {exc}", file=sys.stderr)
             continue
         if records:
-            acts[f"eurlex_{celex}"] = records
+            yield f"eurlex_{celex}", records
         else:
             print(f"[warn] {path.name}: no text", file=sys.stderr)
-    return acts
+
+
+def write_acts(src: Path, output: Path, name: str, cfg: ChunkConfig,
+               dry_run: bool) -> tuple[int, int, int]:
+    """Every act's chunks into legislazione_<name>.chunks.jsonl, streamed;
+    (acts, articles, chunks). Written under a temporary name and renamed."""
+    dst = output / f"legislazione_{name}.chunks.jsonl"
+    tmp = dst.with_name(dst.name + ".tmp")
+    n_acts = n_articles = n_chunks = 0
+    out = None if dry_run else tmp.open("w", encoding="utf-8")
+    try:
+        for code, records in iter_acts(src):
+            n_acts += 1
+            n_articles += len(records)
+            for rec in chunk_records(code, records, cfg, kind="legge_ue"):
+                if out is not None:
+                    out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                n_chunks += 1
+            if n_acts % 1000 == 0:
+                print(f"  {n_acts:,} acts, {n_chunks:,} chunks", file=sys.stderr, flush=True)
+    finally:
+        if out is not None:
+            out.close()
+    if not dry_run and n_acts:
+        tmp.replace(dst)
+    return n_acts, n_articles, n_chunks
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -166,12 +196,10 @@ def main(argv: list[str] | None = None) -> int:
     if not args.src.is_dir():
         ap.error(f"{args.src} is not a directory")
     args.output.mkdir(parents=True, exist_ok=True)
-    acts = read_acts(args.src)
     cfg = ChunkConfig(max_chars=args.max_chars, overlap=args.overlap, min_chars=args.min_chars)
-    n_articles, n_chunks = write_collection(args.name, acts, args.output, cfg, args.dry_run,
-                                            kind="legge_ue")
-    print(f"Total: {len(acts):,} acts, {n_articles:,} articles → {n_chunks:,} chunks")
-    return 0 if acts else 1
+    n_acts, n_articles, n_chunks = write_acts(args.src, args.output, args.name, cfg, args.dry_run)
+    print(f"Total: {n_acts:,} acts, {n_articles:,} articles → {n_chunks:,} chunks")
+    return 0 if n_acts else 1
 
 
 if __name__ == "__main__":
