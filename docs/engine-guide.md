@@ -694,8 +694,13 @@ are slots, the least recently used slot always holds an expert of one of
 the next layers, so evicting it would copy every expert of the step (on
 LUMI with Qwen3-235B and 32 requests, 50 GiB a step): the miss takes the
 most recently used slot outside its layer instead, and the slots filled
-early in the step stay for the next one. `LLAMA_MOE_CACHE_EVICT=lru` always
-takes the least recently used, to compare. `LLAMA_MOE_CACHE_TRACE=FILE`
+early in the step stay for the next one. Which slot goes is decided by a
+count kept for every expert, raised by each selection and halved every
+four steps: the lowest count among the slots unused for a whole step, or,
+when the step overflows, among the slots of the layers it has already
+computed. `LLAMA_MOE_CACHE_EVICT=pass` takes the least recently used and the
+most recently used instead (the eviction of 15-10-2026), and
+`LLAMA_MOE_CACHE_EVICT=lru` always the least recently used, to compare. `LLAMA_MOE_CACHE_TRACE=FILE`
 writes the experts every layer chose, for `bench/moe_cache_sim`, which
 replays them through the policies.
 

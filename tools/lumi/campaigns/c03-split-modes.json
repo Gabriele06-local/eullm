@@ -30,7 +30,9 @@
     "gpt-oss-120b on two and four, layer beside tensor in the same binary where c02 has no row.",
     "Plan them alone: GROUP='rccl-batch rccl-480b rccl-120b' ROUND=r-split-rccl2."
   ],
-  "pull": ["hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M"],
+  "pull": ["hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
+           "hf.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:Q4_K_M",
+           "hf.co/ggml-org/gpt-oss-120b-GGUF:MXFP4"],
   "defaults": {"kind": "throughput", "repeats": 3, "exclusive": true, "slot_ctx": 4096},
   "groups": [
     {"name": "split-32b", "priority": 90, "est_s": 1500,
