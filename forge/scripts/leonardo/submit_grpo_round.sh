@@ -24,7 +24,9 @@
 #      models' hybrid retrieval (two links), graded under rubric v3 into the
 #      graded directory every other model is in; and the practical exam
 #      ($WORK/eval/practical-dev.jsonl, when it exists) the same way, into
-#      $WORK/eval/practical-answers. Compare with compare_graded.py.
+#      $WORK/eval/practical-answers; and the statute exam once more without
+#      the note on a missing article (label <NAME>-q4-hybnn), as RAG
+#      Enterprise asks. Compare with compare_graded.py.
 #
 # A round takes 1 place on the serial partition (the packaging); with none
 # free it is refused before anything is submitted. LINKS=0 queues only steps 2-5, after AFTER
@@ -135,24 +137,29 @@ fi
 # job: the round helper (sbatch_exam_round.slurm) would take two more places
 # on the serial partition, and a day's rounds did not fit (2026-10-15).
 NORMS="$WORK/norms/legislazione_*.chunks.jsonl"
-exam() {  # label items out-dir graded-dir links -> id of the judge job
-    local items=$1 out=$2 graded=$3 links=$4 d="afterok:$pkg" x i
+exam() {  # items out-dir graded-dir links tag [legal_eval options] -> id of the judge job
+    local items=$1 out=$2 graded=$3 links=$4 tag=$5 extra=${6:-} d="afterok:$pkg" x i
     mkdir -p "$out"
     for i in $(seq 1 "$links"); do
         x=$(EXAM_MODELS="$NAME-q4=$OUT/merged" EXAM_GGUF="$NAME-q4=$OUT/gguf/$NAME-q4_k_m.gguf" \
             EXAM_ITEMS="$items" EXAM_OUT="$out" EXAM_NORMS="$NORMS" EXAM_OPEN_ONLY=1 \
-            EXAM_OPEN_TAG=hyb EXAM_EMBEDDER=Qwen/Qwen3-Embedding-0.6B \
+            EXAM_OPEN_TAG="$tag" EXAM_OPEN_ARGS="$extra" EXAM_EMBEDDER=Qwen/Qwen3-Embedding-0.6B \
             EXAM_RERANKER=Qwen/Qwen3-Reranker-0.6B \
             sub -J "eullm-exam-$NAME" --dependency="$d" "$L/sbatch_norm_exam.slurm") || return 1
         d="afterany:$x"
     done
-    sub --dependency="$d" --export="ALL,JUDGE_DIR=$out,JUDGE_QUIET=1,JUDGE_GLOB=answers-$NAME-q4-hyb.jsonl,JUDGE_ARGS=--rubric v3 --graded-dir $graded" \
+    sub --dependency="$d" --export="ALL,JUDGE_DIR=$out,JUDGE_QUIET=1,JUDGE_GLOB=answers-$NAME-q4-$tag.jsonl,JUDGE_ARGS=--rubric v3 --graded-dir $graded" \
         "$L/sbatch_judge.slurm"
 }
-j1=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2) || exit 1
+j1=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2 hyb) || exit 1
 echo "[round] statute exam, graded by job $j1 into $E/devbig-graded-v3"
+# the same exam without the note on a missing article, as RAG Enterprise asks
+# it: the note had become the signal (2026-10-16, see legal_eval.py --no-note)
+j3=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2 hybnn \
+     --no-note) || exit 1
+echo "[round] statute exam without the note, graded by job $j3 (label $NAME-q4-hybnn)"
 if [ -s "$E/practical-dev.jsonl" ] && [ "${NO_PRACTICAL:-0}" != 1 ]; then
-    j2=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1) || exit 1
+    j2=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1 hyb) || exit 1
     echo "[round] practical exam, graded by job $j2 into $E/practical-answers"
 fi
 echo "[round] $NAME: merged model will be $OUT/merged (job $pkg)"

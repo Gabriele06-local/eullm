@@ -71,6 +71,7 @@ def test_the_round_is_queued_whole_and_in_order(tmp_path):
     names = [next((a for a in c[1].split() if a.startswith("eullm-")), "judge") for c in calls]
     assert names == ["eullm-grpo-jg-x"] * 3 + ["eullm-package-jg-x", "eullm-cds-exam",
                                                "eullm-exam-jg-x", "eullm-exam-jg-x", "judge",
+                                               "eullm-exam-jg-x", "eullm-exam-jg-x", "judge",
                                                "eullm-exam-jg-x", "judge"]
     ids = [c[0] for c in calls]
     # the first link waits on nothing, the next ones on the link before
@@ -84,8 +85,10 @@ def test_the_round_is_queued_whole_and_in_order(tmp_path):
     assert f"--dependency=afterany:{ids[6]}" in calls[7][1]       # then its judge
     assert "JUDGE_GLOB=answers-jg-x-q4-hyb.jsonl" in calls[7][1]
     assert "--graded-dir" in calls[7][1] and "devbig-graded-v3" in calls[7][1]
-    assert calls[8][7].endswith("practical-dev.jsonl")            # the practical exam
-    assert "practical-answers" in calls[9][1]
+    # the same exam without the note, as RAG Enterprise asks it
+    assert "JUDGE_GLOB=answers-jg-x-q4-hybnn.jsonl" in calls[10][1]
+    assert calls[11][7].endswith("practical-dev.jsonl")           # the practical exam
+    assert "practical-answers" in calls[12][1]
     assert "lrd_all_serial" in calls[3][1] and "merge_identity_adapter" in calls[3][1]
     assert "quantize_to_gguf.sh" in calls[3][1] and "jg-x-f16.gguf" in calls[3][1]
     assert sum("lrd_all_serial" in c[1] for c in calls) == 1     # one serial place a round
@@ -109,7 +112,7 @@ def test_links_zero_packages_and_examines_a_chain_already_queued(tmp_path):
     assert r.returncode == 0, r.stderr
     calls = [ln.split("|") for ln in log.read_text().splitlines()]
     assert "eullm-package-jg-x" in calls[0][1] and "--dependency=afterany:555" in calls[0][1]
-    assert len(calls) == 7 and not any("eullm-grpo" in c[1] for c in calls)
+    assert len(calls) == 10 and not any("eullm-grpo" in c[1] for c in calls)
 
 
 def test_a_round_already_queued_is_not_submitted_again(tmp_path):
@@ -143,4 +146,4 @@ def test_packaged_queues_only_the_exams_and_takes_no_serial_place(tmp_path):
     assert not any("lrd_all_serial" in c[1] for c in calls)
     assert not any("eullm-grpo" in c[1] or "eullm-package" in c[1] for c in calls)
     assert "--dependency=afterok:4242" in calls[0][1]          # the statute exam
-    assert len(calls) == 5                                      # 2 links + judge, 1 + judge
+    assert len(calls) == 8                     # 2 links + judge, twice; 1 + judge
