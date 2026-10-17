@@ -39,7 +39,7 @@ EULLM is composed of three independent components that work together to create, 
 - Native EULLM API (`/api/generate`, `/api/chat`, `/api/tags`, etc.) — Ollama-compatible
 - OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`)
 - Browser access from this machine by default; `EULLM_ALLOWED_ORIGINS` widens it (Open WebUI on another host)
-- Built-in catalog of 27 open models, among them `legal-it-4b` and `legal-it-8b`
+- Built-in catalog of 25 open models (`legal-it-4b` and `legal-it-8b` are on Hugging Face, out of the catalog until the engine supplies the legal texts)
 - Model download from HuggingFace with streaming progress
 - Local model store at `~/.eullm/models/`
 - Audit trail designed for the EU AI Act — persistent JSONL at `~/.eullm/audit/audit.jsonl`: model, tokens, timing, never the text

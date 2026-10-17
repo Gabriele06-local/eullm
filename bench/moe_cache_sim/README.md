@@ -21,6 +21,8 @@ c++ -O2 -std=c++17 -o moe_cache_sim bench/moe_cache_sim/moe_cache_sim.cpp
 | `lru` | the least recently used: llama.cpp's `moe_cache_lru::plan`, unchanged |
 | `stale-mru` | the least recently used while its expert went unused for a whole pass over the layers; when every slot was used within the last pass, the most recently used one outside the current layer. llama.cpp patch `0008` |
 | `lfu-decay` | the one whose expert has the lowest count, counts kept for every expert (cached or not) and halved every 4 passes (`--half-life`) |
+| `stale-lfu` | `stale-mru` when a pass overflows; among the stale slots, the one whose expert has the lowest decayed count instead of the least recently used |
+| `lfu-pass` | `stale-lfu`, and when a pass overflows, the lowest count among the slots used earlier in this pass (the most recently used if there is none); `/32` compares at most 32 slots a miss, as llama.cpp could afford |
 | `belady (bound)` | the one whose expert is chosen again furthest in the future: needs the whole trace, so it is the best any policy could do |
 
 The layers come in the same order every step. When a step chooses more
@@ -78,3 +80,28 @@ traces to replay here.
     --batch 32 --slots 3900 --expert-mib 10.88
 ./moe_cache_sim run 235b-b32.moe-trace --expert-mib 10.88
 ```
+
+## Real traces (16-10-2026)
+
+The `c10` `evict` points (`next15`, one MI250X GCD) wrote their routing with
+`LLAMA_MOE_CACHE_TRACE`. A quantization mixes tensor types across layers,
+and the cache groups layers by layout: the trace holds the first group, 46
+of Qwen3-235B's 94 layers and 30 of Qwen3-Coder-480B's 62, with that
+group's own slots, which shrink as the batch's KV cache grows. Experts in
+VRAM:
+
+| model, requests | slots | `lru` | `stale-mru` | `lfu-decay` | bound | on the GCD, new eviction |
+|---|---:|---:|---:|---:|---:|---:|
+| 235B, 1 | 2,485 (42%) | 94.3% | 94.3% | 94.3% | 96.1% | 96.3% |
+| 235B, 8 | 2,255 (38%) | 88.9% | 88.9% | 90.9% | 95.3% | 88.2% |
+| 235B, 32 | 1,438 (24%) | 12.1% | 56.2% | 40.5% | 63.8% | 50.5-56.2% |
+| 480B, 1 | 819 (17%) | 77.2% | 77.2% | 78.6% | 88.8% | 82.5% |
+| 480B, 8 | 696 (15%) | 16.5% | 57.6% | 60.4% | 73.9% | 56.9% |
+| 480B, 32 | 272 (6%) | 5.6% | 16.9% | 6.4% | 22.9% | 14.1% (steps over 8) |
+
+The replay agrees with the GCD's own statistics within a few points, over
+all the layers where the GCD's figure covers both groups. The decayed
+counts win where the steps fit and lose where they overflow, which is what
+`stale-lfu` and `lfu-pass` combine; on the synthetic routing `lfu-pass`
+gains 1-4 points over `stale-mru` where a pass overflows and is never
+below it.

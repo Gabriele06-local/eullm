@@ -274,3 +274,36 @@ def test_the_header_fallback_is_reachable_and_still_identifies_the_law():
         "value='urn:nir:stato:legge:1990-08-07;241'/></meta></akomaNtoso>"
     )
     assert _detect_source_from_akn(single_quoted) == "legge_procedimento_amministrativo"
+
+
+# --- --all-acts: a whole Normattiva collection, every act under its own id ----
+
+def test_act_id_from_the_urn():
+    from prepare_legislation import act_id
+    assert act_id(_akn("urn:nir:stato:legge:1990-08-07;241"), "x.xml") == "legge_1990-08-07_241"
+    assert act_id("<akomaNtoso/>", "dir/19900807_241.xml") == "19900807_241"
+
+
+def test_every_act_of_a_collection_reaches_one_file(tmp_path):
+    from prepare_legislation import parse_all_acts_zip, write_collection
+
+    from eullm_forge.datasets.chunk import ChunkConfig
+
+    l241 = "urn:nir:stato:legge:1990-08-07;241"
+    dlgs = "urn:nir:stato:decreto.legislativo:2005-03-07;82"
+    body = "Una disposizione di prova abbastanza lunga da essere un pezzo. " * 6
+    zpath = tmp_path / "collezione.zip"
+    zpath.write_bytes(_zip({
+        "a/241-1.xml": _article_xml(l241, "1", "Principi", body),
+        "a/241-2.xml": _article_xml(l241, "2", "Termini", body),
+        "b/82.xml": _article_xml(dlgs, "1", "Definizioni", body),
+        "b/broken.xml": "<akomaNtoso",
+    }))
+    acts = parse_all_acts_zip(zpath)
+    assert set(acts) == {"legge_1990-08-07_241", "decreto_legislativo_2005-03-07_82"}
+    assert len(acts["legge_1990-08-07_241"]) == 2       # one act over two files
+
+    n_articles, n_chunks = write_collection("vigenti", acts, tmp_path, ChunkConfig(), dry_run=False)
+    rows = [json.loads(line) for line in (tmp_path / "legislazione_vigenti.chunks.jsonl").open()]
+    assert n_articles == 3 and n_chunks == len(rows) >= 3
+    assert {r["code"] for r in rows} == set(acts)

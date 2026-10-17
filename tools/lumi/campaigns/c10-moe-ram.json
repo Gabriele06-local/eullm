@@ -24,7 +24,11 @@
     "the least recently used one (LLAMA_MOE_CACHE_EVICT=lru), same statistics; the new eviction's",
     "points also write the experts every layer selected (LLAMA_MOE_CACHE_TRACE, a file per point",
     "beside its server log, runner 8), for bench/moe_cache_sim to replay the policies on real",
-    "routing. Plan the group alone: GROUP=evict."
+    "routing. Plan the group alone: GROUP=evict.",
+    "evict2 (added 16-10-2026, an engine with patch 0009): the decaying counts of 0009 against",
+    "0008's eviction (LLAMA_MOE_CACHE_EVICT=pass) in the same binary, three repeats, since the",
+    "replay gives them 1-4 points of experts in VRAM apart, about as much as one repeat's noise.",
+    "Plan the group alone: GROUP=evict2."
   ],
   "pull": [
     "hf.co/ggml-org/gpt-oss-120b-GGUF:MXFP4",
@@ -67,6 +71,12 @@
      "axes": {"model": ["qwen3-235b-a22b-gguf-q4_k_m", "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"],
               "batch": [1, 8, 32],
               "env": [{"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_TRACE": "{workdir}/{point}.moe-trace"},
-                      {"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_EVICT": "lru"}]}}
+                      {"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_EVICT": "lru"}]}},
+    {"name": "evict2", "priority": 97, "est_s": 3000,
+     "set": {"extra_args": ["--moe-cache", "auto"], "repeats": 3},
+     "axes": {"model": ["qwen3-235b-a22b-gguf-q4_k_m", "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m"],
+              "batch": [1, 8, 32],
+              "env": [{"LLAMA_MOE_CACHE_STATS": "64"},
+                      {"LLAMA_MOE_CACHE_STATS": "64", "LLAMA_MOE_CACHE_EVICT": "pass"}]}}
   ]
 }

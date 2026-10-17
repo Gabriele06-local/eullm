@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-AGPL--3.0--or--later-blue" alt="License" />
   <img src="https://img.shields.io/badge/EU%20AI%20Act-Designed%20for%20compliance-gold" alt="EU AI Act" />
-  <img src="https://img.shields.io/badge/Engine-v0.7.50-2ea44f" alt="Engine status" />
+  <img src="https://img.shields.io/badge/Engine-v0.7.70-2ea44f" alt="Engine status" />
   <img src="https://img.shields.io/badge/Forge%20%2B%20Hub-Early%20development-orange" alt="Forge/Hub status" />
   <a href="https://github.com/eullm/eullm/actions/workflows/ci.yml"><img src="https://github.com/eullm/eullm/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://doi.org/10.5281/zenodo.20412979"><img src="https://zenodo.org/badge/DOI/10.5281/zenodo.20412979.svg" alt="DOI" /></a>
@@ -45,14 +45,14 @@
 | 🎯 **A RAG gate that knows when to stop** | On Italian law it tells whether the retrieved text can answer: AUROC 0.90 against 0.79 for embeddings, and 2.5× fewer good answers blocked (Jev-Style 2B). |
 | 🔁 **The same question, the same answer** | A decision does not move with the other questions asked beside it: bit for bit, checked on CPU and GPU. |
 | 🧾 **Decisions you can audit, correct and learn from** | Every decision has an id in the local audit trail. Mark it right or wrong, keep a private trace, and train your own decision model with Forge. |
-| 🐘 **A 125B model on a 16 GB GPU** | Qwen3.8-Flash-Next (125B, 6B active, IQ2_XS) writes 55 tokens/s on an RTX 5070 Ti with 64 GB of RAM: 2.5× the usual split, and long prompts read 3.8× faster. |
+| 🐘 **A 125B model on a 16 GB GPU** | Qwen3.8-Flash-Next (125B, 6B active, IQ2_XS) writes 69 tokens/s on an RTX 5070 Ti with 64 GB of RAM: about 3× the usual split, and a 30,000-token prompt is read about 6× faster (1,570 tokens/s). |
 | 🚀 **Up to 62% faster answers** | `--mtp` lets the model draft its own next tokens: +62% on code, +27% on prose with Qwen3.5-9B. |
 | 👥 **A long prompt never freezes the others** | With two slots, an 8,000-token prompt is read in 1.5 s while another answer keeps streaming; its longest pause is 108 ms. |
-| 📈 **Sixteen users, one GPU** | Continuous batching: 259 tokens/s across 16 concurrent requests on one RTX 5070 Ti. |
+| 📈 **Sixteen users, one GPU** | Continuous batching: Qwen3-8B writes 1,065 tokens/s across 16 concurrent requests on one desktop RTX 5070 Ti, 8× one request alone, and 1,434 on one GH200 (EuroHPC JUPITER). |
 | 🧠 **Several models, one server** | Chat models, an embedder and a decision model stay loaded side by side, each sized to the VRAM the others leave. |
 | 🔌 **A drop-in for Ollama and OpenAI** | The same API on port 11434: Open WebUI, LangChain, n8n and any OpenAI client work unchanged. |
 | 🔒 **Nothing leaves your machine** | No telemetry, no external API. Every answer and every decision goes to a local audit trail: model, tokens, timing, never the text. |
-| 🌍 **From an ARM board to a supercomputer** | A 35B MoE at 10.8 tokens/s on an ARM board's CPU alone; tested on EuroHPC Leonardo and LUMI. |
+| 🌍 **From an ARM board to a supercomputer** | A 35B MoE at 10.8 tokens/s on an ARM board's CPU alone; tested on EuroHPC Leonardo, LUMI and JUPITER. |
 | 🎓 **Models trained for your domain** | EuLLM Forge turns a large open model into a small specialist you own. Italian law comes first. |
 
 Where each number comes from: [decisions](docs/engine-guide.md#decisions-without-generation-v1systemone-new-in-v0720) ·
@@ -60,7 +60,7 @@ Where each number comes from: [decisions](docs/engine-guide.md#decisions-without
 [MoE on small GPUs](docs/engine-guide.md#writing-faster-the-expert-cache---moe-cache-experimental) ·
 [MTP](docs/engine-guide.md#speculative-decoding-with-the-models-mtp-head---mtp-n) ·
 [long prompts](docs/roadmap-engine-0.7-1.0.md) ·
-[batching](docs/benchmarks.md) · [ARM and EuroHPC](docs/platforms.md).
+[batching](docs/benchmarks.md#data-centre-gpus-october-2026) · [ARM and EuroHPC](docs/platforms.md).
 The expert cache needs one CUDA GPU and is experimental.
 
 ## Decisions in milliseconds, all local
@@ -102,9 +102,10 @@ Try the [Snake and email triage examples](examples/README.md).
 - **A drop-in replacement.** The Ollama and OpenAI APIs on port 11434:
   Open WebUI, LangChain, n8n and any OpenAI client work unchanged.
 - **Fast where it counts.** Continuous batching serves 16 users at once at
-  259 tok/s on one RTX 5070 Ti; quantized KV cache for long contexts; images
-  and audio as input; large MoE models on small GPUs.
-- **Runs everywhere.** From a Raspberry Pi to an A100 node, with CUDA, ROCm,
+  1,065 tok/s on a desktop RTX 5070 Ti and 1,434 tok/s on one GH200; quantized
+  KV cache for long contexts; images and audio as input; large MoE models on
+  small GPUs.
+- **Runs everywhere.** From a Raspberry Pi to a GH200 node, with CUDA, ROCm,
   Vulkan, Metal and CPU builds of the same engine.
 - **Models trained for your needs.** EuLLM Forge turns a general open model
   into a small specialist for your domain, your language and your brand,
@@ -140,18 +141,20 @@ account. Every download, for every platform: [platforms](docs/platforms.md).
 
 | Where | Measured |
 |---|---|
-| A desktop GPU, RTX 5070 Ti | 64 decisions in 0.66 s; 259 tok/s across 16 concurrent requests; a 125B MoE at 55 tok/s |
+| A desktop GPU, RTX 5070 Ti | 64 decisions in 0.66 s; qwen3-8b at 132 tok/s, 1,065 tok/s across 16 concurrent requests; a 125B MoE at 69 tok/s |
 | An ARM board, no GPU: Radxa Orion O6 | a 35B MoE model (`qwen3.6-35b-a3b`) at 9–11 tok/s, on CPU alone |
-| The same board with an RTX 3060 | qwen3-14b at 33 tok/s |
-| EuroHPC **Leonardo**, NVIDIA A100 64 GB | a 27B model (Q8) at 32.4 tok/s on one GPU |
-| EuroHPC **LUMI-G**, AMD MI250X | qwen3-8b at 40.7 tok/s on one GCD |
+| The same board with an RTX 3060 | qwen3-14b at 33 tok/s; qwen3.6-35b-a3b at 35.6 tok/s |
+| EuroHPC **Leonardo**, NVIDIA A100 64 GB | a 27B model (Q8) at 32.4 tok/s on one GPU; the 125B MoE at 39 tok/s on one GPU |
+| EuroHPC **LUMI-G**, AMD MI250X | qwen3-8b at 114 tok/s on one GCD, 958 tok/s across 32 requests; gpt-oss-120b at 1,181 tok/s on one node |
+| EuroHPC **JUPITER**, NVIDIA GH200 (ARM) | qwen3-8b at 229 tok/s on one GPU, 1,434 tok/s across 16 requests; qwen3-32b at 875 tok/s across 32 |
 
 Also on Apple Silicon (Metal), Intel Macs, Windows, and AMD and Intel GPUs
 through Vulkan, with an experimental ROCm build for recent Radeons on Windows.
 Details, and who tested what:
 [platforms](docs/platforms.md) · [ARM](docs/platforms.md#arm) ·
 [EuroHPC](docs/platforms.md#data-centre-gpus-and-eurohpc) ·
-[benchmarks](docs/benchmarks.md).
+[benchmarks](docs/benchmarks.md) · [LUMI](docs/lumi/allocation-plan.md) ·
+[JUPITER](docs/jupiter/dossier.md#51-eullm-engine-on-gh200-deliverable-5).
 
 ## Models trained for your needs
 
@@ -161,23 +164,31 @@ into a smaller student, teaches it your domain, your language and your name,
 and quantizes it into a GGUF that runs on a laptop with 8 GB of RAM. Your
 brand is in the weights, not in a system prompt anyone can remove.
 
-The first is **`legal-it-4b`**, for Italian law: a 4B model distilled from a
-30B teacher, built on EuroHPC Leonardo. Forge is in development, and so are
-the first models; [the roadmap](docs/roadmap.md) says what is ready and what
-is next. **Want one for your domain?** We build them as a service:
+The first are for Italian law: **[`legal-it-8b`](https://huggingface.co/EuLLM/legal-it-8b)**
+and **[`legal-it-4b`](https://huggingface.co/EuLLM/legal-it-4b)**, trained on
+EuroHPC Leonardo from Ministral-3-8B and Qwen3-4B-Instruct-2507 (supervised
+fine-tuning, then GRPO) and published on Hugging Face. They
+answer from the legal texts a retrieval system puts in the prompt and cite
+them: 89.0% and 85.1% on 429 held-out questions, against 80.9% and 77.6% for
+the models they start from. Use them behind retrieval (as
+[I3K RAG Engine](https://rag.i3k.eu) does), not in a plain chat: without the
+texts they are not meant to answer. The next generation, stronger on case
+law, is in training on EuroHPC Leonardo; Forge is in development,
+and [the roadmap](docs/roadmap.md) says what is ready and what is next. **Want one for your domain?** We build them as a service:
 [dev@eullm.eu](mailto:dev@eullm.eu).
 
 ## What's ready today
 
 | | Status |
 |---|---|
-| **Engine**: inference, Ollama and OpenAI APIs, continuous batching, quantized KV cache, audit trail, chat UI | ✅ Ready, v0.7.50 |
+| **Engine**: inference, Ollama and OpenAI APIs, continuous batching, quantized KV cache, audit trail, chat UI | ✅ Ready, v0.7.70 |
 | **Decisions** (`/v1/systemone`) | ✅ Since v0.7.20 |
 | **Large MoE models on small GPUs** (`--moe-cache`), **MTP drafts** (`--mtp`), **several models at once**, **`model: "auto"`** | ✅ New in v0.7.30; the expert cache is experimental and needs one CUDA GPU |
 | **Multimodal**: images and audio as input | ✅ Vision ready; audio experimental upstream |
 | **Forge**: pruning, distillation, identity, quantization | 🧪 In development |
 | **Hub**: EU-hosted model registry with AI Act cards | 🧪 Prototype |
-| **Domain models**: `legal-it-4b`, then medicine and finance | 🚧 In training |
+| **Domain models**: `legal-it-8b` and `legal-it-4b` for Italian law, used behind retrieval | ✅ On Hugging Face |
+| **Next domain models**: Italian case law, then medicine and finance | 🚧 In training |
 
 The engine works today, on its own, with any GGUF model: you do not need to
 wait for Forge or the Hub.
@@ -228,8 +239,9 @@ healthcare, finance and public administration.
 - **[Francesco Marchetti](https://www.linkedin.com/in/francesco-marchetti-4a7b8149/)**:
   founder, CEO and lead engineer, 27+ years in EU IT and telecommunications
   infrastructure
-- Also building [RAG Enterprise](https://github.com/I3K-IT/RAG-Enterprise),
-  sovereign on-premise document intelligence (AGPL-3.0)
+- Also building [I3K RAG Engine](https://rag.i3k.eu): questions on your own
+  documents, answered with their sources, on your own server, built on EuLLM
+  (open source, AGPL-3.0: [code](https://github.com/I3K-IT/RAG-Enterprise))
 - EIC Accelerator 2026 applicant (Proposal ID 101335975)
 
 Adjacent products operated by I3K Technologies: [CRM81](https://crm81.it)

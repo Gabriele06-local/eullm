@@ -4,7 +4,33 @@ EULLM Engine uses **continuous batching** to decode multiple requests in paralle
 
 This page documents how that scaling behaves on a consumer GPU.
 
-## Test setup
+## October 2026: Qwen3-8B on the RTX 5070 Ti
+
+The same GPU and the same [`bench.sh`](../bench.sh) (150 tokens a request,
+throughput over the wall time of the slowest), with the model the data-centre
+runs below use, on 17 October 2026:
+
+| Concurrent requests | Throughput | Speedup vs N=1 | Each request |
+|:---:|:---:|:---:|:---:|
+| 1 | 132 tok/s | 1.0× | 144 tok/s |
+| 2 | 248 tok/s | 1.9× | 135 tok/s |
+| 4 | 433 tok/s | 3.3× | 117 tok/s |
+| 8 | 720 tok/s | 5.5× | 98 tok/s |
+| 16 | **1,065 tok/s** | **8.1×** | 72 tok/s |
+
+Qwen3-8B Q4_K_M from the catalog (`qwen3-8b`), a local CUDA build of
+0.7.70,
+`eullm serve --batch-size 16 --ctx-size 65536 --no-fit`: 16 slots of 4,096
+tokens, all 36 layers on the GPU, 14.1 of 16.3 GB in use.
+
+`--no-fit` matters here. Without it the sizing estimate (model 4.68 GiB,
+f16 KV cache 9 GiB) kept 2 of the 36 layers in RAM although 2 GB were left,
+and the same run gave 52 tok/s for one request and 300 for 16. With 16 GB, a
+smaller `--ctx-size` (32768 is plenty for this test) fits without the flag.
+
+The March run below, Qwen3.5-9B on an earlier engine, is kept as it was.
+
+## Test setup (March 2026)
 
 | | |
 |---|---|
@@ -68,6 +94,39 @@ Individual request performance under load. Each user gets fewer tok/s as concurr
 | 16 | ~16.5 tok/s |
 
 At ~16 tok/s text still arrives faster than humans can read; the trade-off chosen by continuous batching is "everyone gets tokens in real-time" rather than "one user at full speed, the rest queued."
+
+## Data-centre GPUs (October 2026)
+
+The same scaling, measured on EuroHPC machines with Q4_K_M models and
+the October engines, tokens/s across all requests:
+
+| GPU | model | 1 request | 16 | 32 |
+|---|---|---:|---:|---:|
+| one LUMI-G MI250X GCD | Qwen3-4B | 149 | 921 | 1,242 |
+| | Qwen3-8B | 114 | 705 | 958 |
+| | Qwen3-14B | 75.3 | 470 | 667 |
+| | Qwen3-32B | 38 | 267 | 378 |
+| one JUPITER GH200 | Qwen3-8B | 229 | 1,434 | |
+| | Qwen3-14B | 142 | 1,066 | |
+| | Qwen3-32B | 70 | 589 | 875 |
+| | Qwen3.6-27B (hybrid) | 75 | 513 | 700 |
+| | Qwen3.6-35B-A3B (MoE) | 218 | 888 | |
+
+Against llama-server at the same llama.cpp commit:
+
+- **LUMI-G, Qwen3-8B, 16 requests:** 695 against 646 tok/s, and the median
+  first token after 33 ms against 274 ms, since a new prompt is read inside
+  the running answers' steps.
+- **JUPITER:** equal on dense models one request at a time, ahead with many
+  requests on the hybrid and MoE models: 700 against 392 tok/s with 32
+  requests on Qwen3.6-27B, 888 against 723 with 16 on Qwen3.6-35B-A3B.
+- **One JUPITER node** (four GH200), Qwen3-30B-A3B-Instruct Q8_0, 32 requests
+  per GPU: 2,279 tok/s.
+
+Sources, with the jobs and the engine builds:
+[LUMI-G](lumi/allocation-plan.md) (rounds c01, 10 to 13 October) and
+[JUPITER](jupiter/dossier.md#51-eullm-engine-on-gh200-deliverable-5)
+(14 October).
 
 ## Reproduce
 

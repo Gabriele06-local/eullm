@@ -11,7 +11,9 @@
 # the chain is already queued or running (FORGE_CHAIN_MORE=1 adds N links
 # behind the ones there). FORGE_CHAIN_AFTER=<job> makes the chain wait for
 # that job to end, whatever its outcome (a probe, say), so the allocation
-# never runs more than two nodes at once.
+# never runs more than two nodes at once. FORGE_CHAIN_NAME names the chain
+# (default forge-distill): a chain of another name runs beside this one
+# instead of waiting behind it.
 
 set -euo pipefail
 N="${1:?give the number of two-hour links}"
@@ -47,9 +49,10 @@ for m in sorted(set(sys.argv[1:])):
     print(f"[ok]  {m} in the offline cache")
 PY
 
-QUEUED=$(squeue --me -h -n forge-distill -o %i | wc -l)
+NAME="${FORGE_CHAIN_NAME:-forge-distill}"
+QUEUED=$(squeue --me -h -n "$NAME" -o %i | wc -l)
 if [ "$QUEUED" -gt 0 ] && [ "${FORGE_CHAIN_MORE:-0}" != 1 ]; then
-    squeue --me -n forge-distill
+    squeue --me -n "$NAME"
     err "$QUEUED link(s) of the chain already queued or running: FORGE_CHAIN_MORE=1 to add $N more"
 fi
 
@@ -57,9 +60,9 @@ DEP=singleton
 [ -z "${FORGE_CHAIN_AFTER:-}" ] || DEP="afterany:$FORGE_CHAIN_AFTER,singleton"
 mkdir -p "$FORGE_RUN_DIR/logs"
 for _ in $(seq 1 "$N"); do
-    sbatch --account "$SBATCH_ACCOUNT" --dependency="$DEP" \
+    sbatch --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
         --output="$FORGE_RUN_DIR/logs/distill-%j.out" \
         "$HERE/sbatch_distill.slurm"
 done
-squeue --me -n forge-distill
+squeue --me -n "$NAME"
 echo "The output of each link: $FORGE_RUN_DIR/logs/distill-<job>.out"
