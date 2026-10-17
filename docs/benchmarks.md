@@ -69,6 +69,40 @@ Individual request performance under load. Each user gets fewer tok/s as concurr
 
 At ~16 tok/s text still arrives faster than humans can read; the trade-off chosen by continuous batching is "everyone gets tokens in real-time" rather than "one user at full speed, the rest queued."
 
+## Data-centre GPUs (October 2026)
+
+The table above is the first measurement, on a desktop GPU in March 2026.
+The same scaling, measured since on EuroHPC machines with Q4_K_M models and
+the October engines, tokens/s across all requests:
+
+| GPU | model | 1 request | 16 | 32 |
+|---|---|---:|---:|---:|
+| one LUMI-G MI250X GCD | Qwen3-4B | 149 | 921 | 1,242 |
+| | Qwen3-8B | 114 | 705 | 958 |
+| | Qwen3-14B | 75.3 | 470 | 667 |
+| | Qwen3-32B | 38 | 267 | 378 |
+| one JUPITER GH200 | Qwen3-8B | 229 | 1,434 | |
+| | Qwen3-14B | 142 | 1,066 | |
+| | Qwen3-32B | 70 | 589 | 875 |
+| | Qwen3.6-27B (hybrid) | 75 | 513 | 700 |
+| | Qwen3.6-35B-A3B (MoE) | 218 | 888 | |
+
+Against llama-server at the same llama.cpp commit:
+
+- **LUMI-G, Qwen3-8B, 16 requests:** 695 against 646 tok/s, and the median
+  first token after 33 ms against 274 ms, since a new prompt is read inside
+  the running answers' steps.
+- **JUPITER:** equal on dense models one request at a time, ahead with many
+  requests on the hybrid and MoE models: 700 against 392 tok/s with 32
+  requests on Qwen3.6-27B, 888 against 723 with 16 on Qwen3.6-35B-A3B.
+- **One JUPITER node** (four GH200), Qwen3-30B-A3B-Instruct Q8_0, 32 requests
+  per GPU: 2,279 tok/s.
+
+Sources, with the jobs and the engine builds:
+[LUMI-G](lumi/allocation-plan.md) (rounds c01, 10 to 13 October) and
+[JUPITER](jupiter/dossier.md#51-eullm-engine-on-gh200-deliverable-5)
+(14 October).
+
 ## Reproduce
 
 ### Stress test with parallelism verification (recommended)

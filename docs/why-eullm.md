@@ -30,7 +30,7 @@ A local inference stack gives you a model and a port. What it usually does not g
 | Model registry | Ollama's registry, Hugging Face | Hugging Face today; an EU-hosted registry is planned |
 | AI Act | Nothing built in | A local audit trail designed for its record-keeping |
 | Model verticalizzazione | Manual, requires ML expertise | Forge CLI + pipeline modules (end-to-end integration in progress) |
-| Domain-specific EU models | None | `legal-it-4b` and `legal-it-8b` in the catalog; more in development |
+| Domain-specific EU models | None | `legal-it-4b` and `legal-it-8b` on Hugging Face, for use behind retrieval; more in development |
 | White-label branding | System prompt only (bypassable) | Fine-tuned into weights |
 | Telemetry | Varies | **None.** No analytics, no crash reports, no usage stats. Audit trail stored locally at `~/.eullm/audit/audit.jsonl`, never transmitted |
 | Migration effort | — | **Zero.** Same API, same port, same tools |
