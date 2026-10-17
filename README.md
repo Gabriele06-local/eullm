@@ -48,7 +48,7 @@
 | 🐘 **A 125B model on a 16 GB GPU** | Qwen3.8-Flash-Next (125B, 6B active, IQ2_XS) writes 69 tokens/s on an RTX 5070 Ti with 64 GB of RAM: about 3× the usual split, and a 30,000-token prompt is read about 6× faster (1,570 tokens/s). |
 | 🚀 **Up to 62% faster answers** | `--mtp` lets the model draft its own next tokens: +62% on code, +27% on prose with Qwen3.5-9B. |
 | 👥 **A long prompt never freezes the others** | With two slots, an 8,000-token prompt is read in 1.5 s while another answer keeps streaming; its longest pause is 108 ms. |
-| 📈 **Sixteen users, one GPU** | Continuous batching: Qwen3-8B writes 1,434 tokens/s across 16 concurrent requests on one GH200 (EuroHPC JUPITER) and 705 on one MI250X GCD (LUMI), where the first token comes in 33 ms against 274 for llama-server. |
+| 📈 **Sixteen users, one GPU** | Continuous batching: Qwen3-8B writes 1,065 tokens/s across 16 concurrent requests on one desktop RTX 5070 Ti, 8× one request alone, and 1,434 on one GH200 (EuroHPC JUPITER). |
 | 🧠 **Several models, one server** | Chat models, an embedder and a decision model stay loaded side by side, each sized to the VRAM the others leave. |
 | 🔌 **A drop-in for Ollama and OpenAI** | The same API on port 11434: Open WebUI, LangChain, n8n and any OpenAI client work unchanged. |
 | 🔒 **Nothing leaves your machine** | No telemetry, no external API. Every answer and every decision goes to a local audit trail: model, tokens, timing, never the text. |
@@ -102,7 +102,7 @@ Try the [Snake and email triage examples](examples/README.md).
 - **A drop-in replacement.** The Ollama and OpenAI APIs on port 11434:
   Open WebUI, LangChain, n8n and any OpenAI client work unchanged.
 - **Fast where it counts.** Continuous batching serves 16 users at once at
-  259 tok/s on a desktop RTX 5070 Ti and 1,434 tok/s on one GH200; quantized
+  1,065 tok/s on a desktop RTX 5070 Ti and 1,434 tok/s on one GH200; quantized
   KV cache for long contexts; images and audio as input; large MoE models on
   small GPUs.
 - **Runs everywhere.** From a Raspberry Pi to a GH200 node, with CUDA, ROCm,
@@ -141,7 +141,7 @@ account. Every download, for every platform: [platforms](docs/platforms.md).
 
 | Where | Measured |
 |---|---|
-| A desktop GPU, RTX 5070 Ti | 64 decisions in 0.66 s; 259 tok/s across 16 concurrent requests (Qwen3.5-9B); a 125B MoE at 69 tok/s |
+| A desktop GPU, RTX 5070 Ti | 64 decisions in 0.66 s; qwen3-8b at 132 tok/s, 1,065 tok/s across 16 concurrent requests; a 125B MoE at 69 tok/s |
 | An ARM board, no GPU: Radxa Orion O6 | a 35B MoE model (`qwen3.6-35b-a3b`) at 9–11 tok/s, on CPU alone |
 | The same board with an RTX 3060 | qwen3-14b at 33 tok/s; qwen3.6-35b-a3b at 35.6 tok/s |
 | EuroHPC **Leonardo**, NVIDIA A100 64 GB | a 27B model (Q8) at 32.4 tok/s on one GPU; the 125B MoE at 39 tok/s on one GPU |
