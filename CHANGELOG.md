@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.80 — 2026-10-17
 
 ### Performance
 - **The VRAM left free after a load is a fixed 1 GiB, not 12% of the card, and a model that fitted by two layers now fits.** The fit and the loader kept 12% of the card's memory free (and the fit a further 3% of the free memory), which is 1.9 GB on a 16 GB card, 7.7 GB on a 64 GB one and 11.5 GB on a 96 GB one, for scratch that does not grow with the card: while generating, Qwen3-8B with 16 requests took 40 MiB more than at load. On an RTX 5070 Ti, Qwen3-8B Q4_K_M with a 65,536-token window and 16 slots was cut to 34 of its 36 layers, 52 tokens/s on one request and 300 with 16; with every layer on the GPU (`--no-fit`) it writes 145 and 977-1,065. It now loads whole by itself, at 144.6 tokens/s for one request and 1,054.9 with 16, and the card peaks at the same 14,069 MiB as with `--no-fit`. QwQ-32B at 4,096 tokens goes from 42 to 45 layers on the GPU (4.0 to 4.5 tokens/s), the peak from 13.2 to 14.1 GB. Qwen3.8-Flash-Next (125B, 6B active) with `--moe-cache auto` is as before: the cache ends at 7.75 GiB, 67-70 tokens/s writing and 1,570 reading a 31,000-token prompt, no out-of-memory. On cards of 8 GB or less the change is small, and on a card with a display on it the reserve is smaller than it was: if the desktop shares the card, raise it with `--vram-reserve`.
