@@ -716,9 +716,9 @@ pub fn read_gguf_moe_layout(path: &Path, file_size: u64, n_layers: u32) -> Optio
 /// Free VRAM in bytes, as reported by the active GPU backend.
 ///
 /// `(free, total)` in bytes, or `None` when there is no GPU or nothing can be
-/// read from it. The total matters because the loader's context probe requires
-/// a fraction of the card's TOTAL memory to remain free after allocation
-/// (`inference::MIN_FREE_VRAM_RATIO`), a floor the sizer has to respect or it
+/// read from it. The total is for the callers that report it; the loader's
+/// context probe requires `--vram-reserve` ([`DEFAULT_VRAM_RESERVE_MIB`]) to
+/// remain free after allocation, a floor the sizer has to respect or it
 /// produces splits the loader then refuses.
 ///
 /// Asked through ggml's device registry rather than `cudaMemGetInfo`, so it
@@ -1958,8 +1958,7 @@ pub fn partial_split_hint(
             vram_reserve_bytes(reserve_mib),
         ) {
             levers.push(format!(
-                "--vram-reserve {reserve_mib} (now {}; below that nothing else may \
-                 need the card while it runs)",
+                "--vram-reserve {reserve_mib} (now {})",
                 vram_reserve >> 20
             ));
             break;
