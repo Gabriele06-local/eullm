@@ -51,9 +51,20 @@
 #                  only the exams are queued, after it, and no serial place is
 #                  taken -- to move a round's exams off the serial partition
 #   SERIAL_LIMIT   jobs a user may queue on lrd_all_serial (default 10)
+#   GRPO_MERGED_ROOT  where the merged bf16 weights go (default the project's
+#                  fast scratch, .../grpo-merged/NAME, behind a symlink at
+#                  NAME/merged; unused when the scratch is not there)
 #
-# Idempotent: a round whose GRPO jobs are already queued is not submitted
-# again, and one whose adapter is written skips the training.
+# Idempotent: a round whose GRPO jobs or packaging are already queued, or
+# whose GGUF is already written, is not submitted again; one whose adapter is
+# written skips the training. (On 2026-10-16 a rerun over a finished round
+# queued its packaging and exams a second time.)
+#
+# The merged weights are a day's file: the case-law exam reads them, then
+# nothing does, and the adapter and START make them again in minutes. At
+# 8-18 GB a round they filled $WORK on 2026-10-17, so they are written to the
+# fast scratch (outside the 1 TB quota, purged when unused); the adapter and
+# the GGUF stay on $WORK.
 
 set -uo pipefail
 
@@ -83,6 +94,14 @@ if [ "$LINKS" != 0 ] && [ -n "$(squeue --me -h -n "eullm-grpo-$NAME" -o %i 2>/de
     echo "[round] $NAME: GRPO already queued, nothing submitted"
     exit 0
 fi
+if [ -z "${PACKAGED:-}" ] && [ -s "$OUT/gguf/$NAME-q4_k_m.gguf" ]; then
+    echo "[round] $NAME: already packaged ($OUT/gguf), nothing submitted"
+    exit 0
+fi
+if [ -z "${PACKAGED:-}" ] && [ -n "$(squeue --me -h -n "eullm-package-$NAME" -o %i 2>/dev/null)" ]; then
+    echo "[round] $NAME: packaging already queued, nothing submitted"
+    exit 0
+fi
 serial=$(squeue --me -h -p lrd_all_serial -o %i 2>/dev/null | wc -l)
 if [ -z "${PACKAGED:-}" ] && [ $((serial + 1)) -gt "${SERIAL_LIMIT:-10}" ]; then
     echo "[round] $NAME: $serial jobs queued on lrd_all_serial, a round needs 1 of" \
@@ -97,6 +116,13 @@ sub() {  # sbatch that prints the job id; fails (and says so) when sbatch does
     echo "${id%%;*}"
 }
 ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
+
+MERGED_ROOT="${GRPO_MERGED_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/grpo-merged}"
+if [ -z "${PACKAGED:-}" ] && [ ! -e "$OUT/merged" ] && [ -d "$(dirname "$MERGED_ROOT")" ] &&
+   mkdir -p "$MERGED_ROOT/$NAME" "$OUT"; then
+    ln -s "$MERGED_ROOT/$NAME" "$OUT/merged" &&
+        echo "[round] merged weights on the scratch: $MERGED_ROOT/$NAME"
+fi
 
 dep="${AFTER:+afterok:$AFTER}"
 [ "$LINKS" = 0 ] && [ -n "${AFTER:-}" ] && dep="afterany:$AFTER"

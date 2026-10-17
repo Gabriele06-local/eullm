@@ -21,12 +21,14 @@
 `$WORK` is the project's 1 TB, and it filled up twice: 109% on 5 October
 (a 27B conversion failed writing its first tensor) and 96% on 10 October,
 when two base-model downloads (Qwen3.8-27B, 52 GB; Qwen3.5-4B, 9 GB) landed
-next to the Hugging Face cache, Qwen3-14B and Mistral-Small-24B. The split
-since then:
+next to the Hugging Face cache, Qwen3-14B and Mistral-Small-24B. It was
+full again on 17 October, mostly with the merged bf16 weights of GRPO rounds
+already examined (8-18 GB each) and their checkpoints. The split since then:
 
 | Where | What | Why |
 |---|---|---|
-| `$WORK` | venv, corpora and rulings, prompts, checkpoints and adapters, merged models, GGUFs, exams, answers, grades, reports | only we can produce them, or they are personal data (the rulings) that stay where the data protection measures were set up |
+| `$WORK` | venv, corpora and rulings, prompts, checkpoints and adapters, GGUFs, exams, answers, grades, reports | only we can produce them, or they are personal data (the rulings) that stay where the data protection measures were set up |
+| `/leonardo_scratch/fast/AIFAC_P02_1147/grpo-merged/<round>` | a GRPO round's merged bf16 weights, behind the symlink `<round>/merged` (`submit_grpo_round.sh` puts them there) | a day's file: the case-law exam reads them, then nothing does, and the adapter and the start model make them again in minutes |
 | `/leonardo_scratch/fast/AIFAC_P02_1147/models` | base models downloaded from Hugging Face: the HF cache (`$HF_HOME/hub`: teachers, judges, embedder, reranker) and `$WORK/models/*` | they can be downloaded again at any time; the scratch is outside the 1 TB quota |
 
 The fast scratch is **purged** when files go unused. Ours are read every day
@@ -34,7 +36,9 @@ and the allocation ends on 2 November, but if a copy is ever purged the
 symlink on `$WORK` points at nothing and every job that needs that model
 fails at load — compute nodes have no internet. `status.sh` flags such a
 link with `[!!]`; the fix is to download the model again from a login node
-(`hf download <repo> --local-dir <the path the symlink names>`).
+(`hf download <repo> --local-dir <the path the symlink names>`). For a
+round's merged weights, merge again from the adapter (the packaging line in
+`submit_grpo_round.sh`, without the GGUF).
 
 **Moving a model without stopping the jobs that use it:**
 `forge/scripts/leonardo/move_to_scratch.sh` copies, then swaps. The original
