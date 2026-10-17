@@ -167,13 +167,18 @@ registry on every GPU backend (CUDA, ROCm, Vulkan, Metal); where there is no
 GPU to read it stays silent and `--gpu-layers` is used as-is.
 
 The budget leaves headroom on purpose, and it is the same headroom the
-loader requires: enough of the card's total memory must stay free for the
-context and its compute buffers, or the weights load and then no context can
-be allocated at all. Sizing that aims past that floor produces a split the
-loader refuses, which is a worse failure than a conservative one — so the
-sizer takes the stricter of its own fragmentation margin and the loader's
-minimum. Expect a loaded model to leave roughly 12% of the card free; that
-is not waste, it is what the next token's compute buffer is allocated from.
+loader requires: enough of the card must stay free for the context and its
+compute buffers, or the weights load and then no context can be allocated at
+all. Sizing that aims past that floor produces a split the loader refuses,
+which is a worse failure than a conservative one — so sizing and the loader
+read one number, `--vram-reserve`, in MiB: 1024 by default, 256 at the least.
+It is the same on a 16 GB card and on a 96 GB one, because what it covers (the
+scratch of a decode step, a CUDA context, other programs on the card) does not
+grow with the card. Until 0.7.80 it was 12% of the card's total memory, which
+cost a dense 8B two layers on a 16 GB card. Lower it on a card nothing else
+uses, raise it on one that also drives a display. When a model is only a few
+layers short of fitting whole, the log says which `--vram-reserve`,
+`--ctx-size` or q8_0 KV cache would put them all on the GPU.
 
 ### `eullm pull <model>`
 
