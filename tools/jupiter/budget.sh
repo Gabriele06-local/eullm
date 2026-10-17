@@ -25,7 +25,7 @@ end=$(date -d "$END 23:59:59" +%s) || { echo "[err] not a date: $END"; exit 1; }
 
 # JobID|JobName|State|ElapsedRaw|AllocTRES, one line a job (allocations only).
 ROWS=$(sacct -X -n -P -A "$ACCOUNT" -S "$START" -E now \
-    -o JobID,JobName,State,ElapsedRaw,AllocTRES 2>/dev/null)
+    -o JobID,JobName,State,ElapsedRaw,AllocTRES,Start,End 2>/dev/null)
 [ -n "$ROWS" ] || { echo "[err] sacct returned no jobs for $ACCOUNT since $START"; exit 1; }
 
 awk -F'|' -v now="$now" -v end="$end" -v enddate="$END" -v total="$TOTAL" -v start="$START" '
@@ -49,6 +49,38 @@ END {
     printf "\n  by job name (GPU-hours):\n"
     for (k in byname) printf "    %-24s %8.1f\n", k, byname[k]
 }' <<<"$ROWS"
+
+# GPU-hours a calendar day, each job's time split at midnight, against the
+# rate the rest of the allocation needs.
+ROWS="$ROWS" python3 - "$now" "$end" "$TOTAL" <<'PY'
+import os
+import sys
+from collections import defaultdict
+from datetime import datetime, timedelta
+
+now, end, total = float(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3])
+day_h, used = defaultdict(float), 0.0
+for line in os.environ["ROWS"].splitlines():
+    f = line.split("|")
+    if len(f) < 7 or "PENDING" in f[2] or f[5] in ("", "Unknown", "None"):
+        continue
+    gpus = sum(int(t.split("=")[1]) for t in f[4].split(",") if t.startswith("gres/gpu="))
+    if not gpus:
+        continue
+    t0 = datetime.fromisoformat(f[5])
+    t1 = (datetime.fromtimestamp(now) if f[6] in ("", "Unknown", "None")
+          else datetime.fromisoformat(f[6]))
+    while t0 < t1:
+        cut = min(t1, datetime(t0.year, t0.month, t0.day) + timedelta(days=1))
+        h = (cut - t0).total_seconds() * gpus / 3600
+        day_h[t0.date()] += h
+        used += h
+        t0 = cut
+need = (total - used) / max(1e-9, (end - now) / 86400)
+print(f"\n  by day (GPU-hours; {need:.1f} a day spends the rest by the end):")
+for d in sorted(day_h)[-10:]:
+    print(f"    {d}  {day_h[d]:6.1f}  {day_h[d] / 4:5.1f} node-h  {'#' * round(day_h[d] / 4)}")
+PY
 
 QUEUED=$(squeue --me -h -t PENDING -o '%i|%j|%l|%D' 2>/dev/null)
 if [ -n "$QUEUED" ]; then
