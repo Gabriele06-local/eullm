@@ -295,9 +295,11 @@ struct RuntimeOpts {
     /// leave less. The same amount on a 16 GB card and on a 96 GB one,
     /// because what it covers does not grow with the card. Lower it on a
     /// card nothing else uses (the least is 256), raise it on one that
-    /// drives a display or is shared with other programs.
+    /// drives a display or is shared with other programs. `--fit-target`
+    /// is the same setting under llama-server's name.
     #[arg(
         long,
+        visible_alias = "fit-target",
         value_name = "MIB",
         default_value_t = fit::DEFAULT_VRAM_RESERVE_MIB,
         value_parser = fit::parse_vram_reserve
@@ -5365,6 +5367,11 @@ mod cli_default_parity_tests {
         assert_eq!(
             runtime_opts(&["eullm", "serve", "--vram-reserve", "256"]).vram_reserve,
             256
+        );
+        // llama-server's name for the same margin.
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--fit-target", "2048"]).vram_reserve,
+            2048
         );
         for argv in [
             ["eullm", "serve", "--vram-reserve", "128"],
