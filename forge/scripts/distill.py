@@ -58,6 +58,7 @@ import random
 import shutil
 import sys
 import time
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, get_type_hints
@@ -701,9 +702,18 @@ def latest_checkpoint(output_dir: Path) -> Optional[Path]:
         return None
     candidates = sorted(output_dir.glob("checkpoint-*"), key=_checkpoint_step)
     for path in reversed(candidates):
-        if (path / "training_state.pt").is_file():
+        # Present is not enough: a kill DURING torch.save leaves the file
+        # there and truncated, a zip without its central directory. On
+        # JUPITER on 17-10-2026 the 8B of the norms-v2 chain resumed from
+        # such a checkpoint-1100 in three links running, failed at once in
+        # each and left its two GPUs idle. torch.save writes a zip, so the
+        # file counts only when it reads as one (save_checkpoint now writes
+        # it under a temporary name first, so this should not recur).
+        state = path / "training_state.pt"
+        if state.is_file() and zipfile.is_zipfile(state):
             return path
-        print(f"[resume] {path.name} is missing its training_state.pt, "
+        what = "a truncated" if state.is_file() else "no"
+        print(f"[resume] {path.name} has {what} training_state.pt, "
               "a write was cut short: skipping to the one before it",
               file=sys.stderr)
     return None
@@ -746,7 +756,11 @@ def save_checkpoint(
         "scaler": scaler.state_dict() if scaler is not None else None,
         "config": cfg.__dict__,
     }
-    torch.save(state, ckpt_dir / "training_state.pt")
+    # Under a temporary name, then renamed: a kill mid-write leaves no
+    # training_state.pt rather than a truncated one (see latest_checkpoint).
+    tmp = ckpt_dir / "training_state.pt.tmp"
+    torch.save(state, tmp)
+    os.replace(tmp, ckpt_dir / "training_state.pt")
     return ckpt_dir
 
 
@@ -942,8 +956,18 @@ def train(cfg: DistillConfig) -> None:
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # Seconds since the start at each phase of the start-up: a link that
+    # spends an hour before its first step has to say where (norms-v2 chain,
+    # 17-10-2026).
+    t_start = time.time()
+
+    def phase(name: str) -> None:
+        print(f"[time] {name}: {time.time() - t_start:.0f} s since start",
+              file=sys.stderr, flush=True)
+
     # --- data ---
     train_loader, val_loader = build_dataloaders(cfg, tokenizer)
+    phase("data ready")
     total_micro_steps = (
         len(train_loader) * cfg.num_train_epochs
         if cfg.max_steps < 0
@@ -953,7 +977,9 @@ def train(cfg: DistillConfig) -> None:
 
     # --- models ---
     teacher = load_teacher(cfg, dtype, device)
+    phase("teacher loaded")
     student = load_student(cfg, dtype, device)
+    phase("student loaded")
 
     # --- resume: replace the student BEFORE building the optimizer, so
     # the optimizer binds to the parameters that will actually train
@@ -1001,6 +1027,7 @@ def train(cfg: DistillConfig) -> None:
               f"{skip_batches:,} batches of it already trained on",
               file=sys.stderr)
 
+    phase("ready to train")
     # --- log ---
     print(f"[info] total optim steps: {total_optim_steps:,}",
           file=sys.stderr)
