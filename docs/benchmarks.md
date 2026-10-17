@@ -23,10 +23,16 @@ Qwen3-8B Q4_K_M from the catalog (`qwen3-8b`), a local CUDA build of
 `eullm serve --batch-size 16 --ctx-size 65536 --no-fit`: 16 slots of 4,096
 tokens, all 36 layers on the GPU, 14.1 of 16.3 GB in use.
 
-`--no-fit` matters here. Without it the sizing estimate (model 4.68 GiB,
-f16 KV cache 9 GiB) kept 2 of the 36 layers in RAM although 2 GB were left,
-and the same run gave 52 tok/s for one request and 300 for 16. With 16 GB, a
-smaller `--ctx-size` (32768 is plenty for this test) fits without the flag.
+`--no-fit` matters here. The sizing keeps 12% of the card free once the
+model and its context are in, a margin set after a load that ran out of
+memory on the same 16 GB card. With all 36 layers llama.cpp's own breakdown
+was 4,455 MiB of weights, 9,216 of f16 KV cache and 108 of compute buffers,
+leaving 1,812 of 15,841 MiB free: 11.4%, under the margin, so without the
+flag 2 layers stayed in RAM and the same run gave 52 tok/s for one request
+and 300 for 16. The load with 11.4% free ran the whole test without a
+failure; it is a thinner margin, not a broken one. `--ctx-size 32768` (2,048
+tokens a slot, plenty here) or `--cache-type-k q8_0 --cache-type-v q8_0`
+halves the KV cache and fits all 36 layers without the flag.
 
 The March run below, Qwen3.5-9B on an earlier engine, is kept as it was.
 
