@@ -65,6 +65,14 @@ I numeri di questa pagina sono ottenuti con questo retrieval, che pesa in tutto 
 
 L'implementazione è nel modulo `eullm_forge.eval.dense` di [eullm-forge](https://github.com/eullm/eullm/tree/main/forge). La raccolta normativa si costruisce dai pacchetti AKN OpenData di [Normattiva](https://dati.normattiva.it) con `forge/scripts/prepare_legislation.py`.
 
+### EULLM Engine
+
+```bash
+eullm run hf.co/EuLLM/legal-it-8b:Q4_K_M --ctx-size 8192
+```
+
+Il comando scarica il file, avvia il server locale sulla porta 11434 e accetta il prompt sopra, come unico messaggio utente, all'endpoint `/v1/chat/completions` (formato OpenAI) o `/api/chat` (formato Ollama), con `"temperature": 0`.
+
 ### llama.cpp
 
 ```bash
