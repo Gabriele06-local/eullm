@@ -75,6 +75,9 @@ pub struct GgufInfo {
     /// counted in `n_layers`, when the model carries one: what `--mtp`'s draft
     /// context runs (see [`mtp_reserve_bytes`]).
     pub nextn_layers: Option<u32>,
+    /// The context the model was trained for (`<arch>.context_length`), when
+    /// declared: the ceiling of `--ctx-size auto`.
+    pub context_length: Option<u32>,
 }
 
 impl GgufInfo {
@@ -280,6 +283,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
     let mut value_length: Option<u32> = None;
     let mut full_attention_interval: Option<u32> = None;
     let mut nextn_layers: Option<u32> = None;
+    let mut context_length: Option<u32> = None;
     let mut architecture: Option<String> = None;
 
     // The metadata keys we want, each an integer stored as u32 or u64 depending
@@ -336,6 +340,8 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             Some(&mut full_attention_interval)
         } else if key_bytes.ends_with(b".nextn_predict_layers") {
             Some(&mut nextn_layers)
+        } else if key_bytes.ends_with(b".context_length") {
+            Some(&mut context_length)
         } else {
             None
         };
@@ -380,6 +386,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             && value_length.is_some()
             && full_attention_interval.is_some()
             && nextn_layers.is_some()
+            && context_length.is_some()
         {
             break;
         }
@@ -395,6 +402,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         full_attention_interval,
         architecture,
         nextn_layers,
+        context_length,
     })
 }
 
@@ -830,6 +838,108 @@ pub fn parse_vram_reserve(value: &str) -> Result<u32, String> {
         ));
     }
     Ok(mib)
+}
+
+/// What `--ctx-size` carries for `auto` (and for `0`, which llama.cpp also
+/// reads as "whatever the model and the card allow"): resolved at launch by
+/// [`auto_context`], never past it.
+pub const CTX_AUTO: u32 = 0;
+
+/// The smallest context `auto` settles for, which is also the default of
+/// `--ctx-size`: below it a chat does not hold its own prompt, so the layers
+/// go to the CPU before the window shrinks further.
+pub const AUTO_CTX_FLOOR: u32 = 4096;
+
+/// The largest context `auto` asks for, whatever the model was trained for
+/// and the card could hold: past it the cache takes the card for a window
+/// almost nobody fills, and `--ctx-size N` says so when somebody does.
+pub const AUTO_CTX_CEILING: u32 = 131_072;
+
+/// `--ctx-size`: a number of tokens, or `auto`.
+pub fn parse_ctx_size(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(CTX_AUTO);
+    }
+    value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number of tokens or `auto`"))
+}
+
+/// The context `--ctx-size auto` comes to: the largest window, up to what the
+/// model was trained for and [`AUTO_CTX_CEILING`], that still keeps every
+/// layer on the GPU, in steps of `align` tokens (the slots divide it, so the
+/// caller passes a multiple of them). The window gives way before a layer
+/// does, as llama.cpp's `--fit` does for a context nobody set.
+///
+/// `extra_reserve` is what is already spoken for besides the weights and the
+/// cache (companions, a projector, a larger micro-batch). When even
+/// [`AUTO_CTX_FLOOR`] leaves layers in RAM, that is what comes back, with
+/// `whole` false, and the usual split takes over. `None` when the card or the
+/// header cannot be read.
+#[allow(clippy::too_many_arguments)]
+pub fn auto_context(
+    free_vram: Option<(u64, u64)>,
+    info: Option<&GgufInfo>,
+    file_size: u64,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
+    extra_reserve: u64,
+    align: u32,
+) -> Option<AutoContext> {
+    let info = info?;
+    let align = align.max(1);
+    let floor = AUTO_CTX_FLOOR.div_ceil(align) * align;
+    let trained = info
+        .context_length
+        .filter(|&c| c > 0)
+        .unwrap_or(AUTO_CTX_CEILING);
+    let ceiling = (trained.min(AUTO_CTX_CEILING) / align * align).max(floor);
+    let whole_at = |ctx: u32| {
+        compute_fit(
+            free_vram,
+            Some(info),
+            file_size,
+            ctx,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+            vram_reserve.saturating_add(extra_reserve),
+        )
+    };
+    if matches!(whole_at(floor), FitDecision::Unknown { .. }) {
+        return None;
+    }
+    if whole_at(floor) != FitDecision::FitsFully {
+        return Some(AutoContext {
+            ctx: floor,
+            whole: false,
+        });
+    }
+    // The cost grows with the window, so the answer is the last step that
+    // still fits: bisect over the steps between the floor and the ceiling.
+    let (mut lo, mut hi) = (0u32, (ceiling - floor) / align);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if whole_at(floor + mid * align) == FitDecision::FitsFully {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(AutoContext {
+        ctx: floor + lo * align,
+        whole: true,
+    })
+}
+
+/// What [`auto_context`] settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoContext {
+    /// The window, in tokens, all slots together.
+    pub ctx: u32,
+    /// Whether every layer fits on the GPU at that window.
+    pub whole: bool,
 }
 
 /// A `--vram-reserve` in bytes.
@@ -2958,6 +3068,7 @@ mod tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         }
     }
 
@@ -3240,6 +3351,7 @@ mod tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let free = 15 * 1024 * 1024 * 1024; // ~15 GiB free, 18.5 GB model
         let file = 18_500_000_000;
@@ -3383,12 +3495,153 @@ mod plan_offload_tests {
             full_attention_interval: None,
             architecture: Some("qwen3".into()),
             nextn_layers: None,
+            context_length: None,
         }
     }
 
     /// A dense 14B: 40 layers, 160 KiB of F16 KV per token.
     fn dense() -> (GgufInfo, u64) {
         (attention(40, 8), 8 * GIB + 400 * MIB)
+    }
+
+    /// `auto_context` on the dense 14B above, 160 KiB of F16 KV per token,
+    /// with `free` bytes free, a 1 GiB reserve, and the window the model was
+    /// trained for.
+    fn auto_on_dense(free: u64, trained: Option<u32>, align: u32) -> Option<AutoContext> {
+        let (mut info, size) = dense();
+        info.context_length = trained;
+        auto_context(
+            Some((free, free)),
+            Some(&info),
+            size,
+            F16.0,
+            F16.1,
+            GIB,
+            0,
+            align,
+        )
+    }
+
+    #[test]
+    fn auto_context_stops_at_what_the_model_was_trained_for_when_the_card_has_room() {
+        // 80 GiB free: the cache of 32768 tokens (5 GiB) is nothing to it.
+        let auto = auto_on_dense(80 * GIB, Some(32_768), 256).unwrap();
+        assert_eq!(
+            auto,
+            AutoContext {
+                ctx: 32_768,
+                whole: true
+            }
+        );
+        // No header value: the ceiling of the key, not a guess.
+        let auto = auto_on_dense(400 * GIB, None, 256).unwrap();
+        assert_eq!(auto.ctx, AUTO_CTX_CEILING);
+        // A 1M-token model on a big card is still held to it.
+        let auto = auto_on_dense(400 * GIB, Some(1_048_576), 256).unwrap();
+        assert_eq!(auto.ctx, AUTO_CTX_CEILING);
+    }
+
+    #[test]
+    fn auto_context_is_the_largest_window_that_keeps_every_layer_on_the_card() {
+        // 16 GiB free: weights 8.4 GiB, 1 GiB reserve and the compute buffer
+        // leave about 6.3 GiB for the cache, some 41,000 tokens.
+        let free = 16 * GIB;
+        for align in [256, 768, 4096] {
+            let auto = auto_on_dense(free, Some(131_072), align).unwrap();
+            assert!(auto.whole);
+            assert_eq!(auto.ctx % align, 0, "align {align}");
+            let (info, size) = dense();
+            let whole_at = |ctx: u32| {
+                compute_fit(
+                    Some((free, free)),
+                    Some(&info),
+                    size,
+                    ctx,
+                    F16.0,
+                    F16.1,
+                    GIB,
+                ) == FitDecision::FitsFully
+            };
+            assert!(whole_at(auto.ctx), "align {align}: {} must fit", auto.ctx);
+            assert!(
+                !whole_at(auto.ctx + align),
+                "align {align}: {} would fit as well",
+                auto.ctx + align
+            );
+        }
+    }
+
+    #[test]
+    fn auto_context_gives_way_to_the_weights_only_below_the_floor() {
+        // 9.6 GiB free: the weights and the reserve are there, a cache of
+        // 4096 tokens (640 MiB) is not.
+        let auto = auto_on_dense(9 * GIB + 600 * MIB, Some(131_072), 256).unwrap();
+        assert_eq!(
+            auto,
+            AutoContext {
+                ctx: AUTO_CTX_FLOOR,
+                whole: false
+            }
+        );
+        // The floor is a multiple of the slots' block, rounded up.
+        let auto = auto_on_dense(9 * GIB + 600 * MIB, Some(131_072), 768).unwrap();
+        assert_eq!(auto.ctx, 4608);
+    }
+
+    #[test]
+    fn auto_context_counts_what_is_already_spoken_for() {
+        let (info, size) = dense();
+        let ask = |extra: u64| {
+            auto_context(
+                Some((20 * GIB, 20 * GIB)),
+                Some(&info),
+                size,
+                F16.0,
+                F16.1,
+                GIB,
+                extra,
+                256,
+            )
+            .unwrap()
+            .ctx
+        };
+        // 3 GiB of companions are 3 GiB less cache: 160 KiB a token.
+        let (without, with) = (ask(0), ask(3 * GIB));
+        assert!(without > with);
+        let lost = (without - with) as u64 * 160 * 1024;
+        assert!(lost.abs_diff(3 * GIB) < 512 * 1024 * 1024, "lost {lost}");
+    }
+
+    #[test]
+    fn auto_context_says_nothing_without_a_card_or_a_header() {
+        let (info, size) = dense();
+        assert_eq!(
+            auto_context(None, Some(&info), size, F16.0, F16.1, GIB, 0, 256),
+            None
+        );
+        assert_eq!(
+            auto_context(
+                Some((16 * GIB, 16 * GIB)),
+                None,
+                size,
+                F16.0,
+                F16.1,
+                GIB,
+                0,
+                256
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_size_takes_a_number_or_auto() {
+        assert_eq!(parse_ctx_size("8192"), Ok(8192));
+        assert_eq!(parse_ctx_size("auto"), Ok(CTX_AUTO));
+        assert_eq!(parse_ctx_size(" AUTO "), Ok(CTX_AUTO));
+        assert_eq!(parse_ctx_size("0"), Ok(CTX_AUTO));
+        assert!(parse_ctx_size("big").is_err());
+        assert!(parse_ctx_size("-1").is_err());
     }
 
     /// A 30B-A3B-shaped MoE: 48 layers, 2 GiB outside the experts and
@@ -4411,6 +4664,7 @@ mod plan_offload_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".into()),
             nextn_layers: Some(1),
+            context_length: None,
             ..attention(25, 2)
         };
         let reserve = |info: &GgufInfo, ctx, n_ubatch| {
@@ -4449,6 +4703,7 @@ mod plan_offload_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".into()),
             nextn_layers: None,
+            context_length: None,
             ..attention(25, 2)
         };
         let file = 4 * GIB;
@@ -4477,6 +4732,7 @@ mod plan_offload_tests {
         let info = GgufInfo {
             n_embd: Some(5120),
             nextn_layers: Some(1),
+            context_length: None,
             ..info
         };
         let total = 16 * GIB;
@@ -4753,6 +5009,7 @@ mod key_length_tests {
     #[test]
     fn stops_reading_once_every_wanted_key_is_in_hand() {
         let data = header(&[
+            (b"arch.context_length", 40960),
             (b"arch.block_count", 40),
             (b"arch.embedding_length", 2048),
             (b"arch.attention.head_count", 16),
@@ -4765,6 +5022,7 @@ mod key_length_tests {
         ]);
         let info = parse_gguf_header(&data).expect("parses");
         assert_eq!(info.n_layers, 40);
+        assert_eq!(info.context_length, Some(40960));
         assert_eq!(info.full_attention_interval, Some(4));
         assert_eq!(info.nextn_layers, Some(1));
     }
@@ -4789,6 +5047,7 @@ mod key_length_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".to_string()),
             nextn_layers: None,
+            context_length: None,
         };
         // The reported case: 14.38 GiB free on a 15.92 GiB card, 15.66 GiB
         // of weights, 4096 context, F16 cache.
@@ -4879,6 +5138,7 @@ mod key_length_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let hybrid = GgufInfo {
             full_attention_interval: Some(4),
@@ -4916,6 +5176,7 @@ mod key_length_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let assumed = GgufInfo {
             key_length: None,
@@ -5250,6 +5511,7 @@ mod moe_fit_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         }
     }
 

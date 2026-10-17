@@ -96,7 +96,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--n-cpu-moe` | `0` | MoE models: expert tensors on CPU for the first N layers only |
 | `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another) or `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible. No `none` (make one GPU visible instead) and no `row` (llama.cpp's CUDA and ROCm backends no longer support it) |
 | `--tensor-split` | (by free memory) | Each GPU's share of the model, as proportions, e.g. `3,1` |
-| `--ctx-size, -c` | `4096` | Total context window (split across batch slots) |
+| `--ctx-size, -c` | `4096` | Total context window (split across batch slots), or `auto`: the largest that keeps every layer on the GPU (dense models; never below 4096, up to what the model was trained for and 131072) |
 | `--threads, -t` | all CPUs | Number of CPU threads |
 | `--batch-size` | `1` | Concurrent requests served by the batching scheduler (raise `--ctx-size` with it) |
 | `--n-batch` | `2048` | Prefill batch size (tokens per eval) |
