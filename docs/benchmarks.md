@@ -34,6 +34,11 @@ failure; it is a thinner margin, not a broken one. `--ctx-size 32768` (2,048
 tokens a slot, plenty here) or `--cache-type-k q8_0 --cache-type-v q8_0`
 halves the KV cache and fits all 36 layers without the flag.
 
+Since 0.7.80 the margin is a fixed 1 GiB (`--vram-reserve`), and this run loads
+all 36 layers without `--no-fit`: 144.6 tok/s for one request and 1,054.9 for
+16 (the run above with `--no-fit`, repeated the same day, gave 145.1 and 977.2),
+the card peaking at 14,069 MiB in both.
+
 The March run below, Qwen3.5-9B on an earlier engine, is kept as it was.
 
 ## Test setup (March 2026)
