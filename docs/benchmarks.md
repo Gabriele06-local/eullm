@@ -18,7 +18,8 @@ runs below use, on 17 October 2026:
 | 8 | 720 tok/s | 5.5× | 98 tok/s |
 | 16 | **1,065 tok/s** | **8.1×** | 72 tok/s |
 
-Qwen3-8B Q4_K_M from the catalog (`qwen3-8b`), engine built from `main`,
+Qwen3-8B Q4_K_M from the catalog (`qwen3-8b`), a local CUDA build of
+0.7.70,
 `eullm serve --batch-size 16 --ctx-size 65536 --no-fit`: 16 slots of 4,096
 tokens, all 36 layers on the GPU, 14.1 of 16.3 GB in use.
 
