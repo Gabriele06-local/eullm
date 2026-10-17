@@ -275,6 +275,60 @@ per-document mask does not reset.
 * The Qwen3.5 probe again with the fast kernels, then the Qwen3.5
   distillation on legislation, 4B and 9B students, in two-hour links.
 
+### 5.8 The held-out exam, graded (17-10-2026, deliverable 6)
+
+Every model of §5.5–5.7 sat the 217-question exam twice: closed book, and
+open book, each question with the articles BM25 finds for it in the
+legislation in front. Qwen3-30B-A3B-Instruct-2507 graded every answer
+against the text of the article (correct, partial, wrong; rubric v3, as on
+Leonardo; score = correct + half the partial, over 217), four graders on
+one node (job 2371747, 34 minutes, 0.44 kWh). Totals only: the questions
+stay held out.
+
+| model (instruction-tuned on the same pairs) | open book | correct |
+|---|---:|---:|
+| Qwen3.5-9B distilled on legislation | **0.811** | 175 |
+| Qwen3.5-9B Base | 0.804 | 172 |
+| Qwen3.5-4B Base | 0.781 | 168 |
+| Qwen3-8B distilled, packed (9,223 pairs) | 0.767 | 165 |
+| Qwen3-4B-Instruct-2507 (reference, as released) | 0.765 | 159 |
+| Qwen3.5-4B distilled on legislation | 0.765 | 164 |
+| Qwen3-8B distilled (4,272 pairs) | 0.737 | 158 |
+| Qwen3-4B distilled, packed (9,223 pairs) | 0.730 | 157 |
+| Qwen3-4B Base (4,272 / 9,223 pairs) | 0.717 / 0.714 | 153 / 152 |
+| Qwen3-8B Base (4,272 pairs) | 0.712 | 154 |
+| Qwen3-4B distilled (9,223 / 4,272 pairs) | 0.703 / 0.694 | 147 / 149 |
+
+Closed book every model, the reference included, scores 0.000–0.023: none
+knows the articles by heart. Open book, the two Qwen3.5-9B models are the
+first of ours clearly ahead of the reference (+10 questions of 217). A
+model distilled and the same model not distilled stay within a few
+questions of each other in every pair: 1.5M tokens of legislation move
+nothing measurable; the family and the size of the student do. Whether a
+corpus a hundred times larger does is what norms-v2 asks (§5.9).
+
+### 5.9 norms-v2: the codes with the EU acts in Italian (from 17-10-2026)
+
+The Italian codes with 17,529 EU acts in force, in Italian, fetched from the
+Publications Office (`prepare_eurlex.py`): 392,538 training chunks, ~220M
+tokens. A fixed sample of 250,000 (~139M tokens) and 3,000 held out is the
+corpus of a packed distillation chain, 4B and 8B students, one epoch, 7,224
+optimiser steps, two-hour links.
+
+* A link killed by its time limit while saving left a truncated
+  `training_state.pt` (8B, checkpoint-1100), and every later link of the 8B
+  failed at once reading it. The state is now written under a temporary name
+  and renamed, and a truncated one is skipped for the one before
+  (`18f0611`); the 8B resumed from checkpoint-1000 (job 2371817).
+* Each link spent 50–70 minutes of its two hours loading the teacher (links
+  2362188–2362191 and 2371817; 3.6 minutes for the first link, 12 for
+  2371816), against 3.5 minutes on 14-10: the 61 GB read from `$PROJECT`
+  twice, once per run, in many small reads at once, as fast as the shared
+  file system allows at that hour. The four graders of job 2371747 loaded
+  theirs quickly the same day. The teacher is now copied once per node into
+  memory (`/dev/shm`, a few large reads) and both runs load it from there
+  (`9d093b7`), from link 2375535.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
@@ -335,6 +389,9 @@ figures below with the site's energy mix.
 | 15-10 | Teacher alone on one GPU received its inputs on the student's GPU | inputs moved to the teacher's device (`ce822dc`) |
 | 15-10 | Short documents left the GPUs idle (~340 tokens/s) | sequence packing (`ebc56c4`): the same runs in a sixth of the time |
 | 16-10 | Qwen3.5's linear attention ran on Transformers' reference PyTorch path, 4× slower than Qwen3 | flash-linear-attention 0.5.2 in the venv |
+| 16-10 | flash-linear-attention 0.5.2 refuses the module's Triton 3.5.1 on Hopper (wrong gradients up to 3.7.0) | Triton 3.8.0 in a directory of its own for the Qwen3.5 jobs (`9f04bd6`) |
+| 17-10 | A link killed while saving left a truncated checkpoint; every later link failed on it | atomic save, truncated state skipped on resume (`18f0611`) |
+| 17-10 | Loading the teacher took 50–70 minutes of a two-hour link | teacher copied once per node into memory (`9d093b7`) |
 
 ## 9. Resource use
 
@@ -360,10 +417,9 @@ figures below with the site's energy mix.
 
 ## 10. Next
 
-1. The exam results of every model; instruction tuning on 9,223 pairs
-   (deliverables 4, 6).
-2. The Qwen3.5 distillation on legislation and its exam, against Qwen3's
-   (deliverable 7).
+1. norms-v2 to the end of its epoch, its checkpoints instruction-tuned
+   and sitting the exam as they come (deliverables 2, 3, 6).
+2. Qwen3.5-9B, the best student so far, on norms-v2 (deliverable 7).
 3. A corpus large enough for the remaining hours: more legislation
    (EUR-Lex in Italian, the rest of Normattiva) and ruling summaries from
    Leonardo; generated pairs grow with the text, not with seeds (§5.4).
