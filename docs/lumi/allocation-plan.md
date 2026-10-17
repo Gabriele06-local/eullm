@@ -78,6 +78,18 @@ model with `--cpu-moe` at 4 and 16 requests and the `next11` points left in
 the queue were moved to `parked/` (one request with `--cpu-moe` and the
 480B's points say what the CPU does with the experts).
 
+17-10-2026: LUMI's operations closed access to the machine for security
+reasons (a notice to all users, no date to reopen). The build of `next16`
+and the `evict2` jobs had been started the night before; what ran, and
+whether the queued jobs survive, is to be read once access is back. On
+return: follow CSC's instructions first (they may ask for new keys),
+check that the checkout matches GitHub and rebuild the binary the next
+jobs use rather than trust files that sat on the machine, then
+`status.sh`; points claimed by jobs that died go back to the queue by
+themselves when the next job starts (`requeue_stale`). Days lost to the
+closure count against the calendar, not against the work: if it lasts,
+they are a reason to ask EuroHPC for more time.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
