@@ -417,8 +417,11 @@ struct RuntimeOpts {
     #[arg(long, default_value_t = 8192)]
     checkpoint_min_step: u32,
 
-    /// Context window size
-    #[arg(short, long, default_value_t = 4096)]
+    /// Context window size, in tokens, or `auto` (also `0`): the largest window,
+    /// up to what the model was trained for and 131072, that still keeps every
+    /// layer on the GPU, never below 4096. For a dense model; a MoE model, a
+    /// launch with `--mtp` or with `--no-fit` takes 4096 and says so. It sizes the model `eullm run` loads; `serve` takes 4096 for the models it loads unless a request sets num_ctx.
+    #[arg(short, long, default_value_t = 4096, value_parser = fit::parse_ctx_size)]
     ctx_size: u32,
 
     /// Maximum concurrent requests served by the continuous-batching scheduler.
@@ -2552,6 +2555,77 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// `--ctx-size auto`: the window this launch gets, printed with why. A dense
+/// model is sized with [`fit::auto_context`]; anything else (a MoE model,
+/// `--mtp`, `--no-fit`, or a card or header that cannot be read) takes the
+/// default of 4096, because the window and what else is loaded trade against
+/// each other there and a number should be asked for.
+fn resolve_auto_context(
+    gguf_path: &std::path::Path,
+    sized: bool,
+    cache_type_k: &inference::KvCacheType,
+    cache_type_v: &inference::KvCacheType,
+    vram_reserve: u64,
+    extra_reserve: u64,
+    batch_size: usize,
+) -> u32 {
+    let default = fit::AUTO_CTX_FLOOR;
+    let info = fit::read_gguf_info(gguf_path);
+    let moe = info.as_ref().is_some_and(|i| {
+        fit::read_model_moe_layout(gguf_path, i.n_layers).is_some_and(|l| l.is_moe())
+    });
+    if !sized || moe {
+        println!(
+            "[EULLM] --ctx-size auto: {} -> {default} tokens; give a number to choose.",
+            if moe {
+                "a MoE model trades the window against its experts"
+            } else {
+                "no sizing here (--no-fit or --mtp)"
+            }
+        );
+        return default;
+    }
+    // The slots divide the window, in blocks of 256 tokens.
+    let slots = batch_size.max(1) as u32;
+    let align = slots * 256 / gcd(slots, 256);
+    match fit::auto_context(
+        fit::vram_bytes(),
+        info.as_ref(),
+        fit::model_file_bytes(gguf_path),
+        inference::cache_type_bytes_per_elem(cache_type_k),
+        inference::cache_type_bytes_per_elem(cache_type_v),
+        vram_reserve,
+        extra_reserve,
+        align,
+    ) {
+        Some(auto) if auto.whole => {
+            println!(
+                "[EULLM] --ctx-size auto: {} tokens, the most that keeps every layer on the GPU.",
+                auto.ctx
+            );
+            auto.ctx
+        }
+        Some(auto) => {
+            println!(
+                "[EULLM] --ctx-size auto: not every layer fits even at {} tokens; using that, \
+                 and the split below.",
+                auto.ctx
+            );
+            auto.ctx
+        }
+        None => {
+            println!(
+                "[EULLM] --ctx-size auto: could not read the card or the model; using {default} tokens."
+            );
+            default
+        }
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// Valid launch values for `--batch-size`.
 ///
 /// 0 is sequential mode (also forced for multimodal models); 1..=64 are the
@@ -2979,6 +3053,23 @@ async fn cmd_run(
         // already chose --cpu-moe/--n-cpu-moe themselves — explicit intent
         // beats a guess) does the dense run_fit flow, with its prompt and
         // its --fit-strict handling, take over.
+        if ctx_size == fit::CTX_AUTO {
+            ctx_size = resolve_auto_context(
+                &gguf_path,
+                fit && mtp == 0,
+                &cache_type_k,
+                &cache_type_v,
+                vram_reserve,
+                companion_reserve_bytes
+                    .saturating_add(fit::ubatch_reserve_bytes(n_ubatch))
+                    .saturating_add(if mmproj_offload == Some(false) {
+                        0
+                    } else {
+                        mmproj_bytes
+                    }),
+                batch_size,
+            );
+        }
         if fit {
             // What the user asked for with --gpu-layers, kept as an upper
             // bound: sizing may lower it, never raise it.
@@ -3386,6 +3477,10 @@ async fn cmd_run(
         eprintln!("    eullm run ./path/to/model.gguf");
         eprintln!();
     }
+    // `auto` is resolved against a model; with none, the default window.
+    if ctx_size == fit::CTX_AUTO {
+        ctx_size = fit::AUTO_CTX_FLOOR;
+    }
 
     let short = model_name.strip_prefix("eullm/").unwrap_or(&model_name);
 
@@ -3610,7 +3705,7 @@ async fn cmd_serve(
     gpu_layers: i32,
     fit: bool,
     fit_strict: bool,
-    ctx_size: u32,
+    mut ctx_size: u32,
     threads: Option<u32>,
     flash_attn: bool,
     n_batch: u32,
@@ -3643,6 +3738,14 @@ async fn cmd_serve(
     decision_ctx: u32,
     residency: api::ResidencyConfig,
 ) {
+    if ctx_size == fit::CTX_AUTO {
+        println!(
+            "[EULLM] --ctx-size auto sizes the model `eullm run` loads; the server loads its \
+             models with {} tokens unless a request sets num_ctx.",
+            fit::AUTO_CTX_FLOOR
+        );
+        ctx_size = fit::AUTO_CTX_FLOOR;
+    }
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -5379,6 +5482,20 @@ mod cli_default_parity_tests {
         ] {
             assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
         }
+    }
+
+    #[test]
+    fn the_context_is_4096_unless_asked_and_takes_auto_on_both_commands() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).ctx_size, 4096);
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--ctx-size", "auto"]).ctx_size,
+            fit::CTX_AUTO
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "serve", "-c", "32768"]).ctx_size,
+            32768
+        );
+        assert!(Cli::try_parse_from(["eullm", "serve", "--ctx-size", "huge"]).is_err());
     }
 
     #[test]
