@@ -47,7 +47,14 @@ def make_checkpoints(root: Path, steps) -> None:
     for step in steps:
         d = root / f"checkpoint-{step}"
         d.mkdir(parents=True)
-        (d / "training_state.pt").write_bytes(b"x")
+        write_state(d / "training_state.pt")
+
+
+def write_state(path: Path) -> None:
+    """A training_state.pt as torch.save leaves it: a zip archive."""
+    import zipfile
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("archive/data.pkl", b"x")
 
 
 # --- the CLI gives every flag the type the config declares --------------------
@@ -117,6 +124,19 @@ def test_a_checkpoint_a_kill_caught_mid_write_is_skipped(tmp_path, capsys):
 
     assert distill.latest_checkpoint(tmp_path).name == "checkpoint-6"
     assert "checkpoint-400" in capsys.readouterr().err
+
+
+def test_a_state_file_cut_short_by_a_kill_is_skipped(tmp_path, capsys):
+    """norms-v2, 17-10-2026: a link was killed during torch.save, and the
+    truncated training_state.pt of checkpoint-1100 failed every later link
+    of the 8B at once ("failed finding central directory")."""
+    make_checkpoints(tmp_path, [1000, 1100])
+    state = tmp_path / "checkpoint-1100" / "training_state.pt"
+    whole = state.read_bytes()
+    state.write_bytes(whole[:len(whole) // 2])
+
+    assert distill.latest_checkpoint(tmp_path).name == "checkpoint-1000"
+    assert "truncated" in capsys.readouterr().err
 
 
 def test_only_half_written_checkpoints_resumes_nothing_at_all(tmp_path):
@@ -470,7 +490,7 @@ def test_resuming_from_a_non_finite_checkpoint_is_caught_at_load(monkeypatch,
     # with no training_state.pt (a write cut short), and this test is about
     # the nan, not about a half-written directory.
     (tmp_path / "checkpoint-4").mkdir()
-    (tmp_path / "checkpoint-4" / "training_state.pt").write_bytes(b"x")
+    write_state(tmp_path / "checkpoint-4" / "training_state.pt")
     monkeypatch.setattr(distill, "_reload_student_from_checkpoint",
                         lambda *a, **k: TinyStudent(float("nan")))
     monkeypatch.setattr(distill, "load_checkpoint", lambda *a, **k: 4)
