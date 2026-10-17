@@ -1187,7 +1187,7 @@ eullm unload                              # Free the loaded model's VRAM without
 Key features:
 - **Real inference** powered by llama.cpp (not a mock, not a proxy)
 - **Multimodal (new in v0.6.0)** — vision (image OCR + scene description) and experimental audio understanding via llama.cpp `mtmd`, served through the same Ollama-compatible `/api/chat` and the embedded Chat UI. See [Multimodal](#multimodal-vision--audio-new-in-v060)
-- **Continuous batching** — multiple requests decoded in parallel: 259 tok/s across 16 requests on one RTX 5070 Ti, 2.75× a single request ([benchmarks](benchmarks.md))
+- **Continuous batching** — multiple requests decoded in parallel: 1,065 tok/s across 16 requests on one RTX 5070 Ti with Qwen3-8B, 8× a single request ([benchmarks](benchmarks.md))
 - **Token streaming** — NDJSON on Ollama endpoints, SSE on OpenAI endpoint (`"stream": true`)
 - **GPU acceleration** — NVIDIA CUDA, Apple Metal, AMD ROCm and Vulkan; which build was tested on what, and by whom, is in [platforms](platforms.md)
 - **Ollama-compatible API** — same endpoints, same port

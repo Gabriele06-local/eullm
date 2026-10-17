@@ -4,7 +4,32 @@ EULLM Engine uses **continuous batching** to decode multiple requests in paralle
 
 This page documents how that scaling behaves on a consumer GPU.
 
-## Test setup
+## October 2026: Qwen3-8B on the RTX 5070 Ti
+
+The same GPU and the same [`bench.sh`](../bench.sh) (150 tokens a request,
+throughput over the wall time of the slowest), with the model the data-centre
+runs below use, on 17 October 2026:
+
+| Concurrent requests | Throughput | Speedup vs N=1 | Each request |
+|:---:|:---:|:---:|:---:|
+| 1 | 132 tok/s | 1.0× | 144 tok/s |
+| 2 | 248 tok/s | 1.9× | 135 tok/s |
+| 4 | 433 tok/s | 3.3× | 117 tok/s |
+| 8 | 720 tok/s | 5.5× | 98 tok/s |
+| 16 | **1,065 tok/s** | **8.1×** | 72 tok/s |
+
+Qwen3-8B Q4_K_M from the catalog (`qwen3-8b`), engine built from `main`,
+`eullm serve --batch-size 16 --ctx-size 65536 --no-fit`: 16 slots of 4,096
+tokens, all 36 layers on the GPU, 14.1 of 16.3 GB in use.
+
+`--no-fit` matters here. Without it the sizing estimate (model 4.68 GiB,
+f16 KV cache 9 GiB) kept 2 of the 36 layers in RAM although 2 GB were left,
+and the same run gave 52 tok/s for one request and 300 for 16. With 16 GB, a
+smaller `--ctx-size` (32768 is plenty for this test) fits without the flag.
+
+The March run below, Qwen3.5-9B on an earlier engine, is kept as it was.
+
+## Test setup (March 2026)
 
 | | |
 |---|---|
@@ -71,8 +96,7 @@ At ~16 tok/s text still arrives faster than humans can read; the trade-off chose
 
 ## Data-centre GPUs (October 2026)
 
-The table above is the first measurement, on a desktop GPU in March 2026.
-The same scaling, measured since on EuroHPC machines with Q4_K_M models and
+The same scaling, measured on EuroHPC machines with Q4_K_M models and
 the October engines, tokens/s across all requests:
 
 | GPU | model | 1 request | 16 | 32 |
