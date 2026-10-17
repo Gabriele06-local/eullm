@@ -66,7 +66,7 @@ field. The ones that matter:
 | `sets`, `min/max_duration_s` | workload: which sets, and how long; it stretches to the time free |
 | `extra_args` | anything else for `eullm serve` (`--fit-strict` in the shipped specs) |
 | `env` | environment variables for the point's servers, e.g. `{"LLAMA_MOE_CACHE_STATS": "64"}`; needs the runner of 15-10-2026. In a value, `{workdir}` is the job's directory of server logs and `{point}` the point's id (`"LLAMA_MOE_CACHE_TRACE": "{workdir}/{point}.moe-trace"`: a file per point beside its log), which needs runner 8 |
-| `priority`, `est_s` | scheduling only; not part of a point's identity |
+| `priority`, `est_s` | scheduling only; not part of a point's identity. A throughput or decision point that runs three times its `est_s` (at least an hour) has its servers killed and fails |
 
 A `decision` point serves a decision model alone (`eullm serve
 --decision-model <model> --decision-ctx <decision_ctx>`, a Jev-Style release
@@ -121,6 +121,13 @@ the job. Several jobs can drain one queue: a claim is an atomic rename.
 
 At the walltime Slurm's SIGTERM stops the servers at once and puts the
 interrupted points back; the next job takes them up.
+
+A throughput or decision point that runs past three times its estimate (at
+least an hour) has its servers killed and fails, "stopped after N s". The
+request timeout bounds one read, not a request, so a server streaming a
+token every few minutes never reaches it: DeepSeek-V3.1 with `--cpu-moe`
+held a whole LUMI-G node for 9.8 hours that way (15-10-2026). Workload
+points stretch to the time they are given and have no such limit.
 
 No point starts on a device that already holds VRAM with nothing running on
 it (more than 2 GiB): the device is set aside, the servers of this job that

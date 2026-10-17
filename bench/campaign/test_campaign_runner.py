@@ -680,3 +680,25 @@ def test_a_point_no_usable_block_can_hold_does_not_keep_the_rest_out(tmp_path, e
     for wide in (whole, eight):
         p, used, _, _ = r.plan_next(now, [wide, one])
         assert p["id"] == "one" and used == [1]
+
+
+def test_a_point_past_its_time_limit_is_stopped_and_fails(tmp_path, engine, monkeypatch):
+    """A server that answers too slowly to reach the request timeout still
+    meets the point's own limit: its servers are killed and the point fails
+    saying why, instead of holding its devices for hours."""
+    import point
+
+    monkeypatch.setenv("FAKE_EULLM_DELAY_S", "0.5")
+    monkeypatch.setattr(point, "POINT_LIMIT_MIN_S", 1.0)
+    p = normalize({"model": "qwen3-8b", "num_predict": 12, "repeats": 1})
+    p |= {"id": "slow", "est_s": 0}
+    assert point.point_limit_s(p) == 1.0
+    soak = normalize({"model": "m", "kind": "workload", "sets": ["tiny"]})
+    assert point.point_limit_s(soak) is None
+    ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path))
+    started = time.time()
+    with pytest.raises(point.PointError, match="stopped after 1 s"):
+        point.run(p, ctx)
+    assert time.time() - started < 30
+    assert all(s.proc.poll() is not None for s in ctx.servers)
+    assert not ctx.stragglers

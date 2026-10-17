@@ -73,6 +73,16 @@ READY_TIMEOUT_S = 900
 KILL_WAIT_S = 600
 REQUEST_TIMEOUT_S = 1800
 WARMUP_TIMEOUT_S = 3600  # a 400 GB model read off Lustre is the slow case
+# How long a throughput or decision point may run, servers started to last
+# answer, before its servers are killed and it fails: this many times its
+# estimate, and never less than the floor. The request timeout bounds one
+# read, not a request: a server that streams a token every few minutes never
+# reaches it, and DeepSeek-V3.1 with --cpu-moe on SSE2 kernels held a whole
+# LUMI-G node for 9.8 hours that way (c10, 15-10-2026). Workload points
+# stretch to the time they are given by design and finetune points run no
+# server; neither has the limit.
+POINT_LIMIT_FACTOR = 3
+POINT_LIMIT_MIN_S = 3600
 
 # Filler for synthetic long prompts: plain prose, so it tokenizes like text
 # rather than like a repeated token the tokenizer could merge.
@@ -1129,6 +1139,14 @@ WARMUP_BODY = {"prompt": "Ciao.", "stream": True, "think": False, "num_predict":
                "options": {"num_predict": 8}}
 
 
+def point_limit_s(p: dict):
+    """The seconds `p` may run before its servers are killed (above), or
+    None for the kinds that have no limit."""
+    if p["kind"] not in ("throughput", "decision"):
+        return None
+    return max(POINT_LIMIT_FACTOR * p.get("est_s", 0), POINT_LIMIT_MIN_S)
+
+
 def run(p: dict, ctx: Context, answers_path=None) -> dict:
     """Measure `p` on `ctx.physical`; the result, or an exception."""
     if p["kind"] == "finetune":
@@ -1139,39 +1157,67 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
     started = time.time()
     servers = start_servers(p, ctx)
     ctx.servers = servers
-    try:
+    limit = point_limit_s(p)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
         for s in servers:
-            s.wait_ready(stop=ctx.stop)
-        if p["kind"] == "decision":
-            # The model loads before the server answers: readiness is the load.
-            cache = cache_state(p, ctx)
-            ready_s = time.time() - started
-            got = concurrently(len(servers), lambda i: decision_request(
-                servers[i].url, decision_bodies(dict(p, distinct_states=1))[0], WARMUP_TIMEOUT_S))
-            for i, g in enumerate(got):
-                if isinstance(g, Exception):
-                    raise PointError(f"first decision failed on server {i}: {g}\n"
-                                     + servers[i].log_tail())
-            ctx.model_seen.add(p["model"])
-            measured, window = run_decision(p, servers, ctx)
-            stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
-            load = {"cache": cache, "storage": model_storage(p), "wall_s": round(ready_s, 2)}
-            if evicted is not None:
-                load["evicted_bytes"] = evicted
-            return {"load": load, "decision": measured, "device_stats": stats}
-        if p["kind"] == "throughput":
-            warm_body = generate_body(p, p["prompt"] if not p["prompt_tokens"]
-                                      else synthetic_prompt(p["prompt_tokens"], "warmup"))
-        else:
-            warm_body = dict(WARMUP_BODY, model=p["model"])
-        load = warm_up(p, servers, ctx, warm_body)
+            s.kill()
+
+    timer = threading.Timer(limit, expire) if limit else None
+    if timer:
+        timer.daemon = True
+        timer.start()
+    try:
+        result = _measure(p, ctx, servers, evicted, started, answers_path)
+    except Exception as e:
+        if expired.is_set():
+            raise PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
+                             f"estimate of {p.get('est_s', 0)} s: {e}") from e
+        raise
+    finally:
+        if timer:
+            timer.cancel()
+        ctx.stragglers = [s for s in servers if not s.stop()]
+    if expired.is_set():
+        raise PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
+                         f"estimate of {p.get('est_s', 0)} s")
+    return result
+
+
+def _measure(p: dict, ctx: Context, servers: list, evicted, started: float, answers_path):
+    """`run`'s measurement once the servers are started."""
+    for s in servers:
+        s.wait_ready(stop=ctx.stop)
+    if p["kind"] == "decision":
+        # The model loads before the server answers: readiness is the load.
+        cache = cache_state(p, ctx)
+        ready_s = time.time() - started
+        got = concurrently(len(servers), lambda i: decision_request(
+            servers[i].url, decision_bodies(dict(p, distinct_states=1))[0], WARMUP_TIMEOUT_S))
+        for i, g in enumerate(got):
+            if isinstance(g, Exception):
+                raise PointError(f"first decision failed on server {i}: {g}\n"
+                                 + servers[i].log_tail())
+        ctx.model_seen.add(p["model"])
+        measured, window = run_decision(p, servers, ctx)
+        stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
+        load = {"cache": cache, "storage": model_storage(p), "wall_s": round(ready_s, 2)}
         if evicted is not None:
             load["evicted_bytes"] = evicted
-        if p["kind"] == "throughput":
-            measured, window = run_throughput(p, servers, ctx)
-        else:
-            measured, window = run_workload(p, servers, ctx, answers_path)
-        stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
-        return {"load": load, p["kind"]: measured, "device_stats": stats}
-    finally:
-        ctx.stragglers = [s for s in servers if not s.stop()]
+        return {"load": load, "decision": measured, "device_stats": stats}
+    if p["kind"] == "throughput":
+        warm_body = generate_body(p, p["prompt"] if not p["prompt_tokens"]
+                                  else synthetic_prompt(p["prompt_tokens"], "warmup"))
+    else:
+        warm_body = dict(WARMUP_BODY, model=p["model"])
+    load = warm_up(p, servers, ctx, warm_body)
+    if evicted is not None:
+        load["evicted_bytes"] = evicted
+    if p["kind"] == "throughput":
+        measured, window = run_throughput(p, servers, ctx)
+    else:
+        measured, window = run_workload(p, servers, ctx, answers_path)
+    stats = ctx.sampler.window(*window, ctx.physical) if ctx.sampler else {}
+    return {"load": load, p["kind"]: measured, "device_stats": stats}
