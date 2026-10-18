@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Inventory of the Consiglio di Stato corpus and its development split.
+"""Inventory of a case-law corpus and its development split.
 
     python forge/scripts/cds_split.py \\
         --chunks $WORK/datasets/legal_it_amm/train.jsonl $WORK/datasets/legal_it_amm/val.jsonl \\
         --openga $WORK/eval/openga/cds-sentenze-20*.csv \\
         --out-dir $WORK/eval/cds
+
+    python forge/scripts/cds_split.py --kind snciv \\
+        --chunks $WORK/datasets/legal_it/train.jsonl $WORK/datasets/legal_it/val.jsonl \\
+        --out-dir $WORK/eval/cass
+
+``--kind`` picks the court (`eullm_forge.caselaw.courts`): "cds" for the
+Consiglio di Stato (the default), "snciv" and "snpen" for the Corte di
+cassazione, whose corpus has no OpenGA index and so is grouped by ruling.
+The lists are named after the kind (``<kind>-dev-ids.txt``,
+``<kind>-train-ids.txt``, ``<kind>-split.json``).
 
 Step 0 of the case-law plan (research report of 2026-10-05). Two things:
 
@@ -38,7 +48,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.caselaw import attach_meta, group_key, load_openga, load_rulings  # noqa: E402
+from eullm_forge.caselaw import (  # noqa: E402
+    attach_meta,
+    court,
+    group_key,
+    load_openga,
+    load_rulings,
+)
 
 LAST_TRAINING_YEAR = 2024
 
@@ -79,8 +95,9 @@ def digest(ids: list[str]) -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kind", default="cds", help="court: cds, snciv, snpen")
     ap.add_argument("--chunks", nargs="+", type=Path, required=True,
-                    help="chunk files holding the rulings (kind cds)")
+                    help="chunk files holding the rulings of that kind")
     ap.add_argument("--openga", nargs="*", type=Path, default=[],
                     help="OpenGA cds-sentenze CSVs: appeal number, section, outcome")
     ap.add_argument("--dev", type=int, default=1300, help="development rulings to set aside")
@@ -88,43 +105,48 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", type=Path, required=True)
     args = ap.parse_args(argv)
 
-    rulings = load_rulings(args.chunks)
+    try:
+        k = court(args.kind).kind
+    except ValueError as e:
+        ap.error(str(e))
+    rulings = load_rulings(args.chunks, kind=k)
     if not rulings:
-        print("[cds] no cds rulings in the chunk files", file=sys.stderr)
+        print(f"[{k}] no {k} rulings in the chunk files", file=sys.stderr)
         return 1
     matched = attach_meta(rulings, load_openga(args.openga)) if args.openga else 0
     chars = sum(len(r.text) for r in rulings.values())
-    print(f"[cds] {len(rulings):,} rulings from {sum(r.n_chunks for r in rulings.values()):,} "
+    print(f"[{k}] {len(rulings):,} rulings from {sum(r.n_chunks for r in rulings.values()):,} "
           f"chunks, {chars / 1e6:,.0f} M characters (~{chars / 3.5 / 1e6:,.0f} M tokens)")
-    print(f"[cds] OpenGA metadata for {matched:,} of {len(rulings):,}"
+    print(f"[{k}] OpenGA metadata for {matched:,} of {len(rulings):,}"
           + ("" if args.openga else " (no --openga: grouping by ruling, not by appeal)"))
     by_year = Counter(r.year for r in rulings.values())
-    print("[cds] by year: " + ", ".join(f"{y}: {n:,}" for y, n in sorted(
+    print(f"[{k}] by year: " + ", ".join(f"{y}: {n:,}" for y, n in sorted(
         by_year.items(), key=lambda x: (x[0] is None, x[0] or 0))))
     sections = Counter(r.section or "?" for r in rulings.values())
-    print("[cds] by section: " + ", ".join(f"{s}: {n:,}" for s, n in sections.most_common(10)))
+    print(f"[{k}] by section: " + ", ".join(f"{s}: {n:,}" for s, n in sections.most_common(10)))
     late = sum(n for y, n in by_year.items() if y and y > LAST_TRAINING_YEAR)
     if late:
-        print(f"[cds] WARNING: {late:,} rulings after {LAST_TRAINING_YEAR} in the chunk files: "
+        print(f"[{k}] WARNING: {late:,} rulings after {LAST_TRAINING_YEAR} in the chunk files: "
               "left out of both lists, and the training corpus should not hold them",
               file=sys.stderr)
     eligible = {k: r for k, r in rulings.items() if r.year and r.year <= LAST_TRAINING_YEAR}
     groups = {group_key(r) for r in eligible.values()}
-    print(f"[cds] {len(eligible):,} rulings of 2017-{LAST_TRAINING_YEAR} in {len(groups):,} "
+    first = min((r.year for r in eligible.values()), default=LAST_TRAINING_YEAR)
+    print(f"[{k}] {len(eligible):,} rulings of {first}-{LAST_TRAINING_YEAR} in {len(groups):,} "
           "appeal groups")
 
     dev = sorted(choose_dev(eligible, args.dev, args.seed))
     train = sorted(set(eligible) - set(dev))
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "cds-dev-ids.txt").write_text("\n".join(dev) + "\n", encoding="utf-8")
-    (args.out_dir / "cds-train-ids.txt").write_text("\n".join(train) + "\n", encoding="utf-8")
-    manifest = {"dev": len(dev), "train": len(train), "seed": args.seed,
+    (args.out_dir / f"{k}-dev-ids.txt").write_text("\n".join(dev) + "\n", encoding="utf-8")
+    (args.out_dir / f"{k}-train-ids.txt").write_text("\n".join(train) + "\n", encoding="utf-8")
+    manifest = {"kind": k, "dev": len(dev), "train": len(train), "seed": args.seed,
                 "dev_sha256": digest(dev), "train_sha256": digest(train),
                 "openga_matched": matched, "rulings": len(rulings),
                 "dev_by_year": dict(sorted(Counter(str(rulings[i].year) for i in dev).items()))}
-    (args.out_dir / "cds-split.json").write_text(json.dumps(manifest, indent=1) + "\n",
+    (args.out_dir / f"{k}-split.json").write_text(json.dumps(manifest, indent=1) + "\n",
                                                  encoding="utf-8")
-    print(f"[cds] dev {len(dev):,} rulings, train {len(train):,} -> {args.out_dir} "
+    print(f"[{k}] dev {len(dev):,} rulings, train {len(train):,} -> {args.out_dir} "
           f"(dev sha256 {manifest['dev_sha256'][:12]})")
     return 0
 

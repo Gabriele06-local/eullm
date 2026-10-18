@@ -1,4 +1,6 @@
-"""Case law (Consiglio di Stato) for the legal-it models: rulings, split, cards.
+"""Case law for the legal-it models: rulings, split, cards.
+
+Consiglio di Stato and Corte di cassazione (`courts`).
 
 The rulings are pseudonymised, not anonymous, so they do not go into the
 published weights (research report of 2026-10-05). What they give is an
@@ -9,6 +11,7 @@ ruling (`schede`) -- abstract principles, norms applied, outcome, questions
 
 from __future__ import annotations
 
+from .courts import COURTS, Court, court
 from .rulings import (
     Ruling,
     attach_meta,
@@ -19,5 +22,5 @@ from .rulings import (
     ruling_view,
 )
 
-__all__ = ["Ruling", "attach_meta", "group_key", "join_chunks", "load_openga", "load_rulings",
-           "ruling_view"]
+__all__ = ["COURTS", "Court", "Ruling", "attach_meta", "court", "group_key", "join_chunks",
+           "load_openga", "load_rulings", "ruling_view"]
