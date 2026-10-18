@@ -29,7 +29,9 @@ every annex.
 
 ## How the corpus is partitioned
 
-**Corte di Cassazione** — the whole of 2021-2026 is training data. The
+**Corte di Cassazione** — the whole of 2021-2026 is training data. (Used
+for the September distillation; what it gave and what it can still be used
+for: [legal-it-experiments.md](legal-it-experiments.md), sections 1 and 6.) The
 validation split is described under *Known limitations*.
 
 **Consiglio di Stato** — split by publication year, permanently:

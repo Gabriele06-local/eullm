@@ -1,0 +1,187 @@
+# legal-it — what was tried, what it gave, and why the course changed
+
+> Status: living record · Last updated: 2026-10-18
+
+The record of every legal-it training line, from the first distillation on
+Cassazione rulings to the GRPO rounds of October. The model cards say how
+the *published* models were made; this page says what else was tried and
+why it was set aside, so a direction is not dropped and forgotten, or
+retried without knowing how it went. Numbers come from the exams on
+Leonardo; each section names its source.
+
+## The exams
+
+| Exam | Size | What it measures |
+|---|---|---|
+| Held-out statute exam | 429 questions | the published models' numbers (model cards); used once per release candidate |
+| Development statute exam (`devbig`) | 472 questions | content, deadlines, nonexistent articles, asked open book with hybrid retrieval (BM25 + Qwen3-Embedding-0.6B + Qwen3-Reranker-0.6B); graded by Qwen3-30B-A3B-Instruct-2507 under rubric v3, and the deadline and absent-article questions (190) also by a program |
+| The same, without the note (`-hybnn`) | 472 | the prompt no longer says "nella raccolta normativa non è presente art. N": RAG products built on the models do not write that note, so this is the product condition (`legal_eval.py --no-note`, 2026-10-16) |
+| Practical exam | 145 dev / 70 held-out | a practical question needing a group of linked articles, written by Qwen3.6-27B (`eullm_forge.eval.practical`) |
+| Case-law exam | 1,200 questions | answering from Consiglio di Stato rulings and citing the right one (`sbatch_cds_exam.slurm`) |
+
+All numbers below are Q4_K_M GGUFs through llama-server unless marked bf16.
+
+## 1. September: distillation on the Cassazione corpus
+
+**What.** `docs/legal-it-4b-strategy.md` and ADR-001. A corpus of 1.13 M
+chunks, about 700 M tokens: Cassazione civil and criminal judgments
+2021-2026 from ItalGiure (`docs/corpus-acquisition.md`), pseudonymised by
+`anonymize.py` (rounds 1-6), deduplicated, plus the codes and the
+Constitution. Teacher Qwen3-30B-A3B-Base, student Qwen3-4B-Base, logit
+distillation on Leonardo (`legal_it`, `legal_it_v12`; an 8B run in
+`legal_it_8b`). Then stage 3 on the distilled student (domain pairs plus
+identity): `legal-it-4b` v0.2.
+
+**What it gave.** The student learned the language of the corpus: on 40
+held-out chunks of 512 tokens its perplexity at step 12,600 was 3.19
+against 6.65 for Qwen3-4B-Base (`legal_it_v12/exports/perplexity.csv`).
+
+**Why the course changed (2026-09-26/27, commits 749a0ee and 689ec50).**
+Measured on questions, not on perplexity:
+
+- v0.2 matched Qwen3-4B-Instruct on the keyword score, but read by a person
+  four answers in ten were wrong: the TAR deadline given as 30 days (it is
+  60), the ricorso straordinario as 30 (it is 120), art. 27 Cost. described
+  as art. 25, the AI Act disclosure duty backwards.
+- On the held-out exam a 4B model answered about 3% of 233 questions from
+  memory, whoever trained it, and 46-60% with the retrieved norms in the
+  prompt.
+- At exactly that, answering from the text in the prompt, the distilled
+  model did worst: restating an article just read, 44 of 86 against 67 for
+  Qwen3-4B-Instruct; a question about a nonexistent article got an
+  invented answer 18 times out of 18.
+
+So legal-it became a model that answers **from the texts retrieval gives
+it**, trained from an instruct model on open-book pairs (section 2). The
+distillation did not fail at what it measured; it measured the wrong
+thing for the product. Two more reasons weighed on publishing a model
+trained on rulings: the anonymiser had once reported a clean run and still
+left 59 codici fiscali in the training text (strategy, risks table), and a
+published model that memorised a ruling cannot be recalled.
+
+**What is still there.** The checkpoints and exports on `$WORK`
+(`legal_it/exports`, `legal_it_v12/exports`, `legal_it_8b`): keep them
+until section 6 is decided.
+
+**What was never measured.** Whether the corpus helps on case law or on
+practical questions, which did not exist as exams then; and the distilled
+student with the open-book recipe on top of it. Every comparison above is
+on statute questions, where knowing the rulings cannot help.
+
+## 2. October: the open-book recipe, and the published models
+
+From an instruct model: open-book SFT on 18,972 pairs (85% written by
+Qwen3-30B-A3B-Instruct-2507 from one article each, 15% about nonexistent
+articles), then GRPO with programmatic rewards (deadlines, abstention).
+Statutes only, no rulings. Published 2026-10-04:
+
+| | Base | Held-out (429) | Base model, same retrieval |
+|---|---|---|---|
+| `legal-it-8b` | Ministral-3-8B-Instruct-2512 (Mistral AI) | 89.0% | 80.9% |
+| `legal-it-4b` | Qwen3-4B-Instruct-2507 | 85.1% | 77.6% |
+
+Ministral-3-14B with the same recipe scored 436 on `devbig`, the same as
+the 8B (436 bf16, 437 Q4): on this exam a larger model of the same family
+added nothing.
+
+## 3. October: the 27B teacher and the Qwen3.5 students
+
+**What.** Privileged-context distillation for the case-law skill (commit
+ba6decf, `opd_train.py`, from 2026-10-06): the student answers with the
+passages the case-law index retrieves, the teacher reads the same question
+with the source ruling in front, and the student is moved towards the
+teacher's distributions at each answer token (reverse KL). For the Qwen3.5
+students the teacher was **Qwen3.8-27B** (`opd-q38t-q35-*`). Ministral
+was distilled from itself: no available teacher shared its tokenizer.
+Then GRPO rounds on top, with the judge as reward (`submit_grpo_round.sh`):
+`jp` (practical prompts), `jp2` (a second round on `jp`), `jpa` (with
+abstention prompts), `jpn` (the same with the note removed from 70% of the
+prompts), `jp3n` and `jpn2` (one more round each).
+
+**Development statute exam (472), correct, with / without the note:**
+
+| Model | With | Without | Program-graded (190), with / without |
+|---|---|---|---|
+| **legal-it-8b** (published) | 437 | **440** | 183 / 183 |
+| **legal-it-4b** (published) | 422 | **393** | 176 / **143** |
+| OPD 9B, the start | 403 | 412 | 170 / 173 |
+| jp-9b | 437 | 436 | 178 / 181 |
+| jp2-9b | **447** | not yet | 177 |
+| jp3n-9b | 439 | 437 | 175 / 175 |
+| jpn-9b | 434 | 431 | 176 / 176 |
+| OPD 4B, the start | 377 | — | 166 |
+| jpn-4b | 390 | **427** | 176 / 176 |
+| jpn2-4b | 410 | **426** | 177 / 175 |
+
+**Paired (McNemar), without the note:**
+
+- against legal-it-4b: jpn-4b +34 (59:25, p < 0.001), jpn2-4b +33 (56:23,
+  p < 0.001), significant strictly and leniently. Almost all of it on
+  nonexistent articles (36:2 and 35:0); content even (15:12, 14:11);
+  deadlines slightly worse (4:8, 4:9). **The published 4B depends on the
+  note** (393 without, 143 of 190 program-graded): without it, it answers
+  about articles that are not there. The new 4B does not.
+- against legal-it-8b: jp −4 (p 0.65), jp3n −3 (p 0.76), jpn −9 (p 0.24),
+  and leniently the 8B is ahead (p 0.002-0.023). **No Qwen3.5-9B beats the
+  Mistral 8B.**
+
+**Practical exam (145), correct:** jp2-9b 82, jp3n-9b 81, jpn2-4b 81,
+jpa-9b 75, jpn-4b 75, jp-9b 73, jpn-9b 67, OPD 4B 67, OPD 9B 62. The
+published models' run is queued.
+
+**Case-law exam (1,200), source ruling cited:** 0.348-0.362 for every
+round, with the source ruling retrieved in 0.382 of the questions: the
+models cite it about nine times in ten when it is there. **Case law is
+held back by retrieval, not by the models.**
+
+**What it says.** The 27B start (403) was far below where the published
+models end (437); GRPO did most of the work on the Qwen3.5 line (+30 to
++44). A third round on `jp2` (`jp3n`) did not improve it:
+its groups were often all graded the same, nothing left to learn from.
+
+**Why Qwen3.5 may be underused (open).** The strategy noted it in
+September (`legal-it-4b-strategy.md`, alternatives table): Qwen3.5's
+hybrid architecture makes logit distillation noisier and its tooling
+younger. Besides that: it is a reasoning model and every run here keeps
+reasoning off; it never had the open-book SFT the published models had;
+and `devbig` is near its ceiling (93%). Each is a measurement, not a
+belief: reasoning on (needs a `legal_eval.py` option), the same SFT on
+Qwen3.5, bf16 against Q4.
+
+## 4. The release candidate
+
+`jpn2-4b` (or `jpn3-4b`, in training) against `legal-it-4b`, without the
+note, on the held-out exam, once. If it holds, it replaces `legal-it-4b`:
+same content, and it says when an article is not there.
+
+## 5. Teachers, summary
+
+| Teacher | Used for | Published? |
+|---|---|---|
+| Qwen3-30B-A3B-Base | logit distillation on the Cassazione corpus (September) | no (v0.2) |
+| Qwen3-30B-A3B-Instruct-2507 | writes the open-book SFT pairs; the exam judge | yes, as data writer |
+| Qwen3.8-27B | privileged-context OPD of Qwen3.5-4B/9B (case-law skill) | no |
+| Qwen3.6-27B | writes the practical exam and the practical GRPO prompts | as data writer |
+
+## 6. The Cassazione, again
+
+The corpus is not wasted; what it was used for was the wrong half of the
+job. What it can still give, in order of likely return:
+
+1. **Retrieval over rulings.** The case-law exam is capped by retrieval
+   (0.382): an index, embedder and reranker that find the right ruling
+   move every model at once, and train nothing on personal data.
+2. **Open-book case-law training.** As the Consiglio di Stato cards do
+   (`export_clean_cards.py`): questions on rulings, the rulings in the
+   prompt, answers that cite them, with made-up references and only
+   principles of law, then SFT and GRPO on `legal-it-8b`. It teaches the
+   skill the product uses, reading rulings, not remembering them.
+3. **Knowledge: the distilled corpus model under the open-book recipe.**
+   The experiment never run in section 1: continued training on the
+   corpus, then the same SFT and GRPO, measured on the practical and
+   case-law exams as well as the statutes. Not on top of a published
+   model without the SFT and GRPO after it: v0.2 is what continued
+   training alone does to the reading skill.
+
+Any model trained on ruling text goes through the memorisation check
+(roadmap phase 3) before it is published.
