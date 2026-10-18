@@ -299,9 +299,20 @@ stay held out.
 | Qwen3-8B Base (4,272 pairs) | 0.712 | 154 |
 | Qwen3-4B distilled (9,223 / 4,272 pairs) | 0.703 / 0.694 | 147 / 149 |
 
+**The instruction pairs overlap the exam.** The exam was drawn from every
+Normattiva article and the pairs from passages of the training split, with
+no article left out of either. Traced back to their passages
+(`pairs_exam_overlap.py`, 18-10-2026): 251 of the 9,223 pairs ask about an
+exam article, and 105 of the exam's 153 articles have pairs about them. The
+reference was trained on none of them, so every figure of ours above may be
+inflated against it; the instruction tuning is rerun on the 8,972 pairs
+that touch no exam article (§5.9), and only that comparison with the
+reference stands.
+
 Closed book every model, the reference included, scores 0.000–0.023: none
-knows the articles by heart. Open book, the two Qwen3.5-9B models are the
-first of ours clearly ahead of the reference (+10 questions of 217). A
+knows the articles by heart. Open book, the two Qwen3.5-9B models score
+ahead of the reference (+10 questions of 217), pending the rerun without
+the overlap. A
 model distilled and the same model not distilled stay within a few
 questions of each other in every pair: 1.5M tokens of legislation move
 nothing measurable; the family and the size of the student do. Whether a
@@ -327,7 +338,13 @@ optimiser steps, two-hour links.
   file system allows at that hour. The four graders of job 2371747 loaded
   theirs quickly the same day. The teacher is now copied once per node into
   memory (`/dev/shm`, a few large reads) and both runs load it from there
-  (`9d093b7`), from link 2375535.
+  (`9d093b7`), from link 2375535: 49 s for the copy, the runs training
+  after 4–5 minutes instead of an hour.
+* Halfway (4B at step 3,400, 8B at 2,800, jobs 2381934–2381935), instruction
+  tuned and examined open book: the 4B 0.712 against 0.714 for the 4B Base,
+  the 8B 0.740 against 0.751 for the 8B Base. Open book the article is in
+  front of the model, so the exam measures reading it, which distillation
+  on the law is not expected to change; its effect is the held-out loss.
 
 ## 6. Energy
 
@@ -392,6 +409,7 @@ figures below with the site's energy mix.
 | 16-10 | flash-linear-attention 0.5.2 refuses the module's Triton 3.5.1 on Hopper (wrong gradients up to 3.7.0) | Triton 3.8.0 in a directory of its own for the Qwen3.5 jobs (`9f04bd6`) |
 | 17-10 | A link killed while saving left a truncated checkpoint; every later link failed on it | atomic save, truncated state skipped on resume (`18f0611`) |
 | 17-10 | Loading the teacher took 50–70 minutes of a two-hour link | teacher copied once per node into memory (`9d093b7`) |
+| 18-10 | 105 of the exam's 153 articles had instruction pairs about them | overlap traced (`d746b11`); instruction tuning rerun on the 8,972 pairs without it |
 
 ## 9. Resource use
 
