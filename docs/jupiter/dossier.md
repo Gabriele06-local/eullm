@@ -305,14 +305,26 @@ no article left out of either. Traced back to their passages
 (`pairs_exam_overlap.py`, 18-10-2026): 251 of the 9,223 pairs ask about an
 exam article, and 105 of the exam's 153 articles have pairs about them. The
 reference was trained on none of them, so every figure of ours above may be
-inflated against it; the instruction tuning is rerun on the 8,972 pairs
-that touch no exam article (§5.9), and only that comparison with the
-reference stands.
+inflated against it. Rerun on the 8,972 pairs that touch no exam article
+(jobs 2390511 and 2390513, 18-10-2026), four Base models side by side:
+
+| model, instruction-tuned on the clean pairs | open book | correct | training, one GH200 |
+|---|---:|---:|---:|
+| Qwen3.5-9B Base | **0.790** | 171 | 47.7 min |
+| Qwen3.5-4B Base | **0.786** | 168 | 41.8 min |
+| Qwen3-4B-Instruct-2507 (reference) | 0.765 | 159 | — |
+| Qwen3-8B Base | 0.747 | 159 | 59.6 min |
+| Qwen3-4B Base | 0.684 | 146 | 48.3 min |
+
+Every model moves by at most a few questions against its run on the
+overlapping pairs: the overlap inflated little. Both Qwen3.5 models stay
+ahead of the reference (+9 and +12 correct answers of 217) on pairs that
+never saw an exam article; this is the comparison that stands.
 
 Closed book every model, the reference included, scores 0.000–0.023: none
 knows the articles by heart. Open book, the two Qwen3.5-9B models score
-ahead of the reference (+10 questions of 217), pending the rerun without
-the overlap. A
+ahead of the reference (+10 questions of 217), and still are without the
+overlap (above). A
 model distilled and the same model not distilled stay within a few
 questions of each other in every pair: 1.5M tokens of legislation move
 nothing measurable; the family and the size of the student do. Whether a
@@ -409,7 +421,7 @@ figures below with the site's energy mix.
 | 16-10 | flash-linear-attention 0.5.2 refuses the module's Triton 3.5.1 on Hopper (wrong gradients up to 3.7.0) | Triton 3.8.0 in a directory of its own for the Qwen3.5 jobs (`9f04bd6`) |
 | 17-10 | A link killed while saving left a truncated checkpoint; every later link failed on it | atomic save, truncated state skipped on resume (`18f0611`) |
 | 17-10 | Loading the teacher took 50–70 minutes of a two-hour link | teacher copied once per node into memory (`9d093b7`) |
-| 18-10 | 105 of the exam's 153 articles had instruction pairs about them | overlap traced (`d746b11`); instruction tuning rerun on the 8,972 pairs without it |
+| 18-10 | 105 of the exam's 153 articles had instruction pairs about them | overlap traced (`d746b11`); instruction tuning rerun on the 8,972 pairs without it: scores within a few questions |
 
 ## 9. Resource use
 
