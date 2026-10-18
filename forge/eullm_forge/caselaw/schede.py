@@ -1,4 +1,7 @@
-"""One card per ruling: what a teacher model distils out of a Consiglio di Stato ruling.
+"""One card per ruling: what a teacher model distils out of a ruling.
+
+Written for the Consiglio di Stato and used for the Corte di cassazione too
+(`courts`): only who writes, the citation shape and the outcomes differ.
 
 The card is the unit everything downstream uses (research report of
 2026-10-05, step 1): its one-line form prefixes the ruling's chunks in the
@@ -22,29 +25,29 @@ import json
 import re
 
 from ..datasets.anonymize import RE_CF, RE_IBAN
+from .courts import CDS, Court
 
-OUTCOMES = ("accoglimento", "rigetto", "inammissibilità", "improcedibilità",
-            "accoglimento parziale", "cessata materia del contendere", "altro")
+OUTCOMES = CDS.outcomes
 
-SYSTEM = (
-    "Sei un magistrato dell'Ufficio del Massimario della giustizia amministrativa. "
+_SYSTEM = (
+    "Sei un magistrato {massimario}. "
     "Estrai dalle sentenze i principi di diritto in forma astratta, come una massima: "
     "mai nomi di parti, persone, società, enti locali specifici, luoghi o fatti che "
     "identifichino la controversia. Scrivi in italiano giuridico corretto. Rispondi "
     "solo con un oggetto JSON."
 )
+SYSTEM = _SYSTEM.format(massimario=CDS.massimario)
 
 TASK = (
-    "Sentenza del Consiglio di Stato{where}:\n\n--- SENTENZA ---\n{text}\n--- FINE ---\n\n"
+    "Sentenza {of_name}{where}:\n\n--- SENTENZA ---\n{text}\n--- FINE ---\n\n"
     "Restituisci un oggetto JSON con questi campi:\n"
     "- \"principi\": da 1 a 4 principi di diritto affermati dalla sentenza, ciascuno in 1-3 "
     "frasi, in forma astratta come una massima ufficiale (niente parti, luoghi, date dei fatti, "
     "importi).\n"
-    "- \"norme\": le disposizioni applicate o interpretate, nella forma \"art. 21-octies, l. n. "
-    "241/1990\" o \"art. 120 c.p.a.\" (al massimo 8).\n"
+    "- \"norme\": le disposizioni applicate o interpretate, nella forma {norm_examples} "
+    "(al massimo 8).\n"
     "- \"esito\": uno tra {outcomes}.\n"
-    "- \"materia\": la materia in poche parole (per esempio \"appalti pubblici - esclusione "
-    "dalla gara\").\n"
+    "- \"materia\": la materia in poche parole (per esempio \"{materia_example}\").\n"
     "- \"domande_ricerca\": da 3 a 5 domande che un avvocato potrebbe porre e a cui questa "
     "sentenza risponde, in termini generali e senza riferimenti al caso.\n"
     "- \"domande_esame\": da 2 a 3 oggetti {{\"domanda\", \"risposta\", \"rubrica\"}}: la "
@@ -93,13 +96,16 @@ class CardRejected(ValueError):
         self.reason = reason
 
 
-def messages(text: str, *, section: str = "", year: int | None = None) -> list[dict]:
-    """The chat messages that ask for one card."""
+def messages(text: str, *, section: str = "", year: int | None = None,
+             court: Court = CDS) -> list[dict]:
+    """The chat messages that ask for one card of a ruling of ``court``."""
     where = ", " + ", ".join(p for p in (section, str(year) if year else "") if p) \
         if (section or year) else ""
-    return [{"role": "system", "content": SYSTEM},
-            {"role": "user", "content": TASK.format(where=where, text=text,
-                                                    outcomes=", ".join(OUTCOMES))}]
+    return [{"role": "system", "content": _SYSTEM.format(massimario=court.massimario)},
+            {"role": "user", "content": TASK.format(
+                of_name=court.of_name, where=where, text=text,
+                norm_examples=court.norm_examples, materia_example=court.materia_example,
+                outcomes=", ".join(court.outcomes))}]
 
 
 def _strings(obj, key: str, lo: int, hi: int, min_len: int, max_len: int) -> list[str]:
@@ -123,7 +129,7 @@ def _leaks(text: str) -> str | None:
     return None
 
 
-def parse_card(raw: str) -> dict:
+def parse_card(raw: str, court: Court = CDS) -> dict:
     """The card in a teacher reply, checked; raises CardRejected."""
     text = (raw or "").strip()
     # a thinking model's reasoning, if it gave one despite being asked not to
@@ -145,7 +151,7 @@ def parse_card(raw: str) -> dict:
         "domande_ricerca": _strings(obj, "domande_ricerca", 3, 5, 15, 400),
     }
     esito = str(obj.get("esito") or "").strip().lower()
-    card["esito"] = esito if esito in OUTCOMES else "altro"
+    card["esito"] = esito if esito in court.outcomes else "altro"
     card["materia"] = str(obj.get("materia") or "").strip()[:200]
     exam = obj.get("domande_esame")
     if not isinstance(exam, list) or len(exam) < 2:
@@ -165,7 +171,7 @@ def parse_card(raw: str) -> dict:
     return card
 
 
-def prefix(card: dict, ruling_meta: dict) -> str:
+def prefix(card: dict, ruling_meta: dict, court: Court = CDS) -> str:
     """The one-line form of a card that goes in front of the ruling's chunks.
 
     Short and generic on purpose: a plain summary beat one written around
@@ -173,7 +179,7 @@ def prefix(card: dict, ruling_meta: dict) -> str:
     NLLP 2025).
     """
     head = ", ".join(p for p in (
-        "Cons. Stato", ruling_meta.get("sezione") or "",
+        court.cite, ruling_meta.get("sezione") or "",
         f"n. {ruling_meta.get('numero')}" if ruling_meta.get("numero") else "",
         str(ruling_meta.get("data") or ruling_meta.get("year") or "")) if p)
     norms = "; ".join(card.get("norme", [])[:3])

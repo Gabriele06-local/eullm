@@ -11,17 +11,19 @@ where the two overlap, so the format the models know does not change.
 
 from __future__ import annotations
 
+from .courts import CDS, Court
+
 PASSAGE_CHARS = 3000
 
 
-def ruling_label(meta: dict) -> str:
+def ruling_label(meta: dict, court: Court = CDS) -> str:
     """How a ruling is cited in a prompt: "Cons. Stato, Sezione V, n. 202301234"."""
-    parts = ["Cons. Stato", meta.get("sezione") or "", f"n. {meta['numero']}" if meta.get("numero")
+    parts = [court.cite, meta.get("sezione") or "", f"n. {meta['numero']}" if meta.get("numero")
              else ""]
     return ", ".join(p for p in parts if p)
 
 
-def caselaw_prompt(question: str, passages: list[tuple[str, str]]) -> str:
+def caselaw_prompt(question: str, passages: list[tuple[str, str]], court: Court = CDS) -> str:
     """The question with the retrieved passages, as (label, text) pairs, in front."""
     if not passages:
         return question
@@ -29,13 +31,13 @@ def caselaw_prompt(question: str, passages: list[tuple[str, str]]) -> str:
     for i, (label, text) in enumerate(passages, 1):
         body = text[:PASSAGE_CHARS].rstrip() + (" […]" if len(text) > PASSAGE_CHARS else "")
         blocks.append(f"[{i}] {label}\n{body}")
-    return ("Testi di riferimento (sentenze del Consiglio di Stato):\n\n" + "\n\n".join(blocks)
+    return (f"Testi di riferimento ({court.plural}):\n\n" + "\n\n".join(blocks)
             + "\n\nRispondi alla domanda basandoti sui testi sopra, se sono pertinenti, "
               "citando le sentenze che usi.\n\nDomanda: " + question)
 
 
 def privileged_prompt(question: str, passages: list[tuple[str, str]], ruling: tuple[str, str],
-                      max_chars: int = 12000, citable: bool = True) -> str:
+                      max_chars: int = 12000, citable: bool = True, court: Court = CDS) -> str:
     """The student's prompt with the source ruling in front: the teacher's view.
 
     ``citable=False`` when retrieval did not find the source: the teacher is
@@ -51,4 +53,4 @@ def privileged_prompt(question: str, passages: list[tuple[str, str]], ruling: tu
     else:
         head = ("Sentenza da cui proviene la domanda (non è tra i testi di riferimento: usala per "
                 "sapere che cosa è giusto, ma non citarla):")
-    return f"{head}\n{body}\n\n---\n\n" + caselaw_prompt(question, passages)
+    return f"{head}\n{body}\n\n---\n\n" + caselaw_prompt(question, passages, court)

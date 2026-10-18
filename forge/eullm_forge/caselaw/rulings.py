@@ -39,7 +39,7 @@ class Ruling:
 
     @property
     def number(self) -> str:
-        return self.id.split("/", 1)[-1]
+        return self.id.rsplit("/", 1)[-1]     # "cds/202301234", "snciv/2023/12345"
 
     @property
     def nrg(self) -> str:
