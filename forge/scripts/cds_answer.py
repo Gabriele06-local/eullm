@@ -24,6 +24,11 @@ Two checks need no judge, and are printed and written per answer:
 With ``--gguf`` the answers come from that file through llama-server, the
 model directory giving the tokenizer, as legal_eval.py does.
 
+``--kind snciv`` (or ``snpen``) sets the exam on Corte di cassazione rulings
+(`caselaw.courts`): the chunks of that kind are indexed, the passages are
+labelled "Cass. civ., n. 12345/2023", and a citation is read as number and
+year (`caselaw.citation_key`).
+
 Counts only, never a question or an answer.
 """
 
@@ -38,7 +43,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.caselaw import attach_meta, load_openga, load_rulings  # noqa: E402
+from eullm_forge.caselaw import (  # noqa: E402
+    attach_meta,
+    citation_key,
+    cited_number,
+    court,
+    load_openga,
+    load_rulings,
+)
 from eullm_forge.caselaw.index import RulingIndex, SparseBM25, build_units  # noqa: E402
 from eullm_forge.caselaw.prompts import caselaw_prompt, ruling_label  # noqa: E402
 
@@ -77,13 +89,13 @@ def cited_numbers(text: str) -> set[str]:
     return out
 
 
-def exam_items(rows: list[dict], dev: set[str], limit: int) -> list[dict]:
+def exam_items(rows: list[dict], dev: set[str], limit: int, kind: str = "cds") -> list[dict]:
     items = []
     for r in rows:
         if r["id"] not in dev:
             continue
         for i, q in enumerate(r.get("domande_esame", [])):
-            items.append({"id": f"cds-{r['id'].split('/')[-1]}-{i}", "ruling": r["id"],
+            items.append({"id": f"{kind}-{citation_key(r['id'])}-{i}", "ruling": r["id"],
                           "question": q["domanda"], "reference": q["risposta"],
                           "rubric": q["rubrica"]})
     return items[:limit] if limit else items
@@ -125,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("model", help="merged model directory (or the tokenizer's, with --gguf)")
     ap.add_argument("--label", required=True)
+    ap.add_argument("--kind", default="cds", help="court: cds, snciv, snpen")
     ap.add_argument("--questions", nargs="+", type=Path, required=True)
     ap.add_argument("--dev-ids", type=Path, required=True)
     ap.add_argument("--chunks", nargs="+", type=Path, required=True)
@@ -147,17 +160,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--llama-server")
     ap.add_argument("--answers", type=Path, required=True)
     args = ap.parse_args(argv)
+    try:
+        the_court = court(args.kind)
+    except ValueError as e:
+        ap.error(str(e))
 
     dev = {ln.strip() for ln in args.dev_ids.open(encoding="utf-8") if ln.strip()}
     rows = []
     for p in args.questions:
         rows += [json.loads(line) for line in p.open(encoding="utf-8") if line.strip()]
-    items = exam_items(rows, dev, args.limit)
+    items = exam_items(rows, dev, args.limit, the_court.kind)
     if not items:
         print("[cds-exam] no exam questions of development rulings", file=sys.stderr)
         return 1
 
-    rulings = load_rulings(args.chunks)
+    rulings = load_rulings(args.chunks, kind=the_court.kind)
     if args.openga:
         attach_meta(rulings, load_openga(args.openga))
     cards = {}
@@ -171,10 +188,12 @@ def main(argv: list[str] | None = None) -> int:
         for line in p.open(encoding="utf-8"):
             if line.strip():
                 c = json.loads(line)
-                if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds":
+                if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) \
+                        == the_court.kind:
                     chunks.append(c)
     units = build_units(rulings, chunks, cards=cards, prefix_chunks=bool(cards),
-                        card_units=bool(cards) and args.index == "prefix+cards")
+                        card_units=bool(cards) and args.index == "prefix+cards",
+                        court=the_court)
     index = RulingIndex(units, bm25=SparseBM25([u.text for u in units]))
     if args.embedder:
         from eullm_forge.caselaw.index import shard_vectors, units_key
@@ -187,8 +206,8 @@ def main(argv: list[str] | None = None) -> int:
 
     def label_of(rid: str) -> str:
         r = rulings.get(rid)
-        return ruling_label({"sezione": getattr(r, "section", ""),
-                             "numero": rid.split("/", 1)[-1]})
+        return ruling_label({"sezione": getattr(r, "section", ""), "numero": cited_number(rid)},
+                            the_court)
 
     contents, contexts = [], []
     for it in items:
@@ -199,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
             ids.append(u.ruling)
             if len(passages) >= args.k:
                 break
-        contents.append(caselaw_prompt(it["question"], passages))
+        contents.append(caselaw_prompt(it["question"], passages, the_court))
         contexts.append(ids)
 
     results = generate(args, contents)
@@ -209,10 +228,10 @@ def main(argv: list[str] | None = None) -> int:
     with args.answers.open("w", encoding="utf-8") as f:
         for it, ctx, (answer, ended) in zip(items, contexts, results):
             cited = cited_numbers(answer)
-            in_ctx = {r.split("/", 1)[-1] for r in ctx}
+            in_ctx = {citation_key(r) for r in ctx}
             row = {**it, "answer": answer, "context": ctx, "cited": sorted(cited),
                    "cited_ok": cited <= in_ctx,
-                   "source_cited": it["ruling"].split("/", 1)[-1] in cited,
+                   "source_cited": citation_key(it["ruling"]) in cited,
                    "source_retrieved": it["ruling"] in ctx, "ended": ended}
             ok += row["cited_ok"]
             src += row["source_cited"]

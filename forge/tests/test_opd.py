@@ -403,3 +403,40 @@ def test_rescoring_reads_the_answers_already_written(tmp_path, capsys):
     assert "citing only rulings given 0.000 -> 0.500" in out
     assert "citing the source 0.500 -> 0.500" in out
     assert "999" not in out and "Cons." not in out
+
+
+def test_the_cassazione_exam_labels_and_reads_citations_with_the_year(tmp_path, monkeypatch,
+                                                                      capsys):
+    chunks = tmp_path / "legal_it.jsonl"
+    rows = []
+    for n in range(4):
+        rid = f"snciv/202{n % 2 + 1}/{100 + n}"
+        rows.append({"text": f"Corte di cassazione {n}: principio{n} sulla responsabilità.",
+                     "sentence_id": rid, "chunk_index": 0, "year": 2021 + n % 2,
+                     "kind": "snciv"})
+    rows.append({"text": "Consiglio di Stato: altra cosa.", "sentence_id": "cds/202000000",
+                 "chunk_index": 0, "year": 2020, "kind": "cds"})
+    chunks.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    dev = tmp_path / "snciv-dev-ids.txt"
+    dev.write_text("snciv/2021/100\n")
+    questions = tmp_path / "snciv-dev-cards.jsonl"
+    questions.write_text(json.dumps({"id": "snciv/2021/100", "domande_esame": [
+        {"domanda": "Quando vale il principio0 sulla responsabilità?", "risposta": "Sempre.",
+         "rubrica": "Dice sempre."}]}) + "\n")
+    mod = _load("cds_answer")
+    seen = []
+
+    def fake(args, contents):
+        seen.extend(contents)
+        return [("Secondo Cass. civ., n. 100/2021, il principio vale.", True)]
+
+    monkeypatch.setattr(mod, "generate", fake)
+    out = tmp_path / "answers-x.jsonl"
+    assert mod.main(["model", "--label", "x", "--kind", "snciv", "--questions", str(questions),
+                     "--dev-ids", str(dev), "--chunks", str(chunks), "--answers", str(out)]) == 0
+    row = json.loads(out.read_text())
+    assert row["id"] == "snciv-202100100-0"
+    assert "(sentenze della Corte di cassazione)" in seen[0]
+    assert "Cass. civ., n. 100/2021" in seen[0] and "Consiglio di Stato" not in seen[0]
+    assert row["source_retrieved"] and row["source_cited"] and row["cited_ok"]
+    assert all(r.startswith("snciv/") for r in row["context"])

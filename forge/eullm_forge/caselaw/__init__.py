@@ -15,6 +15,8 @@ from .courts import COURTS, Court, court
 from .rulings import (
     Ruling,
     attach_meta,
+    citation_key,
+    cited_number,
     group_key,
     join_chunks,
     load_openga,
@@ -22,5 +24,6 @@ from .rulings import (
     ruling_view,
 )
 
-__all__ = ["COURTS", "Court", "Ruling", "attach_meta", "court", "group_key", "join_chunks",
+__all__ = ["COURTS", "Court", "Ruling", "attach_meta", "citation_key", "cited_number", "court",
+           "group_key", "join_chunks",
            "load_openga", "load_rulings", "ruling_view"]
