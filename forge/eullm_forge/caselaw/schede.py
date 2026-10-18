@@ -67,6 +67,20 @@ SENSITIVE_OGGETTO = (
     r"invalidit|handicap|minor[ei]|adozion|stupefacent|penal|reato|condann|casellario|"
     r"religio|culto|sindacal|orientamento sessuale|genetic|biometric")
 
+# The same categories for a Corte di cassazione civil ruling, which has no
+# OGGETTO to read: matched on the card's own subject and text instead, and
+# wider, since civil cases bring family, health and personal status that an
+# administrative appeal rarely does. "Clausola penale" is a contract term,
+# not a criminal matter, and is not matched.
+CASS_SENSITIVE = (
+    r"minor[ei]|affidament|adozion|separazion|divorzi|filiazion|paternit|maternit|"
+    r"famiglia|familiar|unione civile|unioni civili|matrimon|coniug|"
+    r"sanit|salute|medic|malattia|danno biologico|disabil|invalidit|handicap|"
+    r"interdizion|amministrazione di sostegno|inabilitazion|"
+    r"protezione internazionale|asilo|immigra|espulsion|rimpatri|soggiorno|cittadinanza|"
+    r"stupefacent|(?<!clausola )penal(?!e contrattual)|reato|condann[ae] penal|casellario|"
+    r"religio|culto|sindacal|orientamento sessuale|genetic|biometric")
+
 # What a cited provision looks like. Matched, not required: a norm in another
 # shape (an EU directive, a royal decree, "TUEL") is dropped from the card,
 # not the card refused -- the first version refused 458 of the first 3,100
