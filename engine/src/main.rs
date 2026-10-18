@@ -5044,9 +5044,12 @@ fn daemonize(pidfile: &str, log_path: &std::path::Path) {
 
 /// Install a signal handler for SIGABRT that prints diagnostic info.
 ///
-/// llama.cpp uses `GGML_ASSERT` which calls `abort()` on failure, producing
-/// a core dump with no useful message. This handler prints actionable
-/// suggestions before re-raising the signal for the default handler.
+/// llama.cpp's `GGML_ASSERT` calls `abort()` on failure, and so does the GPU
+/// runtime on a fault it cannot recover from (ROCm's HSA "aborting with
+/// error", CUDA's sticky errors): either way the process dies with a core
+/// dump and the cause is the line printed just before. This handler says so
+/// and lists what usually helps, before re-raising the signal for the
+/// default handler.
 #[cfg(unix)]
 fn install_abort_handler() {
     unsafe {
@@ -5060,25 +5063,28 @@ fn install_abort_handler() {
 #[cfg(unix)]
 extern "C" fn abort_handler(_sig: libc::c_int) {
     // Only use async-signal-safe operations (write to stderr).
+    //
+    // It used to say that every abort was a GGML_ASSERT and to suggest
+    // --no-flash-attn first; on LUMI-G the aborts it was printed for were a
+    // GPU memory fault reported by ROCm and crashes while the server was
+    // stopping (16-10-2026), where that advice pointed the wrong way.
     let msg = b"\n\
 ==========================================================\n\
 EULLM ENGINE CRASHED (SIGABRT)\n\
 ==========================================================\n\
-llama.cpp hit a fatal assertion (GGML_ASSERT).\n\
+The process aborted. The cause is in the lines just above:\n\
+  - \"GGML_ASSERT(...) failed\" with a file and line: a check in\n\
+    llama.cpp failed;\n\
+  - \"HSA_STATUS_ERROR_...\", \"Memory access fault\" or a CUDA error:\n\
+    the GPU faulted, in a kernel or in a copy.\n\
 \n\
-Common causes and fixes:\n\
-  1. Flash attention not supported by this model/quantization:\n\
-     -> Re-run with: eullm run <model> --no-flash-attn\n\
-\n\
-  2. Out of GPU memory (VRAM):\n\
-     -> Reduce batch size: eullm run <model> --batch-size 1\n\
-     -> Reduce context:    eullm run <model> --ctx-size 2048\n\
-     -> Use CPU only:      eullm run <model> --gpu-layers 0\n\
-\n\
-  3. Incompatible GGUF file or quantization:\n\
-     -> Try a different quantization (Q4_K_M recommended)\n\
-\n\
-Run with RUST_LOG=debug for more context before the crash.\n\
+What usually helps:\n\
+  1. Out of GPU memory: a smaller --batch-size or --ctx-size, or\n\
+     fewer --gpu-layers.\n\
+  2. A kernel this model or quantization trips: --no-flash-attn, or\n\
+     another quantization.\n\
+  3. Run with RUST_LOG=eullm=debug,llama-cpp-2=info for llama.cpp's own\n\
+     log up to the crash.\n\
 ==========================================================\n";
     unsafe {
         libc::write(2, msg.as_ptr() as *const libc::c_void, msg.len());
