@@ -1,4 +1,4 @@
-"""Retrieval over Consiglio di Stato rulings: BM25 and embeddings, by ruling.
+"""Retrieval over rulings (Consiglio di Stato, Corte di cassazione): BM25 and embeddings, by ruling.
 
 The statute index (`eval.retrieval.NormIndex`) keeps one Counter per record,
 fine for 10^5 articles and tens of GB for 3.5x10^5 chunks of rulings. Here
@@ -169,7 +169,8 @@ class RulingIndex:
 
 
 def build_units(rulings: dict, chunks: Sequence[dict], *, cards: dict | None = None,
-                prefix_chunks: bool = False, card_units: bool = False) -> list[Unit]:
+                prefix_chunks: bool = False, card_units: bool = False,
+                court=None) -> list[Unit]:
     """The units of one index setting.
 
     ``chunks`` are the training chunk records (text, sentence_id); with
@@ -177,6 +178,8 @@ def build_units(rulings: dict, chunks: Sequence[dict], *, cards: dict | None = N
     ``card_units`` every card is also a unit of its own (principles and
     norms, never the facts).
     """
+    from .courts import CDS
+    from .rulings import cited_number
     from .schede import prefix
 
     units: list[Unit] = []
@@ -185,10 +188,10 @@ def build_units(rulings: dict, chunks: Sequence[dict], *, cards: dict | None = N
         text = c.get("text") or ""
         if prefix_chunks and cards and rid in cards:
             r = rulings.get(rid)
-            meta = {"sezione": getattr(r, "section", ""), "numero": rid.split("/", 1)[-1],
+            meta = {"sezione": getattr(r, "section", ""), "numero": cited_number(rid),
                     "data": (getattr(r, "meta", {}) or {}).get("DATA_PUBBLICAZIONE"),
                     "esito_openga": cards[rid].get("esito_openga")}
-            text = prefix(cards[rid], meta) + "\n" + text
+            text = prefix(cards[rid], meta, court or CDS) + "\n" + text
         units.append(Unit(rid, text))
     if card_units and cards:
         for rid, card in cards.items():
