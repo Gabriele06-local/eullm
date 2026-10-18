@@ -359,3 +359,56 @@ def test_abstain_prompts_teach_the_difference_and_hide_the_note_from_the_student
     assert "sessanta giorni" in rows["statute"]["student"][0]["content"]
     assert rows["no_text"]["student"][0]["content"] == question
     assert rows["no_text"]["teacher"][0]["content"].startswith(mod.NO_TEXT_NOTE)
+
+
+# --- the engine as teacher (JUPITER) -------------------------------------------
+
+def test_the_engine_backend_writes_grounded_pairs(tmp_path):
+    import re
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            seen.append(self.path)
+            n = re.search(r"art\. (\S+) ", body["messages"][-1]["content"]).group(1)
+            answer = (f"Secondo l'art. {n} la disciplina numero {n} regola la materia "
+                      "civile con disposizioni di dettaglio, come dice il testo.")
+            content = json.dumps({"domanda": f"Che cosa prevede l'art. {n} del codice civile?",
+                                  "risposta": answer})
+            out = json.dumps({"message": {"role": "assistant", "content": content},
+                              "eval_count": 9, "done": True}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *args):
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        norms = tmp_path / "legislazione_x.chunks.jsonl"
+        norms.write_text("\n".join(json.dumps(r) for r in RECORDS) + "\n")
+        exam = tmp_path / "exam.jsonl"
+        exam.write_text(json.dumps(exam_item("codice_civile", "3").to_dict()) + "\n")
+        out = tmp_path / "o.jsonl"
+        assert load_script().main([
+            "--norms", str(norms), "--exclude-exam", str(exam), "--out", str(out),
+            "--limit", "20", "--backend", "eullm", "--model", "m",
+            "--servers", f"http://127.0.0.1:{srv.server_address[1]}", "--concurrency", "4",
+        ]) == 0
+    finally:
+        srv.shutdown()
+    pairs = [json.loads(x) for x in out.read_text().splitlines()]
+    grounded = [p for p in pairs if p["task"] == "openbook_grounded"]
+    assert seen and set(seen) == {"/api/chat"}
+    # the stub always names the article: kept when the job asked for it, rejected otherwise
+    assert grounded and all(p["named"] for p in grounded)
+    assert all(p["key"].split("-v")[0] != "ob-g-codice_civile-3" for p in pairs)
+    assert out.with_name("o.jsonl.done").exists()
