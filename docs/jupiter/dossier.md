@@ -321,6 +321,23 @@ overlapping pairs: the overlap inflated little. Both Qwen3.5 models stay
 ahead of the reference (+9 and +12 correct answers of 217) on pairs that
 never saw an exam article; this is the comparison that stands.
 
+Two more questions on the same clean pairs and exam (jobs 2393734–2393736,
+2398718–2398719, 18-10-2026):
+
+| question | model | without | with |
+|---|---|---:|---:|
+| Does distillation on norms-v2 (139M tokens, one epoch) help? | Qwen3-4B | 0.684 | 0.689 |
+| | Qwen3-8B | 0.747 | 0.744 |
+| Do 19,141 more pairs from EU acts help (28,113 in all)? | Qwen3.5-9B | 0.790 | 0.776 |
+| | Qwen3.5-4B | 0.786 | 0.747 |
+| | Qwen3-4B | 0.684 | 0.664 |
+
+Distillation on a corpus a hundred times larger still moves nothing open
+book. Three times the pairs, two in three of them about EU acts, lower
+every score on an exam about Italian codes (by 3 to 9 correct answers):
+pairs about the text the model will be asked about count, more pairs about
+other text do not.
+
 Closed book every model, the reference included, scores 0.000–0.023: none
 knows the articles by heart. Open book, the two Qwen3.5-9B models score
 ahead of the reference (+10 questions of 217), and still are without the
