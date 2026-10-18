@@ -233,6 +233,9 @@ class Job:
     passage: str
     source: str
     instruction_prefix: str = ""
+    # Index of the corpus record the passage was cut from: traces a pair back
+    # to its article (pairs_exam_overlap.py). Not written into the pair.
+    record: int = -1
 
 
 class Rejected(ValueError):
@@ -325,7 +328,7 @@ def make_jobs(
         key = hashlib.sha1(f"{task}\x00{passage}".encode()).hexdigest()[:20]
         prefix = rng.choice(_CONTEXT_INSTRUCTIONS[task]) if task in _CONTEXT_INSTRUCTIONS else ""
         source = rec.get("source") or rec.get("kind") or rec.get("source_id") or ""
-        jobs.append(Job(key, task, passage, str(source), prefix))
+        jobs.append(Job(key, task, passage, str(source), prefix, record=i))
     return jobs
 
 
