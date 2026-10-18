@@ -283,9 +283,12 @@ class Server:
     def start(self) -> None:
         log = open(self.log_path, "ab")
         # A session of its own, so stopping it stops whatever it started too.
+        # Run beside its log: a server that crashes leaves its core dump (and
+        # ROCm its gpucore.<pid>) in its working directory, which was the
+        # job's, the checkout in /projappl with its 50 GB quota (17-10-2026).
         self.proc = subprocess.Popen(
             self.command(), stdout=log, stderr=subprocess.STDOUT, env=self.env,
-            start_new_session=True,
+            start_new_session=True, cwd=os.path.dirname(os.path.abspath(self.log_path)),
         )
         log.close()
 
