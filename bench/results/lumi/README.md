@@ -14,10 +14,11 @@ neighbours) and its provenance (job, node, engine version, repository
 revision). What the numbers mean, and which ones a decision rests on, is in
 `docs/lumi/allocation-plan.md`.
 
-To make one, on a LUMI login node:
+To make one, on a LUMI login node (`collect`, then a compressed copy of
+every result file in the project directory):
 
 ```bash
-eullm && $CAMPAIGN collect --queue "$CAMPAIGN_DIR"
+eullm && bash tools/lumi/archive_results.sh
 ```
 
 then, from your own computer:
