@@ -53,7 +53,7 @@
 | 🔌 **A drop-in for Ollama and OpenAI** | The same API on port 11434: Open WebUI, LangChain, n8n and any OpenAI client work unchanged. |
 | 🔒 **Nothing leaves your machine** | No telemetry, no external API. Every answer and every decision goes to a local audit trail: model, tokens, timing, never the text. |
 | 🌍 **From an ARM board to a supercomputer** | A 35B MoE at 10.8 tokens/s on an ARM board's CPU alone; tested on EuroHPC Leonardo, LUMI and JUPITER. |
-| 🎓 **Models trained for your domain** | EuLLM Forge turns a large open model into a small specialist you own. Italian law comes first. |
+| 🎓 **Models trained for your domain** | EuLLM Forge turns a large open model into a small specialist you own. Italian law comes first: `legal-it-8b` is a Mistral model trained on EuroHPC Leonardo, European end to end. |
 
 Where each number comes from: [decisions](docs/engine-guide.md#decisions-without-generation-v1systemone-new-in-v0720) ·
 [RAG gate](docs/reflex-roadmap.md#rag-gate-italian-legal-set--rtx-5070-ti-jev-style-2b) ·
@@ -165,9 +165,12 @@ and quantizes it into a GGUF that runs on a laptop with 8 GB of RAM. Your
 brand is in the weights, not in a system prompt anyone can remove.
 
 The first are for Italian law: **[`legal-it-8b`](https://huggingface.co/EuLLM/legal-it-8b)**
-and **[`legal-it-4b`](https://huggingface.co/EuLLM/legal-it-4b)**, trained on
-EuroHPC Leonardo from Ministral-3-8B and Qwen3-4B-Instruct-2507 (supervised
-fine-tuning, then GRPO) and published on Hugging Face. They
+and **[`legal-it-4b`](https://huggingface.co/EuLLM/legal-it-4b)**, published on
+Hugging Face. **`legal-it-8b` is European end to end**: it starts from
+Ministral-3-8B by Mistral AI (Paris, Apache 2.0) and was trained in Italy on
+the EuroHPC supercomputer Leonardo, on public Italian legislation only.
+`legal-it-4b` starts from Qwen3-4B-Instruct-2507; both were trained with
+supervised fine-tuning, then GRPO. They
 answer from the legal texts a retrieval system puts in the prompt and cite
 them: 89.0% and 85.1% on 429 held-out questions, against 80.9% and 77.6% for
 the models they start from. Use them behind retrieval (as
