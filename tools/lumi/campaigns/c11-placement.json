@@ -1,0 +1,52 @@
+{
+  "campaign": "c11-placement",
+  "notes": [
+    "Objective (3), the placement policy (allocation plan, engine work item 4): how to lay a",
+    "model out over a whole node of 8 GCDs once tensor parallelism reduces through RCCL.",
+    "c03 on the RCCL build (16-10-2026): tensor writes 49-83% more than layer split on four GCDs",
+    "at 32 and 64 requests (Qwen3-32B 565 and 810 against 380 and 521; the 235B 192 and 264",
+    "against 116 and 144), twice as much on the 480B over eight at 16 and 32, and 52% more for",
+    "gpt-oss-120b on two at 32 than c02's layer split; with one request layer is still faster",
+    "on eight GCDs. What is left to measure is the node as a whole: replicas of a smaller split",
+    "against one wider one, each split as layer and as tensor, at the same total of requests.",
+    "batch is per server: 2 servers x 32 and 1 x 64 are the same 64 requests on the node.",
+    "DeepSeek-V3.1 (MLA attention) may not have tensor parallelism in llama.cpp: a load that",
+    "fails is the measurement. Needs an RCCL build (next16 or later)."
+  ],
+  "pull": [
+    "hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
+    "hf.co/ggml-org/gpt-oss-120b-GGUF:MXFP4",
+    "hf.co/unsloth/Qwen3-Coder-480B-A35B-Instruct-GGUF:Q4_K_M",
+    "hf.co/unsloth/DeepSeek-V3.1-GGUF:Q4_K_M"
+  ],
+  "defaults": {"kind": "throughput", "repeats": 3, "gcds": 8, "exclusive": true, "slot_ctx": 4096},
+  "groups": [
+    {"name": "place-235b", "priority": 90, "est_s": 2400,
+     "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m"},
+     "axes": {"replica_gcds": [4, 8], "batch": [16, 32, 64],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "place-120b", "priority": 88, "est_s": 1500,
+     "set": {"model": "gpt-oss-120b-gguf-mxfp4"},
+     "axes": {"replica_gcds": [2, 4], "batch": [16, 32, 64],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "place-480b", "priority": 86, "est_s": 3600,
+     "set": {"model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m", "batch": 64},
+     "axes": {"extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "place-671b", "priority": 84, "est_s": 3600,
+     "set": {"model": "deepseek-v3.1-gguf-q4_k_m"},
+     "axes": {"batch": [1, 16, 32],
+              "extra_args": [["--fit-strict", "--split-mode", "layer"],
+                             ["--fit-strict", "--split-mode", "tensor"]]}},
+    {"name": "place-32b-r1", "priority": 82, "est_s": 1200,
+     "set": {"model": "qwen3-32b", "replica_gcds": 1, "batch": 16, "extra_args": ["--fit-strict"]}},
+    {"name": "place-32b-r2", "priority": 82, "est_s": 1200,
+     "set": {"model": "qwen3-32b", "replica_gcds": 2, "batch": 32,
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]}},
+    {"name": "place-32b-r4", "priority": 82, "est_s": 1200,
+     "set": {"model": "qwen3-32b", "replica_gcds": 4, "batch": 64,
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]}}
+  ]
+}

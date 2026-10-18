@@ -173,6 +173,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
+| `c11-placement` | 35 | ~22 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -663,6 +664,12 @@ In order:
    binary, with three repeats each, since one repeat's noise is about the
    size of the difference.
 
+   Measured (`r-moe-evict2`, `next16`, 16/17-10-2026), tokens/s, 0008's
+   eviction → 0009's: the 235B 22.0 → 22.1, 30.5 → 31.5, 22.6 → 23.6 at
+   1, 8 and 32 requests; the 480B 6.6 → 7.0, 7.9 → 8.1, 8.9 → 9.2. Three
+   to six percent where the replay saw fewer copies, never less (the
+   repeats' spread 0.8-7%). 0009 stays the default.
+
    **The CPU kernels of every LUMI build were SSE2 only** until 15-10-2026:
    `tools/lumi/build_engine.sh` set no `target-cpu`, so Rust targeted
    x86-64's baseline and `build.rs` gave ggml no AVX, AVX2, FMA or F16C (the
@@ -731,6 +738,24 @@ In order:
    is linked by default in LUMI builds from 16-10-2026 (`EULLM_RCCL=0` to
    leave it out); layer split does not use it. `rccl-batch`, `rccl-480b`
    and `rccl-120b` go on to 32 and 64 requests, the 480B and gpt-oss-120b.
+
+   They (`r-split-rccl2`, `next14`, 16-10-2026), tokens/s, layer → tensor:
+
+   | model | GCDs | 1 | 16 | 32 | 64 |
+   |---|---:|---:|---:|---:|---:|
+   | Qwen3-32B | 4 | | | 380 → **565** | 521 → **810** |
+   | Qwen3-235B Q4_K_M | 4 | | | 116 → **192** | 144 → **264** |
+   | Qwen3-Coder-480B Q4_K_M | 8 | 28.1 → 17.6 | 63.9 → **127** | 82 → **192** | |
+   | gpt-oss-120b MXFP4, tensor | 2 | 92.2 | 276 | 454 | |
+   | | 4 | 75.1 | 309 | 502 | |
+
+   With many requests tensor is the better split wherever a model needs
+   more than one GCD: 49-83% more than layer on four GCDs, twice as much on
+   the 480B over eight, and gpt-oss-120b on two writes 454 at 32 where c02's
+   layer split wrote 298. With one request layer stays ahead on eight GCDs.
+   The 480B's tensor load takes 1,506-1,640 s (layer 88-167). Whether
+   replicas of a smaller split beat one wider split on a whole node, the
+   question the placement policy needs answered, is `c11-placement`.
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
