@@ -96,3 +96,48 @@ def test_the_script_refuses_without_the_dev_split_and_prints_counts_only(tmp_pat
     printed = capsys.readouterr().out
     assert "1 written" in printed and "grave illecito" not in printed
     assert len(out.read_text().splitlines()) == 1
+
+
+def _cass(rid, principio=None, materia="responsabilità contrattuale - onere della prova", **kw):
+    card = _card(rid, principio=principio or (
+        "In tema di inadempimento contrattuale il creditore deve provare la fonte del suo "
+        "diritto, mentre spetta al debitore provare l'esatto adempimento."), **kw)
+    card.update(court="snciv", oggetto=None, sezione="", materia=materia,
+                norme=["art. 1218 c.c.", "art. 2697 c.c."])
+    return card
+
+
+def test_cassazione_civil_cards_leave_without_oggetto_but_not_the_sensitive_ones():
+    mod = _load()
+    rows = [
+        _cass("snciv/2022/101"),
+        _cass("snciv/2022/102", principio="La clausola penale ha funzione di liquidazione "
+                                          "preventiva del danno e può essere ridotta dal giudice."),
+        _cass("snciv/2022/103", materia="separazione personale dei coniugi - addebito"),
+        _cass("snciv/2022/104", principio="Nel risarcimento del danno biologico il giudice deve "
+                                          "personalizzare la liquidazione tabellare."),
+        _cass("snciv/2022/105", principio="L'affidamento del minore va deciso nel suo esclusivo "
+                                          "interesse morale e materiale."),
+        _card("cds/2021000001"),                                # another court's card
+        {**_cass("snpen/2022/7"), "court": "snpen"},
+    ]
+    out, stats = mod.export(rows, set(), random.Random(0), "snciv")
+    assert stats["written"] == 2 and stats["other_court"] == 2
+    assert stats["dropped:sensitive_materia"] == 1 and stats["dropped:sensitive_content"] == 2
+    assert all(c["estremi"]["autorita"] == "Cass. civ." for c in out)
+    assert all(c["estremi"]["sezione"] in mod.CASS_SECTIONS for c in out)
+    assert all(2021 <= c["estremi"]["anno"] <= 2024 and 50000 <= c["estremi"]["numero"] < 60000
+               for c in out)
+    assert not any("snciv/" in json.dumps(c) for c in out)
+
+
+def test_criminal_rulings_are_never_exported(tmp_path):
+    import pytest
+    mod = _load()
+    cards = tmp_path / "c.jsonl"
+    cards.write_text(json.dumps(_cass("snpen/2022/7")) + "\n")
+    dev = tmp_path / "dev.txt"
+    dev.write_text("x\n")
+    with pytest.raises(SystemExit):
+        mod.main([str(cards), "--dev-ids", str(dev), "--kind", "snpen",
+                  "--out", str(tmp_path / "o.jsonl")])
