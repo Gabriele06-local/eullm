@@ -81,3 +81,5 @@ ragbench-*.json
 
 # Local clutter moved out of the repo root (reports, binaries, models, media)
 /artifacts/
+# The LUMI campaign summaries are kept (bench/results/lumi/README.md)
+!bench/results/lumi/*.csv
