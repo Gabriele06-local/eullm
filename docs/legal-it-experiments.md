@@ -185,3 +185,37 @@ job. What it can still give, in order of likely return:
 
 Any model trained on ruling text goes through the memorisation check
 (roadmap phase 3) before it is published.
+
+## 7. An external test of legal-it-8b (2026-10-18, from reddit.com)
+
+A legal-tech team tested the published `legal-it-8b` Q4_K_M and sent a
+report, after a post about the model on reddit.com. Criminal law and
+procedure only; 11 questions in the model card's format (3 retrieved texts,
+the missing-article note, temperature 0, 400 tokens), and 5 inside their own
+pipeline with 50,000-80,000-token prompts, far from the training format.
+Small sample: signals, not rates.
+
+**What held.** It finds the right text among similar ones, also in very
+long prompts, and restates its principle faithfully; it corrects a numeric
+premise when the right figure is in the text (the penalty for fraud, the
+deadline for an appeal); the nonexistent-article answer with the note was
+"exemplary"; clean Italian; it fits a 16 GB T4 with 86,000 tokens.
+
+**What failed, and what answers it:**
+
+| Failure | Example | Answer | Where |
+|---|---|---|---|
+| A false premise accepted with the right text in the prompt | "after the Cartabia reform art. 624-bis c.p. is prosecuted on complaint: by when?" (it is not; the reform concerns art. 624) | false-premise questions written from the statute text, rewarded only when the answer corrects the premise | next GRPO round |
+| A wrong ruling number let through | "Sezioni Unite n. 18474/2025" for a principle another ruling in front of it states | `caselaw_wrong_cite` pairs | Cassazione SFT (`make_caselaw_sft.py`) |
+| No abstention when the texts do not answer | the expected ruling was not retrieved; the answer was built on another one | absent-context pairs (statutes: `openbook-v05`; case law: `caselaw_absent`); the jpn rounds without the note | Cassazione SFT; 4B candidate |
+| Citations that cannot be checked | none of 11 answers used [1]-[3]; the wrong passage, or the operative part instead of the reasoning | every case-law citation ends with its passage number `[n]` | Cassazione SFT |
+| Content from memory | art. 360 c.p.c. in a criminal-procedure answer; criteria not in the texts | a reward for citing only articles and rulings present in the prompt (`check_cited_articles.py` as a reward) | next GRPO round |
+| Reasoning | art. 444 c.p.p. criterion wrong; art. 4 l. 110/1975 and art. 699 c.p. confused; facts of a case read as legal requirements; contradictions | multi-article practical questions; a stronger teacher (open: reasoning on, Mistral teacher) | open |
+| Multi-part questions, the reasoning part dropped | the boundary between two offences, how to frame the appeal | practical questions with a rubric per part | next GRPO round |
+| Fines in lire | Normattiva keeps the original lire amounts (art. 640 c.p.) and the model reports them as current | flag lire amounts at indexing time, and train answers to say they are original amounts to be converted | corpus and product |
+| A hidden system prompt | with llama.cpp `--jinja` and no system message, Ministral's chat template inserts its default system prompt (~525 tokens, "Le Chat") | check what the training template did, then ship a template without it, or with a short one of our own, trained and served alike | packaging |
+
+Their tests were all criminal; our case-law training is civil only, since
+criminal rulings never leave the cluster (section 6). Abstract principles of
+criminal law hold no personal data, but whether their cards may be trained
+on is a decision still to be taken.

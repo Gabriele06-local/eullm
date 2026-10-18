@@ -45,8 +45,8 @@ def test_grounded_pairs_show_the_card_among_others_and_cite_it(tmp_path, capsys)
     mix = tmp_path / "statute.jsonl"
     mix.write_text(json.dumps({"instruction": "Testi normativi...", "output": "Secondo l'art."})
                    + "\n")
-    assert mod.main([str(_cards(tmp_path)), "--absent-share", "0", "--mix", str(mix),
-                     "--out", str(out)]) == 0
+    assert mod.main([str(_cards(tmp_path)), "--absent-share", "0", "--wrong-cite-share", "0",
+                     "--mix", str(mix), "--out", str(out)]) == 0
     rows = [json.loads(ln) for ln in out.read_text().splitlines()]
     assert len(rows) == len(TOPICS) + 1
     pairs = [r for r in rows if r.get("task") == "caselaw_grounded"]
@@ -56,8 +56,10 @@ def test_grounded_pairs_show_the_card_among_others_and_cite_it(tmp_path, capsys)
                                            "cassazione)")
         assert f"Cass. civ., Sez. III, n. {51000 + n}/2023" in r["instruction"]
         assert r["instruction"].count("Cass. civ.") == 3
+        pos = next(int(b.split("]")[0]) for b in r["instruction"].split("\n[")[1:]
+                   if f"n. {51000 + n}/2023" in b.split("\n")[0])
         assert r["output"] == f"Vale il principio numero {n}. In questo senso Cass. civ., " \
-                              f"Sez. III, n. {51000 + n}/2023."
+                              f"Sez. III, n. {51000 + n}/2023 [{pos}]."
     printed = capsys.readouterr().out
     assert "principio" not in printed and f"{len(TOPICS)} grounded" in printed
 
@@ -81,3 +83,19 @@ def test_cards_of_the_rulings_themselves_are_refused(tmp_path):
                                "domande_esame": []}) + "\n")
     with pytest.raises(SystemExit):
         mod.main([str(raw), "--out", str(tmp_path / "o.jsonl")])
+
+
+def test_wrong_citation_pairs_correct_the_premise_then_answer(tmp_path):
+    mod = _load()
+    out = tmp_path / "sft.jsonl"
+    assert mod.main([str(_cards(tmp_path)), "--absent-share", "0", "--wrong-cite-share", "1",
+                     "--out", str(out)]) == 0
+    rows = [json.loads(ln) for ln in out.read_text().splitlines()]
+    assert rows and all(r["task"] == "caselaw_wrong_cite" for r in rows)
+    for r in rows:
+        n = int(r["key"].split("-")[1])
+        fake = r["instruction"].rsplit("Mi risulta che lo abbia stabilito ", 1)[1].split(":")[0]
+        assert fake.startswith("Cass. civ., Sez. III, n. 5") and fake not in r["instruction"].split(
+            "Domanda:")[0]
+        assert r["output"].startswith(f"Tra le sentenze riportate non c'è {fake},")
+        assert f"Sez. III, n. {51000 + n}/2023 [" in r["output"]
