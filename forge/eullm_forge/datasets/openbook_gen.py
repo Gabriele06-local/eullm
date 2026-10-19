@@ -217,7 +217,8 @@ def _article_number_pattern(number: str) -> str:
     the article it is keyed by. A plain `12` also refuses the suffixes, so a
     question about 12-bis is not accepted as a 12 job.
     """
-    suffixes = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
+    suffixes = ("bis|ter|quater|quinquies|sexies|septies|octies|novies|decies|undecies|"
+                "duodecies|terdecies|quaterdecies|quinquiesdecies|sexiesdecies|septiesdecies")
     base, sep, suffix = number.partition("-")
     pat = re.escape(base)
     if suffix:
