@@ -50,15 +50,22 @@ from pathlib import Path
 # The same pattern as eullm_forge.eval.abstain.ABSTAIN (a test keeps them
 # equal): this file imports nothing from the package, so it runs alone.
 ABSTAIN = re.compile(
-    r"non (?:ho trovato|trovo)|non contengono|non dispongo|"
+    r"non (?:ho trovato|trovo)|non (?:contiene|contengono|include|comprende|compare|"
+    r"riporta|riportano)|non dispongo|"
     r"non (?:è|sono) present[ei] (?:nei|tra i|nella raccolta)|"
     r"non risulta(?:no)? (?:nei|dai|tra i) (?:testi|documenti)|"
+    r"non (?:contiene|contengono|include|comprende|compare|riporta|riportano)"
+    r"\s+(?:\w+\s+){0,2}?(?:l['’]\s*)?(?:(?:articol[oi]|norm[ae]|disposizion[ei]"
+    r"|testi|testo|riferiment[oi]|fonte)\b|art\.)|"
+    r"non (?:risulta|risultano) (?:alcun[ao]?|nessun[ao]?)\s+(?:articol[oi]|norm[ae]"
+    r"|disposizion[ei]|riferiment[oi]|testo)\b|"
     r"non (?:è|sono) (?:indicat|previst|riportat)[oaie] nei (?:testi|documenti)|"
     r"nei (?:testi|documenti) (?:forniti|disponibili|riportati) non|"
     r"non posso (?:quindi )?(?:dar\w*|fornir\w*|rispondert?\w*)[^.]{0,40}"
     r"(?:certezza|sicur[oa])|"
     r"senza (?:il|i) test[oi] dell[ae] norm|"
-    r"no relevant information|informazioni rilevanti", re.IGNORECASE)
+    r"no relevant information|non (?:ci sono|sono|risultano|emergono)[^.]{0,40}"
+    r"informazioni rilevanti", re.IGNORECASE)
 _BRACKETS = re.compile(r"\[([^\[\]]{3,200})\]")
 _ART = re.compile(r"\bart(?:icolo|\.)?\s*(\d+(?:[- ]?(?:bis|ter|quater|quinquies|sexies|"
                   r"septies|octies|novies|decies))?)", re.IGNORECASE)

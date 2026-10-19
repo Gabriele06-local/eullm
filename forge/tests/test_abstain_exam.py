@@ -7,6 +7,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from eullm_forge.datasets.openbook_gen import ABSENT_ANSWER
 from eullm_forge.eval import EvalItem, NormIndex
 from eullm_forge.eval.abstain import ABSTAIN, abstained, cited_articles, unsourced_articles
@@ -36,8 +38,27 @@ def test_a_right_answer_is_not_read_as_abstaining():
                    "contumacia.",
                    "Ove non risulta diversamente dal contratto, il termine è di dieci giorni.",
                    "Secondo l'art. 54 c.p. non è punibile chi ha agito per necessità.",
-                   "Il giudice non può pronunciare sentenza senza aver sentito le parti."):
+                   "Il giudice non può pronunciare sentenza senza aver sentito le parti.",
+                   "Le informazioni rilevanti sono contenute nell'art. 2043 c.c."):
         assert not abstained(answer), answer
+
+
+@pytest.mark.parametrize("answer", [
+    # Real model answers recorded when the reward was fixed: the singular is
+    # the same sentence, one text instead of many, and "non risulta alcuna"
+    # is the usual phrasing. The exam still knew only "non contengono".
+    "Il testo fornito non contiene l'articolo richiesto.",
+    "Il brano riportato non contiene la disposizione richiesta.",
+    "La raccolta fornita non contiene l'art. 2999 del codice civile.",
+    "Dagli atti riportati non risulta alcuna disposizione in merito.",
+    "Non risulta nessuna norma che disciplini la materia.",
+    "Nel brano riportato non compare la disposizione di cui si chiede.",
+    "La raccolta non include l'articolo richiesto.",
+])
+def test_the_exam_reads_the_abstention_the_reward_already_pays(answer):
+    assert abstained(answer), answer
+    # the RAG Enterprise copy must agree, and it is the same pattern
+    assert _load("rag_enterprise_eval").abstained(answer), answer
 
 
 def test_rag_enterprise_eval_reads_abstentions_the_same_way():
