@@ -3310,7 +3310,23 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         h.abort();
     }
 
-    tracing::info!("Server shut down gracefully.");
+    // Free every model before returning, on the thread that owns it
+    // (`unload_all` joins each scheduler thread, an embedding worker joins on
+    // drop), while the GPU runtime is whole. Returning with a scheduler
+    // thread still holding its model and context left the C runtime's exit
+    // handlers, ggml's and ROCm's static destructors among them, to take the
+    // device down under it: on LUMI-G nearly every server aborted on SIGTERM
+    // ("double free or corruption", "corrupted size vs. prev_size", a ggml
+    // abort on the way out of `main`), on every build from next10 to next16.
+    // It is also the path a model swap takes, so a fault here is one a swap
+    // would hit.
+    let unloaded = state.unload_all().await;
+    *state.embedding.write().await = None;
+    *state.decision.write().await = None;
+    tracing::info!(
+        "Server shut down gracefully ({} generation model(s) unloaded).",
+        unloaded.len()
+    );
     Ok(())
 }
 

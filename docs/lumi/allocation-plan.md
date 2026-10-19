@@ -90,6 +90,24 @@ themselves when the next job starts (`requeue_stale`). Days lost to the
 closure count against the calendar, not against the work: if it lasts,
 they are a reason to ask EuroHPC for more time.
 
+18-10-2026, the crashes behind the core dumps in the checkout. Reading the
+server logs of the last fifteen jobs: nearly every engine server aborted
+when the runner stopped it, on every build from `next10` to `next16` and
+every model ("double free or corruption", "corrupted size vs. prev_size",
+a ggml abort on the way out of `main`). The measurements were already
+taken; the cause was `serve` returning with each model still held by its
+scheduler thread, so the process's exit handlers took the GPU down under
+it. Fixed in the engine (models unloaded and their threads joined before
+`serve` returns, then an exit without those handlers), and the runner now
+records how every server ended (`server_exits`), which says on the next
+build whether it holds. Apart from those, soaks of Qwen3-32B with Q8_0
+weights or a q8_0 KV cache at 32 requests aborted while working, and one
+Qwen3-30B-A3B Q8_0 server met a GPU memory fault
+(`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`); the runner counted those
+soaks as passed, since fewer than half their requests failed, and now
+records the death (`servers_died`). Their cause is still to be read in
+their logs.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
