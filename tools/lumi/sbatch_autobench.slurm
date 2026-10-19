@@ -41,6 +41,12 @@
 
 set -uo pipefail
 
+# LUMI's /usr/bin/python3 is 3.6 and ab_data.py needs 3.8+ (a walrus at line
+# 242 is a parse-time SyntaxError there). campaign_env.sh picks the newest
+# interpreter on PATH, then cray-python, as every other LUMI job here does.
+# shellcheck source=campaign_env.sh
+source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh" || exit 1
+
 EULLM_BIN="${EULLM_BIN:?set EULLM_BIN to the eullm binary}"
 DECISION="${DECISION:?set DECISION to the decision model GGUF}"
 export SMALL="${SMALL:?set SMALL to the small model id (see: eullm list)}"
@@ -111,14 +117,14 @@ echo "  ready after $(( $(date +%s) - WARM_START )) s (model loads from Lustre i
 echo
 echo "=== AutoBench ==="
 start_sampler
-python3 "$BENCH" --url "$URL" --small "$SMALL" --large "$LARGE" \
+"$PY" "$BENCH" --url "$URL" --small "$SMALL" --large "$LARGE" \
     ${EMBED:+--embed-model "$EMBED"} --sets "$SETS" --limit "$LIMIT" \
     --e2e-limit "$E2E_LIMIT" --concurrency "$CONCURRENCY" --answers "$ANSWERS" \
     --out "$PREFIX.json" --details "$PREFIX.jsonl"
 STATUS=$?
 kill "${SAMPLER_PID:-0}" 2>/dev/null
 
-python3 - "$PREFIX.json" "$UTIL_LOG" "$STATUS" <<'PY'
+"$PY" - "$PREFIX.json" "$UTIL_LOG" "$STATUS" <<'PY'
 import json, os, re, sys
 report_path, util_path, status = sys.argv[1], sys.argv[2], int(sys.argv[3])
 try:
