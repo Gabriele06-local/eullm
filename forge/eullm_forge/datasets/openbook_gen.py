@@ -210,6 +210,22 @@ def missing_pair(job: OpenBookJob, index: NormIndex, k: int = 3) -> dict:
             "task": "openbook_missing", "source": job.code, "key": job.key}
 
 
+def _article_number_pattern(number: str) -> str:
+    """The article as a citation writes it, suffix included.
+
+    `12-sexies` must not be read as `12`: the gate is what keeps the pair on
+    the article it is keyed by. A plain `12` also refuses the suffixes, so a
+    question about 12-bis is not accepted as a 12 job.
+    """
+    suffixes = ("bis|ter|quater|quinquies|sexies|septies|octies|novies|decies|undecies|"
+                "duodecies|terdecies|quaterdecies|quinquiesdecies|sexiesdecies|septiesdecies")
+    base, sep, suffix = number.partition("-")
+    pat = re.escape(base)
+    if suffix:
+        return pat + rf"\s*[-–]?\s*{re.escape(suffix)}\b"
+    return pat + rf"\b(?!\s*[-–]?\s*(?:{suffixes})\b)"
+
+
 def parse_openbook(raw: str, job: OpenBookJob, index: NormIndex, k: int = 3,
                    cfg: GenConfig | None = None) -> dict:
     """Turn a teacher generation into a grounded pair, or raise `Rejected`."""
@@ -225,13 +241,13 @@ def parse_openbook(raw: str, job: OpenBookJob, index: NormIndex, k: int = 3,
         raise Rejected("answer_length")
     if italian_ratio(a) < cfg.min_italian_ratio:
         raise Rejected("not_italian")
-    names_it = re.search(rf"\bart(?:icolo|\.)?\s*{re.escape(job.number.split('-')[0])}\b",
-                         q, re.IGNORECASE) is not None
+    numbered = _article_number_pattern(job.number)
+    names_it = re.search(rf"\bart(?:icolo|\.)?\s*{numbered}", q, re.IGNORECASE) is not None
     if job.named and not names_it:
         raise Rejected("question_not_naming")
     if not job.named and names_it:
         raise Rejected("question_names_article")
-    if not re.search(rf"\b{re.escape(job.number.split('-')[0])}\b", a):
+    if not re.search(rf"\b{numbered}", a):
         raise Rejected("answer_not_citing")
     _check_clean(q, "question", cfg)
     _check_clean(a, "answer", cfg)
