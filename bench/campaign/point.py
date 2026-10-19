@@ -760,6 +760,18 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
     if ctx.stop.is_set():
         raise Interrupted("stopped during the workload")
 
+    # A server that died before the runner stopped it is the soak's finding,
+    # whatever share of the requests it took with it: the rule below fails a
+    # point only when most of them failed, and soaks of Qwen3-32B that
+    # crashed in their last hours were counted as passed (LUMI, 16-10-2026).
+    # When: the first request on it that failed.
+    died = []
+    for k, s in enumerate(servers):
+        if s.proc is not None and s.proc.poll() is not None:
+            failed_at = [r["t"] for r in records if not r["ok"] and r["i"] % len(servers) == k]
+            died.append({"server": k, "exit": s.proc.returncode,
+                         "after_s": round(min(failed_at) - start, 1) if failed_at else None})
+
     ok = [r for r in records if r["ok"]]
     if records and len(ok) < len(records) / 2:
         raise PointError(f"{len(records) - len(ok)} of {len(records)} requests failed: "
@@ -841,6 +853,7 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
             "rate": round(same / len(later), 4) if later else None,
         },
         "throughput_drift_pct": drift,
+        "servers_died": died,
         "series": series,
     }, (start, end)
 
@@ -1186,6 +1199,12 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
     if expired.is_set():
         raise PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
                          f"estimate of {p.get('est_s', 0)} s")
+    # How each server ended once asked to stop: 0 is a clean exit, -6 an
+    # abort, -11 a segfault, -9 our own SIGKILL after it ignored SIGTERM;
+    # None if it is still there. On LUMI nearly every engine server aborted
+    # while stopping (16-10-2026), which this counts across builds.
+    result["server_exits"] = [s.proc.returncode if s.proc is not None else None
+                              for s in servers]
     return result
 
 

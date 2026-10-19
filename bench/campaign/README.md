@@ -129,6 +129,15 @@ token every few minutes never reaches it: DeepSeek-V3.1 with `--cpu-moe`
 held a whole LUMI-G node for 9.8 hours that way (15-10-2026). Workload
 points stretch to the time they are given and have no such limit.
 
+A server that dies while its point is measuring is recorded, not hidden: a
+workload point fails only when most of its requests fail, so a soak that
+lost its server in its last hours used to read as passed. Its result now
+lists `servers_died` (which server, its exit code, and after how many
+seconds its first request failed), the report shows a `died` column, and
+every point records `server_exits`, how its servers ended once asked to
+stop (0 clean, a negative number the signal that ended it: -6 an abort,
+-11 a segfault, -9 the runner's own kill after SIGTERM went unanswered).
+
 No point starts on a device that already holds VRAM with nothing running on
 it (more than 2 GiB): the device is set aside, the servers of this job that
 no running point owns are killed (Ollama's model process can outlive
