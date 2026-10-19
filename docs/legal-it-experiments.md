@@ -100,11 +100,11 @@ The model itself is cheap: **about 9 GPU-hours** of training for the
 published 8B. The data and the measuring, shared by every model of the
 line, cost far more: the teacher writing the pairs took 40 GPU-hours, the
 exams and their grading 88. `gen-instruct`
-is most likely the September line's (section 1): it wrote the
-`instruct-pairs` files stage 3 used on the distilled student (commit
-7040d91), and the published models' SFT is the 18,972 open-book pairs
-alone. To be confirmed from the SFT job's log, which names the pair files
-it loaded.
+is the September line's (section 1): it wrote the `instruct-pairs` files
+stage 3 used on the distilled student (commit 7040d91). The published 8B's
+SFT loaded `openbook-v04.jsonl` alone, 18,972 pairs plus 180 identity
+examples (job 59092257's log: `--no-format-tokens --lr 1e-4 --epochs 1
+--max-length 4096 --batch-size 1 --grad-accum 16`).
 
 ## 3. October: the 27B teacher and the Qwen3.5 students
 
