@@ -26,15 +26,20 @@ def _cds_answer():
     return mod
 
 
-def rescore(rows: list[dict], cited_numbers) -> dict[str, float]:
+def rescore(rows: list[dict], cited_numbers, citation_key) -> dict[str, float]:
     """Old and new share of answers citing only given rulings, and citing the source."""
     n = len(rows) or 1
     ok = src = 0
     for r in rows:
         cited = cited_numbers(r.get("answer", ""))
-        in_ctx = {c.split("/", 1)[-1] for c in r.get("context", [])}
+        # citation_key, not split("/", 1)[-1]: the Consiglio di Stato id is
+        # cds/202301234 (two parts, the key is the second), but a Cassazione
+        # id is snciv/2023/12345 -- its key is "202312345", which the old
+        # split turned into "2023/12345", so no correct Cassazione citation
+        # ever matched and every rescore read 0.000.
+        in_ctx = {citation_key(c) for c in r.get("context", [])}
         ok += cited <= in_ctx
-        src += str(r.get("ruling", "")).split("/", 1)[-1] in cited
+        src += citation_key(str(r.get("ruling", ""))) in cited
     return {"cited_ok_before": sum(bool(r.get("cited_ok")) for r in rows) / n,
             "cited_ok": ok / n,
             "source_cited_before": sum(bool(r.get("source_cited")) for r in rows) / n,
@@ -46,13 +51,14 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("answers", nargs="+", type=Path, help="answers-*.jsonl of cds_answer.py")
     args = ap.parse_args(argv)
-    cited_numbers = _cds_answer().cited_numbers
+    mod = _cds_answer()
+    cited_numbers, citation_key = mod.cited_numbers, mod.citation_key
     for p in args.answers:
         rows = [json.loads(ln) for ln in p.open(encoding="utf-8") if ln.strip()]
         if not rows or "context" not in rows[0]:
             print(f"{p.name}: not a cds_answer.py answers file, skipped")
             continue
-        s = rescore(rows, cited_numbers)
+        s = rescore(rows, cited_numbers, citation_key)
         print(f"{p.name}: {len(rows)} answers | citing only rulings given "
               f"{s['cited_ok_before']:.3f} -> {s['cited_ok']:.3f} | citing the source "
               f"{s['source_cited_before']:.3f} -> {s['source_cited']:.3f}")

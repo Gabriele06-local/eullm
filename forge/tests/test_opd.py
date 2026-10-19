@@ -405,6 +405,28 @@ def test_rescoring_reads_the_answers_already_written(tmp_path, capsys):
     assert "999" not in out and "Cons." not in out
 
 
+def test_rescoring_a_cassazione_answer_uses_the_same_key_as_cds_answer(tmp_path, capsys):
+    """A Cassazione id has three parts (snciv/2023/12345); the old
+    split("/", 1)[-1] kept "2023/12345" while cited_numbers yields
+    "202312345", so every correct Cassazione citation was rescored as
+    invented and every source citation as missing."""
+    mod = _load("cds_rescore")
+    p = tmp_path / "answers-snciv.jsonl"
+    rows = [{"id": "snciv-202312345-0", "ruling": "snciv/2023/12345",
+             "context": ["snciv/2023/12345"],
+             "answer": "Secondo Cass. civ., Sez. III, n. 12345/2023, il principio vale.",
+             "cited_ok": True, "source_cited": True},
+            {"id": "snciv-202312345-1", "ruling": "snciv/2023/12345",
+             "context": ["snciv/2023/12345"],
+             "answer": "Secondo Cass. civ., Sez. III, n. 999/2019, il principio vale.",
+             "cited_ok": False, "source_cited": False}]
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    assert mod.main([str(p)]) == 0
+    out = capsys.readouterr().out
+    assert "citing only rulings given 0.500 -> 0.500" in out
+    assert "citing the source 0.500 -> 0.500" in out
+
+
 def test_the_cassazione_exam_labels_and_reads_citations_with_the_year(tmp_path, monkeypatch,
                                                                       capsys):
     chunks = tmp_path / "legal_it.jsonl"
