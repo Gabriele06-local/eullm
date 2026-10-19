@@ -157,6 +157,19 @@ def test_failure_is_retried_then_kept(tmp_path):
     assert q.load("failed", p["id"])["notes"] == ["boom", "boom again"]
 
 
+def test_a_failure_that_must_not_be_retried_stays_failed_with_its_note(tmp_path):
+    """A server death is the soak's finding: retrying it would replace the
+    crash with a later healthy run and hide it from the report."""
+    q = Queue(str(tmp_path))
+    p = expand(SPEC)[0]
+    q.add(p)
+    q.claim(p["id"], {"job": "1"})
+    assert q.finish(p["id"], "failed", "server exited 134", retry=False) == "failed"
+    failed = q.load("failed", p["id"])
+    assert failed["attempts"] == 1
+    assert failed["notes"] == ["server exited 134"]
+
+
 def test_stale_claims_go_back(tmp_path):
     q = Queue(str(tmp_path))
     a, b, c = expand(SPEC)[:3]

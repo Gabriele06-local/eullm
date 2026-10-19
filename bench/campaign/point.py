@@ -774,8 +774,17 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
 
     ok = [r for r in records if r["ok"]]
     if records and len(ok) < len(records) / 2:
-        raise PointError(f"{len(records) - len(ok)} of {len(records)} requests failed: "
+        # Carry the death out with the failure: this raise used to discard
+        # `died`, and run()'s server_exits are attached only on the success
+        # path, so a crash early in a soak reached campaign.py as a bare
+        # request-failure count. The retry then succeeded and the report
+        # showed a clean measured soak with died=0.
+        err = PointError(f"{len(records) - len(ok)} of {len(records)} requests failed: "
                          f"{[r.get('error') for r in records if not r['ok']][:3]}")
+        err.servers_died = died
+        err.server_exits = [s.proc.returncode if s.proc is not None else None
+                            for s in servers]
+        raise err
 
     # Accuracy, from the first pass.
     per_set = {}
@@ -1189,8 +1198,12 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
         result = _measure(p, ctx, servers, evicted, started, answers_path)
     except Exception as e:
         if expired.is_set():
-            raise PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
-                             f"estimate of {p.get('est_s', 0)} s: {e}") from e
+            err = PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
+                             f"estimate of {p.get('est_s', 0)} s: {e}")
+            for key in ("servers_died", "server_exits"):
+                if getattr(e, key, None) is not None:
+                    setattr(err, key, getattr(e, key))
+            raise err from e
         raise
     finally:
         if timer:
