@@ -1,0 +1,30 @@
+{
+  "campaign": "c12-stability",
+  "notes": [
+    "The soaks that crashed while working (r-next10 and r-next15, 15-17-10-2026): Qwen3-32B at",
+    "32 requests on one GCD, with Q4_K_M or Q8_0 weights and an f16 or q8_0 KV cache, aborted",
+    "hours into a soak, and one Qwen3-30B-A3B Q8_0 server met a GPU memory fault",
+    "(HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION). The runner of those rounds counted the soaks",
+    "as passed, since fewer than half of their requests failed. The same configurations again,",
+    "on an engine that stops cleanly (next17) and a runner that records a server that dies",
+    "(servers_died, server_exits), with llama.cpp's own log on, so that a crash leaves the line",
+    "that says why. Qwen3-14B Q8_0 with a q8_0 KV cache, which did not crash, as control.",
+    "One GCD a point: six of them share a node, each stretching to the time the job has, up to",
+    "six hours."
+  ],
+  "pull": ["hf.co/Qwen/Qwen3-32B-GGUF:Q8_0", "hf.co/Qwen/Qwen3-30B-A3B-GGUF:Q8_0",
+           "hf.co/Qwen/Qwen3-14B-GGUF:Q8_0"],
+  "defaults": {"kind": "workload", "gcds": 1, "batch": 32, "slot_ctx": 4096, "concurrency": 32,
+               "sets": ["gsm8k", "arc-easy", "arc-challenge"],
+               "min_duration_s": 7200, "max_duration_s": 21600, "interval_s": 60,
+               "extra_args": ["--fit-strict"],
+               "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info"}},
+  "groups": [
+    {"name": "crash-32b", "priority": 95,
+     "axes": {"model": ["qwen3-32b", "qwen3-32b-gguf-q8_0"], "kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "crash-30b-a3b", "priority": 95,
+     "axes": {"model": ["qwen3-30b-a3b-gguf-q8_0"], "kv": ["f16/f16"]}},
+    {"name": "control-14b", "priority": 90,
+     "set": {"model": "qwen3-14b-gguf-q8_0", "kv": "q8_0/q8_0"}}
+  ]
+}
