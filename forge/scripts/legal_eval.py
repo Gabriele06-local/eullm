@@ -68,6 +68,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -175,7 +176,27 @@ def articles_in_hand(index, found: list[dict]) -> set[str]:
             | {a for r in found for a in cited_articles(r.get("text", ""))})
 
 
-def chat_prompt(tok, content: str) -> str:
+_REASONING = re.compile(r"(?s)^\s*(?:<think>|\[THINK\])(.*?)(?:</think>|\[/THINK\])\s*")
+
+
+def split_reasoning(text: str) -> tuple[str, str, bool]:
+    """(answer, reasoning, closed) of a reasoning model's output.
+
+    Qwen writes <think>...</think> and Ministral-3-Reasoning [THINK]...[/THINK]
+    before the answer; the judge must grade the answer only. A reasoning that
+    never closed (cut at --max-new-tokens) leaves no answer at all.
+    """
+    text = text or ""
+    m = _REASONING.match(text)
+    if m:
+        return text[m.end():].strip(), m.group(1).strip(), True
+    for opener in ("<think>", "[THINK]"):
+        if text.lstrip().startswith(opener):
+            return "", text.lstrip()[len(opener):].strip(), False
+    return text, "", True
+
+
+def chat_prompt(tok, content: str, think: bool = False) -> str:
     """One user turn in the model's chat format, with thinking switched off.
 
     Qwen3's hybrid models (Qwen3-8B and the like) think by default: they open
@@ -186,7 +207,7 @@ def chat_prompt(tok, content: str) -> str:
     """
     return tok.apply_chat_template([{"role": "user", "content": content}],
                                    tokenize=False, add_generation_prompt=True,
-                                   enable_thinking=False)
+                                   enable_thinking=think)
 
 
 def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
@@ -225,6 +246,10 @@ def main() -> int:
     ap.add_argument("--label", default="")
     ap.add_argument("--items", help="eval set JSONL (default: the legal-it seed)")
     ap.add_argument("--max-new-tokens", type=int, default=400)
+    ap.add_argument("--think", action="store_true",
+                    help="let a reasoning model reason before it answers (give a larger "
+                         "--max-new-tokens, e.g. 3000): the reasoning is kept apart in the "
+                         "answers file and only the answer after it is scored and graded")
     ap.add_argument("--csv", help="append the summary row here")
     ap.add_argument("--answers", help="write every answer, with its score, here")
     ap.add_argument("--norms", nargs="+",
@@ -298,7 +323,7 @@ def main() -> int:
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
-        prompts.append(chat_prompt(tok, content))
+        prompts.append(chat_prompt(tok, content, think=args.think))
     if args.gguf:
         from eullm_forge.eval.gguf import LlamaServer, generate_answers_gguf
         log = Path(args.answers).with_suffix(".server.log") if args.answers else None
@@ -322,6 +347,11 @@ def main() -> int:
               flush=True)
         results = generate_answers(model, tok, prompts, batch_size=batch,
                                    max_new_tokens=args.max_new_tokens, end_ids=end_ids)
+    reasonings = {}
+    if args.think:
+        split = [split_reasoning(text) for text, _ in results]
+        reasonings = {it.id: r for it, (_, r, _) in zip(items, split)}
+        results = [(a, e and closed) for (a, _, closed), (_, e) in zip(split, results)]
     answers = {it.id: text for it, (text, _) in zip(items, results)}
     ended = sum(e for _, e in results)
     if not args.quiet:
@@ -358,7 +388,8 @@ def main() -> int:
                                     "context": contexts.get(it.id),
                                     "abstained": abst[it.id],
                                     "unsourced_articles": unsourced[it.id],
-                                    "absent": args.absent},
+                                    "absent": args.absent,
+                                    **({"reasoning": reasonings[it.id]} if args.think else {})},
                                    ensure_ascii=False) + "\n")
     if args.csv:
         append_csv_row(Path(args.csv),
