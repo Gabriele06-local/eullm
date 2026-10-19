@@ -29,12 +29,25 @@ ABSTAIN = re.compile(
     r"non (?:ho trovato|trovo)|non contengono|non dispongo|"
     r"non (?:è|sono) present[ei] (?:nei|tra i|nella raccolta)|"
     r"non risulta(?:no)? (?:nei|dai|tra i) (?:testi|documenti)|"
+    # The same verbs with the missing thing as their object: "il testo non
+    # contiene l'articolo", "la raccolta non include la norma". Without it the
+    # singular -- the same sentence, one text instead of many -- was not an
+    # abstention here while rewards.abstains() already paid it.
+    r"non (?:contiene|contengono|include|comprende|compare|riporta|riportano)"
+    r"\s+(?:\w+\s+){0,2}?(?:l['’]\s*)?(?:(?:articol[oi]|norm[ae]|disposizion[ei]"
+    r"|testi|testo|riferiment[oi]|fonte)\b|art\.)|"
+    r"non (?:risulta|risultano) (?:alcun[ao]?|nessun[ao]?)\s+(?:articol[oi]|norm[ae]"
+    r"|disposizion[ei]|riferiment[oi]|testo)\b|"
     r"non (?:è|sono) (?:indicat|previst|riportat)[oaie] nei (?:testi|documenti)|"
     r"nei (?:testi|documenti) (?:forniti|disponibili|riportati) non|"
     r"non posso (?:quindi )?(?:dar\w*|fornir\w*|rispondert?\w*)[^.]{0,40}"
     r"(?:certezza|sicur[oa])|"
     r"senza (?:il|i) test[oi] dell[ae] norm|"
-    r"no relevant information|informazioni rilevanti", re.IGNORECASE)
+    # "informazioni rilevanti" alone is also the phrase of a right answer
+    # ("Le informazioni rilevanti sono contenute nell'art. 2043"): require
+    # the negation.
+    r"no relevant information|non (?:ci sono|sono|risultano|emergono)[^.]{0,40}"
+    r"informazioni rilevanti", re.IGNORECASE)
 
 _SUFFIXES = "bis|ter|quater|quinquies|sexies|septies|octies|novies|decies"
 _NUM = rf"(\d+)(?:[\s-]*({_SUFFIXES}))?\b"
