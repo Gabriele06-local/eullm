@@ -18,57 +18,139 @@
 //! Neither is dramatic on its own. The point is the shape: every new sampler
 //! has to be added in four places, and being right in three of them is
 //! indistinguishable, in a diff, from being right in all four. Order matters
-//! here too (grammar must lead, `dist` must close), and an ordering fixed in
+//! here too (`dist` must close), and an ordering fixed in
 //! one copy would silently not be fixed in the others.
 
+use llama_cpp_2::context::LlamaContext;
 use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::sampling::LlamaSampler;
+use llama_cpp_2::token::LlamaToken;
+use llama_cpp_2::token::data::LlamaTokenData;
+use llama_cpp_2::token::data_array::LlamaTokenDataArray;
 
 use super::{GenerateRequest, random_seed_fallback};
 
-/// Build the sampler chain for one request.
+/// The sampler of one request: its chain, and the grammar of a request that
+/// asked for constrained output (`format: "json"`), kept out of the chain.
+///
+/// The grammar used to lead the chain, so it checked every token of the
+/// vocabulary against the grammar at every step, on one CPU thread, while the
+/// GPU waited for the next token. Gemma's vocabulary has some 262,000 tokens,
+/// eight times a 32k one: with Gemma 4 E4B on an RTX 5070 Ti, short JSON
+/// answers took 13 to 78 s with the GPU at 17-24%, and the same answers asked
+/// for in the prompt, without `format`, took a third to a quarter of that
+/// (measured on 19-10-2026).
+///
+/// Now the grammar checks the token the chain draws, as llama.cpp's own
+/// sampler does (`common_sampler_sample`, grammar-based rejection sampling):
+/// a model writing JSON almost always draws a token the grammar allows, so
+/// the check costs one token instead of the whole vocabulary. Only when the
+/// grammar rejects the token is the step drawn again from the full
+/// distribution with the grammar applied first, the old path, so the answer
+/// stays inside the grammar every time.
+pub(crate) struct RequestSampler {
+    chain: LlamaSampler,
+    grammar: Option<LlamaSampler>,
+}
+
+impl RequestSampler {
+    /// Draw the next token from the `idx`-th output of the last decode (`-1`:
+    /// the only one) and accept it, once, into every sampler with a history:
+    /// the penalties' window and the grammar's parse state.
+    ///
+    /// Never call `accept` after this. Every caller used to accept the token
+    /// `LlamaSampler::sample` had already accepted, so each token was taken
+    /// twice: the repeat penalty counted it twice over half its window, and
+    /// with a grammar the second `{` left the grammar nowhere to go and
+    /// llama.cpp aborted the whole server (`GGML_ASSERT(!stacks.empty())` in
+    /// llama-grammar.cpp, found 08-10-2026).
+    #[must_use]
+    pub(crate) fn sample(&mut self, ctx: &LlamaContext<'_>, idx: i32) -> LlamaToken {
+        let Some(grammar) = self.grammar.as_mut() else {
+            // `LlamaSampler::sample` draws and accepts in one call.
+            return self.chain.sample(ctx, idx);
+        };
+
+        // The same row `LlamaSampler::sample` reads: see
+        // `scheduler::sampled_token_is_corrupt` for why `-1` goes through
+        // `get_logits`.
+        let logits = if idx == -1 {
+            ctx.get_logits()
+        } else {
+            ctx.get_logits_ith(idx)
+        };
+        let candidates = |logits: &[f32]| {
+            LlamaTokenDataArray::from_iter(
+                (0_i32..)
+                    .zip(logits)
+                    .map(|(id, &logit)| LlamaTokenData::new(LlamaToken::new(id), logit, 0.0)),
+                false,
+            )
+        };
+
+        let mut cur = candidates(logits);
+        self.chain.apply(&mut cur);
+        let drawn = cur.selected_token();
+
+        let token = match drawn.filter(|&t| grammar_allows(grammar, t)) {
+            Some(token) => token,
+            None => {
+                // Rejected: the grammar narrows the full distribution first,
+                // then the chain draws from what is left.
+                let mut cur = candidates(logits);
+                grammar.apply(&mut cur);
+                self.chain.apply(&mut cur);
+                cur.selected_token()
+                    .or(drawn)
+                    .expect("the dist sampler always selects a token")
+            }
+        };
+
+        grammar.accept(token);
+        self.chain.accept(token);
+        token
+    }
+}
+
+/// Whether the grammar, in its current state, allows `token` next: applied to
+/// that token alone, it leaves its logit finite.
+fn grammar_allows(grammar: &mut LlamaSampler, token: LlamaToken) -> bool {
+    let mut single = LlamaTokenDataArray::new(vec![LlamaTokenData::new(token, 1.0, 0.0)], false);
+    grammar.apply(&mut single);
+    single.data.first().is_some_and(|d| d.logit().is_finite())
+}
+
+/// Build the sampler for one request.
 ///
 /// `seed_fallback` is only consulted when the client sent no seed *and* the
 /// system clock is unusable; see [`random_seed_fallback`]. Callers pass
 /// something stable and locally distinct (the scheduler passes its slot id).
 ///
 /// Order is part of the contract, not a style choice:
-/// grammar → penalties → top-k → top-p → min-p → temperature → dist.
-/// The grammar sampler must see the full distribution before anything has
-/// truncated it, and `dist` must be last because it is what actually draws the
-/// token; anything after it would have no effect.
-///
-/// The chain is used through `LlamaSampler::sample`, which draws the token
-/// *and accepts it*: when it returns, every sampler with a history (the
-/// penalties' window, the grammar's parse state) has already taken the token.
-/// Never call `accept` after `sample`. Every caller used to, so each token was
-/// taken twice: the repeat penalty counted it twice over half its window, and
-/// with a grammar (`format: "json"`) the second `{` left the grammar nowhere
-/// to go and llama.cpp aborted the whole server (`GGML_ASSERT(!stacks.empty())`
-/// in llama-grammar.cpp, found 08-10-2026).
+/// penalties → top-k → top-p → min-p → temperature → dist. `dist` must be
+/// last because it is what actually draws the token; anything after it would
+/// have no effect. The grammar is not in the chain: see [`RequestSampler`].
 pub(crate) fn build_sampler(
     model: &LlamaModel,
     request: &GenerateRequest,
     seed_fallback: u32,
-) -> LlamaSampler {
+) -> RequestSampler {
     let seed = request
         .seed
         .unwrap_or_else(|| random_seed_fallback(seed_fallback));
 
-    let mut chain: Vec<LlamaSampler> = Vec::new();
-
-    // Grammar (if any) must be first in the chain.
-    if let Some(ref grammar_str) = request.grammar {
-        match LlamaSampler::grammar(model, grammar_str, "root") {
-            Ok(gs) => chain.push(gs),
-            // Never silent: a request that asked for constrained output and did
-            // not get it must leave a trace. The multimodal copy used to drop
-            // this on the floor.
-            Err(e) => {
+    let grammar = request.grammar.as_ref().and_then(|grammar_str| {
+        LlamaSampler::grammar(model, grammar_str, "root")
+            // Never silent: a request that asked for constrained output and
+            // did not get it must leave a trace. The multimodal copy used to
+            // drop this on the floor.
+            .inspect_err(|e| {
                 tracing::warn!("Grammar sampler init failed ({e:?}), falling back to unconstrained")
-            }
-        }
-    }
+            })
+            .ok()
+    });
+
+    let mut chain: Vec<LlamaSampler> = Vec::new();
 
     // Repeat penalty (Ollama default: 1.1, last 64 tokens).
     if request.repeat_penalty != 1.0 {
@@ -96,7 +178,10 @@ pub(crate) fn build_sampler(
     // Draws the token — must stay last.
     chain.push(LlamaSampler::dist(seed));
 
-    LlamaSampler::chain_simple(chain)
+    RequestSampler {
+        chain: LlamaSampler::chain_simple(chain),
+        grammar,
+    }
 }
 
 #[cfg(test)]
