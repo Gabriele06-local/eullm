@@ -50,6 +50,16 @@ class Ruling:
         return str(self.meta.get("NOME_SEZIONE") or "").strip()
 
 
+def chunk_ruling_id(chunk: dict) -> str:
+    """The ruling a chunk belongs to: sentence_id, or source_id when absent."""
+    return str(chunk.get("sentence_id") or chunk.get("source_id") or "")
+
+
+def chunk_kind(chunk: dict) -> str:
+    """The court of a chunk: its kind, or the prefix of its ruling id."""
+    return str(chunk.get("kind") or chunk_ruling_id(chunk).split("/", 1)[0])
+
+
 def cited_number(rid: str) -> str:
     """A ruling's number as a citation writes it: "202301234", "12345/2023".
 
@@ -102,8 +112,8 @@ def load_rulings(paths: Iterable[str | Path], kind: str = "cds") -> dict[str, Ru
                 if not line.strip():
                     continue
                 r = json.loads(line)
-                sid = str(r.get("sentence_id") or r.get("source_id") or "")
-                if not sid or (r.get("kind") or sid.split("/", 1)[0]) != kind:
+                sid = chunk_ruling_id(r)
+                if not sid or chunk_kind(r) != kind:
                     continue
                 parts[sid].append((int(r.get("chunk_index") or 0), r.get("text") or ""))
                 years.setdefault(sid, r.get("year"))

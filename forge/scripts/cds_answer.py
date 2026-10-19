@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.caselaw import (  # noqa: E402
     attach_meta,
+    chunk_kind,
     citation_key,
     cited_number,
     court,
@@ -188,8 +189,7 @@ def main(argv: list[str] | None = None) -> int:
         for line in p.open(encoding="utf-8"):
             if line.strip():
                 c = json.loads(line)
-                if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) \
-                        == the_court.kind:
+                if chunk_kind(c) == the_court.kind:
                     chunks.append(c)
     units = build_units(rulings, chunks, cards=cards, prefix_chunks=bool(cards),
                         card_units=bool(cards) and args.index == "prefix+cards",
