@@ -50,8 +50,7 @@ from pathlib import Path
 # The same pattern as eullm_forge.eval.abstain.ABSTAIN (a test keeps them
 # equal): this file imports nothing from the package, so it runs alone.
 ABSTAIN = re.compile(
-    r"non (?:ho trovato|trovo)|non (?:contiene|contengono|include|comprende|compare|"
-    r"riporta|riportano)|non dispongo|"
+    r"non (?:ho trovato|trovo)|non contengono|non dispongo|"
     r"non (?:è|sono) present[ei] (?:nei|tra i|nella raccolta)|"
     r"non risulta(?:no)? (?:nei|dai|tra i) (?:testi|documenti)|"
     r"non (?:contiene|contengono|include|comprende|compare|riporta|riportano)"

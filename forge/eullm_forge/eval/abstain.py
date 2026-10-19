@@ -26,8 +26,7 @@ from collections.abc import Iterable
 # lost answer, so a phrase that a right answer also uses ("se il convenuto
 # non è presente", "ove non risulta diversamente") must not match.
 ABSTAIN = re.compile(
-    r"non (?:ho trovato|trovo)|non (?:contiene|contengono|include|comprende|compare|"
-    r"riporta|riportano)|non dispongo|"
+    r"non (?:ho trovato|trovo)|non contengono|non dispongo|"
     r"non (?:è|sono) present[ei] (?:nei|tra i|nella raccolta)|"
     r"non risulta(?:no)? (?:nei|dai|tra i) (?:testi|documenti)|"
     # The same verbs with the missing thing as their object: "il testo non
