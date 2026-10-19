@@ -34,8 +34,9 @@ import re
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 
-from .abstain import _CITE, _MORE, _key, cited_articles
+from .abstain import _CITE, _MORE, _key
 from .dataset import EvalItem
+from .metrics import normalize_text
 from .norm_exam import CODE_LABELS, Article, _usable
 from .retrieval import named_code
 
@@ -161,6 +162,39 @@ def messages(group: list[Article]) -> list[dict]:
             {"role": "user", "content": TASK.format(texts=texts)}]
 
 
+def _code_after(text: str) -> str | None:
+    """The code named after a citation, full name or the exam's abbreviation."""
+    code = named_code(text)
+    if code:
+        return code
+    norm = f" {normalize_text(text)} "
+    for c, (name, abbr) in CODE_NAMES.items():
+        if f" {normalize_text(abbr)} " in norm or f" {normalize_text(name)} " in norm:
+            return c
+    return None
+
+
+def _cited(answer: str, group: list[Article]) -> set[tuple[str, str]]:
+    """(code, number) the answer cites; a bare number counts only if unique."""
+    coded: set[tuple[str, str]] = set()
+    bare: set[str] = set()
+    for m in _CITE.finditer(answer):
+        code = _code_after(answer[m.end():m.end() + 60])
+        nums = [_key(m.group(1), m.group(2))]
+        nums += [_key(n, s) for n, s in _MORE.findall(m.group(3))]
+        for n in nums:
+            if code:
+                coded.add((code, n))
+            else:
+                bare.add(n)
+    # "art. 2" in a group with c.c. art. 2 and Cost. art. 2 names neither:
+    # the same number in two codes is not a citation of both.
+    for a in group:
+        if a.number in bare and sum(b.number == a.number for b in group) == 1:
+            coded.add((a.code, a.number))
+    return coded
+
+
 def parse_practical(raw: str, group: list[Article]) -> dict:
     """The item in a teacher reply, checked; raises PracticalRejected."""
     text = re.sub(r"(?s)<think>.*?</think>", "", (raw or "").strip()).strip()
@@ -193,9 +227,11 @@ def parse_practical(raw: str, group: list[Article]) -> dict:
         raise PracticalRejected("bad_articles")
     # What a correct answer must cite is what the teacher said is needed AND its
     # own answer cites: on 2026-10-15 refusing every item whose answer left one
-    # declared article out threw away 33 of 125. One cited at least.
-    cited = cited_articles(answer)
-    needed = [a for a in (group[i - 1] for i in dict.fromkeys(idx)) if a.number in cited]
+    # declared article out threw away 33 of 125. One cited at least. The code
+    # is part of the citation: art. 2 c.c. does not cite art. 2 Cost.
+    cited = _cited(answer, group)
+    needed = [a for a in (group[i - 1] for i in dict.fromkeys(idx))
+              if (a.code, a.number) in cited]
     if not needed:
         raise PracticalRejected("answer_misses_article")
     return {"domanda": question, "risposta": answer, "rubrica": rubric, "articoli": needed}

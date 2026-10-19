@@ -182,6 +182,38 @@ def test_the_needed_articles_are_those_declared_and_cited(known):
     assert [a.number for a in parsed["articoli"]] == ["1453", "2043"]
 
 
+def test_a_citation_in_one_code_is_not_a_citation_of_another(known):
+    """Art. 2 c.c. and art. 2 Cost. share a number: the code is part of the
+    citation, or the rubric demands an article the teacher's answer never
+    cited (and the reference includes its text)."""
+    civ2 = _art("codice_civile", 2, "La maggiore età è fissata al diciottesimo anno.")
+    cost2 = _art("costituzione", 2, "La Repubblica riconosce i diritti inviolabili.")
+    g = [civ2, cost2]
+    parsed = parse_practical(_reply(
+        articoli=[1, 2],
+        risposta="La maggiore età è fissata al diciottesimo anno (art. 2 c.c.); "
+                 "il fondamento è il riconoscimento dei diritti inviolabili.",
+        rubrica="Deve indicare il diciottesimo anno e i diritti inviolabili."), g)
+    assert [(a.code, a.number) for a in parsed["articoli"]] == [("codice_civile", "2")]
+    item = to_item(g, parsed, "dev")
+    assert "art. 2 Cost." not in item.rubric
+    assert item.metadata["articoli"] == ["codice_civile:2"]
+
+
+def test_a_bare_number_shared_by_two_codes_names_neither(known):
+    civ2 = _art("codice_civile", 2, "La maggiore età è fissata al diciottesimo anno.")
+    cost2 = _art("costituzione", 2, "La Repubblica riconosce i diritti inviolabili.")
+    g = [civ2, cost2]
+    with pytest.raises(PracticalRejected) as exc:
+        parse_practical(_reply(
+            articoli=[1, 2],
+            risposta="La maggiore età è fissata al diciottesimo anno (art. 2), "
+                     "insieme ai diritti inviolabili riconosciuti alla persona "
+                     "dalla Repubblica e garantiti nei confronti dei poteri pubblici.",
+            rubrica="Deve indicare il diciottesimo anno e i diritti inviolabili."), g)
+    assert exc.value.reason == "answer_misses_article"
+
+
 def _load_prompts():
     spec = importlib.util.spec_from_file_location(
         "make_practical_prompts", SCRIPT.parent / "make_practical_prompts.py")
