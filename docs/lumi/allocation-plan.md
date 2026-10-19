@@ -192,6 +192,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 | `c11-placement` | 35 | ~22 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
+| `c12-stability` | 6 | ~6 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`) |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
