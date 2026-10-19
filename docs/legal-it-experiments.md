@@ -84,6 +84,28 @@ Ministral-3-14B with the same recipe scored 436 on `devbig`, the same as
 the 8B (436 bf16, 437 Q4): on this exam a larger model of the same family
 added nothing.
 
+**What it cost** (A100 GPU-hours, from `sacct` for 2026-09-25 to 10-05):
+
+| | Job | Wall time | GPU-hours |
+|---|---|---|---|
+| `legal-it-8b`, SFT | `eullm-s3-ministral-v04` (59092257) | 4 h 09 m on 1 A100 | ~4.2 |
+| `legal-it-8b`, GRPO | `eullm-grpo-ministral-v04` (59125822) | 1 h 33 m on 3 A100 | ~4.6 |
+| `legal-it-8b`, merge and GGUF | serial partition | 16 m | CPU only |
+| Ministral-3-14B, SFT + GRPO | | | 5.8 + 6.4 |
+| Shared: open-book pairs written by the teacher (`gen-openbook`) | | | 40.2 |
+| Shared: exams (`exam`) and their grading (`judge`) | | | 24.3 + 63.4 |
+| `gen-instruct` | | | 22.1 |
+
+The model itself is cheap: **about 9 GPU-hours** of training for the
+published 8B. The data and the measuring, shared by every model of the
+line, cost far more: the teacher writing the pairs took 40 GPU-hours, the
+exams and their grading 88. `gen-instruct`
+is the September line's (section 1): it wrote the `instruct-pairs` files
+stage 3 used on the distilled student (commit 7040d91). The published 8B's
+SFT loaded `openbook-v04.jsonl` alone, 18,972 pairs plus 180 identity
+examples (job 59092257's log: `--no-format-tokens --lr 1e-4 --epochs 1
+--max-length 4096 --batch-size 1 --grad-accum 16`).
+
 ## 3. October: the 27B teacher and the Qwen3.5 students
 
 **What.** Privileged-context distillation for the case-law skill (commit
