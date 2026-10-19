@@ -18,14 +18,24 @@ DEST="${EULLM_ARCHIVE_DIR:-/projappl/${SBATCH_ACCOUNT:-project_465003366}/$USER/
 mkdir -p "$DEST" || exit 1
 $CAMPAIGN collect --queue "$CAMPAIGN_DIR" || exit 1
 OUT="$DEST/results-$(date +%F).tar.gz"
+# Write beside the destination, rename only on success: tar opens its output
+# before it reads the tree, so writing $OUT directly truncated the previous
+# archive for the day first, and a failure (disk full in the small projappl
+# quota, an unreadable operand) left a partial file under the final name
+# with the good one gone. Reruns on the same date are the documented
+# workflow, so this was one failed tar away from losing the safety copy.
+TMP="$(mktemp "$DEST/.results-$(date +%F).XXXXXX.tar.gz")" || exit 1
+trap 'rm -f "$TMP"' EXIT
 # Running jobs keep writing their node files while tar reads them: tar says
 # "file changed as we read it" and exits with 1, the archive whole all the
 # same. Only 2 and above are errors.
-tar czf "$OUT" -C "$CAMPAIGN_DIR" --exclude=results/logs --warning=no-file-changed results
+tar czf "$TMP" -C "$CAMPAIGN_DIR" --exclude=results/logs --warning=no-file-changed results
 rc=$?
 if [ "$rc" -gt 1 ]; then
-    echo "[err] tar failed ($rc): $OUT is not to be trusted" >&2
+    echo "[err] tar failed ($rc): $OUT is unchanged" >&2
     exit "$rc"
 fi
+mv -f "$TMP" "$OUT" || { echo "[err] cannot replace $OUT" >&2; exit 1; }
+trap - EXIT
 echo "$(tar tzf "$OUT" | wc -l) files → $OUT ($(du -h "$OUT" | cut -f1))"
 ls -la --block-size=M "$DEST" | tail -3
