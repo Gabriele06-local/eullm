@@ -26,7 +26,6 @@ use llama_cpp_2::llama_batch::LlamaBatch;
 use llama_cpp_2::model::params::LlamaModelParams;
 use crate::model_tokens::{AddBos, ModelTokens};
 use llama_cpp_2::model::LlamaModel;
-use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::speculative::{MtpDrafter, MtpSpeculativeParams};
 use llama_cpp_2::token::LlamaToken;
 use tokio::sync::mpsc;
@@ -101,7 +100,7 @@ pub(crate) struct ScheduledRequest {
 struct ActiveSequence {
     seq_id: i32,
     tx: mpsc::Sender<StreamEvent>,
-    sampler: LlamaSampler,
+    sampler: super::sampling::RequestSampler,
     decoder: encoding_rs::Decoder,
     /// Hold-back buffer for streaming stop-sequence detection. Any trailing
     /// text that could still grow into (a prefix of) a stop sequence is kept
