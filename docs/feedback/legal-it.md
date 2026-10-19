@@ -71,7 +71,20 @@ Template:
 - **Error type:** invented article / accepted false premise / wrong term / wrong article cited / other
 -->
 
-All the entries below come from one external test (reddit.com, private
+#### Notice period of a short-term lease, with half the texts left out
+- **Where:** reddit.com, 2026-10-19
+- **Setting:** with texts in the prompt, but by the user's account half of
+  the relevant ones were left out
+- **Question:** rental contract questions; one on the notice period of a
+  short-term lease (exact wording not given)
+- **Model answer:** cited the right Civil Code articles, gave a wrong notice
+  period (figure not given)
+- **Correct answer:** not given; details asked. Residential leases are
+  largely governed by l. 431/1998 and l. 392/1978, which are not in the
+  collection the model was trained with.
+- **Error type:** wrong term; no abstention on insufficient texts
+
+The entries below come from one external test (reddit.com, private
 contact, 2026-10-18): a team building a criminal-law RAG platform ran
 `legal-it-8b-Q4_K_M.gguf` in two settings and sent a written report. In the
 "card format" setting the prompt followed the model card (one user turn, the
