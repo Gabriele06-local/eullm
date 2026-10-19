@@ -113,6 +113,54 @@ def test_generations_that_break_the_format_are_rejected(index, q, a, named, reas
     assert exc.value.reason == reason
 
 
+@pytest.fixture
+def suffix_index():
+    return NormIndex(RECORDS + [
+        rec("codice_civile", "12", "La norma base disciplina la materia."),
+        rec("codice_civile", "12-bis", "La norma bis aggiunge un caso."),
+        rec("codice_civile", "12-sexies", "La norma sexies disciplina il caso speciale."),
+    ])
+
+
+def _suffix_job():
+    return OpenBookJob(key="g-12-sexies", kind="grounded", code="codice_civile",
+                       number="12-sexies", text="La norma sexies disciplina il caso speciale.")
+
+
+@pytest.mark.parametrize("q, reason", [
+    ("Che cosa prevede l'art. 12 del codice civile?", "question_not_naming"),
+    ("Che cosa prevede l'art. 12-bis del codice civile?", "question_not_naming"),
+])
+def test_a_suffixed_job_is_not_answered_by_its_plain_or_other_sibling(suffix_index, q, reason):
+    with pytest.raises(Rejected) as exc:
+        parse_openbook(gen(q, ANSWER), _suffix_job(), suffix_index)
+    assert exc.value.reason == reason
+
+
+def test_a_suffixed_job_reads_the_exact_suffix(suffix_index):
+    q = "Che cosa prevede l'art. 12-sexies del codice civile?"
+    a = ("Secondo l'art. 12-sexies del codice civile, la norma disciplina il caso "
+         "speciale e si applica alle fattispecie indicate dal testo.")
+    pair = parse_openbook(gen(q, a), _suffix_job(), suffix_index)
+    assert pair["key"] == "g-12-sexies"
+    assert "caso speciale" in pair["instruction"]
+    # the same job does not accept an answer citing only the plain article
+    with pytest.raises(Rejected) as exc:
+        parse_openbook(gen(q, ANSWER), _suffix_job(), suffix_index)
+    assert exc.value.reason == "answer_not_citing"
+
+
+def test_a_plain_job_does_not_accept_a_suffixed_citation(suffix_index):
+    job = OpenBookJob(key="g-12", kind="grounded", code="codice_civile", number="12",
+                      text="La norma base disciplina la materia.")
+    q = "Che cosa prevede l'art. 12 del codice civile?"
+    a = ("Secondo l'art. 12-bis del codice civile, la norma aggiunge un caso ulteriore "
+         "e si applica alle fattispecie indicate dal testo.")
+    with pytest.raises(Rejected) as exc:
+        parse_openbook(gen(q, a), job, suffix_index)
+    assert exc.value.reason == "answer_not_citing"
+
+
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "generate_openbook_pairs.py"
 
 
