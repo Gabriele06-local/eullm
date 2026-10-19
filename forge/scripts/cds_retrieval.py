@@ -46,7 +46,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.caselaw import attach_meta, load_openga, load_rulings  # noqa: E402
+from eullm_forge.caselaw import attach_meta, chunk_kind, load_openga, load_rulings  # noqa: E402
 from eullm_forge.caselaw.index import (  # noqa: E402
     RulingIndex,
     SparseBM25,
@@ -106,8 +106,7 @@ def main(argv: list[str] | None = None) -> int:
     if not asked:
         print("[ret] no questions", file=sys.stderr)
         return 1
-    chunks = [c for c in read_jsonl(args.chunks)
-              if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds"]
+    chunks = [c for c in read_jsonl(args.chunks) if chunk_kind(c) == "cds"]
     rulings = load_rulings(args.chunks)
     if args.openga:
         attach_meta(rulings, load_openga(args.openga))

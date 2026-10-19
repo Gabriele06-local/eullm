@@ -212,6 +212,41 @@ def test_the_exam_asks_only_development_rulings_and_checks_citations(tmp_path, m
     assert "cut at --max-new-tokens 0.500" in printed
 
 
+def test_the_exam_reads_chunks_that_carry_only_source_id(tmp_path, monkeypatch):
+    """The corpus key may be sentence_id or source_id (rulings.load_rulings
+    and index.build_units both accept either). cds_answer's own filter read
+    only sentence_id, so a source_id-only chunk became kind "None" and the
+    whole index was empty: the model was asked closed-book and the answer
+    file claimed the source ruling was not retrieved."""
+    chunks, _cards, dev, _ = _corpus(tmp_path)
+    rows = [json.loads(line) for line in chunks.read_text().splitlines()]
+    for r in rows:
+        r.pop("sentence_id", None)
+        r.pop("kind", None)
+        r["source_id"] = f"cds/{r['source_id'].split('/')[1]}"
+    chunks.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
+    questions = tmp_path / "dev-cards.jsonl"
+    questions.write_text(json.dumps({"id": "cds/202000000", "domande_esame": [
+        {"domanda": "Quando si applica il principio0?", "risposta": "Sempre.",
+         "rubrica": "Dice sempre."}]}) + "\n")
+    mod = _load("cds_answer")
+    seen = []
+
+    def fake(args, contents):
+        seen.extend(contents)
+        return [("Secondo n. 202000000 il principio si applica.", True)]
+
+    monkeypatch.setattr(mod, "generate", fake)
+    out = tmp_path / "answers" / "answers-source-id.jsonl"
+    assert mod.main(["model", "--label", "x", "--questions", str(questions),
+                     "--dev-ids", str(dev), "--chunks", str(chunks),
+                     "--answers", str(out)]) == 0
+    row = json.loads(out.read_text().splitlines()[0])
+    assert "cds/202000000" in row["context"]
+    assert row["source_retrieved"]
+    assert seen[0].startswith("Testi di riferimento")
+
+
 def test_the_note_reaches_the_teacher_only_and_leaves_the_rows_alone():
     mod = _load("opd_train")
     teacher = [{"role": "system", "content": "s"}, {"role": "user", "content": "Domanda"},

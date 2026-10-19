@@ -47,7 +47,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.caselaw import attach_meta, load_openga, load_rulings, ruling_view  # noqa: E402
+from eullm_forge.caselaw import (  # noqa: E402
+    attach_meta,
+    chunk_kind,
+    load_openga,
+    load_rulings,
+    ruling_view,
+)
 from eullm_forge.caselaw.index import RulingIndex, SparseBM25, build_units  # noqa: E402
 from eullm_forge.caselaw.prompts import (  # noqa: E402
     caselaw_prompt,
@@ -116,8 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_rulings:
         chosen = chosen[:args.max_rulings]
 
-    chunks = [c for c in read_jsonl(args.chunks)
-              if (c.get("kind") or str(c.get("sentence_id", "")).split("/")[0]) == "cds"]
+    chunks = [c for c in read_jsonl(args.chunks) if chunk_kind(c) == "cds"]
     # Development rulings never reach a prompt, as a source or as a retrieved
     # passage. Their units are skipped when ranked rather than left out of the
     # index, so the index stays the one the exam and the retrieval check use,
