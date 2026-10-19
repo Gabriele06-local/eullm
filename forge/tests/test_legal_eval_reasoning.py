@@ -17,7 +17,8 @@ def _load():
 
 def test_both_reasoning_formats_are_taken_apart():
     mod = _load()
-    out = mod.split_reasoning("<think>\nla premessa è falsa\n</think>\n\nNo: da sei mesi a tre anni.")
+    out = mod.split_reasoning("<think>\nla premessa è falsa\n</think>\n\n"
+                              "No: da sei mesi a tre anni.")
     assert out == ("No: da sei mesi a tre anni.", "la premessa è falsa", True)
     out = mod.split_reasoning("[THINK]art. 640[/THINK]Risposta.")
     assert out == ("Risposta.", "art. 640", True)
