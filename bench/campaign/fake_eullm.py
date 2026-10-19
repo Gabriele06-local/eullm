@@ -16,7 +16,10 @@ Models it knows: every id except those starting with "missing", which get a
 404 like an id the store does not have, and those starting with "huge",
 refused the way --fit-strict refuses a model too large for the free VRAM.
 Every answer ends with "Answer: 4", so a GSM8K-style item whose answer is 4
-grades correct. FAKE_EULLM_DELAY_S sets the time per token.
+grades correct. FAKE_EULLM_DELAY_S sets the time per token, and
+FAKE_EULLM_DIE_AFTER=N makes the server exit at once (code 134, as an abort)
+on the request after the Nth /api/generate or /api/chat, as a server that
+crashes in the middle of a soak.
 """
 
 import json
@@ -27,6 +30,9 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 DELAY = float(os.environ.get("FAKE_EULLM_DELAY_S", "0.001"))
+DIE_AFTER = int(os.environ.get("FAKE_EULLM_DIE_AFTER", "0"))
+SERVED = [0]
+SERVED_LOCK = threading.Lock()
 WORDS = ["Il", " mare", " era", " calmo", "."]
 
 
@@ -104,6 +110,11 @@ class Handler(BaseHTTPRequestHandler):
                                       f"'{model}' does not fully fit in the currently free VRAM; "
                                       "not loading."})
             return
+        if DIE_AFTER:
+            with SERVED_LOCK:
+                SERVED[0] += 1
+                if SERVED[0] > DIE_AFTER:
+                    os._exit(134)
         n = int((body.get("options") or {}).get("num_predict") or body.get("num_predict") or 16)
         n = min(n, 32)
         chat = self.path == "/api/chat"

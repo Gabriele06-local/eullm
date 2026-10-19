@@ -30,7 +30,7 @@ METRICS = {
                    ("ttft_ms_p50", "ttft ms"), ("load_wall_s", "load s")) + DEVICE,
     "workload": (("accuracy", "accuracy"), ("agg_tok_s_mean", "tok/s"),
                  ("consistency", "consist"), ("requests", "requests"),
-                 ("duration_s", "dur s")) + DEVICE,
+                 ("duration_s", "dur s"), ("died", "died")) + DEVICE,
     "decision": (("dec_per_s", "dec/s"), ("dec_client_ms_p50", "p50 ms"),
                  ("dec_client_ms_p99", "p99 ms"), ("dec_wait_ms_p50", "wait ms"),
                  ("dec_decode_ms_p50", "decode ms"), ("dec_consistency", "consist"),

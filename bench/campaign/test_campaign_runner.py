@@ -702,3 +702,36 @@ def test_a_point_past_its_time_limit_is_stopped_and_fails(tmp_path, engine, monk
     assert time.time() - started < 30
     assert all(s.proc.poll() is not None for s in ctx.servers)
     assert not ctx.stragglers
+
+
+def test_a_server_that_dies_during_a_workload_is_recorded(tmp_path, engine, monkeypatch):
+    """A soak that loses its server near the end still counts its numbers,
+    but says the server died, when, and how; and every point says how its
+    servers ended once asked to stop."""
+    import point
+
+    sets = tmp_path / "sets"
+    sets.mkdir()
+    with open(sets / "ten.jsonl", "w") as f:
+        for k in range(10):
+            f.write(json.dumps({"id": f"t{k}", "answer": "4", "grader": "number",
+                                "messages": [{"role": "user", "content": f"{k}+4-{k}?"}]}) + "\n")
+    monkeypatch.setenv("FAKE_EULLM_DIE_AFTER", "7")
+    p = normalize({"kind": "workload", "model": "qwen3-4b", "sets": ["ten"], "concurrency": 1})
+    p |= {"id": "soak"}
+    ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path),
+                        sets_dir=str(sets))
+    got = point.run(p, ctx)
+    w = got["workload"]
+    # the warm-up is the first of the seven it answers: the last four fail
+    assert w["requests"] == 10 and w["failed"] == 4
+    assert [d["server"] for d in w["servers_died"]] == [0]
+    assert w["servers_died"][0]["exit"] == 134 and w["servers_died"][0]["after_s"] >= 0
+    assert got["server_exits"] == [134]
+    row = campaign.row_of({"params": p, "workload": w, "server_exits": got["server_exits"]})
+    assert row["died"] == 1 and row["stop_exit"] == "134"
+
+    monkeypatch.delenv("FAKE_EULLM_DIE_AFTER")
+    healthy = point.run(p | {"id": "soak2"}, ctx)
+    assert healthy["workload"]["servers_died"] == []
+    assert healthy["server_exits"] and None not in healthy["server_exits"]

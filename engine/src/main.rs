@@ -3874,6 +3874,26 @@ async fn cmd_serve(
         eprintln!("Server error: {e}");
         std::process::exit(1);
     }
+    exit_after_serve();
+}
+
+/// Leave the process once `serve` has freed everything EuLLM owns, without
+/// the C runtime's exit handlers. What is left for them is process-wide GPU
+/// state that the system reclaims anyway, and on ROCm their order is not
+/// ours to choose: ggml's static destructors can run after the runtime's
+/// own teardown and abort, turning a clean stop into a core dump. Nothing of
+/// EuLLM's waits on them: the audit log writes each line unbuffered, and
+/// stdout and stderr are flushed here.
+fn exit_after_serve() -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    #[cfg(unix)]
+    unsafe {
+        libc::_exit(0)
+    }
+    #[cfg(not(unix))]
+    std::process::exit(0)
 }
 
 /// Load `--decision-model` at launch as a reserved companion — see the

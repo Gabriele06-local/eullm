@@ -962,7 +962,7 @@ COLUMNS = (
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
     "extra_args", "trial", "vram_start_mib_max", "dec_together", "dec_same_choices",
-    "dec_largest_shift", "dec_flipped", "env",
+    "dec_largest_shift", "dec_flipped", "env", "died", "stop_exit",
 )
 
 
@@ -980,6 +980,7 @@ def row_of(r: dict) -> dict:
                engine=(r.get("engine") or {}).get("version"), bench_rev=r.get("bench_rev"),
                extra_args=" ".join(p.get("extra_args", [])),
                env=" ".join(f"{k}={v}" for k, v in sorted((p.get("env") or {}).items())),
+               stop_exit=" ".join(str(c) for c in r.get("server_exits") or []),
                vram_start_mib_max=max((r.get("vram_at_start_mib") or {}).values(),
                                       default=None))
     t = r.get("throughput")
@@ -1000,7 +1001,8 @@ def row_of(r: dict) -> dict:
                    requests=w.get("requests"), drift_pct=w.get("throughput_drift_pct"),
                    accuracy=" ".join(f"{k}={v.get('accuracy')}"
                                      for k, v in sorted(w.get("accuracy", {}).items())),
-                   consistency=(w.get("consistency") or {}).get("rate"))
+                   consistency=(w.get("consistency") or {}).get("rate"),
+                   died=len(w.get("servers_died") or []))
     ft = r.get("finetune")
     if ft:
         epochs = ft.get("per_epoch") or []
