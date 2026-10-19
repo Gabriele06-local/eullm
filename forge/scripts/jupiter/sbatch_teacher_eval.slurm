@@ -21,7 +21,9 @@
 # Writes $FORGE_RUN_DIR/teacher-eval/answers-<set>-<label>[-think].jsonl and
 # a row in teacher-eval.csv; the log holds totals and times only, never a
 # question (--quiet). The question files may be private: they stay on the
-# project storage, never in the repository.
+# project storage, never in the repository nor anywhere online, and so do
+# the answers files, which repeat the questions; the output directory
+# (EVAL_OUT) is made readable by the user alone.
 
 #SBATCH --job-name=forge-teacher-eval
 #SBATCH --partition=booster
@@ -43,9 +45,14 @@ BATCH="${EVAL_BATCH:-16}"
 NORMS="${EVAL_NORMS:-$(ls "$FORGE_DATA_DIR"/norms-src/legislazione_*.chunks.jsonl | grep -v eurlex | tr '\n' ' ')}"
 EMBEDDER="${EVAL_EMBEDDER:-Qwen/Qwen3-Embedding-0.6B}"
 RERANKER="${EVAL_RERANKER:-Qwen/Qwen3-Reranker-0.6B}"
-OUT="$FORGE_RUN_DIR/teacher-eval"
+OUT="${EVAL_OUT:-$FORGE_RUN_DIR/teacher-eval}"
 JOB="${SLURM_JOB_ID:-local}"
 mkdir -p "$OUT" "$FORGE_RUN_DIR/power" "$FORGE_RUN_DIR/retrieval-cache"
+# The answers files carry the questions, and some sets are private (the
+# LexIA traps): the directory and everything written in it are the user's
+# alone, without the ACLs the project storage hands down.
+umask 077
+chmod 700 "$OUT" && { setfacl -b "$OUT" 2>/dev/null || true; }
 TAG="$LABEL$([ "$THINK" = 1 ] && echo -think)"
 ANSWERS="$OUT/answers-$SET-$TAG.jsonl"
 

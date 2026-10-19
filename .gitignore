@@ -83,3 +83,10 @@ ragbench-*.json
 /artifacts/
 # The LUMI campaign summaries are kept (bench/results/lumi/README.md)
 !bench/results/lumi/*.csv
+
+# Private evaluation sets and the answers that repeat their questions: never
+# in the repository, never online (they stay on the clusters' private dirs).
+lexia-trappole*
+*lexia*.jsonl
+private-eval/
+teacher-eval/
