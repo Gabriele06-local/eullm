@@ -10,7 +10,8 @@
 #   b8b  Qwen3-8B-Base, not distilled      on the same pairs and recipe
 #
 # FORGE_SFT_ARMS names others as "name=model name=model" (a merged
-# directory or a hub id in the offline cache), four at most. Each run is
+# directory, a hub id in the offline cache, or "base+adapter" for a
+# distillation checkpoint, merged first), four at most. Each run is
 # stage3_sft.py (Leonardo's stage 3: LoRA r32, 2 epochs, the identity
 # examples mixed in) on FORGE_SFT_PAIRS, then the adapter merged into the
 # weights, chat_smoke.py (does it end its turn) and legal_eval.py (the
@@ -27,7 +28,8 @@
 # FORGE_SFT_TAG puts the runs in $FORGE_RUN_DIR/sft-<tag> (another set of
 # pairs, other arms). With a held-out exam at FORGE_SFT_EXAM (default
 # $FORGE_DATA_DIR/eval/norm-exam.jsonl, make_norm_exam.py) every model also
-# sits it, into norm-exam.csv.
+# sits it, into norm-exam.csv; with FORGE_SFT_NORMS (legislation chunk files)
+# it sits it open book too, as "<label>-open".
 #
 # Resumable: a rerun continues a run from its checkpoint, skips a finished
 # adapter, a merged model and an evaluation already done, so rerunning it on
@@ -62,8 +64,10 @@ else echo "  no held-out exam at $EXAM: make_norm_exam.py on a login node; the t
 python -c "import transformers, peft; print('  imports: transformers', transformers.__version__, 'peft', peft.__version__)" ||
     { echo "[!!] the venv does not import on this node"; exit 1; }
 
-# A hub id counts when the offline cache has it, a directory when it holds a model.
+# A hub id counts when the offline cache has it, a directory when it holds a
+# model; "base+adapter" when the base counts and the adapter is there.
 have_model() {
+    case "$1" in *+*) have_model "${1%%+*}" && [ -f "${1#*+}/adapter_config.json" ]; return ;; esac
     if [ -d "$1" ]; then [ -f "$1/config.json" ]; return; fi
     python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pretrained(sys.argv[1], local_files_only=True)" "$1" >/dev/null 2>&1
 }
@@ -84,11 +88,32 @@ evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers>
         python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" --items "$EXAM" \
             --csv "$SFT/norm-exam.csv" --answers "$3/norm-exam-answers.jsonl" --quiet
     fi
+    # The same exam open book (FORGE_SFT_NORMS: legislation chunk files): each
+    # question with the articles BM25 finds for it in front, as "<label>-open".
+    # Closed book, no model knew the articles (16-10-2026); this asks whether
+    # it can read them.
+    if [ -s "$EXAM" ] && [ -n "${FORGE_SFT_NORMS:-}" ] && ! in_csv "$1-open" "$SFT/norm-exam.csv"; then
+        # shellcheck disable=SC2086
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1-open" --items "$EXAM" \
+            --norms $FORGE_SFT_NORMS --csv "$SFT/norm-exam.csv" \
+            --answers "$3/norm-exam-open-answers.jsonl" --quiet
+    fi
 }
 
 run_arm() {    # run_arm <name> <model>; runs on the GPU it is given
     local name="$1" model="$2" out="$SFT/$1" t0 rc
     mkdir -p "$out"
+    # "base+adapter": a distillation checkpoint, merged into its base first.
+    if [[ "$model" == *+* ]]; then
+        if [ ! -f "$out/start/config.json" ]; then
+            python - "${model%%+*}" "${model#*+}" "$out/start" <<'PY' || { echo "[!!] $name: merging the checkpoint failed"; return 1; }
+import sys
+from eullm_forge.identity import merge_identity_adapter
+merge_identity_adapter(sys.argv[1], sys.argv[2], sys.argv[3])
+PY
+        fi
+        model="$out/start"
+    fi
     if [ ! -f "$out/adapter/adapter_config.json" ]; then
         t0=$(date +%s)
         timeout --signal=TERM "$TRAIN_S" python "$EULLM_REPO/forge/scripts/stage3_sft.py" \

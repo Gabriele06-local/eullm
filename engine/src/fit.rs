@@ -75,6 +75,9 @@ pub struct GgufInfo {
     /// counted in `n_layers`, when the model carries one: what `--mtp`'s draft
     /// context runs (see [`mtp_reserve_bytes`]).
     pub nextn_layers: Option<u32>,
+    /// The context the model was trained for (`<arch>.context_length`), when
+    /// declared: the ceiling of `--ctx-size auto`.
+    pub context_length: Option<u32>,
 }
 
 impl GgufInfo {
@@ -280,6 +283,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
     let mut value_length: Option<u32> = None;
     let mut full_attention_interval: Option<u32> = None;
     let mut nextn_layers: Option<u32> = None;
+    let mut context_length: Option<u32> = None;
     let mut architecture: Option<String> = None;
 
     // The metadata keys we want, each an integer stored as u32 or u64 depending
@@ -336,6 +340,8 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             Some(&mut full_attention_interval)
         } else if key_bytes.ends_with(b".nextn_predict_layers") {
             Some(&mut nextn_layers)
+        } else if key_bytes.ends_with(b".context_length") {
+            Some(&mut context_length)
         } else {
             None
         };
@@ -380,6 +386,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
             && value_length.is_some()
             && full_attention_interval.is_some()
             && nextn_layers.is_some()
+            && context_length.is_some()
         {
             break;
         }
@@ -395,6 +402,7 @@ pub fn parse_gguf_header(data: &[u8]) -> Option<GgufInfo> {
         full_attention_interval,
         architecture,
         nextn_layers,
+        context_length,
     })
 }
 
@@ -716,9 +724,9 @@ pub fn read_gguf_moe_layout(path: &Path, file_size: u64, n_layers: u32) -> Optio
 /// Free VRAM in bytes, as reported by the active GPU backend.
 ///
 /// `(free, total)` in bytes, or `None` when there is no GPU or nothing can be
-/// read from it. The total matters because the loader's context probe requires
-/// a fraction of the card's TOTAL memory to remain free after allocation
-/// (`inference::MIN_FREE_VRAM_RATIO`), a floor the sizer has to respect or it
+/// read from it. The total is for the callers that report it; the loader's
+/// context probe requires `--vram-reserve` ([`DEFAULT_VRAM_RESERVE_MIB`]) to
+/// remain free after allocation, a floor the sizer has to respect or it
 /// produces splits the loader then refuses.
 ///
 /// Asked through ggml's device registry rather than `cudaMemGetInfo`, so it
@@ -782,29 +790,165 @@ pub enum FitDecision {
     Unknown { reason: String },
 }
 
-/// Fraction of the card's TOTAL memory that must still be free after the
-/// model and its context are resident.
-///
-/// This mirrors `inference::MIN_FREE_VRAM_RATIO`, which the sequential
-/// engine's context probe enforces at load time, and the two must agree:
-/// sizing to leave 3% of *free* VRAM while the loader demands 12% of
-/// *total* produced splits the loader then refused — the model's weights
+/// How much VRAM must still be free after the model and its context are
+/// resident, in MiB (`--vram-reserve`). One number for the sizer
+/// ([`compute_fit`], [`moe_budget`]), the loader's context probe
+/// (`inference::probe_and_shrink_context`) and the companion-model check
+/// (`api::usable_vram`): sizing to leave one amount while the loader demands
+/// another produced splits the loader then refused — the model's weights
 /// went in, and the context allocation failed all the way down to 512
 /// tokens ("allocation succeeded but left only 10% of GPU memory free").
-/// Found on a swap into a 27B on a 16 GiB card.
+/// Found on a swap into a 27B on a 16 GiB card. That is why every reader
+/// takes the value from here and none keeps a constant of its own.
 ///
-/// `pub(crate)`: also read by `api::ensure_embedding_model`'s much simpler
-/// fits-or-evict check for the embedding slot, so the same floor applies to
-/// both instead of drifting into two numbers that happen to start equal.
-pub(crate) const MIN_FREE_TOTAL_RATIO: f64 = 0.12;
+/// It was a share of the card (12% of the total, with a further 3% of the
+/// free memory) until 0.7.80, which is the wrong shape: what has to stay
+/// free is the scratch the card needs while generating and what other
+/// processes take, and none of it grows with the card. 1.9 GB on a 16 GB card
+/// cost a dense 8B two of its 36 layers (132 tokens/s on one request became
+/// 52); 7.7 GB on a 64 GB one and 11.5 GB on a 96 GB one bought nothing.
+///
+/// 1 GiB covers 25 times the growth measured while generating (about 40 MiB
+/// on Qwen3-8B Q4_K_M with 16 requests, 17-10-2026) and leaves room for a
+/// desktop on the same card, the case the old 12% was found for
+/// (`inference::probe_and_shrink_context`). The compute buffer is not in
+/// it: that is allocated at load and charged by
+/// [`COMPUTE_BUFFER_RESERVE_BYTES`] and [`ubatch_reserve_bytes`].
+pub const DEFAULT_VRAM_RESERVE_MIB: u32 = 1024;
 
-/// Fraction of free VRAM we're willing to use, reserving a slice for
-/// allocator fragmentation and miscellaneous driver overhead. Together with
-/// `COMPUTE_BUFFER_RESERVE_BYTES` this reproduces the ~0.8 GiB headroom
-/// measured on an RTX 5070 Ti loading qwq-32b at 45/64 layers (f16 KV,
-/// 4096 ctx) — i.e. the sizer lands the same safe split that was validated by
-/// hand, then offloads strictly more layers as the KV cache is quantized.
-const VRAM_SAFETY_FRACTION: f64 = 0.97;
+/// The least `--vram-reserve` accepted, in MiB. The CUDA context and the
+/// scratch a decode step asks for after the context is allocated: the
+/// compute buffer measured on a 27B at the default micro-batch was 164 MiB
+/// (see [`COMPUTE_BUFFER_RESERVE_BYTES`]), and a CUDA context takes about
+/// 100 MiB more, so below 256 even a dense model on a card nothing else
+/// uses has nothing left for the allocator to work in.
+pub const MIN_VRAM_RESERVE_MIB: u32 = 256;
+
+/// `--vram-reserve`: MiB that must stay free, [`MIN_VRAM_RESERVE_MIB`] or
+/// more.
+pub fn parse_vram_reserve(value: &str) -> Result<u32, String> {
+    let mib: u32 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number of MiB"))?;
+    if mib < MIN_VRAM_RESERVE_MIB {
+        return Err(format!(
+            "{mib} MiB is below the {MIN_VRAM_RESERVE_MIB} MiB minimum: the CUDA context and \
+             the scratch a decode step asks for after loading need that much"
+        ));
+    }
+    Ok(mib)
+}
+
+/// What `--ctx-size` carries for `auto` (and for `0`, which llama.cpp also
+/// reads as "whatever the model and the card allow"): resolved at launch by
+/// [`auto_context`], never past it.
+pub const CTX_AUTO: u32 = 0;
+
+/// The smallest context `auto` settles for, which is also the default of
+/// `--ctx-size`: below it a chat does not hold its own prompt, so the layers
+/// go to the CPU before the window shrinks further.
+pub const AUTO_CTX_FLOOR: u32 = 4096;
+
+/// The largest context `auto` asks for, whatever the model was trained for
+/// and the card could hold: past it the cache takes the card for a window
+/// almost nobody fills, and `--ctx-size N` says so when somebody does.
+pub const AUTO_CTX_CEILING: u32 = 131_072;
+
+/// `--ctx-size`: a number of tokens, or `auto`.
+pub fn parse_ctx_size(value: &str) -> Result<u32, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("auto") {
+        return Ok(CTX_AUTO);
+    }
+    value
+        .parse()
+        .map_err(|_| format!("`{value}` is not a number of tokens or `auto`"))
+}
+
+/// The context `--ctx-size auto` comes to: the largest window, up to what the
+/// model was trained for and [`AUTO_CTX_CEILING`], that still keeps every
+/// layer on the GPU, in steps of `align` tokens (the slots divide it, so the
+/// caller passes a multiple of them). The window gives way before a layer
+/// does, as llama.cpp's `--fit` does for a context nobody set.
+///
+/// `extra_reserve` is what is already spoken for besides the weights and the
+/// cache (companions, a projector, a larger micro-batch). When even
+/// [`AUTO_CTX_FLOOR`] leaves layers in RAM, that is what comes back, with
+/// `whole` false, and the usual split takes over. `None` when the card or the
+/// header cannot be read.
+#[allow(clippy::too_many_arguments)]
+pub fn auto_context(
+    free_vram: Option<(u64, u64)>,
+    info: Option<&GgufInfo>,
+    file_size: u64,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
+    extra_reserve: u64,
+    align: u32,
+) -> Option<AutoContext> {
+    let info = info?;
+    let align = align.max(1);
+    let floor = AUTO_CTX_FLOOR.div_ceil(align) * align;
+    let trained = info
+        .context_length
+        .filter(|&c| c > 0)
+        .unwrap_or(AUTO_CTX_CEILING);
+    let ceiling = (trained.min(AUTO_CTX_CEILING) / align * align).max(floor);
+    let whole_at = |ctx: u32| {
+        compute_fit(
+            free_vram,
+            Some(info),
+            file_size,
+            ctx,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+            vram_reserve.saturating_add(extra_reserve),
+        )
+    };
+    if matches!(whole_at(floor), FitDecision::Unknown { .. }) {
+        return None;
+    }
+    if whole_at(floor) != FitDecision::FitsFully {
+        return Some(AutoContext {
+            ctx: floor,
+            whole: false,
+        });
+    }
+    // The cost grows with the window, so the answer is the last step that
+    // still fits: bisect over the steps between the floor and the ceiling.
+    let (mut lo, mut hi) = (0u32, (ceiling - floor) / align);
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if whole_at(floor + mid * align) == FitDecision::FitsFully {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    Some(AutoContext {
+        ctx: floor + lo * align,
+        whole: true,
+    })
+}
+
+/// What [`auto_context`] settled on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutoContext {
+    /// The window, in tokens, all slots together.
+    pub ctx: u32,
+    /// Whether every layer fits on the GPU at that window.
+    pub whole: bool,
+}
+
+/// A `--vram-reserve` in bytes.
+pub const fn vram_reserve_bytes(mib: u32) -> u64 {
+    (mib as u64) << 20
+}
+
+/// [`DEFAULT_VRAM_RESERVE_MIB`] in bytes.
+pub const DEFAULT_VRAM_RESERVE_BYTES: u64 = vram_reserve_bytes(DEFAULT_VRAM_RESERVE_MIB);
 
 /// Flat reserve for the CUDA context + the prefill/decode compute buffer,
 /// which does not scale per offloaded layer. H2-H (docs/backlog-fix-e-hardening.md)
@@ -1045,8 +1189,9 @@ pub fn compute_fit(
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
 ) -> FitDecision {
-    let (free_vram, total_vram) = match vram {
+    let (free_vram, _) = match vram {
         Some(v) => v,
         None => {
             return FitDecision::Unknown {
@@ -1100,16 +1245,11 @@ pub fn compute_fit(
         None => (ctx_size as f64) * FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER,
     };
 
-    // Budget = free VRAM, minus the flat compute-buffer reserve, minus
-    // whichever headroom is larger: our own fragmentation margin, or the
-    // floor the loader's context probe will enforce anyway. Sizing past the
-    // loader's floor only produces splits it refuses.
-    let fragmentation_headroom = free_vram as f64 * (1.0 - VRAM_SAFETY_FRACTION);
-    let loader_floor = total_vram as f64 * MIN_FREE_TOTAL_RATIO;
-    let usable = (free_vram as f64
-        - fragmentation_headroom.max(loader_floor)
-        - COMPUTE_BUFFER_RESERVE_BYTES)
-        .max(0.0);
+    // Budget = free VRAM, minus the reserve that must stay free (the same
+    // amount the loader's context probe will demand, so sizing past it only
+    // produces splits it refuses), minus the flat compute-buffer reserve.
+    let usable =
+        (free_vram as f64 - vram_reserve as f64 - COMPUTE_BUFFER_RESERVE_BYTES).max(0.0);
 
     // Largest layer count whose exact cost fits the budget. A few hundred
     // iterations at most; the closed-form division stopped being exact the
@@ -1164,12 +1304,12 @@ pub enum MoeFitDecision {
 /// cache. What is left between the two is what the experts can have.
 fn moe_budget(
     free_vram: u64,
-    total_vram: u64,
     info: &GgufInfo,
     layout: &MoeLayout,
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
 ) -> (f64, f64) {
     let kv_per_paying_layer = match info.kv_elems_per_token_per_layer() {
         Some((k_elems, v_elems)) => {
@@ -1178,11 +1318,8 @@ fn moe_budget(
         None => (ctx_size as f64) * FALLBACK_KV_BYTES_PER_TOKEN_PER_LAYER,
     };
     let total_kv = kv_per_paying_layer * info.kv_paying_layers(info.n_layers as u64) as f64;
-    let usable = (free_vram as f64
-        - (free_vram as f64 * (1.0 - VRAM_SAFETY_FRACTION))
-            .max(total_vram as f64 * MIN_FREE_TOTAL_RATIO)
-        - COMPUTE_BUFFER_RESERVE_BYTES)
-        .max(0.0);
+    let usable =
+        (free_vram as f64 - vram_reserve as f64 - COMPUTE_BUFFER_RESERVE_BYTES).max(0.0);
     (usable, layout.non_expert_bytes as f64 + total_kv)
 }
 
@@ -1216,6 +1353,7 @@ pub fn cpu_expert_bytes(layout: &MoeLayout, n_cpu_moe: u32) -> u64 {
 /// UD-Q4_K_XL on an A100: 379 tokens/s read at 512, 1,876 at 8,192). So,
 /// as for an expert cache, a split sized with `auto_n_ubatch` takes
 /// [`MOE_CACHE_N_UBATCH`] if it still holds with the larger compute buffer.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_moe_fit_plan(
     vram: Option<(u64, u64)>,
     info: Option<&GgufInfo>,
@@ -1223,6 +1361,7 @@ pub fn compute_moe_fit_plan(
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
     auto_n_ubatch: bool,
 ) -> MoeFitPlan {
     let fit = |vram| {
@@ -1233,6 +1372,7 @@ pub fn compute_moe_fit_plan(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            vram_reserve,
         )
     };
     let mut decision = fit(vram);
@@ -1276,6 +1416,7 @@ pub fn compute_moe_fit(
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
 ) -> MoeFitDecision {
     let (Some((free_vram, total_vram)), Some(info), Some(layout)) = (vram, info, layout) else {
         return MoeFitDecision::NotMoe;
@@ -1286,12 +1427,12 @@ pub fn compute_moe_fit(
 
     let (usable, fixed_cost) = moe_budget(
         free_vram,
-        total_vram,
         info,
         layout,
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
     );
 
     if fixed_cost >= usable {
@@ -1305,6 +1446,7 @@ pub fn compute_moe_fit(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            vram_reserve,
         );
         let gpu_layers = match decision {
             FitDecision::FitsFully => -1,
@@ -1527,12 +1669,13 @@ pub fn plan_moe_cache(
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
     cpu_moe: bool,
     n_cpu_moe: u32,
     auto_n_ubatch: bool,
     prefetch: MoePrefetch,
 ) -> Option<MoeCachePlan> {
-    let (Some((free_vram, total_vram)), Some(info), Some(layout)) = (vram, info, layout) else {
+    let (Some((free_vram, _)), Some(info), Some(layout)) = (vram, info, layout) else {
         return None;
     };
     if !layout.is_moe() {
@@ -1540,12 +1683,12 @@ pub fn plan_moe_cache(
     }
     let (usable, fixed_cost) = moe_budget(
         free_vram,
-        total_vram,
         info,
         layout,
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
     );
     let expert_bytes: u64 = layout.expert_bytes_per_layer.iter().sum();
     // Without a flag of the user's sending experts to RAM, a model that fits
@@ -1867,6 +2010,104 @@ pub enum FitOutcome {
     Abort,
 }
 
+/// Layers a split may be short of the whole model for [`partial_split_hint`]
+/// to bother naming a lever: a few layers in RAM cost a lot of speed (two of
+/// 36 made a dense 8B four times slower) and are within reach of a setting,
+/// where half a model in RAM is not.
+const HINT_MAX_MISSING_LAYERS: u32 = 4;
+
+/// The smallest `--ctx-size` [`partial_split_hint`] suggests: a window below
+/// this is not what anyone asked a long context for.
+const HINT_MIN_CTX: u32 = 2048;
+
+/// When a split leaves only a few layers in RAM, what would put them all on
+/// the GPU, each worked out with [`compute_fit`] itself so that following it
+/// does what it says: the `--vram-reserve` that would do it (when still
+/// above [`MIN_VRAM_RESERVE_MIB`]), the `--ctx-size`, and the q8_0 KV cache
+/// (when the caches are larger than that). `None` when the split is not
+/// near-whole, or none of them gets there.
+#[allow(clippy::too_many_arguments)]
+pub fn partial_split_hint(
+    free_vram: u64,
+    info: &GgufInfo,
+    file_size: u64,
+    ctx_size: u32,
+    kv_bytes_per_elem_k: f64,
+    kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
+    layers: i32,
+    n_layers: u32,
+) -> Option<String> {
+    let on_gpu = u32::try_from(layers).ok()?;
+    if on_gpu >= n_layers || n_layers - on_gpu > HINT_MAX_MISSING_LAYERS {
+        return None;
+    }
+    let fits = |ctx: u32, k: f64, v: f64, reserve: u64| {
+        compute_fit(
+            Some((free_vram, free_vram)),
+            Some(info),
+            file_size,
+            ctx,
+            k,
+            v,
+            reserve,
+        ) == FitDecision::FitsFully
+    };
+    let mut levers = Vec::new();
+
+    // The reserve: the layers' bytes missing come out of it one for one.
+    // Walk down in 64 MiB steps from the current one, no further than the
+    // minimum.
+    let mut reserve_mib = (vram_reserve >> 20) as u32;
+    while reserve_mib > MIN_VRAM_RESERVE_MIB {
+        reserve_mib = reserve_mib.saturating_sub(64).max(MIN_VRAM_RESERVE_MIB);
+        if fits(
+            ctx_size,
+            kv_bytes_per_elem_k,
+            kv_bytes_per_elem_v,
+            vram_reserve_bytes(reserve_mib),
+        ) {
+            levers.push(format!(
+                "--vram-reserve {reserve_mib} (now {})",
+                vram_reserve >> 20
+            ));
+            break;
+        }
+    }
+
+    // The window, in steps of 1,024 tokens.
+    let mut ctx = ctx_size / 1024 * 1024;
+    if ctx == ctx_size {
+        ctx = ctx.saturating_sub(1024);
+    }
+    while ctx >= HINT_MIN_CTX {
+        if fits(ctx, kv_bytes_per_elem_k, kv_bytes_per_elem_v, vram_reserve) {
+            levers.push(format!("--ctx-size {ctx} (now {ctx_size})"));
+            break;
+        }
+        ctx -= 1024;
+    }
+
+    // The KV cache at 8 bits, where it is larger than that now.
+    let q8 = crate::inference::cache_type_bytes_per_elem(&crate::inference::KvCacheType::Q8_0);
+    if (kv_bytes_per_elem_k > q8 || kv_bytes_per_elem_v > q8)
+        && fits(ctx_size, q8.min(kv_bytes_per_elem_k), q8.min(kv_bytes_per_elem_v), vram_reserve)
+    {
+        levers.push(
+            "--cache-type-k q8_0 --cache-type-v q8_0 (less exact attention over a long window)"
+                .to_string(),
+        );
+    }
+
+    if levers.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "All {n_layers} layers would be on the GPU with any one of: {}.",
+        levers.join("; ")
+    ))
+}
+
 /// Run the `--fit` decision flow and return the effective `gpu_layers`.
 ///
 /// `fallback_gpu_layers` is the user-provided `--gpu-layers`, used whenever
@@ -1875,6 +2116,7 @@ pub enum FitOutcome {
 /// Headless safety: this only ever prompts when BOTH stdin and stdout are
 /// terminals. A non-interactive invocation proceeds with the computed split
 /// (printing a one-line warning) and never blocks.
+#[allow(clippy::too_many_arguments)]
 pub fn run_fit(
     model_path: &Path,
     fallback_gpu_layers: i32,
@@ -1883,6 +2125,7 @@ pub fn run_fit(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     reserve_bytes: u64,
+    vram_reserve: u64,
 ) -> FitOutcome {
     run_fit_impl(
         model_path,
@@ -1892,6 +2135,7 @@ pub fn run_fit(
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
         reserve_bytes,
+        vram_reserve,
         /* allow_prompt */ true,
         /* announce */ true,
     )
@@ -1903,6 +2147,7 @@ pub fn run_fit(
 /// IS a TTY, so the [`run_fit`] gate alone would block it on the first
 /// partial-fit load. A partial split proceeds with a logged one-liner;
 /// `strict` still refuses, and the caller turns that into an API error.
+#[allow(clippy::too_many_arguments)]
 pub fn run_fit_headless(
     model_path: &Path,
     fallback_gpu_layers: i32,
@@ -1911,6 +2156,7 @@ pub fn run_fit_headless(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     reserve_bytes: u64,
+    vram_reserve: u64,
 ) -> FitOutcome {
     run_fit_impl(
         model_path,
@@ -1920,6 +2166,7 @@ pub fn run_fit_headless(
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
         reserve_bytes,
+        vram_reserve,
         /* allow_prompt */ false,
         /* announce */ false,
     )
@@ -1946,6 +2193,7 @@ fn run_fit_impl(
     // reserved companion and not an ad-hoc one (see
     // `EmbeddingSlot::is_reserved_companion`).
     reserve_bytes: u64,
+    vram_reserve: u64,
     allow_prompt: bool,
     announce: bool,
 ) -> FitOutcome {
@@ -1961,6 +2209,7 @@ fn run_fit_impl(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
     );
 
     match decision {
@@ -2002,6 +2251,19 @@ fn run_fit_impl(
         }
         FitDecision::Partial { layers, n_layers } => {
             let free = free_vram.unwrap_or(0);
+            let hint = info.as_ref().and_then(|info| {
+                partial_split_hint(
+                    free,
+                    info,
+                    file_size,
+                    ctx_size,
+                    kv_bytes_per_elem_k,
+                    kv_bytes_per_elem_v,
+                    vram_reserve,
+                    layers,
+                    n_layers,
+                )
+            });
             if strict {
                 eprintln!(
                     "[EULLM] --fit-strict: model needs ~{} but only {} VRAM is free; not loading.",
@@ -2021,6 +2283,9 @@ fn run_fit_impl(
                 println!(
                     "  Computed split: {layers}/{n_layers} layers on GPU, rest in RAM (slower)."
                 );
+                if let Some(hint) = &hint {
+                    println!("  {hint}");
+                }
                 loop {
                     print!("  Continue with this split? [c]ontinue / [a]bort > ");
                     let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -2047,6 +2312,9 @@ fn run_fit_impl(
                     gib(free),
                     gib(file_size),
                 );
+                if let Some(hint) = &hint {
+                    eprintln!("[EULLM] {hint}");
+                }
                 FitOutcome::Proceed(layers)
             }
         }
@@ -2074,6 +2342,7 @@ pub fn run_moe_fit_plan(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     reserve_bytes: u64,
+    vram_reserve: u64,
     auto_n_ubatch: bool,
 ) -> MoeFitPlan {
     let info = read_gguf_info(model_path);
@@ -2090,6 +2359,7 @@ pub fn run_moe_fit_plan(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
         auto_n_ubatch,
     )
 }
@@ -2104,6 +2374,7 @@ pub fn run_moe_cache(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     reserve_bytes: u64,
+    vram_reserve: u64,
     request: MoeCache,
     cpu_moe: bool,
     n_cpu_moe: u32,
@@ -2125,6 +2396,7 @@ pub fn run_moe_cache(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
         cpu_moe,
         n_cpu_moe,
         auto_n_ubatch,
@@ -2245,6 +2517,7 @@ pub fn place_mmproj(
     ctx_size: u32,
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
+    vram_reserve: u64,
     mmproj_bytes: u64,
 ) -> MmprojPlacement {
     if mmproj_bytes == 0 {
@@ -2266,6 +2539,7 @@ pub fn place_mmproj(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
     ) {
         MoeFitDecision::Proceed { n_cpu_moe: 0 } => true,
         MoeFitDecision::NotMoe => match compute_fit(
@@ -2275,6 +2549,7 @@ pub fn place_mmproj(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            vram_reserve,
         ) {
             FitDecision::FitsFully => true,
             FitDecision::Partial { .. } => false,
@@ -2304,6 +2579,7 @@ pub fn decide_mmproj_placement(
     kv_bytes_per_elem_k: f64,
     kv_bytes_per_elem_v: f64,
     reserve_bytes: u64,
+    vram_reserve: u64,
 ) -> MmprojPlacement {
     if mmproj_bytes == 0 {
         return MmprojPlacement::FollowText;
@@ -2323,6 +2599,7 @@ pub fn decide_mmproj_placement(
         ctx_size,
         kv_bytes_per_elem_k,
         kv_bytes_per_elem_v,
+        vram_reserve,
         mmproj_bytes,
     )
 }
@@ -2350,6 +2627,9 @@ pub struct OffloadFlags {
     /// `--moe-prefetch`, and what decides whether an expert cache keeps room
     /// for its slots.
     pub moe_prefetch: MoePrefetch,
+    /// `--vram-reserve` in bytes: what must stay free after the load (see
+    /// [`DEFAULT_VRAM_RESERVE_MIB`]).
+    pub vram_reserve: u64,
 }
 
 /// What sizing decided, before the `--gpu-layers` ceiling: what the load
@@ -2445,6 +2725,7 @@ pub fn plan_offload(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            flags.vram_reserve,
             mmproj_bytes,
         ),
         forced => MmprojPlacement::from_flag(forced),
@@ -2460,6 +2741,7 @@ pub fn plan_offload(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            flags.vram_reserve,
             flags.cpu_moe,
             flags.n_cpu_moe,
             flags.auto_n_ubatch,
@@ -2508,6 +2790,7 @@ pub fn plan_offload(
             ctx_size,
             kv_bytes_per_elem_k,
             kv_bytes_per_elem_v,
+            flags.vram_reserve,
             flags.auto_n_ubatch,
         )
     };
@@ -2532,6 +2815,7 @@ pub fn plan_offload(
                 ctx_size,
                 kv_bytes_per_elem_k,
                 kv_bytes_per_elem_v,
+                flags.vram_reserve,
             );
             let gpu_layers = match decision {
                 FitDecision::FitsFully => -1,
@@ -2597,7 +2881,7 @@ impl OffloadPlan {
     /// it has always used, so a load logs what it did as before: nothing for
     /// a model it could not size unless `--fit-strict` refuses it then.
     /// `file_size` is the model's, for the sizes it states.
-    pub fn print_decision(&self, file_size: u64, strict: bool) {
+    pub fn print_decision(&self, file_size: u64, strict: bool, hint: Option<&str>) {
         let free = self.free_vram.unwrap_or(0);
         match &self.basis {
             OffloadBasis::MoeExperts { n_cpu_moe } => tracing::info!(
@@ -2639,13 +2923,18 @@ impl OffloadPlan {
                     "[EULLM] Retry without --fit-strict to offload {layers}/{n_layers} layers (rest in RAM)."
                 );
             }
-            OffloadBasis::Dense(FitDecision::Partial { layers, n_layers }) => eprintln!(
-                "[EULLM] Model larger than free VRAM ({} free, model {}): \
-                 offloading {layers}/{n_layers} layers, the rest runs in RAM (slower). \
-                 Set --gpu-layers to choose yourself, or --no-fit to disable sizing.",
-                gib(free),
-                gib(file_size),
-            ),
+            OffloadBasis::Dense(FitDecision::Partial { layers, n_layers }) => {
+                eprintln!(
+                    "[EULLM] Model larger than free VRAM ({} free, model {}): \
+                     offloading {layers}/{n_layers} layers, the rest runs in RAM (slower). \
+                     Set --gpu-layers to choose yourself, or --no-fit to disable sizing.",
+                    gib(free),
+                    gib(file_size),
+                );
+                if let Some(hint) = hint {
+                    eprintln!("[EULLM] {hint}");
+                }
+            }
             OffloadBasis::Dense(FitDecision::Unknown { reason }) if strict => {
                 eprintln!("[EULLM] --fit could not size the model: {reason}.");
                 eprintln!(
@@ -2779,6 +3068,7 @@ mod tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         }
     }
 
@@ -2824,7 +3114,7 @@ mod tests {
                 4096,
                 F16.0,
                 F16.1,
-            );
+                DEFAULT_VRAM_RESERVE_BYTES);
             if d == FitDecision::FitsFully {
                 return free;
             }
@@ -2848,8 +3138,8 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-            projector,
-        )
+            DEFAULT_VRAM_RESERVE_BYTES,
+            projector)
     }
 
     /// The case from the report, and the one that has to discriminate: enough
@@ -2872,7 +3162,8 @@ mod tests {
                 file_size,
                 4096,
                 F16.0,
-                F16.1
+                F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES
             ),
             FitDecision::FitsFully,
             "the text model alone must fit here, or this proves nothing"
@@ -2925,8 +3216,8 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-            PROJECTOR,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES,
+            PROJECTOR);
         assert_eq!(unknown, MmprojPlacement::FollowText);
         assert_eq!(
             place(15 * GIB, 16 * GIB, &info, 12 * GIB, 0),
@@ -2940,8 +3231,8 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-            PROJECTOR,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES,
+            PROJECTOR);
         assert_eq!(headerless, MmprojPlacement::FollowText);
 
         assert_eq!(MmprojPlacement::Gpu.on_gpu(), Some(true));
@@ -2986,7 +3277,7 @@ mod tests {
     #[test]
     fn fit_unknown_when_no_vram() {
         let info = info_layers(28);
-        let d = compute_fit(None, Some(&info), 5_000_000_000, 4096, F16.0, F16.1);
+        let d = compute_fit(None, Some(&info), 5_000_000_000, 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         assert!(matches!(d, FitDecision::Unknown { .. }));
     }
 
@@ -3003,7 +3294,7 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES);
         assert!(matches!(d, FitDecision::Unknown { .. }));
     }
 
@@ -3018,7 +3309,7 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES);
         assert_eq!(d, FitDecision::FitsFully);
     }
 
@@ -3033,7 +3324,7 @@ mod tests {
             4096,
             F16.0,
             F16.1,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES);
         match d {
             FitDecision::Partial { layers, n_layers } => {
                 assert!(layers > 0 && (layers as u32) < n_layers);
@@ -3060,15 +3351,16 @@ mod tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let free = 15 * 1024 * 1024 * 1024; // ~15 GiB free, 18.5 GB model
         let file = 18_500_000_000;
         // Large context so the KV term is significant.
         let ctx = 32768;
 
-        let f16 = compute_fit(Some((free, free)), Some(&info), file, ctx, 2.0, 2.0);
+        let f16 = compute_fit(Some((free, free)), Some(&info), file, ctx, 2.0, 2.0, DEFAULT_VRAM_RESERVE_BYTES);
         // Q4_0 ≈ 0.5625 B/elem for both K and V.
-        let q4 = compute_fit(Some((free, free)), Some(&info), file, ctx, 0.5625, 0.5625);
+        let q4 = compute_fit(Some((free, free)), Some(&info), file, ctx, 0.5625, 0.5625, DEFAULT_VRAM_RESERVE_BYTES);
 
         let layers = |d: &FitDecision| match d {
             FitDecision::Partial { layers, .. } => *layers,
@@ -3178,7 +3470,7 @@ mod tests {
                 4096,
                 F16.0,
                 F16.1,
-            );
+                DEFAULT_VRAM_RESERVE_BYTES);
             prop_assert!(matches!(d, FitDecision::Unknown { .. }), "{n} layers gave {d:?}");
         }
     }
@@ -3203,12 +3495,153 @@ mod plan_offload_tests {
             full_attention_interval: None,
             architecture: Some("qwen3".into()),
             nextn_layers: None,
+            context_length: None,
         }
     }
 
     /// A dense 14B: 40 layers, 160 KiB of F16 KV per token.
     fn dense() -> (GgufInfo, u64) {
         (attention(40, 8), 8 * GIB + 400 * MIB)
+    }
+
+    /// `auto_context` on the dense 14B above, 160 KiB of F16 KV per token,
+    /// with `free` bytes free, a 1 GiB reserve, and the window the model was
+    /// trained for.
+    fn auto_on_dense(free: u64, trained: Option<u32>, align: u32) -> Option<AutoContext> {
+        let (mut info, size) = dense();
+        info.context_length = trained;
+        auto_context(
+            Some((free, free)),
+            Some(&info),
+            size,
+            F16.0,
+            F16.1,
+            GIB,
+            0,
+            align,
+        )
+    }
+
+    #[test]
+    fn auto_context_stops_at_what_the_model_was_trained_for_when_the_card_has_room() {
+        // 80 GiB free: the cache of 32768 tokens (5 GiB) is nothing to it.
+        let auto = auto_on_dense(80 * GIB, Some(32_768), 256).unwrap();
+        assert_eq!(
+            auto,
+            AutoContext {
+                ctx: 32_768,
+                whole: true
+            }
+        );
+        // No header value: the ceiling of the key, not a guess.
+        let auto = auto_on_dense(400 * GIB, None, 256).unwrap();
+        assert_eq!(auto.ctx, AUTO_CTX_CEILING);
+        // A 1M-token model on a big card is still held to it.
+        let auto = auto_on_dense(400 * GIB, Some(1_048_576), 256).unwrap();
+        assert_eq!(auto.ctx, AUTO_CTX_CEILING);
+    }
+
+    #[test]
+    fn auto_context_is_the_largest_window_that_keeps_every_layer_on_the_card() {
+        // 16 GiB free: weights 8.4 GiB, 1 GiB reserve and the compute buffer
+        // leave about 6.3 GiB for the cache, some 41,000 tokens.
+        let free = 16 * GIB;
+        for align in [256, 768, 4096] {
+            let auto = auto_on_dense(free, Some(131_072), align).unwrap();
+            assert!(auto.whole);
+            assert_eq!(auto.ctx % align, 0, "align {align}");
+            let (info, size) = dense();
+            let whole_at = |ctx: u32| {
+                compute_fit(
+                    Some((free, free)),
+                    Some(&info),
+                    size,
+                    ctx,
+                    F16.0,
+                    F16.1,
+                    GIB,
+                ) == FitDecision::FitsFully
+            };
+            assert!(whole_at(auto.ctx), "align {align}: {} must fit", auto.ctx);
+            assert!(
+                !whole_at(auto.ctx + align),
+                "align {align}: {} would fit as well",
+                auto.ctx + align
+            );
+        }
+    }
+
+    #[test]
+    fn auto_context_gives_way_to_the_weights_only_below_the_floor() {
+        // 9.6 GiB free: the weights and the reserve are there, a cache of
+        // 4096 tokens (640 MiB) is not.
+        let auto = auto_on_dense(9 * GIB + 600 * MIB, Some(131_072), 256).unwrap();
+        assert_eq!(
+            auto,
+            AutoContext {
+                ctx: AUTO_CTX_FLOOR,
+                whole: false
+            }
+        );
+        // The floor is a multiple of the slots' block, rounded up.
+        let auto = auto_on_dense(9 * GIB + 600 * MIB, Some(131_072), 768).unwrap();
+        assert_eq!(auto.ctx, 4608);
+    }
+
+    #[test]
+    fn auto_context_counts_what_is_already_spoken_for() {
+        let (info, size) = dense();
+        let ask = |extra: u64| {
+            auto_context(
+                Some((20 * GIB, 20 * GIB)),
+                Some(&info),
+                size,
+                F16.0,
+                F16.1,
+                GIB,
+                extra,
+                256,
+            )
+            .unwrap()
+            .ctx
+        };
+        // 3 GiB of companions are 3 GiB less cache: 160 KiB a token.
+        let (without, with) = (ask(0), ask(3 * GIB));
+        assert!(without > with);
+        let lost = (without - with) as u64 * 160 * 1024;
+        assert!(lost.abs_diff(3 * GIB) < 512 * 1024 * 1024, "lost {lost}");
+    }
+
+    #[test]
+    fn auto_context_says_nothing_without_a_card_or_a_header() {
+        let (info, size) = dense();
+        assert_eq!(
+            auto_context(None, Some(&info), size, F16.0, F16.1, GIB, 0, 256),
+            None
+        );
+        assert_eq!(
+            auto_context(
+                Some((16 * GIB, 16 * GIB)),
+                None,
+                size,
+                F16.0,
+                F16.1,
+                GIB,
+                0,
+                256
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn ctx_size_takes_a_number_or_auto() {
+        assert_eq!(parse_ctx_size("8192"), Ok(8192));
+        assert_eq!(parse_ctx_size("auto"), Ok(CTX_AUTO));
+        assert_eq!(parse_ctx_size(" AUTO "), Ok(CTX_AUTO));
+        assert_eq!(parse_ctx_size("0"), Ok(CTX_AUTO));
+        assert!(parse_ctx_size("big").is_err());
+        assert!(parse_ctx_size("-1").is_err());
     }
 
     /// A 30B-A3B-shaped MoE: 48 layers, 2 GiB outside the experts and
@@ -3232,7 +3665,118 @@ mod plan_offload_tests {
             moe_cache: None,
             auto_n_ubatch: false,
             moe_prefetch: MoePrefetch::default(),
+            vram_reserve: DEFAULT_VRAM_RESERVE_BYTES,
         }
+    }
+
+    /// Qwen3-8B Q4_K_M with a 65,536-token window on a 16 GB RTX 5070 Ti
+    /// (15,841 MiB, 15,595 free; measured 17-10-2026). The reserve was 12%
+    /// of the card, 1,901 MiB, and the fit kept two of its 36 layers in RAM:
+    /// 52 tokens/s on one request against 132 with all 36 on the GPU.
+    #[test]
+    fn a_dense_8b_with_a_long_window_fits_whole_on_a_16_gb_card() {
+        let info = attention(36, 8);
+        let card = (15_595 * MIB, 15_841 * MIB);
+        let fit = |reserve| {
+            compute_fit(Some(card), Some(&info), 4_792 * MIB, 65_536, F16.0, F16.1, reserve)
+        };
+        assert_eq!(fit(DEFAULT_VRAM_RESERVE_BYTES), FitDecision::FitsFully);
+        // The share of the card it used to leave free.
+        assert_eq!(
+            fit(1_901 * MIB),
+            FitDecision::Partial {
+                layers: 34,
+                n_layers: 36
+            }
+        );
+    }
+
+    /// The split that cost the 8B two layers names what would have kept them,
+    /// each of which works when followed; a split far from whole names none.
+    #[test]
+    fn a_split_a_few_layers_short_names_what_would_fit_the_rest() {
+        let info = attention(36, 8);
+        let free = 15_595 * MIB;
+        let hint = |reserve: u64, layers, k: f64, v: f64| {
+            partial_split_hint(free, &info, 4_792 * MIB, 65_536, k, v, reserve, layers, 36)
+        };
+        let text = hint(1_901 * MIB, 34, F16.0, F16.1).expect("two layers short");
+        assert!(text.contains("--vram-reserve 1261 (now 1901"), "{text}");
+        assert!(text.contains("--ctx-size 60416 (now 65536)"), "{text}");
+        assert!(text.contains("--cache-type-k q8_0 --cache-type-v q8_0"), "{text}");
+        // Each one does what it says.
+        let fits = |ctx, k, v, reserve| {
+            compute_fit(Some((free, free)), Some(&info), 4_792 * MIB, ctx, k, v, reserve)
+                == FitDecision::FitsFully
+        };
+        assert!(fits(65_536, F16.0, F16.1, 1_261 * MIB));
+        assert!(fits(60_416, F16.0, F16.1, 1_901 * MIB));
+        assert!(fits(65_536, 1.0625, 1.0625, 1_901 * MIB));
+        assert!(!fits(61_440 + 1024, F16.0, F16.1, 1_901 * MIB));
+        // Already at q8_0: no lever there. Whole, or half the model short:
+        // nothing to say.
+        let q8 = hint(1_901 * MIB, 34, 1.0625, 1.0625).unwrap_or_default();
+        assert!(!q8.contains("--cache-type-k"), "{q8}");
+        assert_eq!(hint(1_901 * MIB, 36, F16.0, F16.1), None);
+        assert_eq!(hint(1_901 * MIB, 18, F16.0, F16.1), None);
+        // A reserve already at the minimum cannot be lowered.
+        let floor = hint(256 * MIB, 34, F16.0, F16.1).unwrap_or_default();
+        assert!(!floor.contains("--vram-reserve"), "{floor}");
+    }
+
+    /// The reserve is the same on a small card and a large one: that is what
+    /// moving from a share of the card to MiB changes.
+    #[test]
+    fn the_reserve_does_not_grow_with_the_card() {
+        let info = attention(36, 8);
+        let file = 4_792 * MIB;
+        // A model that fits whole with a gigabyte to spare, on a 16 GB card
+        // and on a 96 GB one.
+        for total in [16 * GIB, 96 * GIB] {
+            let free = total - GIB / 4;
+            assert_eq!(
+                compute_fit(
+                    Some((free, total)),
+                    Some(&info),
+                    file,
+                    4096,
+                    F16.0,
+                    F16.1,
+                    DEFAULT_VRAM_RESERVE_BYTES
+                ),
+                FitDecision::FitsFully
+            );
+        }
+        // And the reserve bites exactly where it says: free memory that
+        // leaves less than the reserve beside the compute buffer, the KV
+        // cache and the weights keeps a layer back.
+        let kv = 4096 * 36 * (8 * 128 * 2 * 2);
+        let needed = file + kv + COMPUTE_BUFFER_RESERVE_BYTES as u64 + DEFAULT_VRAM_RESERVE_BYTES;
+        let at = |free| {
+            compute_fit(
+                Some((free, 16 * GIB)),
+                Some(&info),
+                file,
+                4096,
+                F16.0,
+                F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES,
+            )
+        };
+        assert_eq!(at(needed), FitDecision::FitsFully);
+        assert!(matches!(at(needed - 1), FitDecision::Partial { .. }));
+    }
+
+    /// `--vram-reserve` below the minimum is refused with the reason.
+    #[test]
+    fn a_reserve_below_the_minimum_is_refused() {
+        assert_eq!(parse_vram_reserve("1024"), Ok(1024));
+        assert_eq!(parse_vram_reserve(" 256 "), Ok(MIN_VRAM_RESERVE_MIB));
+        let low = parse_vram_reserve("255").unwrap_err();
+        assert!(low.contains("256 MiB minimum"), "{low}");
+        assert!(parse_vram_reserve("0").is_err());
+        assert!(parse_vram_reserve("1 GiB").unwrap_err().contains("not a number"));
+        assert_eq!(vram_reserve_bytes(1024), DEFAULT_VRAM_RESERVE_BYTES);
     }
 
     /// A split with experts in RAM reads prompts in a larger micro-batch when
@@ -3313,13 +3857,13 @@ mod plan_offload_tests {
                     ctx,
                     F16.0,
                     F16.1,
-                    mmproj_bytes,
-                )
+                    DEFAULT_VRAM_RESERVE_BYTES,
+                    mmproj_bytes)
             };
         }
         reserve += placement.reserve(mmproj_bytes);
         let moe = if !cpu_moe && n_cpu_moe == 0 {
-            compute_moe_fit(less(reserve), info, layout, ctx, F16.0, F16.1)
+            compute_moe_fit(less(reserve), info, layout, ctx, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES)
         } else {
             MoeFitDecision::NotMoe
         };
@@ -3334,7 +3878,7 @@ mod plan_offload_tests {
                 cpu_moe = true;
                 gl
             }
-            _ => match compute_fit(less(reserve), info, file_size, ctx, F16.0, F16.1) {
+            _ => match compute_fit(less(reserve), info, file_size, ctx, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES) {
                 FitDecision::FitsFully => -1,
                 FitDecision::Partial { layers, .. } => layers,
                 FitDecision::Unknown { .. } => flags.gpu_layers,
@@ -3545,14 +4089,14 @@ mod plan_offload_tests {
                 4096,
                 F16.0,
                 F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES,
                 cpu_moe,
                 n_cpu_moe,
                 false,
-                MoePrefetch::default(),
-            )
+                MoePrefetch::default())
         };
         let card = (14 * GIB, 16 * GIB);
-        let (usable, fixed) = moe_budget(card.0, card.1, &info, &layout, 4096, F16.0, F16.1);
+        let (usable, fixed) = moe_budget(card.0, &info, &layout, 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         let room = (usable - fixed) as u64;
 
         let auto = cache(MoeCache::Auto, card, false, 0).expect("the experts do not fit");
@@ -3588,7 +4132,7 @@ mod plan_offload_tests {
         assert_eq!(cache(MoeCache::Auto, (3 * GIB, 16 * GIB), false, 0), None);
 
         // 384 MiB of room: too little for an automatic cache, enough for 300 MiB asked for.
-        let tight = fixed as u64 + 16 * GIB * 12 / 100 + 320 * MIB + 384 * MIB;
+        let tight = fixed as u64 + DEFAULT_VRAM_RESERVE_BYTES + 320 * MIB + 384 * MIB;
         assert_eq!(cache(MoeCache::Auto, (tight, 16 * GIB), false, 0), None);
         let small = cache(MoeCache::Mib(300), (tight, 16 * GIB), false, 0).unwrap();
         assert_eq!(small.bytes, 300 * MIB);
@@ -3617,11 +4161,11 @@ mod plan_offload_tests {
                 4096,
                 F16.0,
                 F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES,
                 false,
                 0,
                 auto_n_ubatch,
-                MoePrefetch::default(),
-            )
+                MoePrefetch::default())
         };
         let card = (14 * GIB, 16 * GIB);
         let default = cache(MoeCache::Auto, card, false).unwrap();
@@ -3636,7 +4180,7 @@ mod plan_offload_tests {
         let asked = cache(MoeCache::Mib(2000), card, true).unwrap();
         assert_eq!((asked.bytes, asked.n_ubatch), (2000 * MIB, Some(MOE_CACHE_N_UBATCH)));
         // One that fits only with the default micro-batch keeps it, whole.
-        let (usable, fixed) = moe_budget(card.0, card.1, &info, &layout, 4096, F16.0, F16.1);
+        let (usable, fixed) = moe_budget(card.0, &info, &layout, 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         let room_mib = ((usable - fixed) as u64 / MIB) as u32;
         let snug = cache(MoeCache::Mib(room_mib - 64), card, true).unwrap();
         assert_eq!(snug.bytes, u64::from(room_mib - 64) * MIB);
@@ -3644,7 +4188,7 @@ mod plan_offload_tests {
 
         // Too little room for a cache beside the larger buffer: the default
         // micro-batch, and the cache it leaves room for.
-        let fixed_and_floor = fixed as u64 + 16 * GIB * 12 / 100 + 320 * MIB;
+        let fixed_and_floor = fixed as u64 + DEFAULT_VRAM_RESERVE_BYTES + 320 * MIB;
         let tight = (fixed_and_floor + GIB, 16 * GIB);
         let kept = cache(MoeCache::Auto, tight, true).unwrap();
         assert_eq!(kept.n_ubatch, None);
@@ -3726,14 +4270,14 @@ mod plan_offload_tests {
                 4096,
                 F16.0,
                 F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES,
                 false,
                 0,
                 auto_n_ubatch,
-                prefetch,
-            )
+                prefetch)
         };
         let card = (14 * GIB, 16 * GIB);
-        let (usable, fixed) = moe_budget(card.0, card.1, &info, &layout, 4096, F16.0, F16.1);
+        let (usable, fixed) = moe_budget(card.0, &info, &layout, 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         let room = (usable - fixed) as u64;
         let step_down = |bytes: u64| bytes / (256 * MIB) * (256 * MIB);
         let slots = 4 * 150 * MIB;
@@ -3785,7 +4329,7 @@ mod plan_offload_tests {
         // Room for the larger micro-batch and a cache of 768 MiB (and a bit),
         // which the slots would cut below the minimum: the micro-batch stays,
         // the slots give way.
-        let fixed_and_floor = fixed as u64 + 16 * GIB * 12 / 100 + 320 * MIB;
+        let fixed_and_floor = fixed as u64 + DEFAULT_VRAM_RESERVE_BYTES + 320 * MIB;
         let tight = (fixed_and_floor + extra + 832 * MIB, 16 * GIB);
         let larger = cache(MoeCache::Auto, tight, true, four).unwrap();
         assert_eq!(larger.n_ubatch, Some(MOE_CACHE_N_UBATCH));
@@ -4120,6 +4664,7 @@ mod plan_offload_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".into()),
             nextn_layers: Some(1),
+            context_length: None,
             ..attention(25, 2)
         };
         let reserve = |info: &GgufInfo, ctx, n_ubatch| {
@@ -4158,6 +4703,7 @@ mod plan_offload_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".into()),
             nextn_layers: None,
+            context_length: None,
             ..attention(25, 2)
         };
         let file = 4 * GIB;
@@ -4186,6 +4732,7 @@ mod plan_offload_tests {
         let info = GgufInfo {
             n_embd: Some(5120),
             nextn_layers: Some(1),
+            context_length: None,
             ..info
         };
         let total = 16 * GIB;
@@ -4199,7 +4746,7 @@ mod plan_offload_tests {
                 4096,
                 F16.0,
                 F16.1,
-            ) == FitDecision::FitsFully
+                DEFAULT_VRAM_RESERVE_BYTES) == FitDecision::FitsFully
         };
         let free = (1..=total / (64 * MIB))
             .map(|steps| steps * 64 * MIB)
@@ -4462,6 +5009,7 @@ mod key_length_tests {
     #[test]
     fn stops_reading_once_every_wanted_key_is_in_hand() {
         let data = header(&[
+            (b"arch.context_length", 40960),
             (b"arch.block_count", 40),
             (b"arch.embedding_length", 2048),
             (b"arch.attention.head_count", 16),
@@ -4474,16 +5022,18 @@ mod key_length_tests {
         ]);
         let info = parse_gguf_header(&data).expect("parses");
         assert_eq!(info.n_layers, 40);
+        assert_eq!(info.context_length, Some(40960));
         assert_eq!(info.full_attention_interval, Some(4));
         assert_eq!(info.nextn_layers, Some(1));
     }
 
     /// The sizer must never hand the loader a split the loader will refuse.
-    /// `inference::probe_and_shrink_context` requires 12% of the card's
-    /// TOTAL memory to still be free once the model and its context are
-    /// resident; sizing to leave 3% of *free* VRAM broke that on a swap
-    /// into a 27B on a 16 GiB card — the weights loaded, then the context
-    /// allocation failed all the way down to 512 tokens.
+    /// `inference::probe_and_shrink_context` requires the reserve to still
+    /// be free once the model and its context are resident; sizing to leave
+    /// a different amount than the probe asks (3% of *free* VRAM, against 12%
+    /// of the card's total) broke that on a swap into a 27B on a 16 GiB card
+    /// — the weights loaded, then the context allocation failed all the way
+    /// down to 512 tokens.
     #[test]
     fn sizing_leaves_the_headroom_the_loader_requires() {
         const GIB: u64 = 1024 * 1024 * 1024;
@@ -4497,13 +5047,14 @@ mod key_length_tests {
             full_attention_interval: Some(4),
             architecture: Some("qwen35".to_string()),
             nextn_layers: None,
+            context_length: None,
         };
         // The reported case: 14.38 GiB free on a 15.92 GiB card, 15.66 GiB
         // of weights, 4096 context, F16 cache.
         let free = (14.38 * GIB as f64) as u64;
         let total = (15.92 * GIB as f64) as u64;
         let file = (15.66 * GIB as f64) as u64;
-        let layers = match compute_fit(Some((free, total)), Some(&info), file, 4096, 2.0, 2.0) {
+        let layers = match compute_fit(Some((free, total)), Some(&info), file, 4096, 2.0, 2.0, DEFAULT_VRAM_RESERVE_BYTES) {
             FitDecision::Partial { layers, .. } => layers,
             other => panic!("expected a partial split, got {other:?}"),
         };
@@ -4516,10 +5067,10 @@ mod key_length_tests {
         let used = layers as f64 * per_layer_weight + paying * kv_per_paying;
         let left = free as f64 - used - COMPUTE_BUFFER_RESERVE_BYTES;
         assert!(
-            left >= total as f64 * MIN_FREE_TOTAL_RATIO,
+            left >= DEFAULT_VRAM_RESERVE_BYTES as f64,
             "split of {layers} layers leaves {:.2} GiB, below the loader's {:.2} GiB floor",
             left / GIB as f64,
-            total as f64 * MIN_FREE_TOTAL_RATIO / GIB as f64
+            DEFAULT_VRAM_RESERVE_BYTES as f64 / GIB as f64
         );
         // And it is still a useful split, not a collapse to CPU.
         assert!(layers > 40, "expected a substantial offload, got {layers}");
@@ -4587,6 +5138,7 @@ mod key_length_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let hybrid = GgufInfo {
             full_attention_interval: Some(4),
@@ -4595,11 +5147,11 @@ mod key_length_tests {
         let free = Some((16u64 * 1024 * 1024 * 1024, 16u64 * 1024 * 1024 * 1024));
         let file_size = 22u64 * 1024 * 1024 * 1024;
         let ctx = 131072;
-        let dense_layers = match compute_fit(free, Some(&dense), file_size, ctx, 2.0, 2.0) {
+        let dense_layers = match compute_fit(free, Some(&dense), file_size, ctx, 2.0, 2.0, DEFAULT_VRAM_RESERVE_BYTES) {
             FitDecision::Partial { layers, .. } => layers,
             other => panic!("expected partial, got {other:?}"),
         };
-        let hybrid_layers = match compute_fit(free, Some(&hybrid), file_size, ctx, 2.0, 2.0) {
+        let hybrid_layers = match compute_fit(free, Some(&hybrid), file_size, ctx, 2.0, 2.0, DEFAULT_VRAM_RESERVE_BYTES) {
             FitDecision::Partial { layers, .. } => layers,
             other => panic!("expected partial, got {other:?}"),
         };
@@ -4624,6 +5176,7 @@ mod key_length_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         };
         let assumed = GgufInfo {
             key_length: None,
@@ -4637,7 +5190,7 @@ mod key_length_tests {
         let file = 2_500_000_000;
         let ctx = 32768;
 
-        let layers = |i: &GgufInfo| match compute_fit(Some((free, free)), Some(i), file, ctx, 2.0, 2.0) {
+        let layers = |i: &GgufInfo| match compute_fit(Some((free, free)), Some(i), file, ctx, 2.0, 2.0, DEFAULT_VRAM_RESERVE_BYTES) {
             FitDecision::Partial { layers, .. } => layers,
             FitDecision::FitsFully => i32::MAX,
             FitDecision::Unknown { .. } => -1,
@@ -4958,6 +5511,7 @@ mod moe_fit_tests {
             full_attention_interval: None,
             architecture: None,
             nextn_layers: None,
+            context_length: None,
         }
     }
 
@@ -4975,7 +5529,7 @@ mod moe_fit_tests {
             4096,
             F16.0,
             F16.1,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES);
         assert_eq!(d, MoeFitDecision::NotMoe);
     }
 
@@ -4986,7 +5540,7 @@ mod moe_fit_tests {
             expert_bytes_per_layer: vec![1_000_000_000],
             ..Default::default()
         };
-        let d = compute_moe_fit(None, Some(&info(1)), Some(&layout), 4096, F16.0, F16.1);
+        let d = compute_moe_fit(None, Some(&info(1)), Some(&layout), 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         assert_eq!(d, MoeFitDecision::NotMoe);
     }
 
@@ -5005,7 +5559,7 @@ mod moe_fit_tests {
             4096,
             F16.0,
             F16.1,
-        );
+            DEFAULT_VRAM_RESERVE_BYTES);
         assert_eq!(d, MoeFitDecision::Proceed { n_cpu_moe: 0 });
     }
 
@@ -5022,11 +5576,12 @@ mod moe_fit_tests {
             expert_bytes_per_layer: vec![per_layer_expert; 4],
             ..Default::default()
         };
-        // usable ≈ free*0.97 - 640MiB. Pick free VRAM so that after non-expert
-        // (1GB) + a small KV term, there's room for exactly ~1 layer of
-        // experts (2GB) but not 2 (4GB).
-        let free = 4_200_000_000u64;
-        let d = compute_moe_fit(Some((free, free)), Some(&info(4)), Some(&layout), 512, F16.0, F16.1);
+        // usable = free - 1 GiB reserve - 320 MiB compute buffer. Pick free
+        // VRAM so that after non-expert (1GB) + a small KV term, there's room
+        // for exactly ~1 layer of experts (2GB) but not 2 (4GB). 4.2 GB
+        // before the reserve was absolute (it was 12% of the card, 3% of free).
+        let free = 4_800_000_000u64;
+        let d = compute_moe_fit(Some((free, free)), Some(&info(4)), Some(&layout), 512, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         match d {
             MoeFitDecision::Proceed { n_cpu_moe } => {
                 assert_eq!(n_cpu_moe, 3, "expected layers 0..=2 evicted, layer 3 kept");
@@ -5045,7 +5600,7 @@ mod moe_fit_tests {
             ..Default::default()
         };
         let free = 8_000_000_000u64; // 8 GB free
-        let d = compute_moe_fit(Some((free, free)), Some(&info(2)), Some(&layout), 4096, F16.0, F16.1);
+        let d = compute_moe_fit(Some((free, free)), Some(&info(2)), Some(&layout), 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         match d {
             MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers } => {
                 assert!(gpu_layers >= 0, "must still resolve to a loadable split");
@@ -5070,7 +5625,7 @@ mod moe_fit_tests {
             ..Default::default()
         };
         let free = 2_000_000_000u64; // 2 GB free
-        let d = compute_moe_fit(Some((free, free)), Some(&info(8)), Some(&layout), 4096, F16.0, F16.1);
+        let d = compute_moe_fit(Some((free, free)), Some(&info(8)), Some(&layout), 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
         match d {
             MoeFitDecision::ProceedCpuMoeAndPartial { gpu_layers } => {
                 assert!(gpu_layers >= 0, "even the worst case must resolve, not abort");
@@ -5146,25 +5701,24 @@ const RAM_USABLE_FRACTION: f64 = 0.70;
 
 /// Classify a download of `file_bytes` against the memory this machine has.
 ///
-/// `vram` is `(free, total)` as [`vram_bytes`] reports it, `ram` is total
+/// `vram` is `(free, total)` as [`vram_bytes`] reports it, `vram_reserve` the
+/// `--vram-reserve` in bytes, `ram` is total
 /// system RAM. Both optional: a CPU-only build has no VRAM to report, and
 /// Windows has no RAM figure here.
 pub fn classify_download(
     file_bytes: u64,
     vram: Option<(u64, u64)>,
     ram: Option<u64>,
+    vram_reserve: u64,
 ) -> RunVerdict {
     let needed =
         file_bytes + ((file_bytes as f64 * OVERHEAD_FRACTION) as u64).max(OVERHEAD_FLOOR);
 
     // Same headroom the real sizer applies, so a green light here does not
-    // turn into a partial split there: the loader's floor is a fraction of
-    // TOTAL VRAM, not of what happens to be free.
+    // turn into a partial split there: the reserve that must stay free
+    // (`--vram-reserve`).
     let usable_vram = vram
-        .map(|(free, total)| {
-            (free as f64 * VRAM_SAFETY_FRACTION - total as f64 * MIN_FREE_TOTAL_RATIO).max(0.0)
-                as u64
-        })
+        .map(|(free, _)| free.saturating_sub(vram_reserve))
         .unwrap_or(0);
     let usable_ram = ram
         .map(|r| (r as f64 * RAM_USABLE_FRACTION) as u64)
@@ -5213,7 +5767,7 @@ mod download_verdict_tests {
     fn a_small_model_on_a_big_card_fits() {
         // 4 GiB of weights on a 24 GiB card with 23 free.
         assert_eq!(
-            classify_download(4 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB)),
+            classify_download(4 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Fits
         );
     }
@@ -5222,7 +5776,7 @@ mod download_verdict_tests {
     fn a_model_past_the_card_but_inside_ram_is_tight_not_impossible() {
         // 40 GiB of weights, 24 GiB card, 128 GiB of RAM: this runs, slowly.
         assert_eq!(
-            classify_download(40 * GIB, Some((23 * GIB, 24 * GIB)), Some(128 * GIB)),
+            classify_download(40 * GIB, Some((23 * GIB, 24 * GIB)), Some(128 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Tight
         );
     }
@@ -5230,12 +5784,12 @@ mod download_verdict_tests {
     #[test]
     fn a_model_past_both_is_too_large() {
         assert_eq!(
-            classify_download(400 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB)),
+            classify_download(400 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::TooLarge
         );
     }
 
-    // The loader reserves a fraction of TOTAL VRAM, so a card reporting
+    // The loader needs the reserve to stay free, so a card reporting
     // almost all of its memory free still cannot take a model sized to it.
     // Sizing against `free` alone is what produced splits the loader then
     // refused; the same headroom has to apply here or a green light turns
@@ -5243,9 +5797,9 @@ mod download_verdict_tests {
     #[test]
     fn the_loader_floor_is_respected_not_just_free_memory() {
         // 21 GiB of weights on a 24 GiB card with 23.5 free. Free memory
-        // alone says yes; the 12% floor on total says no.
+        // alone says yes; the reserve says no.
         assert_ne!(
-            classify_download(21 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB)),
+            classify_download(21 * GIB, Some((23 * GIB, 24 * GIB)), Some(64 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Fits
         );
     }
@@ -5253,16 +5807,16 @@ mod download_verdict_tests {
     #[test]
     fn a_cpu_only_machine_is_judged_on_ram_alone() {
         assert_eq!(
-            classify_download(4 * GIB, None, Some(32 * GIB)),
+            classify_download(4 * GIB, None, Some(32 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Fits
         );
         // Fits in RAM, but only by filling nearly all of it.
         assert_eq!(
-            classify_download(25 * GIB, None, Some(32 * GIB)),
+            classify_download(25 * GIB, None, Some(32 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Tight
         );
         assert_eq!(
-            classify_download(64 * GIB, None, Some(32 * GIB)),
+            classify_download(64 * GIB, None, Some(32 * GIB), DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::TooLarge
         );
     }
@@ -5270,7 +5824,7 @@ mod download_verdict_tests {
     // Better to say "unknown" than to paint a red light from no data.
     #[test]
     fn nothing_measurable_is_unknown_not_a_guess() {
-        assert_eq!(classify_download(8 * GIB, None, None), RunVerdict::Unknown);
+        assert_eq!(classify_download(8 * GIB, None, None, DEFAULT_VRAM_RESERVE_BYTES), RunVerdict::Unknown);
     }
 
     // Windows reports no RAM figure. A model past the card is still known
@@ -5278,7 +5832,7 @@ mod download_verdict_tests {
     #[test]
     fn a_missing_ram_figure_never_produces_a_red_light() {
         assert_eq!(
-            classify_download(400 * GIB, Some((23 * GIB, 24 * GIB)), None),
+            classify_download(400 * GIB, Some((23 * GIB, 24 * GIB)), None, DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Tight
         );
     }
@@ -5290,7 +5844,7 @@ mod download_verdict_tests {
         let tiny = 200 * 1024 * 1024;
         // 512 MiB floor + 200 MiB of weights does not fit in 600 MiB.
         assert_ne!(
-            classify_download(tiny, Some((600 * 1024 * 1024, 700 * 1024 * 1024)), None),
+            classify_download(tiny, Some((600 * 1024 * 1024, 700 * 1024 * 1024)), None, DEFAULT_VRAM_RESERVE_BYTES),
             RunVerdict::Fits
         );
     }

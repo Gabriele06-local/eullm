@@ -66,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     # On an instruct model the chat-format rows are trained already; training
     # them again only moves what already works. On a base model they are not,
     # and without them it never learns to stop (legal-it v0.1).
+    ap.add_argument("--default-system", default="",
+                    help="replace the system prompt the chat template inserts when a request "
+                         "has none (Ministral's is ~525 tokens of Le Chat); kept in the "
+                         "adapter, the merge and the GGUF")
+    ap.add_argument("--default-system-file", type=Path,
+                    help="the same, read from a file")
     ap.add_argument("--no-format-tokens", action="store_true",
                     help="do not train the chat-format token rows (instruct bases)")
     args = ap.parse_args(argv)
@@ -110,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
         gradient_checkpointing=True,
         save_steps=args.save_steps,
         train_format_tokens=not args.no_format_tokens,
+        default_system=(args.default_system_file.read_text(encoding="utf-8").strip()
+                        if args.default_system_file else args.default_system),
     )
     adapter = fine_tune_identity(config)
     print(f"[stage3] adapter {adapter}", flush=True)

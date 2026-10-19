@@ -21,6 +21,10 @@
 #                 rejects excluded)
 #   CE_CHUNKS     chunk files (default $WORK/datasets/legal_it_amm/{train,val}.jsonl)
 #   CE_DIR        answers directory (default $WORK/eval/cds-exam)
+#   CE_KIND       court: cds (default), snciv, snpen. For the Corte di cassazione the
+#                 defaults below follow the kind: $WORK/eval/cass/<kind>-dev-cards.jsonl,
+#                 $WORK/eullm_runs/cass/schede-*.jsonl, $WORK/datasets/legal_it,
+#                 $WORK/eval/cass-exam, no OpenGA
 #   CE_ARGS       more options for cds_answer.py, e.g. "--limit 0"
 #   CE_REPO       checkout to run (default: the one this file was submitted from)
 #
@@ -48,12 +52,27 @@ fi
 # shellcheck disable=SC1091
 source "$REPO/forge/scripts/leonardo/env.sh"
 
-QUESTIONS="${CE_QUESTIONS:-$WORK/eval/cds/dev-cards.jsonl}"
-DIR="${CE_DIR:-$WORK/eval/cds-exam}"
+KIND="${CE_KIND:-cds}"
+if [ "$KIND" = cds ]; then
+    D_QUESTIONS=$WORK/eval/cds/dev-cards.jsonl D_DIR=$WORK/eval/cds-exam
+    D_CHUNKS="$WORK/datasets/legal_it_amm/train.jsonl $WORK/datasets/legal_it_amm/val.jsonl"
+    D_CARDS="$WORK/eullm_runs/cds/schede*.jsonl" D_DEV=$WORK/eval/cds/cds-dev-ids.txt
+    OPENGA_ARGS=(--openga "$WORK/eval/openga/cds-sentenze-2017-2024.csv")
+    CACHE=$WORK/eval/cds/retrieval-cache
+else
+    D_QUESTIONS=$WORK/eval/cass/$KIND-dev-cards.jsonl D_DIR=$WORK/eval/cass-exam
+    D_CHUNKS="$WORK/datasets/legal_it/train.jsonl $WORK/datasets/legal_it/val.jsonl"
+    D_CARDS="$WORK/eullm_runs/cass/schede-*.jsonl" D_DEV=$WORK/eval/cass/$KIND-dev-ids.txt
+    OPENGA_ARGS=()
+    CACHE=$WORK/eval/cass/retrieval-cache
+fi
+QUESTIONS="${CE_QUESTIONS:-$D_QUESTIONS}"
+DIR="${CE_DIR:-$D_DIR}"
+DEV="${CE_DEV_IDS:-$D_DEV}"
 # shellcheck disable=SC2206
-CHUNKS=(${CE_CHUNKS:-$WORK/datasets/legal_it_amm/train.jsonl $WORK/datasets/legal_it_amm/val.jsonl})
+CHUNKS=(${CE_CHUNKS:-$D_CHUNKS})
 CARDS=()
-for f in ${CE_CARDS:-$WORK/eullm_runs/cds/schede*.jsonl}; do
+for f in ${CE_CARDS:-$D_CARDS}; do
     case "$f" in *rejects*) ;; *) [ -s "$f" ] && CARDS+=("$f") ;; esac
 done
 SERVER="${LCPP_SERVER:-$LCPP_DIR/build-cuda/bin/llama-server}"
@@ -61,6 +80,7 @@ fail=0
 [ -n "${CE_LABEL:-}" ] || { echo "[ce] CE_LABEL is required" >&2; fail=1; }
 [ -d "${CE_MODEL:-}" ] || { echo "[ce] no model directory at '${CE_MODEL:-}'" >&2; fail=1; }
 [ -s "$QUESTIONS" ] || { echo "[ce] no questions at $QUESTIONS" >&2; fail=1; }
+[ -s "$DEV" ] || { echo "[ce] no development ids at $DEV" >&2; fail=1; }
 for f in "${CHUNKS[@]}"; do [ -s "$f" ] || { echo "[ce] missing $f" >&2; fail=1; }; done
 GGUF_ARGS=()
 if [ -n "${CE_GGUF:-}" ]; then
@@ -88,9 +108,9 @@ source "$REPO/forge/scripts/leonardo/heartbeat.sh"
 heartbeat_start
 
 # shellcheck disable=SC2086
-python "$REPO/forge/scripts/cds_answer.py" "$CE_MODEL" --label "$CE_LABEL" \
-    --questions "$QUESTIONS" --dev-ids "$WORK/eval/cds/cds-dev-ids.txt" \
-    --chunks "${CHUNKS[@]}" --openga "$WORK/eval/openga/cds-sentenze-2017-2024.csv" \
+python "$REPO/forge/scripts/cds_answer.py" "$CE_MODEL" --label "$CE_LABEL" --kind "$KIND" \
+    --questions "$QUESTIONS" --dev-ids "$DEV" \
+    --chunks "${CHUNKS[@]}" "${OPENGA_ARGS[@]}" \
     "${CARD_ARGS[@]}" --embedder Qwen/Qwen3-Embedding-0.6B --reranker Qwen/Qwen3-Reranker-0.6B \
-    --cache-dir "$WORK/eval/cds/retrieval-cache" "${GGUF_ARGS[@]}" \
+    --cache-dir "$CACHE" "${GGUF_ARGS[@]}" \
     --answers "$DIR/answers-$CE_LABEL.jsonl" ${CE_ARGS:-}

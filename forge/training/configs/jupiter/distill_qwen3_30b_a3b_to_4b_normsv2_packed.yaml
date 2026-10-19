@@ -1,0 +1,54 @@
+# distill_qwen3_30b_a3b_to_4b_norms_packed.yaml on norms-v2: the Italian codes
+# with the EU regulations and directives in force in Italian (prepare_eurlex.py,
+# 17,563 acts listed on 16-10-2026), split by make_norms_split.py into
+# $FORGE_DATA_DIR/norms-v2 (submit with FORGE_DISTILL_DATA pointing there).
+# Tens of millions of tokens rather than 1.5M, so one epoch, not three, and
+# the step counts of a long run: 100 warm-up steps, a save every 100 (~30
+# minutes at ~32,000 tokens a step), the held-out loss every 200 on 40
+# batches. Its own output directory: the norms runs stay as they are.
+teacher_model: Qwen/Qwen3-30B-A3B-Base
+teacher_adapter: null
+student_model: Qwen/Qwen3-4B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+teacher_device_map: split
+teacher_gpus: [0]
+teacher_gib_per_gpu: 80
+student_device: cuda:1
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+dataset_dir: ./datasets/norms   # overridden by sbatch_distill.slurm (--dataset-dir)
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+pack_sequences: true
+max_train_samples: null
+output_dir: ./checkpoints/qwen3_4b_normsv2_packed_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 100
+save_steps: 100
+save_total_limit: 3
+eval_steps: 200
+eval_max_batches: 40
+logging_steps: 20
+kl_temperature: 2.0
+kl_alpha: 0.7
+bf16: true
+gradient_checkpointing: true
+seed: 42

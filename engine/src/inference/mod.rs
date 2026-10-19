@@ -394,6 +394,25 @@ fn gpu_memory() -> Option<(u64, u64)> {
     (total_sum > 0).then_some((free_sum, total_sum))
 }
 
+/// What `grow_moe_cache` leaves free beyond the cache, in bytes: the room the
+/// prefetch's slots (`keep_bytes`) ask for with their compute need and a
+/// margin, never less than the `--vram-reserve` the whole load keeps free,
+/// which is all that is kept when there are no slots.
+fn grow_kept_bytes(keep_bytes: u64, vram_reserve: u64) -> u64 {
+    // What llama.cpp's prefetch asks to be free when it makes its slots at the
+    // first long prompt, beside the slots: "4 slots of 256.2 MiB and 792 MiB
+    // left for the compute need 1817 MiB of free VRAM" (patch 0003). With the
+    // slots in place that much is all that is left, and it is enough.
+    const PREFETCH_COMPUTE_HEADROOM: u64 = 800 << 20;
+    // Left free beyond that for what the first request makes.
+    const MARGIN: u64 = 256 << 20;
+    if keep_bytes > 0 {
+        (keep_bytes + PREFETCH_COMPUTE_HEADROOM + MARGIN).max(vram_reserve + MARGIN)
+    } else {
+        vram_reserve + MARGIN
+    }
+}
+
 /// Grow the expert cache of `--moe-cache auto` into the VRAM the plan left
 /// over, and return the size to load with (the planned one when there is
 /// nothing to gain).
@@ -417,16 +436,8 @@ pub(crate) fn grow_moe_cache(
 ) -> u64 {
     // Granularity of the cache, as in `fit::plan_moe_cache`.
     const STEP: u64 = 256 << 20;
-    // What llama.cpp's prefetch asks to be free when it makes its slots at the
-    // first long prompt, beside the slots: "4 slots of 256.2 MiB and 792 MiB
-    // left for the compute need 1817 MiB of free VRAM" (patch 0003). With the
-    // slots in place that much is all that is left, and it is enough.
-    const PREFETCH_COMPUTE_HEADROOM: u64 = 800 << 20;
     // Left free beyond that for what the first request makes.
     const MARGIN: u64 = 256 << 20;
-    // Without prefetch slots nothing is made after this context, and the
-    // floor `probe_and_shrink_context` asks of a context is the guide.
-    const NO_PREFETCH_FREE_RATIO: f64 = 0.08;
 
     let planned = config.moe_cache_bytes;
     let Some(grow) = config.moe_cache_grow else {
@@ -443,14 +454,13 @@ pub(crate) fn grow_moe_cache(
         drop(ctx);
         memory
     };
-    let Some((free, total)) = measure(planned) else {
+    let Some((free, _)) = measure(planned) else {
         return planned;
     };
-    let kept = if grow.keep_bytes > 0 {
-        grow.keep_bytes + PREFETCH_COMPUTE_HEADROOM + MARGIN
-    } else {
-        (total as f64 * NO_PREFETCH_FREE_RATIO) as u64 + MARGIN
-    };
+    // Never less than the reserve the whole load is sized to leave. Without
+    // prefetch slots nothing is made after this context, and that reserve
+    // (plus the margin) is all that is kept.
+    let kept = grow_kept_bytes(grow.keep_bytes, config.vram_reserve);
     let extra = free.saturating_sub(kept) / STEP * STEP;
     let target = (planned + extra).min(grow.max_bytes / STEP * STEP);
     if target <= planned {
@@ -674,6 +684,10 @@ pub struct InferenceConfig {
     /// left once the context exists and grows the cache into it
     /// (`grow_moe_cache`). `None` keeps the size as planned.
     pub moe_cache_grow: Option<crate::fit::MoeCacheGrow>,
+    /// `--vram-reserve` in bytes: what the context probe requires to be
+    /// free once its context exists, the same amount the load was sized to
+    /// leave (`fit::DEFAULT_VRAM_RESERVE_MIB`).
+    pub vram_reserve: u64,
     /// `--no-mmap`: read the model into memory instead of mapping its file.
     /// Expert tensors kept in RAM then land in the GPU backend's pinned host
     /// buffer, which llama.cpp gives weights overridden to the CPU only when
@@ -722,6 +736,7 @@ impl Default for InferenceConfig {
             mtp_model: None,
             moe_cache_bytes: 0,
             moe_cache_grow: None,
+            vram_reserve: crate::fit::DEFAULT_VRAM_RESERVE_BYTES,
             no_mmap: false,
             moe_prefetch_slots: 0,
             load_threads: crate::readahead::LoadThreads::default(),
@@ -2016,8 +2031,8 @@ impl InferenceEngine {
     ///    alone lands on 16384, but plenty of values between there and the
     ///    32768 that failed were never even tried.
     ///
-    /// Both phases require [`MIN_FREE_VRAM_RATIO`] of the GPU's total memory
-    /// to remain free after the probe context is allocated, not just a
+    /// Both phases require `config.vram_reserve` (`--vram-reserve`) of the
+    /// GPU's memory to remain free after the probe context is allocated, not just a
     /// successful allocation — found necessary on the same real hardware: a
     /// context that barely fit at probe time, with nothing left over,
     /// crashed hard (a llama.cpp `GGML_ASSERT`, not the clean error this
@@ -2045,13 +2060,12 @@ impl InferenceEngine {
         // without turning the search into hundreds of them from a large
         // starting request.
         const REFINE_STEP: u32 = 1024;
-        // Fraction of a GPU's *total* memory that must stay free after the
-        // probe context is allocated. 12% is the middle of the 10-15% range
-        // that made the real-hardware crash this defends against stop
-        // reproducing — a working number, not a formula derived from a
-        // fragmentation model that doesn't exist yet. Skipped entirely on a
-        // CPU-only run (no GPU device to have a margin on).
-        const MIN_FREE_VRAM_RATIO: f64 = 0.12;
+        // What must stay free after the probe context is allocated, on a GPU
+        // run (skipped entirely on a CPU-only one: no GPU device to have a
+        // margin on): the same `--vram-reserve` the load was sized to leave,
+        // so the sizer and this probe cannot disagree (`fit::DEFAULT_VRAM_RESERVE_MIB`
+        // has the history). It was 12% of the card's total memory until 0.7.80.
+        let min_free = config.vram_reserve;
 
         // 0 means "use the default", matching the fallback every generate
         // call already applies — not a signal to clamp upward. An explicit
@@ -2093,18 +2107,18 @@ impl InferenceEngine {
         // left over.
         enum ProbeRejection {
             Alloc(String),
-            Margin { free: u64, total: u64 },
+            Margin { free: u64, min_free: u64 },
         }
         impl std::fmt::Display for ProbeRejection {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {
                     Self::Alloc(e) => write!(f, "{e}"),
-                    Self::Margin { free, total } => write!(
+                    Self::Margin { free, min_free } => write!(
                         f,
-                        "allocation succeeded but left only {:.0}% of GPU memory free \
-                         (below the {:.0}% minimum this probe requires)",
-                        *free as f64 / *total as f64 * 100.0,
-                        MIN_FREE_VRAM_RATIO * 100.0
+                        "allocation succeeded but left only {} MiB of GPU memory free \
+                         (below the {} MiB --vram-reserve this probe requires)",
+                        free >> 20,
+                        min_free >> 20
                     ),
                 }
             }
@@ -2126,10 +2140,8 @@ impl InferenceEngine {
                     let memory = gpu_memory();
                     drop(ctx);
                     match memory {
-                        Some((free, total))
-                            if (free as f64) < total as f64 * MIN_FREE_VRAM_RATIO =>
-                        {
-                            Ok(Some(ProbeRejection::Margin { free, total }))
+                        Some((free, _)) if free < min_free => {
+                            Ok(Some(ProbeRejection::Margin { free, min_free }))
                         }
                         _ => Ok(None),
                     }
@@ -2154,9 +2166,7 @@ impl InferenceEngine {
                     &config.cache_type_v,
                 );
                 let shortfall = match rejection {
-                    ProbeRejection::Margin { free, total } => {
-                        Some(((total as f64 * MIN_FREE_VRAM_RATIO) as u64).saturating_sub(free))
-                    }
+                    ProbeRejection::Margin { free, min_free } => Some(min_free.saturating_sub(free)),
                     ProbeRejection::Alloc(_) => None,
                 };
                 // What moving the KV cache to q8_0 would give back, per side:
@@ -3270,12 +3280,38 @@ mod tests {
         });
     }
 
+    /// What `--moe-cache auto` keeps free after growing: the prefetch's slots,
+    /// their compute need and a margin, and never less than the reserve.
+    #[test]
+    fn the_cache_grows_only_to_where_the_reserve_stays_free() {
+        // Slots of 1 GiB: 1 GiB + 800 MiB + 256 MiB, above the 1 GiB reserve.
+        assert_eq!(grow_kept_bytes(GIB, GIB), GIB + 800 * MIB + 256 * MIB);
+        // A small reserve is not what decides.
+        assert_eq!(grow_kept_bytes(GIB, 256 * MIB), GIB + 800 * MIB + 256 * MIB);
+        // Slots so small that the reserve is the larger: the reserve wins.
+        assert_eq!(grow_kept_bytes(64 * MIB, 2 * GIB), 2 * GIB + 256 * MIB);
+        // Without slots the reserve and the margin are all that is kept
+        // (8% of the card and the margin before 0.7.80).
+        assert_eq!(grow_kept_bytes(0, GIB), GIB + 256 * MIB);
+        assert_eq!(grow_kept_bytes(0, 4 * GIB), 4 * GIB + 256 * MIB);
+    }
+
+    /// Sizing, the context probe and the companion check read one number.
+    #[test]
+    fn a_default_config_keeps_the_default_reserve() {
+        assert_eq!(
+            InferenceConfig::default().vram_reserve,
+            crate::fit::DEFAULT_VRAM_RESERVE_BYTES
+        );
+    }
+
     /// The margin rejection exactly as the probe prints it.
-    fn margin_text(free: u64, total: u64) -> String {
+    fn margin_text(free: u64, min_free: u64) -> String {
         format!(
-            "allocation succeeded but left only {:.0}% of GPU memory free \
-             (below the 12% minimum this probe requires)",
-            free as f64 / total as f64 * 100.0
+            "allocation succeeded but left only {} MiB of GPU memory free \
+             (below the {} MiB --vram-reserve this probe requires)",
+            free >> 20,
+            min_free >> 20
         )
     }
 
@@ -3312,12 +3348,16 @@ mod tests {
 
     #[test]
     fn at_the_floor_only_the_levers_that_can_close_the_gap_are_named() {
-        let (total, free) = (16 * GIB, 16 * GIB / 10);
-        let shortfall = (total as f64 * 0.12) as u64 - free;
+        // 1.6 GiB free where 328 MiB more were required (a 12% floor of a
+        // 16 GiB card, as the report had it; the reserve is 1 GiB now, so the
+        // card here is one with a larger `--vram-reserve`).
+        let free = 16 * GIB / 10;
+        let min_free = free + 328 * MIB;
+        let shortfall = min_free - free;
         let kv_saving = (128.0 * (1.0 - (34.0 / 32.0) / 2.0) * MIB as f64) as u64;
         let msg = context_floor_error(
             512,
-            &margin_text(free, total),
+            &margin_text(free, min_free),
             Some(shortfall),
             kv_saving,
             -1,
@@ -3326,7 +3366,7 @@ mod tests {
         );
 
         assert!(
-            msg.contains(&margin_text(free, total)),
+            msg.contains(&margin_text(free, min_free)),
             "the cause, verbatim: {msg}"
         );
         assert!(msg.contains("328 MiB short"), "{msg}");

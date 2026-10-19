@@ -23,6 +23,8 @@ tags:
 
 **Un modello da 8 miliardi di parametri che risponde a domande sul diritto italiano leggendo i testi di legge che gli vengono forniti.** Gira in locale: il file Q4_K_M pesa 5,2 GB e funziona con llama.cpp, Ollama e l'[EULLM Engine](https://github.com/eullm/eullm).
 
+**Europeo dall'inizio alla fine.** Parte da [Ministral-3-8B](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512) di Mistral AI (Parigi, licenza Apache 2.0) ed è stato addestrato in Italia, sul supercomputer EuroHPC Leonardo (CINECA), solo su testi normativi pubblici.
+
 Sulle 429 domande degli esami riservati, mai viste in addestramento, risponde correttamente all'**89,0%**, contro l'80,9% del modello di partenza con lo stesso retrieval.
 
 > **Avvertenza.** legal-it-8b è uno strumento di consultazione dei testi normativi, non un parere legale. Può sbagliare, anche con sicurezza. Ogni risposta va verificata sul testo ufficiale (Normattiva, Gazzetta Ufficiale) e, per qualsiasi decisione, con un professionista.
@@ -64,6 +66,14 @@ I numeri di questa pagina sono ottenuti con questo retrieval, che pesa in tutto 
 4. i primi 3 testi vanno nel prompt.
 
 L'implementazione è nel modulo `eullm_forge.eval.dense` di [eullm-forge](https://github.com/eullm/eullm/tree/main/forge). La raccolta normativa si costruisce dai pacchetti AKN OpenData di [Normattiva](https://dati.normattiva.it) con `forge/scripts/prepare_legislation.py`.
+
+### EULLM Engine
+
+```bash
+eullm run hf.co/EuLLM/legal-it-8b:Q4_K_M --ctx-size 8192
+```
+
+Il comando scarica il file, avvia il server locale sulla porta 11434 e accetta il prompt sopra, come unico messaggio utente, all'endpoint `/v1/chat/completions` (formato OpenAI) o `/api/chat` (formato Ollama), con `"temperature": 0`.
 
 ### llama.cpp
 
@@ -152,6 +162,7 @@ Apache 2.0, come il modello di partenza Ministral-3-8B-Instruct-2512. I testi no
 
 **legal-it-8b** is an 8B model, fine-tuned from Ministral-3-8B-Instruct-2512, that answers questions on Italian law **from the legal texts placed in its prompt** (retrieval-augmented, open book). The Q4_K_M GGUF is 5.2 GB.
 
+- **European end to end:** base model by Mistral AI (Paris, Apache 2.0), trained in Italy on the EuroHPC supercomputer Leonardo (CINECA), on public Italian legislation only.
 - **Held-out results:** on 429 held-out questions it answers 89.0% correctly, against 80.9% for its base model with the same retrieval. The paired difference is significant under every criterion.
 - **Quantization:** Q4_K_M scores the same as bf16 (435 vs 437 of 472).
 - **Training:** open-book SFT on 18,972 pairs written from public legislation (Normattiva), then GRPO with programmatic rewards (deadlines, abstention on missing articles).

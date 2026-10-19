@@ -16,6 +16,17 @@
 #         --output="$PROJECT/$USER/forge/runs/logs/gen-instruct-%j.out" \
 #         forge/scripts/jupiter/sbatch_gen_instruct.slurm
 #
+# FORGE_GEN_KIND=openbook writes the other kind instead, the task the exam
+# and the product ask (generate_openbook_pairs.py): a question, the articles
+# retrieval finds for it, and the answer from them, citing the article; and
+# questions about articles that do not exist, answered as such. From the
+# Normattiva chunk files (FORGE_GEN_NORMS, default every
+# norms-src/legislazione_*.chunks.jsonl but EUR-Lex's), leaving out every
+# article of the held-out exam (FORGE_GEN_EXAM), into
+# $FORGE_DATA_DIR/openbook/pairs.jsonl. On 18-10-2026 the instruction pairs
+# above, 44-59% questions answered from memory, lowered the open-book score
+# the more of them there were.
+#
 # Needs, from a login node: the model in the engine's store
 # (`$EULLM_BIN pull hf.co/unsloth/Qwen3-30B-A3B-Instruct-2507-GGUF:Q8_0`) and
 # the corpus ($FORGE_DATA_DIR/norms/train.jsonl, make_norms_split.py).
@@ -33,8 +44,16 @@ EULLM_REPO="${EULLM_REPO:-$SLURM_SUBMIT_DIR}"
 source "$EULLM_REPO/forge/scripts/jupiter/env.sh"
 export EULLM_MODELS_DIR="${EULLM_MODELS_DIR:-$PROJECT/$USER/eullm-models}"
 EULLM_BIN="${EULLM_BIN:-$PROJECT/$USER/eullm-target/next10/release/eullm}"
+KIND="${FORGE_GEN_KIND:-instruct}"
 CORPUS="${FORGE_GEN_CORPUS:-$FORGE_DATA_DIR/norms/train.jsonl}"
-OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
+NORMS="${FORGE_GEN_NORMS:-$(ls "$FORGE_DATA_DIR"/norms-src/legislazione_*.chunks.jsonl 2>/dev/null | grep -v eurlex | tr '\n' ' ')}"
+EXAM="${FORGE_GEN_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
+PER_ARTICLE="${FORGE_GEN_PER_ARTICLE:-2}"
+if [ "$KIND" = openbook ]; then
+    OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/openbook/pairs.jsonl}"
+else
+    OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
+fi
 LIMIT="${FORGE_GEN_LIMIT:-20000}"
 STOP_MIN="${FORGE_GEN_STOP_MIN:-52}"
 SEEDS="${FORGE_GEN_SEEDS:-0}"
@@ -46,8 +65,14 @@ export EULLM_AUDIT_DIR="$LOGS/audit"
 
 echo "=== instruction pairs with EULLM Engine: job $JOB on $(hostname), $(date -Is) ==="
 echo "  engine $("$EULLM_BIN" --version 2>&1 | head -1) ($EULLM_BIN)"
-echo "  corpus $CORPUS -> $OUT, up to $LIMIT pairs a seed (seeds $SEEDS), stop after $STOP_MIN min"
-[ -f "$CORPUS" ] || { echo "[!!] no corpus $CORPUS"; exit 1; }
+if [ "$KIND" = openbook ]; then
+    echo "  open book: $(wc -w <<<"$NORMS") norm files, exam $EXAM left out -> $OUT, up to $LIMIT pairs a seed ($PER_ARTICLE questions an article, seeds $SEEDS), stop after $STOP_MIN min"
+    [ -n "$NORMS" ] || { echo "[!!] no norm files"; exit 1; }
+    [ -s "$EXAM" ] || { echo "[!!] no exam at $EXAM: its articles must be left out"; exit 1; }
+else
+    echo "  corpus $CORPUS -> $OUT, up to $LIMIT pairs a seed (seeds $SEEDS), stop after $STOP_MIN min"
+    [ -f "$CORPUS" ] || { echo "[!!] no corpus $CORPUS"; exit 1; }
+fi
 MODEL=$("$EULLM_BIN" list 2>/dev/null | awk 'tolower($1) ~ /30b-a3b-instruct-2507/ && !/file missing/ { print $1; exit }')
 [ -n "$MODEL" ] || { echo "[!!] Qwen3-30B-A3B-Instruct-2507 is not in $EULLM_MODELS_DIR: pull it on a login node"; exit 1; }
 echo "  model $MODEL"
@@ -101,10 +126,19 @@ for seed in $SEEDS; do
     left=$(( STOP_MIN - ($(date +%s) - start) / 60 ))
     [ "$left" -ge 3 ] || { echo "  no time left for seed $seed"; break; }
     echo "--- seed $seed, at most $left min"
-    python "$EULLM_REPO/forge/scripts/generate_instructions.py" \
-        --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
-        --concurrency 128 --batch-size 256 --max-new-tokens 1024 --seed "$seed" \
-        --corpus "$CORPUS" --out "$OUT" --limit "$LIMIT" --stop-after-min "$left" || RC=$?
+    if [ "$KIND" = openbook ]; then
+        # shellcheck disable=SC2086
+        python "$EULLM_REPO/forge/scripts/generate_openbook_pairs.py" \
+            --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
+            --concurrency 128 --batch-size 256 --max-new-tokens 700 --seed "$seed" \
+            --norms $NORMS --exclude-exam "$EXAM" --per-article "$PER_ARTICLE" \
+            --out "$OUT" --limit "$LIMIT" --stop-after-min "$left" || RC=$?
+    else
+        python "$EULLM_REPO/forge/scripts/generate_instructions.py" \
+            --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
+            --concurrency 128 --batch-size 256 --max-new-tokens 1024 --seed "$seed" \
+            --corpus "$CORPUS" --out "$OUT" --limit "$LIMIT" --stop-after-min "$left" || RC=$?
+    fi
 done
 
 stop_servers

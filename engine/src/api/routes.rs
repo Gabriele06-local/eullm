@@ -231,7 +231,10 @@ async fn hf_search(Query(params): Query<HashMap<String, String>>) -> impl IntoRe
 /// needs the GGUF header, which needs the file. It is here to answer "is this
 /// download worth starting", which is a question that has to be answered
 /// before the download, or not at all.
-async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResponse {
+async fn hf_repo(
+    State(state): State<S>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
     let Some(id) = params.get("id").map(|s| s.trim()) else {
         return (
             StatusCode::BAD_REQUEST,
@@ -280,7 +283,7 @@ async fn hf_repo(Query(params): Query<HashMap<String, String>>) -> impl IntoResp
             // The projector rides along with whatever quantization is picked,
             // so it counts towards the download and towards what is resident.
             let total = q.total_bytes + contents.mmproj_bytes;
-            let verdict = crate::fit::classify_download(total, vram, ram);
+            let verdict = crate::fit::classify_download(total, vram, ram, state.vram_reserve);
             json!({
                 "label": q.label,
                 "files": q.files,

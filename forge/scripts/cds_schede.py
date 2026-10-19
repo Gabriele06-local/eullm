@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One card per Consiglio di Stato ruling, written by a teacher model.
+"""One card per ruling (Consiglio di Stato, Corte di cassazione), written by a teacher model.
 
     python forge/scripts/cds_schede.py \\
         --chunks $WORK/datasets/legal_it_amm/train.jsonl \\
@@ -7,6 +7,10 @@
         --ids $WORK/eval/cds/cds-train-ids.txt \\
         --serve $WORK/gguf/qwen3-30b-a3b-instruct-2507/qwen3-30b-a3b-instruct-2507-q8_0.gguf \\
         --gpus 0,1,2 --out $WORK/eullm_runs/cds/schede.jsonl
+
+``--kind snciv`` (or ``snpen``) cards Corte di cassazione rulings instead,
+from the chunks of `$WORK/datasets/legal_it` and the ids of
+``cds_split.py --kind snciv``; each card records its ``court``.
 
 Step 1 of the case-law plan (research report of 2026-10-05); see
 `eullm_forge.caselaw.schede` for what a card holds and why. With
@@ -43,7 +47,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.caselaw import attach_meta, load_openga, load_rulings, ruling_view  # noqa: E402
+from eullm_forge.caselaw import (  # noqa: E402
+    attach_meta,
+    court,
+    load_openga,
+    load_rulings,
+    ruling_view,
+)
 from eullm_forge.caselaw.schede import (  # noqa: E402
     CHECKS_VERSION,
     CardRejected,
@@ -96,6 +106,8 @@ def done_ids(*paths: Path) -> set[str]:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--kind", default="cds",
+                    help="court: cds (Consiglio di Stato), snciv, snpen (Corte di cassazione)")
     ap.add_argument("--chunks", nargs="+", type=Path, required=True)
     ap.add_argument("--openga", nargs="*", type=Path, default=[])
     ap.add_argument("--ids", type=Path, required=True,
@@ -119,6 +131,10 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if bool(args.url) == bool(args.serve):
         ap.error("give either --url or --serve")
+    try:
+        the_court = court(args.kind)
+    except ValueError as e:
+        ap.error(str(e))
 
     wanted = [line.strip() for line in args.ids.open(encoding="utf-8") if line.strip()]
     rejects_path = args.out.with_name(args.out.name.replace(".jsonl", "") + ".rejects.jsonl")
@@ -131,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     if not todo_ids:
         print("[schede] nothing left to do", flush=True)
         return 0
-    rulings = load_rulings(args.chunks)
+    rulings = load_rulings(args.chunks, kind=the_court.kind)
     if args.openga:
         attach_meta(rulings, load_openga(args.openga))
     missing = [i for i in todo_ids if i not in rulings]
@@ -162,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
 
         def work(n: int, r):
             url = urls[n % len(urls)]
-            msgs = messages(ruling_view(r.text, args.max_chars), section=r.section, year=r.year)
+            msgs = messages(ruling_view(r.text, args.max_chars), section=r.section, year=r.year,
+                            court=the_court)
             try:
                 reply = ask(url, msgs, args.max_tokens, args.temperature)
             except (urllib.error.URLError, OSError, ValueError) as e:
@@ -171,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             choice = (reply.get("choices") or [{}])[0]
             content = (choice.get("message") or {}).get("content") or ""
             try:
-                card = parse_card(content)
+                card = parse_card(content, the_court)
             except CardRejected as e:
                 if e.reason in ("no_json", "bad_json"):
                     # what came back instead, so the cause is in the rejects file and not
@@ -195,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
                         rej.flush()
                     return
                 stats["cards"] += 1
-                row = {"id": r.id, "year": r.year, "numero": r.number, "nrg": r.nrg,
+                row = {"id": r.id, "court": the_court.kind, "year": r.year, "numero": r.number,
+                       "nrg": r.nrg,
                        "sezione": r.section, "data": r.meta.get("DATA_PUBBLICAZIONE"),
                        "esito_openga": r.meta.get("ESITO_PROVVEDIMENTO"),
                        # what the appeal was about: how step 4 keeps the art. 9 and 10

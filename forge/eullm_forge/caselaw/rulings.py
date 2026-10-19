@@ -39,7 +39,7 @@ class Ruling:
 
     @property
     def number(self) -> str:
-        return self.id.split("/", 1)[-1]
+        return self.id.rsplit("/", 1)[-1]     # "cds/202301234", "snciv/2023/12345"
 
     @property
     def nrg(self) -> str:
@@ -48,6 +48,27 @@ class Ruling:
     @property
     def section(self) -> str:
         return str(self.meta.get("NOME_SEZIONE") or "").strip()
+
+
+def cited_number(rid: str) -> str:
+    """A ruling's number as a citation writes it: "202301234", "12345/2023".
+
+    The Consiglio di Stato's OpenGA number holds the year ("cds/202301234");
+    a Cassazione number is counted per year ("snciv/2023/12345"), so it is
+    cited with it.
+    """
+    parts = rid.split("/")
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        return f"{parts[2]}/{parts[1]}"
+    return parts[-1]
+
+
+def citation_key(rid: str) -> str:
+    """The form `cds_answer.cited_numbers` reads a citation into: year and number, "202312345"."""
+    parts = rid.split("/")
+    if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+        return f"{parts[1]}{int(parts[2]):05d}"
+    return parts[-1]
 
 
 def join_chunks(chunks: list[str], max_overlap: int = 400) -> str:

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,124 @@ def _slug_from_article(source_id: str, article_num: str | None) -> str:
     return source_id
 
 
+def chunk_records(
+    source_id: str,
+    articles: list[dict],
+    chunk_cfg: ChunkConfig,
+    kind: str = "legge",
+):
+    """The training records of one source's articles, a chunk at a time."""
+    for art in articles:
+        text = art.get("text") or ""
+        if not text.strip():
+            continue
+        article_num = art.get("article_num")
+        source_record_id = _slug_from_article(source_id, article_num)
+        chunks = chunk_text(
+            text,
+            max_chars=chunk_cfg.max_chars,
+            overlap=chunk_cfg.overlap,
+            min_chars=chunk_cfg.min_chars,
+            boundary_lookback=chunk_cfg.boundary_lookback,
+        )
+        total = len(chunks)
+        for i, ch in enumerate(chunks):
+            yield {
+                "text": ch,
+                "source_id": source_record_id,
+                # The document this chunk came from. format_pretraining
+                # groups the train/val split on sentence_id, and a record
+                # without one becomes its own group — scattering one
+                # article's chunks across both sides, the leakage the
+                # per-document split exists to prevent.
+                "sentence_id": source_record_id,
+                "kind": kind,
+                "code": source_id,
+                "article_num": article_num,
+                "article_title": art.get("article_title"),
+                "chunk_index": i,
+                "chunk_total": total,
+            }
+
+
+def write_collection(
+    name: str,
+    sources: dict[str, list[dict]],
+    output_dir: Path,
+    chunk_cfg: ChunkConfig,
+    dry_run: bool,
+    kind: str = "legge",
+) -> tuple[int, int]:
+    """Many sources into one legislazione_<name>.chunks.jsonl, each chunk
+    keeping its own source as ``code``; (articles, chunks) written.
+
+    For collections of thousands of acts (all of Normattiva, EUR-Lex), where a
+    file a source would be thousands of files. Written to a temporary name and
+    renamed, so an interrupted run leaves no half corpus under the real one.
+    """
+    dst = output_dir / f"legislazione_{name}.chunks.jsonl"
+    tmp = dst.with_name(dst.name + ".tmp")
+    n_articles = n_chunks = 0
+    out_f = None if dry_run else tmp.open("w", encoding="utf-8")
+    try:
+        for source_id in sorted(sources):
+            n_articles += len(sources[source_id])
+            for record in chunk_records(source_id, sources[source_id], chunk_cfg, kind):
+                if out_f is not None:
+                    out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+                n_chunks += 1
+    finally:
+        if out_f is not None:
+            out_f.close()
+    if not dry_run:
+        tmp.replace(dst)
+    print(f"  {name}: {len(sources):,} acts, {n_articles:,} articles → {n_chunks:,} "
+          f"chunks → {dst.name}", file=sys.stderr)
+    return n_articles, n_chunks
+
+
+def act_id(xml_text: str, fallback: str) -> str:
+    """A file-safe id for an act from its AKN <FRBRthis> URN.
+
+    ``urn:nir:stato:legge:1990-08-07;241/!main`` -> ``legge_1990-08-07_241``;
+    ``fallback`` (the entry's name) when the document carries no URN.
+    """
+    m = re.search(r'<FRBRthis\b[^>]+\bvalue="([^"]+)"', xml_text)
+    if not m:
+        return re.sub(r"[^0-9A-Za-z-]+", "_", Path(fallback).stem).strip("_")
+    urn = m.group(1).split("/!")[0]
+    urn = re.sub(r"^urn:nir:", "", urn)
+    urn = re.sub(r"^stato:", "", urn)
+    return re.sub(r"[^0-9A-Za-z-]+", "_", urn).strip("_")
+
+
+def parse_all_acts_zip(path: Path) -> dict[str, list[dict]]:
+    """Every act of an AKN ZIP from dati.normattiva.it, each under its own id.
+
+    `parse_normattiva_opendata_zip` keeps only the acts of the catalogue (the
+    codes); this keeps them all, for a collection such as every act in force.
+    One act may span several files; an article number already taken from an
+    earlier file is kept from the first, as there.
+    """
+    import zipfile
+
+    acts: dict[str, list[dict]] = {}
+    with zipfile.ZipFile(path) as zf:
+        names = [n for n in zf.namelist() if n.lower().endswith(".xml")]
+        for name in names:
+            try:
+                xml_text = zf.read(name).decode("utf-8", errors="replace")
+                sid = act_id(xml_text, name)
+                records = _parse_akn_xml(xml_text, sid)
+            except Exception as exc:  # one bad file must not stop thousands
+                print(f"[warn] {name}: {exc}", file=sys.stderr)
+                continue
+            kept = acts.setdefault(sid, [])
+            have = {r.get("article_num") for r in kept}
+            kept.extend(r for r in records if r.get("article_num") not in have)
+    return {sid: arts for sid, arts in acts.items() if arts}
+
+
 def _write_source(
     source_id: str,
     articles: list[dict],
@@ -74,42 +193,10 @@ def _write_source(
     n_chunks = 0
     out_f = None if dry_run else dst.open("w", encoding="utf-8")
     try:
-        for art in articles:
-            text = art.get("text") or ""
-            if not text.strip():
-                continue
-            article_num = art.get("article_num")
-            source_record_id = _slug_from_article(source_id, article_num)
-            chunks = chunk_text(
-                text,
-                max_chars=chunk_cfg.max_chars,
-                overlap=chunk_cfg.overlap,
-                min_chars=chunk_cfg.min_chars,
-                boundary_lookback=chunk_cfg.boundary_lookback,
-            )
-            total = len(chunks)
-            for i, ch in enumerate(chunks):
-                record = {
-                    "text": ch,
-                    "source_id": source_record_id,
-                    # The document this chunk came from. format_pretraining
-                    # groups the train/val split on sentence_id, and a record
-                    # without one becomes its own group — scattering one
-                    # article's chunks across both sides, the leakage the
-                    # per-document split exists to prevent.
-                    "sentence_id": source_record_id,
-                    "kind": "legge",
-                    "code": source_id,
-                    "article_num": article_num,
-                    "article_title": art.get("article_title"),
-                    "chunk_index": i,
-                    "chunk_total": total,
-                }
-                if out_f is not None:
-                    out_f.write(
-                        json.dumps(record, ensure_ascii=False) + "\n"
-                    )
-                n_chunks += 1
+        for record in chunk_records(source_id, articles, chunk_cfg):
+            if out_f is not None:
+                out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            n_chunks += 1
     finally:
         if out_f is not None:
             out_f.close()
@@ -147,6 +234,14 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="XML mode — required, names the output file (e.g. 'costituzione').",
     )
+    parser.add_argument(
+        "--all-acts",
+        metavar="NAME",
+        default=None,
+        help="ZIP mode — keep EVERY act of the ZIP, each under its own id from its "
+        "URN, into one legislazione_<NAME>.chunks.jsonl (a whole Normattiva "
+        "collection), instead of the catalogue's codes.",
+    )
     parser.add_argument("--max-chars", type=int, default=3000)
     parser.add_argument("--overlap", type=int, default=200)
     parser.add_argument("--min-chars", type=int, default=200)
@@ -172,7 +267,16 @@ def main(argv: list[str] | None = None) -> int:
     total_chunks = 0
     t0 = time.time()
 
-    if suffix == ".zip":
+    if suffix == ".zip" and args.all_acts:
+        # --- ZIP mode, every act: a whole collection ------------------------
+        print(f"Reading every act of {args.input_path.name} "
+              f"({args.input_path.stat().st_size / 1024 / 1024:.1f} MB)...", file=sys.stderr)
+        acts = parse_all_acts_zip(args.input_path)
+        n_articles, n = write_collection(args.all_acts, acts, args.output, chunk_cfg, args.dry_run)
+        total_articles += n_articles
+        total_chunks += n
+
+    elif suffix == ".zip":
         # --- ZIP mode: bulk parse via the OpenData parser -------------------
         catalogue = {law.id: law for law in ALL_NORMATTIVA_LAWS}
         if args.sources:

@@ -177,6 +177,9 @@ pub struct AppState {
     /// `--moe-cache`, as the user gave it: every load sizes its own cache
     /// from it (see `fit::plan_moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--vram-reserve` in bytes: what every load sizes itself to leave free
+    /// and its context probe requires (see `fit::DEFAULT_VRAM_RESERVE_MIB`).
+    pub vram_reserve: u64,
     /// `--no-mmap`: every model this server loads is read into memory
     /// rather than mapped (see `InferenceConfig::no_mmap`).
     pub no_mmap: bool,
@@ -549,6 +552,7 @@ impl AppState {
                 n_cpu_moe: self.n_cpu_moe,
                 mmproj_offload: self.mmproj_offload,
                 moe_cache,
+                vram_reserve: self.vram_reserve,
                 auto_n_ubatch: self.n_ubatch.is_none(),
                 moe_prefetch: crate::fit::MoePrefetch {
                     slots: moe_prefetch,
@@ -583,7 +587,28 @@ impl AppState {
                 Room::Ready(plan) => plan,
             };
             if let Some(plan) = &plan {
-                plan.print_decision(file_size, self.fit_strict);
+                let hint = match (&plan.basis, plan.free_vram, sizing.info) {
+                    (
+                        crate::fit::OffloadBasis::Dense(crate::fit::FitDecision::Partial {
+                            layers,
+                            n_layers,
+                        }),
+                        Some(free),
+                        Some(info),
+                    ) => crate::fit::partial_split_hint(
+                        free,
+                        info,
+                        file_size,
+                        effective_ctx,
+                        kv_bpe_k,
+                        kv_bpe_v,
+                        self.vram_reserve,
+                        *layers,
+                        *n_layers,
+                    ),
+                    _ => None,
+                };
+                plan.print_decision(file_size, self.fit_strict, hint.as_deref());
                 if self.fit_strict && plan.refused_by_strict() {
                     return Err(ModelError::LoadFailed(format!(
                         "--fit-strict: model '{normalized}' does not fully fit in the \
@@ -710,6 +735,7 @@ impl AppState {
                 mtp_model: self.mtp_model.clone(),
                 moe_cache_bytes,
                 moe_cache_grow,
+                vram_reserve: self.vram_reserve,
                 no_mmap: load_no_mmap,
                 moe_prefetch_slots,
                 load_threads: self.load_threads,
@@ -1368,7 +1394,7 @@ impl AppState {
                 (models.views(), models.unallocated_reserve())
             };
             let usable = crate::fit::vram_bytes()
-                .map(|card| usable_vram(card, compute_reserve, unallocated));
+                .map(|card| usable_vram(card, self.vram_reserve, compute_reserve, unallocated));
             let now = std::time::Instant::now();
             let plan = resident::companion_evictions(&views, usable, need, now);
             let mut unloaded = 0;
@@ -2138,14 +2164,18 @@ mod fits_tests {
     /// left the next image request without room for its context (F5).
     #[test]
     fn a_sequential_resident_reserves_its_context_for_a_companion() {
-        // 16 GiB card, 8 GiB free; the floor keeps 12% of it back.
+        // 16 GiB card, 8 GiB free; the 1 GiB reserve keeps that much back
+        // (12% of the card, 1.9 GiB, before 0.7.80).
         let card = (8 * GIB, 16 * GIB);
+        let reserve = GIB;
         let embedder = 2 * GIB;
-        assert!(embedder <= usable_vram(card, 256 * MIB, 0));
-        let vision_model_context = 4 * GIB;
-        assert!(embedder > usable_vram(card, 256 * MIB, vision_model_context));
+        assert!(embedder <= usable_vram(card, reserve, 256 * MIB, 0));
+        // 4 GiB before 0.7.80; the larger usable memory needs a larger
+        // context to leave the embedder without room.
+        let vision_model_context = 6 * GIB;
+        assert!(embedder > usable_vram(card, reserve, 256 * MIB, vision_model_context));
         // Saturating, not wrapping, when the reservations exceed what is free.
-        assert_eq!(usable_vram(card, 256 * MIB, 64 * GIB), 0);
+        assert_eq!(usable_vram(card, reserve, 256 * MIB, 64 * GIB), 0);
     }
 }
 
@@ -2176,7 +2206,7 @@ mod same_file_tests {
 
 /// What a card with `(free, total)` VRAM leaves for a companion model — an
 /// embedder or a decision model — beside what is loaded: free VRAM, less the
-/// floor `fit.rs` keeps for every load (`fit::MIN_FREE_TOTAL_RATIO`), less
+/// reserve `fit.rs` keeps for every load (`vram_reserve`, `--vram-reserve`), less
 /// `compute_reserve_bytes` for the companion's own compute buffer —
 /// `fit::EMBEDDING_COMPUTE_RESERVE_BYTES` for an embedder, 256 MiB rather
 /// than `fit.rs`'s 640 MiB, since an embedding model's context and
@@ -2190,12 +2220,12 @@ mod same_file_tests {
 /// model loads fully onto the GPU or not at all (see `EmbeddingModel::load`),
 /// so a companion only ever needs a yes/no answer, never a partial split.
 fn usable_vram(
-    (free, total): (u64, u64),
+    (free, _total): (u64, u64),
+    vram_reserve: u64,
     compute_reserve_bytes: u64,
     unallocated_bytes: u64,
 ) -> u64 {
-    let floor = (total as f64 * crate::fit::MIN_FREE_TOTAL_RATIO) as u64;
-    free.saturating_sub(floor)
+    free.saturating_sub(vram_reserve)
         .saturating_sub(compute_reserve_bytes)
         .saturating_sub(unallocated_bytes)
 }
@@ -2859,6 +2889,8 @@ pub struct ServeConfig {
     pub mtp_model: Option<std::path::PathBuf>,
     /// `--moe-cache` (see `AppState::moe_cache`).
     pub moe_cache: Option<crate::fit::MoeCache>,
+    /// `--vram-reserve` in bytes (see `AppState::vram_reserve`).
+    pub vram_reserve: u64,
     /// `--no-mmap` (see `AppState::no_mmap`).
     pub no_mmap: bool,
     /// `--mmap` (see `AppState::mmap`).
@@ -3187,6 +3219,7 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         mtp_p_min: cfg.mtp_p_min,
         mtp_model: cfg.mtp_model.clone(),
         moe_cache: cfg.moe_cache,
+        vram_reserve: cfg.vram_reserve,
         no_mmap: cfg.no_mmap,
         mmap: cfg.mmap,
         moe_prefetch: cfg.moe_prefetch,
@@ -3384,6 +3417,7 @@ impl AppState {
             mtp_p_min: 0.0,
             mtp_model: None,
             moe_cache: None,
+            vram_reserve: crate::fit::DEFAULT_VRAM_RESERVE_BYTES,
             no_mmap: false,
             mmap: false,
             moe_prefetch: crate::fit::MOE_PREFETCH_SLOTS,

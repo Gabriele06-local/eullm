@@ -12,6 +12,10 @@ teacher and are written directly.
         --exclude-exam $WORK/eval/norm-exam.jsonl \\
         --out $WORK/eullm_runs/stage3/openbook-pairs.jsonl --limit 4000
 
+On JUPITER the teacher is EULLM Engine (``--backend eullm --servers ...``),
+one server a GH200, as for generate_instructions.py
+(forge/scripts/jupiter/sbatch_gen_instruct.slurm, FORGE_GEN_KIND=openbook).
+
 --exclude-exam is REQUIRED when an exam exists: its articles are left out, and
 it prints how many, never which. Resumable like generate_instructions.py:
 jobs come from the seed, and keys already written are skipped.
@@ -35,7 +39,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from generate_instructions import DEFAULT_MODEL, TransformersGenerator, done_keys  # noqa: E402
+from generate_instructions import (  # noqa: E402
+    DEFAULT_MODEL,
+    EullmGenerator,
+    TransformersGenerator,
+    done_keys,
+)
 
 from eullm_forge.datasets.instruct_gen import GenConfig, Rejected  # noqa: E402
 from eullm_forge.datasets.openbook_gen import (  # noqa: E402
@@ -58,7 +67,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-exam", action="store_true",
                     help="confirm there is no exam to exclude (otherwise refused)")
     ap.add_argument("--out", type=Path, required=True)
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", default=DEFAULT_MODEL,
+                    help="Hub id (transformers) or the engine's model name (eullm)")
+    ap.add_argument("--backend", choices=("transformers", "eullm"), default="transformers")
+    ap.add_argument("--servers", default="",
+                    help="eullm: comma-separated server URLs, e.g. http://127.0.0.1:18500,...")
+    ap.add_argument("--concurrency", type=int, default=64,
+                    help="eullm: requests in flight at once, over all the servers")
     ap.add_argument("--limit", type=int, required=True)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--per-article", type=int, default=1,
@@ -131,7 +146,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     cfg = GenConfig()
-    gen = TransformersGenerator(args.model, args.max_new_tokens)
+    if args.backend == "eullm":
+        gen = EullmGenerator([u for u in args.servers.split(",") if u], args.model,
+                             args.max_new_tokens, args.concurrency)
+        print(f"[ob] EULLM Engine: {len(gen.servers)} servers, {args.model}, "
+              f"{gen.concurrency} requests at once", flush=True)
+    else:
+        gen = TransformersGenerator(args.model, args.max_new_tokens)
     todo.sort(key=lambda j: len(j.text), reverse=True)
     tokens, gen_seconds, last_batch = 0, 0.0, 0.0
     finished = True

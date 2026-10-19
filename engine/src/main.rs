@@ -288,6 +288,24 @@ struct RuntimeOpts {
     #[arg(long, value_name = "auto|MIB", value_parser = fit::parse_moe_cache)]
     moe_cache: Option<fit::MoeCache>,
 
+    /// MiB of VRAM that must stay free once the model and its context are
+    /// loaded: the scratch the card needs while generating, and what other
+    /// processes take (a desktop on the same card). Sizing (`--fit`, the
+    /// expert cache) leaves it, and the load refuses a context that would
+    /// leave less. The same amount on a 16 GB card and on a 96 GB one,
+    /// because what it covers does not grow with the card. Lower it on a
+    /// card nothing else uses (the least is 256), raise it on one that
+    /// drives a display or is shared with other programs. `--fit-target`
+    /// is the same setting under llama-server's name.
+    #[arg(
+        long,
+        visible_alias = "fit-target",
+        value_name = "MIB",
+        default_value_t = fit::DEFAULT_VRAM_RESERVE_MIB,
+        value_parser = fit::parse_vram_reserve
+    )]
+    vram_reserve: u32,
+
     /// Read the model into memory instead of mapping its file. Expert
     /// tensors kept in RAM (by --moe-cache, --cpu-moe, --n-cpu-moe or the
     /// --fit split) then go to memory the GPU driver has pinned, which the
@@ -399,8 +417,11 @@ struct RuntimeOpts {
     #[arg(long, default_value_t = 8192)]
     checkpoint_min_step: u32,
 
-    /// Context window size
-    #[arg(short, long, default_value_t = 4096)]
+    /// Context window size, in tokens, or `auto` (also `0`): the largest window,
+    /// up to what the model was trained for and 131072, that still keeps every
+    /// layer on the GPU, never below 4096. For a dense model; a MoE model, a
+    /// launch with `--mtp` or with `--no-fit` takes 4096 and says so. It sizes the model `eullm run` loads; `serve` takes 4096 for the models it loads unless a request sets num_ctx.
+    #[arg(short, long, default_value_t = 4096, value_parser = fit::parse_ctx_size)]
     ctx_size: u32,
 
     /// Maximum concurrent requests served by the continuous-batching scheduler.
@@ -1034,6 +1055,7 @@ async fn main() {
                 mtp_p_min,
                 mtp_model,
                 moe_cache,
+                vram_reserve,
                 no_mmap,
                 mmap,
                 moe_prefetch,
@@ -1181,6 +1203,7 @@ async fn main() {
                 mtp_p_min,
                 mtp_model,
                 moe_cache,
+                vram_reserve,
                 no_mmap,
                 mmap,
                 moe_prefetch,
@@ -1235,6 +1258,7 @@ async fn main() {
                 mtp_p_min,
                 mtp_model,
                 moe_cache,
+                vram_reserve,
                 no_mmap,
                 mmap,
                 moe_prefetch,
@@ -1350,6 +1374,7 @@ async fn main() {
                 mtp_p_min,
                 mtp_model,
                 moe_cache,
+                vram_reserve,
                 no_mmap,
                 mmap,
                 moe_prefetch,
@@ -2532,6 +2557,77 @@ fn open_browser(url: &str) -> std::io::Result<()> {
         .map(|_| ())
 }
 
+/// `--ctx-size auto`: the window this launch gets, printed with why. A dense
+/// model is sized with [`fit::auto_context`]; anything else (a MoE model,
+/// `--mtp`, `--no-fit`, or a card or header that cannot be read) takes the
+/// default of 4096, because the window and what else is loaded trade against
+/// each other there and a number should be asked for.
+fn resolve_auto_context(
+    gguf_path: &std::path::Path,
+    sized: bool,
+    cache_type_k: &inference::KvCacheType,
+    cache_type_v: &inference::KvCacheType,
+    vram_reserve: u64,
+    extra_reserve: u64,
+    batch_size: usize,
+) -> u32 {
+    let default = fit::AUTO_CTX_FLOOR;
+    let info = fit::read_gguf_info(gguf_path);
+    let moe = info.as_ref().is_some_and(|i| {
+        fit::read_model_moe_layout(gguf_path, i.n_layers).is_some_and(|l| l.is_moe())
+    });
+    if !sized || moe {
+        println!(
+            "[EULLM] --ctx-size auto: {} -> {default} tokens; give a number to choose.",
+            if moe {
+                "a MoE model trades the window against its experts"
+            } else {
+                "no sizing here (--no-fit or --mtp)"
+            }
+        );
+        return default;
+    }
+    // The slots divide the window, in blocks of 256 tokens.
+    let slots = batch_size.max(1) as u32;
+    let align = slots * 256 / gcd(slots, 256);
+    match fit::auto_context(
+        fit::vram_bytes(),
+        info.as_ref(),
+        fit::model_file_bytes(gguf_path),
+        inference::cache_type_bytes_per_elem(cache_type_k),
+        inference::cache_type_bytes_per_elem(cache_type_v),
+        vram_reserve,
+        extra_reserve,
+        align,
+    ) {
+        Some(auto) if auto.whole => {
+            println!(
+                "[EULLM] --ctx-size auto: {} tokens, the most that keeps every layer on the GPU.",
+                auto.ctx
+            );
+            auto.ctx
+        }
+        Some(auto) => {
+            println!(
+                "[EULLM] --ctx-size auto: not every layer fits even at {} tokens; using that, \
+                 and the split below.",
+                auto.ctx
+            );
+            auto.ctx
+        }
+        None => {
+            println!(
+                "[EULLM] --ctx-size auto: could not read the card or the model; using {default} tokens."
+            );
+            default
+        }
+    }
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
 /// Valid launch values for `--batch-size`.
 ///
 /// 0 is sequential mode (also forced for multimodal models); 1..=64 are the
@@ -2590,6 +2686,7 @@ async fn cmd_run(
     mtp_p_min: f32,
     mtp_model: Option<PathBuf>,
     moe_cache: Option<fit::MoeCache>,
+    vram_reserve: u32,
     no_mmap: bool,
     mmap: bool,
     moe_prefetch: u32,
@@ -2619,6 +2716,7 @@ async fn cmd_run(
     decision_ctx: u32,
     residency: api::ResidencyConfig,
 ) {
+    let vram_reserve = fit::vram_reserve_bytes(vram_reserve);
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -2746,9 +2844,8 @@ async fn cmd_run(
         // evict-on-generation-load path, exactly as if this flag had not
         // been given, rather than refusing to start over a sizing decision
         // automatic sizing already makes gracefully everywhere else.
-        if let Some((free, total)) = fit::vram_bytes() {
-            let floor = (total as f64 * fit::MIN_FREE_TOTAL_RATIO) as u64;
-            let usable_before_reserve = free.saturating_sub(floor);
+        if let Some((free, _)) = fit::vram_bytes() {
+            let usable_before_reserve = free.saturating_sub(vram_reserve);
             if embedding_reserve_bytes >= usable_before_reserve {
                 println!(
                     "[EULLM] Warning: reserving {} MiB for the embedding model would leave the \
@@ -2784,9 +2881,8 @@ async fn cmd_run(
         decision_reserve_bytes = slot.reserve_bytes;
         launch_decision = Some(slot);
         // Same fallback as the embedding companion above, counting both.
-        if let Some((free, total)) = fit::vram_bytes() {
-            let floor = (total as f64 * fit::MIN_FREE_TOTAL_RATIO) as u64;
-            let usable_before_reserve = free.saturating_sub(floor);
+        if let Some((free, _)) = fit::vram_bytes() {
+            let usable_before_reserve = free.saturating_sub(vram_reserve);
             if embedding_reserve_bytes.saturating_add(decision_reserve_bytes)
                 >= usable_before_reserve
             {
@@ -2959,6 +3055,23 @@ async fn cmd_run(
         // already chose --cpu-moe/--n-cpu-moe themselves — explicit intent
         // beats a guess) does the dense run_fit flow, with its prompt and
         // its --fit-strict handling, take over.
+        if ctx_size == fit::CTX_AUTO {
+            ctx_size = resolve_auto_context(
+                &gguf_path,
+                fit && mtp == 0,
+                &cache_type_k,
+                &cache_type_v,
+                vram_reserve,
+                companion_reserve_bytes
+                    .saturating_add(fit::ubatch_reserve_bytes(n_ubatch))
+                    .saturating_add(if mmproj_offload == Some(false) {
+                        0
+                    } else {
+                        mmproj_bytes
+                    }),
+                batch_size,
+            );
+        }
         if fit {
             // What the user asked for with --gpu-layers, kept as an upper
             // bound: sizing may lower it, never raise it.
@@ -2973,6 +3086,7 @@ async fn cmd_run(
                     kv_bpe_k,
                     kv_bpe_v,
                     companion_reserve_bytes.saturating_add(fit::ubatch_reserve_bytes(n_ubatch)),
+                    vram_reserve,
                 );
             }
             // The MTP head's context, built once the model has loaded (see
@@ -3017,6 +3131,7 @@ async fn cmd_run(
                     kv_bpe_k,
                     kv_bpe_v,
                     sizing_reserve,
+                    vram_reserve,
                     request,
                     cpu_moe,
                     n_cpu_moe,
@@ -3082,6 +3197,7 @@ async fn cmd_run(
                         kv_bpe_k,
                         kv_bpe_v,
                         sizing_reserve,
+                        vram_reserve,
                         n_ubatch_flag.is_none(),
                     )
                 } else {
@@ -3143,6 +3259,7 @@ async fn cmd_run(
                             kv_bpe_k,
                             kv_bpe_v,
                             sizing_reserve,
+                            vram_reserve,
                         )
                     } else {
                         fit::run_fit_headless(
@@ -3153,6 +3270,7 @@ async fn cmd_run(
                             kv_bpe_k,
                             kv_bpe_v,
                             sizing_reserve,
+                            vram_reserve,
                         )
                     } {
                         fit::FitOutcome::Proceed(n) => gpu_layers = n,
@@ -3277,6 +3395,7 @@ async fn cmd_run(
             mtp_model: mtp_model.clone(),
             moe_cache_bytes,
             moe_cache_grow,
+            vram_reserve,
             no_mmap,
             moe_prefetch_slots,
             load_threads,
@@ -3359,6 +3478,10 @@ async fn cmd_run(
         eprintln!("  To test inference, use a local GGUF file:");
         eprintln!("    eullm run ./path/to/model.gguf");
         eprintln!();
+    }
+    // `auto` is resolved against a model; with none, the default window.
+    if ctx_size == fit::CTX_AUTO {
+        ctx_size = fit::AUTO_CTX_FLOOR;
     }
 
     let short = model_name.strip_prefix("eullm/").unwrap_or(&model_name);
@@ -3515,6 +3638,7 @@ async fn cmd_run(
             mtp_p_min,
             mtp_model,
             moe_cache,
+            vram_reserve,
             no_mmap: no_mmap_flag,
             mmap,
             moe_prefetch,
@@ -3589,7 +3713,7 @@ async fn cmd_serve(
     gpu_layers: i32,
     fit: bool,
     fit_strict: bool,
-    ctx_size: u32,
+    mut ctx_size: u32,
     threads: Option<u32>,
     flash_attn: bool,
     n_batch: u32,
@@ -3604,6 +3728,7 @@ async fn cmd_serve(
     mtp_p_min: f32,
     mtp_model: Option<PathBuf>,
     moe_cache: Option<fit::MoeCache>,
+    vram_reserve: u32,
     no_mmap: bool,
     mmap: bool,
     moe_prefetch: u32,
@@ -3621,6 +3746,14 @@ async fn cmd_serve(
     decision_ctx: u32,
     residency: api::ResidencyConfig,
 ) {
+    if ctx_size == fit::CTX_AUTO {
+        println!(
+            "[EULLM] --ctx-size auto sizes the model `eullm run` loads; the server loads its \
+             models with {} tokens unless a request sets num_ctx.",
+            fit::AUTO_CTX_FLOOR
+        );
+        ctx_size = fit::AUTO_CTX_FLOOR;
+    }
     let batch_size = validate_launch_batch_size(batch_size).unwrap_or_else(|e| {
         eprintln!("Error: {e}");
         std::process::exit(1);
@@ -3720,6 +3853,7 @@ async fn cmd_serve(
         mtp_p_min,
         mtp_model,
         moe_cache,
+        vram_reserve: fit::vram_reserve_bytes(vram_reserve),
         no_mmap,
         mmap,
         moe_prefetch,
@@ -5354,6 +5488,48 @@ mod cli_default_parity_tests {
         assert_eq!(asked.mtp_model, Some(PathBuf::from("head.gguf")));
         let run = runtime_opts(&["eullm", "run", "m.gguf", "--mtp-model", "head.gguf"]);
         assert_eq!(run.mtp_model, Some(PathBuf::from("head.gguf")));
+    }
+
+    #[test]
+    fn the_vram_reserve_is_one_gibibyte_on_both_commands_and_not_below_the_minimum() {
+        assert_eq!(
+            runtime_opts(&["eullm", "serve"]).vram_reserve,
+            fit::DEFAULT_VRAM_RESERVE_MIB
+        );
+        assert_eq!(fit::DEFAULT_VRAM_RESERVE_MIB, 1024);
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--vram-reserve", "512"]).vram_reserve,
+            512
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "serve", "--vram-reserve", "256"]).vram_reserve,
+            256
+        );
+        // llama-server's name for the same margin.
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--fit-target", "2048"]).vram_reserve,
+            2048
+        );
+        for argv in [
+            ["eullm", "serve", "--vram-reserve", "128"],
+            ["eullm", "serve", "--vram-reserve", "lots"],
+        ] {
+            assert!(Cli::try_parse_from(argv).is_err(), "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn the_context_is_4096_unless_asked_and_takes_auto_on_both_commands() {
+        assert_eq!(runtime_opts(&["eullm", "serve"]).ctx_size, 4096);
+        assert_eq!(
+            runtime_opts(&["eullm", "run", "x", "--ctx-size", "auto"]).ctx_size,
+            fit::CTX_AUTO
+        );
+        assert_eq!(
+            runtime_opts(&["eullm", "serve", "-c", "32768"]).ctx_size,
+            32768
+        );
+        assert!(Cli::try_parse_from(["eullm", "serve", "--ctx-size", "huge"]).is_err());
     }
 
     #[test]

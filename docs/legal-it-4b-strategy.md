@@ -1,6 +1,10 @@
 # Legal-IT-4B — Verticalization Strategy
 
 > Status: planning · Last updated: 2026-09-08 · Branch: `feat/legal-it`
+>
+> **Superseded on 2026-09-27** by the open-book recipe the published models
+> use. What this plan produced, what it measured and why the course
+> changed: [legal-it-experiments.md](legal-it-experiments.md), section 1.
 
 This document is the single source of truth for how `eullm/legal-it-4b` is
 built. It captures the model choices, the training pipeline, hardware

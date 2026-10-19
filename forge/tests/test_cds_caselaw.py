@@ -391,3 +391,67 @@ def test_the_retrieval_check_finds_the_rulings_its_questions_are_about(corpus, t
 def test_a_reasoning_block_before_the_card_is_skipped():
     card = parse_card("<think>\nLa sentenza riguarda...\n</think>\n" + json.dumps(GOOD))
     assert card["esito"] == "rigetto"
+
+
+@pytest.fixture
+def cass_corpus(tmp_path):
+    """Corte di cassazione chunks as format_pretraining.py wrote them: no OpenGA."""
+    path = tmp_path / "legal_it.jsonl"
+    rows = []
+    for n in range(10):
+        kind = "snciv" if n < 8 else "snpen"
+        year = 2021 + n % 4
+        sid = f"{kind}/{year}/{10000 + n}"
+        for i in range(2):
+            rows.append({"text": f"Cassazione {n} parte{i} fatto{n}_ motivo{i}", "source_id": sid,
+                         "sentence_id": sid, "chunk_index": i, "chunk_total": 2, "year": year,
+                         "kind": kind})
+    rows.append({"text": "Art. 1 legge", "source_id": "legge", "sentence_id": None,
+                 "chunk_index": 0, "chunk_total": 1, "year": None, "kind": "legge"})
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return path
+
+
+def test_the_cassazione_split_is_by_kind_and_named_after_it(cass_corpus, tmp_path, capsys):
+    mod = _load("cds_split")
+    out = tmp_path / "cass"
+    assert mod.main(["--kind", "snciv", "--chunks", str(cass_corpus), "--dev", "2",
+                     "--out-dir", str(out)]) == 0
+    dev = (out / "snciv-dev-ids.txt").read_text().split()
+    train = (out / "snciv-train-ids.txt").read_text().split()
+    assert len(dev) >= 2 and not set(dev) & set(train) and len(dev) + len(train) == 8
+    assert all(i.startswith("snciv/") for i in dev + train)
+    assert json.loads((out / "snciv-split.json").read_text())["kind"] == "snciv"
+    assert not (out / "cds-dev-ids.txt").exists()
+    assert "fatto" not in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        mod.main(["--kind", "tar", "--chunks", str(cass_corpus), "--out-dir", str(out)])
+
+
+def test_a_cassazione_card_is_asked_as_the_cassazione(cass_corpus, teacher, tmp_path):
+    url, seen = teacher
+    ids = tmp_path / "ids.txt"
+    ids.write_text("snciv/2021/10000\nsnciv/2022/10001\n")
+    out = tmp_path / "cass" / "schede.jsonl"
+    mod = _load("cds_schede")
+    assert mod.main(["--kind", "snciv", "--chunks", str(cass_corpus), "--ids", str(ids),
+                     "--out", str(out), "--url", url, "--parallel", "2"]) == 0
+    cards = [json.loads(line) for line in out.read_text().splitlines()]
+    assert sorted(c["id"] for c in cards) == ["snciv/2021/10000", "snciv/2022/10001"]
+    assert all(c["court"] == "snciv" and c["numero"] in ("10000", "10001") for c in cards)
+    system, user = seen[0]["messages"][0]["content"], seen[0]["messages"][-1]["content"]
+    assert "Massimario della Corte di cassazione" in system
+    assert user.startswith("Sentenza della Corte di cassazione, sezioni civili, 202")
+    assert "cassazione con rinvio" in user and "Consiglio di Stato" not in user
+
+
+def test_cassazione_outcomes_and_citations():
+    from eullm_forge.caselaw.courts import SNCIV
+    from eullm_forge.caselaw.prompts import caselaw_prompt, ruling_label
+    card = parse_card(json.dumps({**GOOD, "esito": "Cassazione con rinvio"}), SNCIV)
+    assert card["esito"] == "cassazione con rinvio"
+    assert parse_card(json.dumps({**GOOD, "esito": "cassazione con rinvio"}))["esito"] == "altro"
+    assert prefix(card, {"numero": "12345", "year": 2023}, SNCIV).startswith(
+        "[Cass. civ., n. 12345, 2023 - ")
+    assert ruling_label({"numero": "12345"}, SNCIV) == "Cass. civ., n. 12345"
+    assert "(sentenze della Corte di cassazione)" in caselaw_prompt("D?", [("x", "t")], SNCIV)
