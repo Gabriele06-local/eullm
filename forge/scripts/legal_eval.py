@@ -205,13 +205,36 @@ def chat_prompt(tok, content: str, think: bool = False) -> str:
     template that has no such switch (Qwen3-4B-Instruct-2507, base models)
     ignores the extra variable, so every model is asked the same way.
     """
+    # Mistral Small 4 reads reasoning_effort ("none", its default, or "high")
+    # instead; other templates ignore a variable they do not use.
+    extra = {"reasoning_effort": "high"} if think else {}
     return tok.apply_chat_template([{"role": "user", "content": content}],
                                    tokenize=False, add_generation_prompt=True,
-                                   enable_thinking=think)
+                                   enable_thinking=think, **extra)
+
+
+REASONING_MARKERS = ("<think>", "</think>", "[THINK]", "[/THINK]")
+
+
+def decode_answer(tok, ids: list[int], keep_reasoning: bool = False) -> str:
+    """The text of generated ids, special tokens dropped.
+
+    With ``keep_reasoning`` the reasoning markers stay, for `split_reasoning`:
+    Mistral's [THINK] and [/THINK] are special tokens, which
+    skip_special_tokens would delete, leaving the reasoning glued to the
+    answer and graded as part of it.
+    """
+    if not keep_reasoning:
+        return tok.decode(ids, skip_special_tokens=True).strip()
+    text = tok.decode(ids, skip_special_tokens=False)
+    for t in sorted(set(tok.all_special_tokens) - set(REASONING_MARKERS), key=len, reverse=True):
+        text = text.replace(t, "")
+    return text.strip()
 
 
 def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
-                     max_new_tokens: int, end_ids: list[int]) -> list[tuple[str, bool]]:
+                     max_new_tokens: int, end_ids: list[int],
+                     keep_reasoning: bool = False) -> list[tuple[str, bool]]:
     """Greedy answers to already-templated prompts, ``batch_size`` at a time.
 
     Returns (answer, ended_its_turn) per prompt. In a batch a finished
@@ -233,8 +256,7 @@ def generate_answers(model, tok, prompts: list[str], *, batch_size: int,
                                  eos_token_id=end_ids, pad_token_id=tok.pad_token_id)
         for row in out[:, enc["input_ids"].shape[1]:].tolist():
             cut = next((j for j, t in enumerate(row) if t in end_ids), None)
-            text = tok.decode(row[:cut] if cut is not None else row,
-                              skip_special_tokens=True).strip()
+            text = decode_answer(tok, row[:cut] if cut is not None else row, keep_reasoning)
             out_all.append((text, cut is not None))
     return out_all
 
@@ -346,7 +368,8 @@ def main() -> int:
         print(f"[eval] {len(items)} items on {'GPU' if cuda else 'CPU'}, batch {batch}",
               flush=True)
         results = generate_answers(model, tok, prompts, batch_size=batch,
-                                   max_new_tokens=args.max_new_tokens, end_ids=end_ids)
+                                   max_new_tokens=args.max_new_tokens, end_ids=end_ids,
+                                   keep_reasoning=args.think)
     reasonings = {}
     if args.think:
         split = [split_reasoning(text) for text, _ in results]
