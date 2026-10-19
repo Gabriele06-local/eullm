@@ -112,6 +112,16 @@ and not the line before it that says which call failed and on which
 device. `c12-stability` runs them again with llama.cpp's log on; from the
 build after `next17` its error lines are in every server's log.
 
+19-10-2026, `c12`'s first pass (`next17`): its five soaks ran their six
+hours without a death, and every server stopped with 0, so the clean stop
+holds on ROCm. Six hours was too short, since `c01`'s soaks died 8 to 11.5
+hours in; its long groups run the same configurations 12 to 16 hours, the
+Qwen3-32B ones twice, on one node. In `c01` and `c02` a server whose
+logits turned NaN did not recover: every later request failed the same
+way and the runner kept asking (`quant-soak`: 30,259,011 of 30,331,204
+requests failed; `soak-one-gcd`: 135,126 of 167,211), which points to GPU
+memory written over under the model rather than one bad step.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
@@ -196,7 +206,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 | `c11-placement` | 35 | ~22 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
-| `c12-stability` | 6 | ~6 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`) |
+| `c12-stability` | 14 | ~22 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it
@@ -779,6 +789,41 @@ In order:
    The 480B's tensor load takes 1,506-1,640 s (layer 88-167). Whether
    replicas of a smaller split beat one wider split on a whole node, the
    question the placement policy needs answered, is `c11-placement`.
+
+   It (`next16`, 18-19-10-2026), a whole node of 8 GCDs, tokens/s of the
+   node by the requests on it (servers × batch):
+
+   | model | servers × GCDs, split | 16 | 32 | 64 | 128 | 256 |
+   |---|---|---:|---:|---:|---:|---:|
+   | gpt-oss-120b MXFP4 | 2 × 4, layer | | 445 | 660 | 771 | |
+   | | 2 × 4, tensor | | 606 | 934 | 1,271 | |
+   | | 4 × 2, layer | | | 905 | 1,323 | 1,508 |
+   | | 4 × 2, tensor | | | 1,045 | 1,712 | **2,078** |
+   | Qwen3-235B Q4_K_M | 1 × 8, layer | 75.2 | 113 | 142 | | |
+   | | 1 × 8, tensor | 96.9 | 184 | 293 | | |
+   | | 2 × 4, layer | | 152 | 229 | 286 | |
+   | | 2 × 4, tensor | | 220 | 381 | **526** | |
+   | Qwen3-Coder-480B Q4_K_M | 1 × 8, layer | | | 102 | | |
+   | | 1 × 8, tensor | | | **251** | | |
+   | DeepSeek-V3.1 Q4_K_M | 1 × 8, layer | 35.7 | 44.5 | | | |
+   | Qwen3-32B | 8 × 1 | | | | **2,046** | |
+   | | 4 × 2, tensor | | | | 1,652 | |
+   | | 2 × 4, tensor | | | | 1,332 | |
+
+   The placement that follows: a model that fits one GCD runs one server
+   per GCD, since tensor's reductions cost more than they give at the same
+   requests (Qwen3-32B: eight servers 2,046, four of two GCDs 1,652, with a
+   spread of 21-30% between repeats); a larger model runs on the fewest
+   GCDs that hold it, split as tensor, as many servers as the node takes
+   (gpt-oss-120b four of two GCDs, 2,078 at 256 requests, 38% above layer;
+   the 235B two of four, 526 at 128, 1.8 times layer and the one server of
+   eight); the 480B needs all eight, where tensor writes 2.5 times layer.
+   DeepSeek-V3.1 did not load with tensor (all three points) and stays on
+   layer: 21.5 tokens/s at one request, 44.5 at 32. Tensor's loads are
+   slow: 943-1,269 s for the 235B against 19-145 with layer, 1,679 s for
+   the 480B against 113, 255-626 s for gpt-oss-120b against 10-46. A
+   server loaded once a day can afford that, a swap cannot; why tensor
+   reads that slowly is the next thing to look at.
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.
