@@ -29,3 +29,41 @@ def test_an_answer_without_reasoning_is_left_alone_and_a_cut_one_has_no_answer()
     assert mod.split_reasoning("Risposta diretta.") == ("Risposta diretta.", "", True)
     assert mod.split_reasoning("[THINK]sto ancora ragionando") == ("", "sto ancora ragionando",
                                                                    False)
+
+
+class _Tok:
+    """Enough of a tokenizer: a template that records its variables, and ids
+    that decode to fixed strings, [THINK] among the special tokens."""
+
+    all_special_tokens = ["<s>", "</s>", "<pad>", "[THINK]", "[/THINK]", "[INST]"]
+    pieces = {1: "<s>", 2: "</s>", 3: "[THINK]", 4: "ragiono", 5: "[/THINK]", 6: "Risposta."}
+
+    def __init__(self):
+        self.seen = {}
+
+    def apply_chat_template(self, messages, **kw):
+        self.seen = kw
+        return messages[0]["content"]
+
+    def decode(self, ids, skip_special_tokens=False):
+        out = [self.pieces[i] for i in ids]
+        if skip_special_tokens:
+            out = [p for p in out if p not in self.all_special_tokens]
+        return "".join(out)
+
+
+def test_reasoning_effort_is_asked_only_when_thinking():
+    mod, tok = _load(), _Tok()
+    mod.chat_prompt(tok, "domanda", think=True)
+    assert tok.seen["reasoning_effort"] == "high" and tok.seen["enable_thinking"] is True
+    mod.chat_prompt(tok, "domanda", think=False)
+    assert "reasoning_effort" not in tok.seen and tok.seen["enable_thinking"] is False
+
+
+def test_mistral_think_markers_survive_decoding_and_are_split_off():
+    mod, tok = _load(), _Tok()
+    ids = [3, 4, 5, 6, 2]
+    assert mod.decode_answer(tok, ids) == "ragionoRisposta."
+    kept = mod.decode_answer(tok, ids, keep_reasoning=True)
+    assert kept == "[THINK]ragiono[/THINK]Risposta."
+    assert mod.split_reasoning(kept) == ("Risposta.", "ragiono", True)
