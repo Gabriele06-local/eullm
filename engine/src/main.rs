@@ -961,15 +961,17 @@ async fn main() {
     };
 
     logs.with_env_filter(
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            // Module paths are rooted at the [[bin]] name ("eullm" in
-            // Cargo.toml), not the package name ("eullm-engine") - there's
-            // no separate lib.rs, so every tracing::info!/warn! call site
-            // resolves its target under "eullm::...". "eullm_engine=info"
-            // never matched anything, silently disabling all engine
-            // logging (KV-reuse diagnostics, context/scheduler startup
-            // info, etc.) unless RUST_LOG was set explicitly.
-            .unwrap_or_else(|_| "eullm=info".into()),
+        // Module paths are rooted at the [[bin]] name ("eullm" in
+        // Cargo.toml), not the package name ("eullm-engine") - there's
+        // no separate lib.rs, so every tracing::info!/warn! call site
+        // resolves its target under "eullm::...". "eullm_engine=info"
+        // never matched anything, silently disabling all engine
+        // logging (KV-reuse diagnostics, context/scheduler startup
+        // info, etc.) unless RUST_LOG was set explicitly.
+        tracing_subscriber::EnvFilter::try_new(inference::log_filter(
+            std::env::var("RUST_LOG").ok().as_deref(),
+        ))
+        .unwrap_or_else(|_| inference::log_filter(None).into()),
     )
     .init();
 
@@ -3606,7 +3608,7 @@ async fn cmd_run(
     // `api::AppState::launch_model`.
     let api_launch_model = launch_gguf_path.map(|p| (model_name.clone(), p));
     let api_store = ModelStore::default_store().expect("model store");
-    tokio::spawn(async move {
+    let server = tokio::spawn(async move {
         if let Err(e) = api::serve(api::ServeConfig {
             port,
             // `run` resolves the projector itself and hands the loaded engine
@@ -3689,10 +3691,16 @@ async fn cmd_run(
     if let Some(backend) = repl_backend.filter(|_| repl_possible) {
         interactive_chat(backend, &model_name, ctx_size, batch_size, web).await;
     } else {
-        // No REPL — wait for shutdown signal.
-        // The API server handles graceful shutdown internally via SIGTERM/SIGINT.
-        tokio::signal::ctrl_c().await.ok();
-        tracing::info!("Shutting down...");
+        // No REPL: the process lasts as long as the API server, which stops
+        // itself on SIGTERM or SIGINT (`api::serve`). Waiting for SIGINT here
+        // instead left `eullm run` running after a SIGTERM had stopped the
+        // server, and returning on SIGINT ended the process while the server
+        // was still unloading its models.
+        if server.await.is_err() {
+            // The server's task panicked, and said why above.
+            std::process::exit(1);
+        }
+        exit_after_serve();
     }
 }
 

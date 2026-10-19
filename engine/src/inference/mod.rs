@@ -55,32 +55,43 @@ pub const fn has_gpu_backend() -> bool {
 /// second one. Call this once, at process startup, before loading anything,
 /// and hand the same `Arc` to every loader instead.
 ///
-/// Also silences llama.cpp's own log lines (CUDA graph warmup etc.) once,
-/// here, rather than per-model-load: `void_logs` takes `&mut LlamaBackend`,
-/// which a shared, already-cloned `Arc` can no longer offer. Unless asked
-/// for: see [`llama_log_wanted`].
+/// Also hands llama.cpp's own log lines to tracing, once, here: the
+/// bindings ask tracing's filter about each line before formatting it, so
+/// [`log_filter`] decides which of them are written.
 pub fn init_shared_backend()
 -> Result<std::sync::Arc<LlamaBackend>, Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("Initializing llama.cpp backend...");
-    let mut backend = LlamaBackend::init()?;
+    let backend = LlamaBackend::init()?;
     if llama_log_wanted(std::env::var("RUST_LOG").ok().as_deref()) {
         tracing::info!("llama.cpp's log goes to the log (RUST_LOG names llama-cpp-2)");
-        llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
-    } else {
-        backend.void_logs();
     }
+    llama_cpp_2::send_logs_to_tracing(llama_cpp_2::LogOptions::default());
     Ok(std::sync::Arc::new(backend))
 }
 
-/// Whether llama.cpp's own log lines are wanted: when `RUST_LOG` names
-/// their tracing target, `llama-cpp-2` (`RUST_LOG=eullm=info,llama-cpp-2=info`).
-/// They say why llama.cpp refuses a load, which the engine reports only as
-/// "null result": on LUMI every `--split-mode row` load failed that way
-/// (c03, 15-10-2026). Off otherwise, as before: the bindings hand the lines
-/// to tracing without asking its filter first, so `eullm=info` would not
-/// keep them out.
+/// Whether `RUST_LOG` names llama.cpp's tracing target, `llama-cpp-2`
+/// (`RUST_LOG=eullm=info,llama-cpp-2=info`), and so chooses itself which of
+/// llama.cpp's lines are written. Its lines say why llama.cpp refuses a
+/// load, which the engine reports only as "null result": on LUMI every
+/// `--split-mode row` load failed that way (c03, 15-10-2026).
 fn llama_log_wanted(rust_log: Option<&str>) -> bool {
     rust_log.is_some_and(|filter| filter.contains("llama-cpp-2"))
+}
+
+/// The log filter for `RUST_LOG`: `eullm=info` when it is unset, and
+/// llama.cpp's errors in every case, unless `RUST_LOG` names llama.cpp's
+/// target itself. llama.cpp says what went wrong in error lines before it
+/// aborts (`ROCm error: <what>`, then the device and the function): those
+/// lines were dropped with the rest of its log, and the soaks that crashed
+/// on LUMI (c01, 16-18-10-2026) left only `ggml-cuda.cu:109: ROCm error`,
+/// the line `abort` prints itself. Its other lines stay out: a load writes
+/// hundreds of them.
+pub fn log_filter(rust_log: Option<&str>) -> String {
+    match rust_log.map(str::trim) {
+        None | Some("") => "eullm=info,llama-cpp-2=error".to_string(),
+        Some(filter) if llama_log_wanted(Some(filter)) => filter.to_string(),
+        Some(filter) => format!("{filter},llama-cpp-2=error"),
+    }
 }
 
 /// The one backend every test in this binary shares, for the reason
@@ -3235,6 +3246,38 @@ mod tests {
         assert!(!llama_log_wanted(Some("eullm=info")));
         assert!(!llama_log_wanted(Some("debug")));
         assert!(llama_log_wanted(Some("eullm=info,llama-cpp-2=info")));
+    }
+
+    #[test]
+    fn llama_cpps_errors_are_logged_unless_rust_log_says_otherwise() {
+        assert_eq!(log_filter(None), "eullm=info,llama-cpp-2=error");
+        assert_eq!(log_filter(Some(" ")), "eullm=info,llama-cpp-2=error");
+        assert_eq!(
+            log_filter(Some("eullm=debug")),
+            "eullm=debug,llama-cpp-2=error"
+        );
+        assert_eq!(log_filter(Some("debug")), "debug,llama-cpp-2=error");
+        assert_eq!(
+            log_filter(Some("eullm=info,llama-cpp-2=info")),
+            "eullm=info,llama-cpp-2=info"
+        );
+    }
+
+    /// The filter keeps llama.cpp's errors and nothing else of it, which
+    /// is what the bindings ask it about each line (their target is
+    /// `llama-cpp-2`).
+    #[test]
+    fn the_filter_lets_through_llama_cpps_errors_only() {
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+        let filter = tracing_subscriber::EnvFilter::new(log_filter(Some("eullm=info")));
+        let subscriber = tracing_subscriber::registry().with(filter);
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(tracing::event_enabled!(target: "llama-cpp-2", Level::ERROR));
+            assert!(!tracing::event_enabled!(target: "llama-cpp-2", Level::WARN));
+            assert!(!tracing::event_enabled!(target: "llama-cpp-2", Level::INFO));
+            assert!(tracing::event_enabled!(target: "eullm::api", Level::INFO));
+        });
     }
 
     /// What `--moe-cache auto` keeps free after growing: the prefetch's slots,

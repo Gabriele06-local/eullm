@@ -1970,11 +1970,9 @@ fn run_scheduler_loop(
         }
     };
 
-    // llama.cpp's own log lines (CUDA graph warmup etc.) are silenced once,
-    // process-wide, when the shared backend is created — see `main.rs` —
-    // rather than per-load here, since `void_logs` takes `&mut LlamaBackend`
-    // and this backend is now shared (`Arc`) across every model in the
-    // process.
+    // llama.cpp's own log lines (CUDA graph warmup etc.) are routed once,
+    // process-wide, when the shared backend is created, rather than per-load
+    // here: see `inference::init_shared_backend` and `inference::log_filter`.
 
     // The actual n_ubatch/n_batch llama.cpp applied — read back from the
     // context rather than trusted from what we asked for, since this is
