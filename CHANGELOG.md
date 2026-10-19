@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.90 — 2026-10-19
 
 ### Fixed
 - **`format: "json"` no longer slows writing down, by up to 7 times with a large vocabulary.** The JSON grammar checked every token of the vocabulary at every step, on one CPU thread, while the GPU waited: with Gemma 4 E4B on an RTX 5070 Ti short JSON answers took 13 to 78 s with the GPU at 17-24%. It now checks only the token drawn, as llama.cpp does, and goes over the whole vocabulary only when the grammar rejects that token, so the answer is JSON as before. On gemma-3-270m on the CPU (a 262,144-token vocabulary) the same 212-token JSON answer was written at 54 tokens/s instead of 7.7, as fast as without `format`. It applies to every path, `/api/chat`, `/api/generate` and `/v1/chat/completions`.
