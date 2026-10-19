@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -73,6 +74,7 @@ class IdentityConfig:
     gradient_checkpointing: bool = False
     save_steps: int = 0
     train_format_tokens: bool = True
+    default_system: str = ""
 
 
 def generate_identity_dataset(config: IdentityConfig) -> list[dict[str, str]]:
@@ -314,6 +316,34 @@ def ensure_chat_template(tokenizer: object) -> bool:
             "before identity fine-tuning"
         )
     tokenizer.chat_template = CHATML_TEMPLATE
+    return True
+
+
+_DEFAULT_SYSTEM = re.compile(
+    r"(\{%-?\s*set\s+default_system_message\s*=\s*)'(?:[^'\\]|\\.)*'(\s*-?%\})", re.S)
+
+
+def set_default_system(tokenizer: object, text: str) -> bool:
+    """Replace the system prompt a chat template inserts when a request has none.
+
+    Ministral-3's template inserts Mistral's own, about 525 tokens ("You are
+    Ministral-3-8B-Instruct-2512 ... You power an AI assistant called Le
+    Chat", with "{today}" left unfilled) into every conversation that brings
+    no system message: in training, in our exams, and in llama.cpp with
+    --jinja. legal-it-8b was trained and published with it; a tester found
+    it on 2026-10-18. Set on the tokenizer, the new text travels as the
+    template does (see `ensure_chat_template`): adapter, merge, GGUF.
+
+    Returns False when the template has no default system message to replace.
+    """
+    template = getattr(tokenizer, "chat_template", None)
+    if not isinstance(template, str):
+        return False
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'")
+    new, n = _DEFAULT_SYSTEM.subn(lambda m: f"{m.group(1)}'{escaped}'{m.group(2)}", template)
+    if n != 1:
+        return False
+    tokenizer.chat_template = new
     return True
 
 
@@ -564,6 +594,11 @@ def fine_tune_identity(config: IdentityConfig) -> str:
         tokenizer.pad_token = tokenizer.eos_token
     if ensure_chat_template(tokenizer):
         logger.info("  Tokenizer had no chat template: installed ChatML")
+    if config.default_system:
+        if not set_default_system(tokenizer, config.default_system):
+            raise ValueError("default_system given, but the chat template has no "
+                             "default_system_message to replace")
+        logger.info("  Default system prompt replaced (%d characters)", len(config.default_system))
 
     # bf16 where the GPU has it (every A100): Qwen activations overflow fp16
     # often enough that a run can go non-finite for no reason in the data.
