@@ -106,7 +106,11 @@ Qwen3-30B-A3B Q8_0 server met a GPU memory fault
 (`HSA_STATUS_ERROR_MEMORY_APERTURE_VIOLATION`); the runner counted those
 soaks as passed, since fewer than half their requests failed, and now
 records the death (`servers_died`). Their cause is still to be read in
-their logs.
+their logs, and was not in them: the engine dropped llama.cpp's own log,
+error lines included, so a crash left only `ggml-cuda.cu:109: ROCm error`
+and not the line before it that says which call failed and on which
+device. `c12-stability` runs them again with llama.cpp's log on; from the
+build after `next17` its error lines are in every server's log.
 
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
