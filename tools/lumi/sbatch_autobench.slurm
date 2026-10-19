@@ -45,7 +45,7 @@ set -uo pipefail
 # 242 is a parse-time SyntaxError there). campaign_env.sh picks the newest
 # interpreter on PATH, then cray-python, as every other LUMI job here does.
 # shellcheck source=campaign_env.sh
-source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh"
+source "${EULLM_REPO:-$PWD}/tools/lumi/campaign_env.sh" || exit 1
 
 EULLM_BIN="${EULLM_BIN:?set EULLM_BIN to the eullm binary}"
 DECISION="${DECISION:?set DECISION to the decision model GGUF}"
