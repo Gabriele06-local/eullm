@@ -16,15 +16,19 @@
 #         forge/scripts/jupiter/sbatch_judge.slurm
 #
 # Needs the grader in the offline cache (prefetch_models.py --models
-# Qwen/Qwen3-30B-A3B-Instruct-2507, 61 GB, on a login node). Resumable: a
+# Qwen/Qwen3-30B-A3B-Instruct-2507, 61 GB, on a login node). It is copied
+# once into the node's memory and the four graders load it from there
+# (stage_model.sh): on 19-10-2026 four loads from $PROJECT ran two judges
+# out of their hour (jobs 2403554, 2403558). Resumable: a
 # model already graded is skipped, so a rerun grades only the new ones.
-# Whole node: 4 GPU-hours an hour.
+# Whole node: 4 GPU-hours an hour; two hours at most, a judge of 30 answer
+# sets took 34 minutes.
 
 #SBATCH --job-name=forge-judge
 #SBATCH --partition=booster
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:4
-#SBATCH --time=01:00:00
+#SBATCH --time=02:00:00
 
 set -uo pipefail
 EULLM_REPO="${EULLM_REPO:-$SLURM_SUBMIT_DIR}"
@@ -51,6 +55,11 @@ FILES=("$JUDGE"/answers/answers-*.jsonl)
 [ -e "${FILES[0]}" ] || { echo "[!!] no norm-exam-answers.jsonl under $RUNS/sft*/"; exit 1; }
 echo "  ${#FILES[@]} answer sets, grader $GRADER, rubric v3, into $JUDGE/graded-v3"
 
+# shellcheck source=stage_model.sh
+source "$EULLM_REPO/forge/scripts/jupiter/stage_model.sh"
+GRADER_PATH=$(stage_model "$GRADER")
+echo "  grader loaded from $GRADER_PATH"
+
 POWER="$RUNS/power/judge-$JOB.csv"
 nvidia-smi --query-gpu=timestamp,index,power.draw,utilization.gpu,memory.used \
     --format=csv,noheader,nounits -l 5 >"$POWER" 2>/dev/null &
@@ -64,7 +73,7 @@ for g in 0 1 2 3; do
     [ "${#mine[@]}" -gt 0 ] || continue
     CUDA_VISIBLE_DEVICES=$g taskset -c "$((72 * g))-$((72 * g + 71))" \
         python "$EULLM_REPO/forge/scripts/judge_answers.py" "${mine[@]}" \
-        --model "$GRADER" --rubric v3 --quiet --graded-dir "$JUDGE/graded-v3" \
+        --model "$GRADER_PATH" --rubric v3 --quiet --graded-dir "$JUDGE/graded-v3" \
         --csv "graded-gpu$g.csv" >"$JUDGE/judge-$JOB-gpu$g.log" 2>&1 &
     PIDS+=($!)
 done
