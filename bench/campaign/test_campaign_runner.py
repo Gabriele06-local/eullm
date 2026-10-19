@@ -704,6 +704,30 @@ def test_a_point_past_its_time_limit_is_stopped_and_fails(tmp_path, engine, monk
     assert not ctx.stragglers
 
 
+def test_an_early_server_death_survives_the_failed_point(tmp_path, engine, monkeypatch):
+    """DIE_AFTER=4 kills the server after the warm-up and three requests, so
+    most of the ten fail and the point raises. The death must travel on the
+    exception: the success path's server_exits is never reached, and without
+    it the failed result (and the retry that follows) erased the crash."""
+    import point
+
+    sets = tmp_path / "sets"
+    sets.mkdir()
+    with open(sets / "ten.jsonl", "w") as f:
+        for k in range(10):
+            f.write(json.dumps({"id": f"t{k}", "answer": "4", "grader": "number",
+                                "messages": [{"role": "user", "content": f"{k}+4-{k}?"}]}) + "\n")
+    monkeypatch.setenv("FAKE_EULLM_DIE_AFTER", "4")
+    p = normalize({"kind": "workload", "model": "qwen3-4b", "sets": ["ten"], "concurrency": 1})
+    p |= {"id": "soak-early"}
+    ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path),
+                        sets_dir=str(sets))
+    with pytest.raises(point.PointError, match="requests failed") as exc:
+        point.run(p, ctx)
+    assert exc.value.servers_died[0]["exit"] == 134
+    assert exc.value.server_exits == [134]
+
+
 def test_a_server_that_dies_during_a_workload_is_recorded(tmp_path, engine, monkeypatch):
     """A soak that loses its server near the end still counts its numbers,
     but says the server died, when, and how; and every point says how its

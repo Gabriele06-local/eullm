@@ -106,9 +106,10 @@ class Queue:
         """Back to todo, as if never claimed: the job ended, not the point."""
         self._leave_running(pid, "todo", self.load("running", pid))
 
-    def finish(self, pid: str, state: str, note: str = "") -> str:
+    def finish(self, pid: str, state: str, note: str = "", retry: bool = True) -> str:
         """Leave running/ for `state`; a failure is retried until
-        MAX_ATTEMPTS. Returns the state the point ended up in."""
+        MAX_ATTEMPTS, unless `retry` is false (a server death is a finding,
+        not a flaky attempt). Returns the state the point ended up in."""
         if state not in ("done", "failed", "blocked"):
             raise ValueError(state)
         point = self.load("running", pid)
@@ -116,7 +117,7 @@ class Queue:
             point.setdefault("notes", []).append(note)
         if state == "failed":
             point["attempts"] = point.get("attempts", 0) + 1
-            if point["attempts"] < MAX_ATTEMPTS:
+            if retry and point["attempts"] < MAX_ATTEMPTS:
                 state = "todo"
         self._leave_running(pid, state, point)
         return state

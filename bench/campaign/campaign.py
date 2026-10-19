@@ -427,6 +427,12 @@ class Runner:
                 state, note = "failed", f"{type(e).__name__}: {e}"
                 result["ok"], result["error"], result["outcome"] = False, note, "failed"
                 result["traceback"] = traceback.format_exc()[-4000:]
+                # A death found by the point survives the failure: without
+                # these fields the retry below made an early crash vanish
+                # from the report as a clean measured soak.
+                for key in ("servers_died", "server_exits"):
+                    if getattr(e, key, None) is not None:
+                        result[key] = getattr(e, key)
         ended = time.time()
         result["ended"], result["elapsed_s"] = now_iso(ended), round(ended - run.started, 1)
         if state in ("done", "failed"):
@@ -438,6 +444,7 @@ class Runner:
             if state == "done":
                 print("BENCH_RESULT " + json.dumps(result, separators=(",", ":")), flush=True)
         with self.lock:
+            run.servers_died = result.get("servers_died") or []
             self.finished.append((run, state, note, ended))
         self.wake.set()
 
@@ -546,7 +553,12 @@ class Runner:
                     self.queue.release(pid)
                     final = "released"
                 else:
-                    final = self.queue.finish(pid, state, note)
+                    final = self.queue.finish(pid, state, note,
+                                              # A server that died is the soak's
+                                              # finding, not a flaky attempt: retrying
+                                              # it would replace the crash with a
+                                              # later healthy run.
+                                              retry=not getattr(run, "servers_died", None))
             except FileNotFoundError:
                 final = "released"  # already put back by the stop path
             key = "retry" if (state == "failed" and final == "todo") else final
