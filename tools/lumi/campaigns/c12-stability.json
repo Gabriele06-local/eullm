@@ -10,7 +10,11 @@
     "(servers_died, server_exits), with llama.cpp's own log on, so that a crash leaves the line",
     "that says why. Qwen3-14B Q8_0 with a q8_0 KV cache, which did not crash, as control.",
     "One GCD a point: six of them share a node, each stretching to the time the job has, up to",
-    "six hours."
+    "six hours.",
+    "First pass (next17, 18-19-10-2026): all five ran their six hours, none died, and every",
+    "server stopped with 0. Six hours was too short: the soaks of c01 died 8 to 11.5 hours in.",
+    "The long groups run the same configurations 12 to 16 hours, the Qwen3-32B ones twice",
+    "(a copy is the same point in a group of another name), eight GCDs: one node."
   ],
   "pull": ["hf.co/Qwen/Qwen3-32B-GGUF:Q8_0", "hf.co/Qwen/Qwen3-30B-A3B-GGUF:Q8_0",
            "hf.co/Qwen/Qwen3-14B-GGUF:Q8_0"],
@@ -25,6 +29,20 @@
     {"name": "crash-30b-a3b", "priority": 95,
      "axes": {"model": ["qwen3-30b-a3b-gguf-q8_0"], "kv": ["f16/f16"]}},
     {"name": "control-14b", "priority": 90,
-     "set": {"model": "qwen3-14b-gguf-q8_0", "kv": "q8_0/q8_0"}}
+     "set": {"model": "qwen3-14b-gguf-q8_0", "kv": "q8_0/q8_0"}},
+    {"name": "long-32b", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600},
+     "axes": {"model": ["qwen3-32b"], "kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "long-32b-copy", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600},
+     "axes": {"model": ["qwen3-32b"], "kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "long-32b-q8", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-32b-gguf-q8_0", "kv": "q8_0/q8_0"}},
+    {"name": "long-32b-q8-copy", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-32b-gguf-q8_0", "kv": "q8_0/q8_0"}},
+    {"name": "long-30b-a3b", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-30b-a3b-gguf-q8_0", "kv": "f16/f16"}},
+    {"name": "long-control-14b", "priority": 95,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-14b-gguf-q8_0", "kv": "q8_0/q8_0"}}
   ]
 }
