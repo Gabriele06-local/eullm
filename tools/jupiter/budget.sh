@@ -12,7 +12,10 @@
 # GPU-hours are its elapsed time times the GPUs it was given (gres/gpu in
 # AllocTRES): 4 an hour per node. Running jobs count up to now; queued ones
 # are shown at their time limit, the most they can cost. JuDoor has the
-# official figure; this one is for steering.
+# official figure, and `jutil user cpuquota` prints it on a login node, in
+# core-hours: 72 a GPU-hour (a GH200's Grace cores; the award's 5,000
+# GPU-hours are its 360,000), and it lags Slurm's accounting. Both are shown
+# at the end; this script's own figure is for steering.
 
 set -uo pipefail
 END="${1:-2026-12-15}"
@@ -99,3 +102,11 @@ if [ -n "$QUEUED" ]; then
       printf "    %-10s %-22s %10s  <= %5.1f GPU-hours\n", $1, $2, $3, h }
     END { printf "    %-45s <= %5.1f GPU-hours\n", "together", q }' <<<"$QUEUED"
 fi
+
+# JSC's own count of the budget, core-hours turned into GPU-hours.
+jutil user cpuquota 2>/dev/null | awk -F= -v acct="$ACCOUNT" '
+    $1 == "budget-account" { mine = ($2 == acct) }
+    mine && $1 == "coreh-quota-total" { q = $2 }
+    mine && $1 == "coreh-consumed-total" { c = $2 }
+    mine && $1 == "acct-period-end" { e = $2 }
+    END { if (q > 0) printf "\n  JSC (jutil user cpuquota): %.1f of %.0f GPU-hours used (%.1f%%), %.1f left, period to %s\n", c / 72, q / 72, 100 * c / q, (q - c) / 72, e }'
