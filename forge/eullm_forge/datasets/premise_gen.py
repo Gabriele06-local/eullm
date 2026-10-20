@@ -222,6 +222,30 @@ def _abrogato_answer(fmt: str, n: str, of: str, pos: int, quote: str) -> str:
             "l'argomento, posso cercare la norma oggi in vigore.")
 
 
+def _repealed_sentence(article) -> str:
+    """The sentence that says THIS article is repealed, or "".
+
+    "Abrogat" alone is not enough: a codifying decree's final article
+    ("Sono abrogati: a) ...") is in force and repeals other acts. The
+    sentence must name the article, the norm or a disposition as the thing
+    repealed, or say it was repealed by a later act.
+    """
+    pattern = re.compile(
+        r"\b(?:art(?:icol[oi])?\.?|norm[ae]|disposizion[ei])\s+"
+        r"(?:\d+[\w-]*\s+)?(?:(?:è|e'|sono)\s+stat[oaie]\s+|è|e'|sono|risulta(?:no)?|viene|vengono)?"
+        r"\s*abrogat[oaie]\b"
+        r"|\babrogat[oaie]\s+(?:dalla\b|dal\b|dall['’]|con\b|ai sensi\b)",
+        re.IGNORECASE,
+    )
+    for s in re.split(r"(?<=[.;])\s+|\n+", article.text):
+        if pattern.search(s):
+            return s
+    if article.heading.strip("()[] ").lower() in ("abrogato", "abrogata"):
+        return next((s for s in re.split(r"(?<=[.;])\s+|\n+", article.text)
+                     if "abrogat" in s.lower()), "")
+    return ""
+
+
 def _quoted_in(quote: str, records: list[dict], pos: int) -> bool:
     return bool(quote) and quote in shown(records)[pos - 1]
 
@@ -246,8 +270,7 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
     for code in sorted(by_code):
         of, in_ = CODE_LABELS[code]
         pool = by_code[code]
-        live = [a for a in pool if "abrogat" not in a.text[:300].lower()
-                and len(a.text) >= 150]
+        live = [a for a in pool if not _repealed_sentence(a) and len(a.text) >= 150]
 
         timed = [(a, next(iter(d))) for a in live
                  if len(d := _deadlines(a.text)) == 1 and all_deadlines(a.text) == d]
@@ -299,10 +322,9 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 number=fake, question=q, instruction=open_book_prompt(q, found),
                 output=_inesistente_answer(fmt, fake, of)))
 
-        repealed = [a for a in pool if "abrogat" in a.text[:300].lower()]
+        repealed = [a for a in pool if _repealed_sentence(a)]
         for a in rng.sample(repealed, min(per_code, len(repealed))):
-            line = next((s for s in re.split(r"(?<=[.;])\s+|\n+", a.text)
-                         if "abrogat" in s.lower()), "")
+            line = _repealed_sentence(a)
             q = rng.choice(ABROGATO).format(n=a.number, of=of)
             found, pos = _with_article(index, q, code, a.number, k, rng)
             quote = quote_span(line, anchor="brogat")
