@@ -42,8 +42,8 @@ class _Tok:
         self.seen = {}
 
     def apply_chat_template(self, messages, **kw):
-        self.seen = kw
-        return messages[0]["content"]
+        self.seen, self.messages = kw, messages
+        return messages[-1]["content"]
 
     def decode(self, ids, skip_special_tokens=False):
         out = [self.pieces[i] for i in ids]
@@ -58,6 +58,15 @@ def test_reasoning_effort_is_asked_only_when_thinking():
     assert tok.seen["reasoning_effort"] == "high" and tok.seen["enable_thinking"] is True
     mod.chat_prompt(tok, "domanda", think=False)
     assert "reasoning_effort" not in tok.seen and tok.seen["enable_thinking"] is False
+
+
+def test_a_system_prompt_goes_first_and_none_leaves_the_template_default():
+    mod, tok = _load(), _Tok()
+    mod.chat_prompt(tok, "domanda")
+    assert tok.messages == [{"role": "user", "content": "domanda"}]
+    mod.chat_prompt(tok, "domanda", system="Sei legal-it.")
+    assert tok.messages == [{"role": "system", "content": "Sei legal-it."},
+                            {"role": "user", "content": "domanda"}]
 
 
 def test_mistral_think_markers_survive_decoding_and_are_split_off():
