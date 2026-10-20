@@ -273,6 +273,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 | `c11-placement` | 41 | ~28 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
 | `c12-stability` | 14 | ~22 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
+| `c13-sites` | 14 | ~1 | the same points on LUMI-G, JUPITER and Leonardo, one device each (`docs/sites-comparison.md`): Qwen3-32B at 32 requests for 90 minutes with CUDA/HIP graphs on and off, whether a CUDA server's VRAM grows as LUMI's did; Qwen3-8B, Qwen3-32B and Qwen3.6-35B-A3B at 1-32 requests; on LUMI in the `next21` job |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
 node-hours a pass, nearly all of it the soaks. What spends 4,500 is doing it

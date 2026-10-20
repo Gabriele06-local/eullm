@@ -77,3 +77,13 @@ def test_the_command_line_prints_a_row_a_point_and_names_what_is_missing(tmp_pat
     assert "long-32b-aaaaaaaaaa" in out and "2.00" in out
     assert "long-control-14b-bbbbbbbbbb" in out
     assert "== job 99999999: missing" in out
+
+
+def test_another_sites_job_output_is_found(tmp_path, capsys):
+    write_job(tmp_path, "2326571")
+    logs = tmp_path / "logs"
+    (logs / "eullm-campaign-2326571.out").rename(logs / "eullm-gh200-2326571.out")
+    (logs / "eullm-summary-2326571.out").write_text("nothing of the runner's here\n")
+    assert vram_slopes.job_output(str(tmp_path), "2326571").endswith("eullm-gh200-2326571.out")
+    assert vram_slopes.main(["2326571", "--queue", str(tmp_path)]) == 0
+    assert "long-32b-aaaaaaaaaa" in capsys.readouterr().out

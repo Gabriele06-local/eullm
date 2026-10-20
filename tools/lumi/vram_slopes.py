@@ -16,6 +16,7 @@ keeps its memory.
 
 import argparse
 import ast
+import glob
 import json
 import os
 import re
@@ -100,6 +101,21 @@ def report(points: dict, samples: list, settle_s: float, dead_gib: float) -> lis
     return rows
 
 
+def job_output(queue: str, job: str) -> str:
+    """The job's output, where the runner logs each point's start and end:
+    LUMI-G's `eullm-campaign-<job>.out`, or another site's `<name>-<job>.out`
+    in the same `logs/` (JUPITER's `eullm-gh200-<job>.out`)."""
+    logs = os.path.join(queue, "logs")
+    first = os.path.join(logs, f"eullm-campaign-{job}.out")
+    if os.path.exists(first):
+        return first
+    for path in sorted(glob.glob(os.path.join(logs, f"*-{job}.out"))):
+        with open(path, errors="replace") as f:
+            if any(START.match(line) for line in f):
+                return path
+    return first
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("jobs", nargs="+")
@@ -114,7 +130,7 @@ def main(argv=None) -> int:
         print("set CAMPAIGN_DIR or --queue", file=sys.stderr)
         return 2
     for job in args.jobs:
-        out = os.path.join(args.queue, "logs", f"eullm-campaign-{job}.out")
+        out = job_output(args.queue, job)
         node = os.path.join(args.queue, "results", f"{job}.node.jsonl")
         missing = [p for p in (out, node) if not os.path.exists(p)]
         if missing:
