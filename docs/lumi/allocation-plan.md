@@ -122,6 +122,30 @@ way and the runner kept asking (`quant-soak`: 30,259,011 of 30,331,204
 requests failed; `soak-one-gcd`: 135,126 of 167,211), which points to GPU
 memory written over under the model rather than one bad step.
 
+20-10-2026, the cause in the log at last. A `long-32b` server of `c12`'s
+long groups (`next17`) died about six hours in: its sequences' logits
+turned NaN, then four seconds later `ROCm error: out of memory` in
+`ggml_cuda_graph_evaluate_and_capture`, at `hipGraphInstantiate`, and the
+abort. llama.cpp builds its ROCm backend with HIP graphs on
+(`GGML_HIP_GRAPHS`, on by default), and continuous batching gives the GPU a
+graph of another shape nearly every step, so graphs are made and replaced
+for hours. Its VRAM had grown too: Qwen3-32B with an f16 KV cache at 32
+requests holds 52.3 GB at a throughput point and peaked at 58.5 GB and 61.1
+GB at the end of six-hour soaks; Qwen3-32B Q8_0 with a q8_0 cache reached
+65.3 GB of the GCD's 65.5. `c12`'s `graphs-*` groups run the same
+configurations three hours with the graphs on and off
+(`GGML_CUDA_DISABLE_GRAPHS=1`); the node's VRAM samples
+(`results/<job>.node.jsonl`) say whether it still grows without them.
+
+The 0.7.90 round (`r-0.7.90`, `next18`, 19-20-10-2026): 142 points, none
+failed, and every server stopped with 0. Against the last measurement of
+each configuration, the medians of new over old are 0.99-1.01 in every
+group; the changes are gains on older builds (dense-one-gcd up to 1.27,
+Qwen3-32B over eight GCDs as replicas 1,927 → 2,069 tokens/s). With the
+reserve now 1 GiB, Qwen3-32B with an f16 cache and 40,960-token slots at
+4 requests loads on one GCD (60.6 GB), where it did not fit before; the
+32B Q8_0 with an f16 cache at 32 requests still does not.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
