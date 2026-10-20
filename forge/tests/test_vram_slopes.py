@@ -1,0 +1,79 @@
+"""`tools/lumi/vram_slopes.py` reads the runner's job output and the node's
+samples, and must say which server's VRAM climbed and which device emptied
+because its server died: on 19-20-10-2026 every soak server on LUMI-G grew
+1.3-2.5 GiB an hour until its GCD was full, and this is the check that a fix
+holds.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "tools" / "lumi" / "vram_slopes.py"
+
+spec = importlib.util.spec_from_file_location("vram_slopes", SCRIPT)
+vram_slopes = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(vram_slopes)
+
+GIB = 2**30
+T0 = datetime(2026, 10, 19, 19, 29, 5, tzinfo=timezone.utc).timestamp()
+
+
+def iso(t: float) -> str:
+    return datetime.fromtimestamp(t, timezone.utc).isoformat(timespec="seconds")
+
+
+def write_job(queue: Path, job: str) -> None:
+    (queue / "logs").mkdir(parents=True)
+    (queue / "results").mkdir(parents=True)
+    out = [
+        f"[{iso(T0)}] job {job} on nid007524: devices ['0', '1']",
+        f"[{iso(T0)}] start long-32b-aaaaaaaaaa on ['0'] for 57600s",
+        f"[{iso(T0)}] start long-control-14b-bbbbbbbbbb on ['1'] for 57600s",
+        f"[{iso(T0 + 6 * 3600)}] failed   long-32b-aaaaaaaaaa after 21600s",
+        f"[{iso(T0 + 6 * 3600)}] done     long-control-14b-bbbbbbbbbb after 21600s",
+    ]
+    (queue / "logs" / f"eullm-campaign-{job}.out").write_text("\n".join(out) + "\n")
+    with open(queue / "results" / f"{job}.node.jsonl", "w") as f:
+        for i in range(0, 6 * 3600 + 1, 60):
+            t = T0 + i
+            # Device 0 climbs 2 GiB an hour from 52 and its server dies at the
+            # top, 5 h in; device 1 holds 27 GiB throughout.
+            v0 = 0.0 if i > 5 * 3600 else 52 + 2 * i / 3600
+            d = {"0": {"used": int(v0 * GIB), "total": 64 * GIB, "use": 99},
+                 "1": {"used": int(27 * GIB), "total": 64 * GIB, "use": 99}}
+            f.write(json.dumps({"t": t, "d": d}) + "\n")
+
+
+def test_a_climbing_server_that_died_and_a_flat_one(tmp_path):
+    write_job(tmp_path, "22973477")
+    points = vram_slopes.points_of(str(tmp_path / "logs" / "eullm-campaign-22973477.out"))
+    assert points["long-32b-aaaaaaaaaa"]["devices"] == ["0"]
+    assert points["long-32b-aaaaaaaaaa"]["state"] == "failed"
+    samples = vram_slopes.samples_of(str(tmp_path / "results" / "22973477.node.jsonl"))
+    rows = {r[0]: r for r in vram_slopes.report(points, samples, settle_s=900, dead_gib=1.0)}
+
+    _, dev, hours, first, peak, last, slope, state = rows["long-32b-aaaaaaaaaa"]
+    assert dev == "0"
+    assert abs(slope - 2.0) < 0.01
+    assert first > 52.4 and peak == last and last > 61.9
+    assert "emptied after 5.0 h" in state
+    assert hours < 5
+
+    _, _, _, first, peak, last, slope, state = rows["long-control-14b-bbbbbbbbbb"]
+    assert first == peak == last == 27.0
+    assert abs(slope) < 1e-9
+    assert state == "done"
+
+
+def test_the_command_line_prints_a_row_a_point_and_names_what_is_missing(tmp_path, capsys):
+    write_job(tmp_path, "22973477")
+    assert vram_slopes.main(["22973477", "99999999", "--queue", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "long-32b-aaaaaaaaaa" in out and "2.00" in out
+    assert "long-control-14b-bbbbbbbbbb" in out
+    assert "== job 99999999: missing" in out
