@@ -12,7 +12,7 @@ repository) and updated as the work goes; the working notes behind it are in
 `docs/jupiter/allocation-plan.md`. Every figure below comes from a job on
 JUPITER, named by its Slurm job id.
 
-**Last updated: 18-10-2026, night.**
+**Last updated: 20-10-2026, morning.**
 
 ## 1. At a glance
 
@@ -379,6 +379,25 @@ book. Three times the pairs, two in three of them about EU acts, lower
 every score on an exam about Italian codes (by 3 to 9 correct answers):
 pairs about the text the model will be asked about count, more pairs about
 other text do not.
+
+**Open-book pairs (19-10-2026).** The 14,209 open-book pairs (§5.4), alone
+(`ob`) and with the 8,972 clean instruction pairs (`mix`), two epochs, the
+same four models, the same exam (jobs 2403330–2403558, graded by 2413383):
+
+| model | clean pairs | open-book pairs | both |
+|---|---:|---:|---:|
+| Qwen3.5-4B Base | 0.786 | 0.864 | **0.878** |
+| Qwen3.5-9B Base | 0.790 | **0.876** | 0.820 |
+| Qwen3-8B Base | 0.747 | **0.866** | 0.836 |
+| Qwen3-4B Base | 0.684 | 0.839 | **0.848** |
+| Qwen3-4B-Instruct-2507 (reference) | 0.765 | | |
+
+Pairs in the exam's own form raise every model by 7.8 to 15.5 points, and
+the best, Qwen3.5-4B with both sets, answers 186 of 217 right against 159
+for the reference. Whether the clean instruction pairs add to them is mixed
+(up for the 4B models, down for the 9B and the 8B), as Leonardo found when it
+trained on open-book pairs alone. The judge loaded its grader from node
+memory: 18 minutes for 20 answer sets.
 
 Why, as far as the data say. Distillation did learn the law: the held-out
 loss fell from 0.914 to 0.674 for the 4B and from 0.827 to 0.625 for the 8B

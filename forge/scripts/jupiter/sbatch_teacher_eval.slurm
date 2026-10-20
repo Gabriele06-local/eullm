@@ -13,8 +13,8 @@
 # EVAL_MODEL defaults to Mistral Small 4 (mistralai/Mistral-Small-4-119B-2603,
 # Apache 2.0; 119B MoE, its checkpoint FP8, ~120 GB), spread over the node's
 # four GH200 and loaded from a copy in the node's memory (stage_model.sh).
-# EVAL_DEQUANTIZE=1 loads the FP8 weights as BF16 (~240 GB) instead, if the
-# FP8 path does not run here. EVAL_THINK=1 lets it reason first
+# Its FP8 weights are dequantized to BF16 on loading (~240 GB): transformers'
+# FP8 path needs kernels from the Hub, out of a compute node's reach. EVAL_THINK=1 lets it reason first
 # (reasoning_effort "high", 4,000 new tokens by default); the reasoning is
 # kept apart in the answers file and only the answer is graded.
 #
@@ -69,16 +69,25 @@ done
 source "$EULLM_REPO/forge/scripts/jupiter/stage_model.sh"
 t0=$(date +%s)
 WEIGHTS=$(stage_model "$MODEL")
-if [ "${EVAL_DEQUANTIZE:-0}" = 1 ]; then
-    [ "$WEIGHTS" != "$MODEL" ] || { echo "[!!] EVAL_DEQUANTIZE needs the copy in memory"; exit 1; }
-    python - "$WEIGHTS/config.json" <<'PY'
+if [ "${EVAL_DEQUANTIZE:-1}" = 1 ] && grep -q '"quant_method": "fp8"' "$(stage_source "$WEIGHTS")/config.json" 2>/dev/null; then
+    # Transformers runs FP8 weights through kernels fetched from the Hugging
+    # Face Hub (the `kernels` package), which a compute node cannot reach:
+    # jobs 2414120 and 2414122 stopped there on 19-10-2026. Dequantized on
+    # loading, the weights are BF16 (~240 GB over the four GPUs). A view of
+    # the model with its own config.json: the weights are linked, not copied.
+    src=$(stage_source "$WEIGHTS") || exit 1
+    view="$STAGE_DIR/dequantized"
+    mkdir -p "$view"
+    for f in "$src"/*; do ln -sf "$(readlink -f "$f")" "$view/$(basename "$f")"; done
+    rm -f "$view/config.json"
+    python - "$src/config.json" "$view/config.json" <<'PY'
 import json, sys
-p = sys.argv[1]
-c = json.load(open(p))
+c = json.load(open(sys.argv[1]))
 c["quantization_config"]["dequantize"] = True
-json.dump(c, open(p, "w"), indent=2)
-print("  FP8 weights loaded as BF16 (dequantize)")
+json.dump(c, open(sys.argv[2], "w"), indent=2)
 PY
+    WEIGHTS="$view"
+    echo "  FP8 weights dequantized to BF16 on loading (EVAL_DEQUANTIZE=0 keeps FP8, which needs the kernels package)"
 fi
 echo "  weights from $WEIGHTS, ready in $(( $(date +%s) - t0 )) s"
 
