@@ -49,7 +49,19 @@ printf '  %-12s %s\n' gcds "$GCDS" engine "$("$EULLM_BIN" --version 2>&1 | head 
 rocm-smi --showproductname 2>&1 | grep -E 'GPU\[' | head -8 | sed 's/^/  /'
 echo
 
-# exec: Slurm's SIGTERM at the walltime goes straight to the runner, which
-# kills its servers and puts the interrupted points back in the queue.
-exec $CAMPAIGN run --queue "$CAMPAIGN_DIR" --devices "0-$((GCDS - 1))" \
-    --backend rocm --bind lumi --site lumi-g --engine "$EULLM_BIN"
+# Slurm's SIGTERM at the walltime (or a scancel) is passed on to the runner,
+# which kills its servers and puts the interrupted points back in the queue.
+$CAMPAIGN run --queue "$CAMPAIGN_DIR" --devices "0-$((GCDS - 1))" \
+    --backend rocm --bind lumi --site lumi-g --engine "$EULLM_BIN" &
+RUNNER=$!
+trap 'kill -TERM "$RUNNER" 2>/dev/null' TERM INT
+STATUS=0
+wait "$RUNNER" || STATUS=$?
+while kill -0 "$RUNNER" 2>/dev/null; do  # woken by the trap: wait for the runner itself
+    wait "$RUNNER" || STATUS=$?
+done
+
+# The job's own summary, so that what it measured is read, not assembled:
+# its points, by group, and how each point's VRAM moved while it ran.
+bash "$EULLM_REPO/tools/lumi/job_summary.sh" "$SLURM_JOB_ID"
+exit "$STATUS"

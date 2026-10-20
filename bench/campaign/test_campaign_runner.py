@@ -126,6 +126,11 @@ def test_runner_drains_a_campaign(tmp_path, engine, capsys):
     assert campaign.main(["report", "--queue", qdir]) == 0
     text = capsys.readouterr().out
     assert "=== c-e2e / one (throughput," in text and "tok/s" in text
+    # The summary a job writes of itself: its points only.
+    assert campaign.main(["report", "--queue", qdir, "--job", str(runner.job)]) == 0
+    assert "=== c-e2e / one (throughput," in capsys.readouterr().out
+    assert campaign.main(["report", "--queue", qdir, "--job", "no-such-job"]) == 0
+    assert "=== c-e2e / one" not in capsys.readouterr().out
 
 
 def test_workload_stretches_to_the_time_it_is_given(tmp_path, engine):

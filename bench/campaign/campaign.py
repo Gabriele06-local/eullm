@@ -1079,14 +1079,30 @@ def cmd_report(args):
     import report
 
     results = args.results or os.path.join(args.queue, "results")
+    rows = result_rows(results)
     failed = {}
-    # The points still failed in the queue, by group: a failed result file
-    # stays behind after a retry that succeeds.
-    for pid in Queue(args.queue).ids("failed"):
-        p = Queue(args.queue).load("failed", pid)
-        key = (p.get("campaign"), p.get("group"))
-        failed[key] = failed.get(key, 0) + 1
-    print(report.report(result_rows(results), failed, set(args.campaign or []) or None))
+    if args.job:
+        # What these jobs measured, and what failed in them: a job's failed
+        # attempts are the result files it wrote under <campaign>/failed/.
+        jobs = set(args.job)
+        rows = [r for r in rows if str(r.get("job")) in jobs]
+        for job in jobs:
+            for path in glob.glob(os.path.join(results, "*", "failed", f"*.{job}.json")):
+                try:
+                    with open(path) as f:
+                        r = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                key = (r.get("campaign"), r.get("group"))
+                failed[key] = failed.get(key, 0) + 1
+    else:
+        # The points still failed in the queue, by group: a failed result file
+        # stays behind after a retry that succeeds.
+        for pid in Queue(args.queue).ids("failed"):
+            p = Queue(args.queue).load("failed", pid)
+            key = (p.get("campaign"), p.get("group"))
+            failed[key] = failed.get(key, 0) + 1
+    print(report.report(rows, failed, set(args.campaign or []) or None))
     return 0
 
 
@@ -1206,6 +1222,8 @@ def main(argv=None):
     p.add_argument("--results")
     p.add_argument("--campaign", action="append",
                    help="only this campaign (repeatable), e.g. c06-mtp")
+    p.add_argument("--job", action="append",
+                   help="only what this Slurm job measured or failed (repeatable)")
     p = with_queue(sub.add_parser("collect"))
     p.add_argument("--results")
     p.add_argument("--out")
