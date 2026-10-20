@@ -241,3 +241,89 @@ Their tests were all criminal; our case-law training is civil only, since
 criminal rulings never leave the cluster (section 6). Abstract principles of
 criminal law hold no personal data, but whether their cards may be trained
 on is a decision still to be taken.
+
+## 8. 2026-10-20: teachers measured, false premises, and what a long SFT undoes
+
+**The candidate teachers on the traps.** The 36 LexIA trap questions
+(section 7; the set itself stays private and is never trained on), asked
+without the note, as the product asks, graded by the judge:
+
+| Model | Right | Premise corrected (of 18) | Abstained (of 9) | Answered (of 9) |
+|---|---|---|---|---|
+| Ministral-3-8B, untrained | 6 | 2 | 0 | 4 |
+| Ministral-3-8B-Reasoning, reasoning on | 4 | 0 | 1 | 3 |
+| Qwen3.6-27B, reasoning on | 10 | 5 | 0 | 5 |
+| Qwen3.6-27B | 16 | 6 | 4 | 6 |
+| legal-it-8b (published) | 14 | 5 | 5 | 4 |
+| legal-it-8b, our system prompt | 16 | 6 | 6 | 4 |
+
+No teacher measured corrects more than 6 false premises of 18, so
+distilling one cannot teach it; free reasoning made both reasoning models
+worse. On the practical exam the published 8B ties the best students once
+"partial" counts as right (jp2-9b 19:18, p=1.0): its answers are half as
+long (529 characters against 1,100-1,400), and the judge sides with the
+longer answer in two disagreements out of three.
+
+**Our system prompt costs nothing.** The published 8B asked with
+`system-prompt.txt` instead of Ministral's "Le Chat" default: devbig 437 and
+437 with the note (9:9), 437 and 440 without (0:3, p=0.25), practical 6:5,
+LexIA 15 and 16 of 36. The GGUF can be repackaged with it; training uses it
+from now on (`stage3_sft.py --default-system-file`).
+
+**False premises, built without a teacher** (`make_premise_pairs.py`): a
+wrong deadline, a nonexistent article, a repealed one taken for in force,
+from the statute text, with no note, answered in checked steps with the
+passage quoted. 1,060 questions; 530 for SFT, 530 for GRPO. The published
+8B, 8 samples each (`sample_answers.py`, graded by program):
+
+| Premise | Questions | Pass rate | Always wrong | Mixed | Always right |
+|---|---|---|---|---|---|
+| nonexistent article | 289 | 0.95 | 8 | 10 | 271 |
+| repealed article | 158 | 0.31 | 48 | 101 | 9 |
+| wrong deadline | 83 | 0.40 | 27 | 47 | 9 |
+
+Two lessons from reading the answers: the first reward missed right
+corrections ("il termine di 20 giorni non è previsto", "60 giorni, non 30")
+and scored the deadline kind 0.17 instead of 0.40, so a reward is checked on
+real answers before it trains anything; and some "wrong" answers deny an
+article that is in the prompt ("non compare l'art. 645 c.p.p."), the
+over-abstention the earlier GRPO rounds on nonexistent articles taught.
+From the same samples: 158 questions with mixed answers for GRPO (the
+rest carry no gradient), 158 DPO pairs and 249 correction exercises, the
+model's own right and wrong answers (`make_correction_pairs.py`).
+
+**Citations by program.** `cite_openbook_pairs.py` added the passage number
+and a literal quotation to 16,116 of 16,127 grounded statute pairs
+(`openbook-v06`), the two things the LexIA report found missing.
+
+**What a long SFT on the published model undid.** The Cassazione SFT
+(section 6, item 2: 75,352 case-law pairs and 20,572 statute pairs, 6,007
+steps at lr 1e-4) started from the published `legal-it-8b`:
+
+| Exam | Published | After the Cassazione SFT |
+|---|---|---|
+| devbig with the note | 437 | 415 (10:32, p=0.001) |
+| devbig without the note | 440 | 413 (3:30, p<0.001; lenient p=0.002) |
+| practical (correct + partial) | 60 + 21 | 57 + 9 (lenient 9:24, p=0.014) |
+| LexIA traps without the note | 14 | 4 |
+
+Every LexIA answer was the same sentence, word for word: the fixed answer
+of the absent-article pairs ("Tra i testi normativi riportati non trovo la
+disposizione…"). Fixed-wording refusals were about 14% of that SFT (1,600
+statute pairs and some 11,000 `caselaw_absent`); without the note the model
+took the refusal for the safe answer, by-topic deadline questions included
+(0:9), since those are the shape of the absent pairs. Two rules follow:
+
+1. a long SFT on a model GRPO has shaped undoes the GRPO; what is added on
+   top is short, and GRPO follows it;
+2. fixed-wording refusals stay a small share of any SFT mix (the round below
+   keeps them near 6%), and a model is examined without the note before it
+   is built on.
+
+The round queued that evening, from the published model: a short SFT
+(about 7,500 rows: 4,000 cited statute pairs, 2,000 case-law pairs, the
+false premises in two formats, the correction exercises) in two arms that
+differ only in the premise answers' format, three checked steps or one
+paragraph; then GRPO on the mixed-answer questions; every model examined
+on devbig with and without the note, the practical exam and the LexIA
+traps.
