@@ -13,8 +13,12 @@
 # EVAL_MODEL defaults to Mistral Small 4 (mistralai/Mistral-Small-4-119B-2603,
 # Apache 2.0; 119B MoE, its checkpoint FP8, ~120 GB), spread over the node's
 # four GH200 and loaded from a copy in the node's memory (stage_model.sh).
-# Its FP8 weights are dequantized to BF16 on loading (~240 GB): transformers'
-# FP8 path needs kernels from the Hub, out of a compute node's reach. EVAL_THINK=1 lets it reason first
+# Its FP8 weights do not run here as they are: transformers' FP8 path needs
+# kernels from the Hub, out of a compute node's reach, and its dequantize on
+# loading left the fused experts in FP8 (jobs 2418651-2418654). So the model
+# is converted once to BF16 on a login node (dequantize_fp8.py, ~240 GB) and
+# EVAL_MODEL points at that directory; too big for the node's memory, it is
+# read from the project storage, in large tensors (the experts are fused). EVAL_THINK=1 lets it reason first
 # (reasoning_effort "high", 4,000 new tokens by default); the reasoning is
 # kept apart in the answers file and only the answer is graded.
 #
