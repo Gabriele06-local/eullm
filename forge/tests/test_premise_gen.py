@@ -175,3 +175,20 @@ def test_the_plain_run_writes_the_same_pairs_as_the_steps_run(tmp_path):
 def test_the_script_needs_an_output(tmp_path):
     with pytest.raises(SystemExit):
         _load().main(["--norms", str(tmp_path / "x.jsonl")])
+
+
+def test_corrections_as_the_model_writes_them_are_recognised():
+    # phrasings from the samples of 2026-10-20 the first reward scored 0
+    kw = ["30 giorni|trenta giorni"]
+    for answer in (
+            "L'art. 2197 prevede un termine di trenta giorni. Pertanto, il termine di 20 "
+            "giorni non è previsto dal codice civile.",
+            "Nei testi non compare alcun riferimento a un termine di 60 giorni. L'art. 45 "
+            "prevede un termine perentorio di trenta giorni.",
+            "Il termine è di 30 giorni, non 60.",
+            "L'articolo non prevede un termine di 60 giorni: il termine è di 30 giorni."):
+        assert score_answer(answer, "premessa_termine", kw) == 1.0, answer
+    # the right number with the premise left standing is still not a correction
+    assert score_answer("Il termine per agire è fissato in trenta giorni.",
+                        "premessa_termine", kw) == 0.0
+    assert not corrects("È una facoltà, non una semplice possibilità.")
