@@ -232,8 +232,9 @@ def _repealed_sentence(article) -> str:
     """
     pattern = re.compile(
         r"\b(?:art(?:icol[oi])?\.?|norm[ae]|disposizion[ei])\s+"
-        r"(?:\d+[\w-]*\s+)?(?:è|e'|sono|risulta(?:no)?|viene|vengono)?\s*abrogat[oaie]\b"
-        r"|\babrogat[oaie]\s+(?:dalla|dal|con|ai sensi)\b",
+        r"(?:\d+[\w-]*\s+)?(?:(?:è|e'|sono)\s+stat[oaie]\s+|è|e'|sono|risulta(?:no)?|viene|vengono)?"
+        r"\s*abrogat[oaie]\b"
+        r"|\babrogat[oaie]\s+(?:dalla\b|dal\b|dall['’]|con\b|ai sensi\b)",
         re.IGNORECASE,
     )
     for s in re.split(r"(?<=[.;])\s+|\n+", article.text):
