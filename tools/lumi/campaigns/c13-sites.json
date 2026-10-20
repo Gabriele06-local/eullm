@@ -1,0 +1,31 @@
+{
+  "campaign": "c13-sites",
+  "notes": [
+    "The same points on the three EuroHPC machines EuLLM runs on, with the same engine build:",
+    "LUMI-G (one GCD of an MI250X, ROCm), JUPITER Booster (one GH200, CUDA) and Leonardo",
+    "Booster (one A100 64 GB, CUDA). One device a point, so that a point fits each site's",
+    "rules (Leonardo: jobs of two hours at most, three GPUs at most) and the three compare",
+    "device for device; tokens per billed GPU-hour follow from what each site bills (LUMI an",
+    "MI250X module, two GCDs; JUPITER one GH200; Leonardo one A100).",
+    "graphs: on LUMI-G every server under continuous batching grew 1.3-2.5 GiB of VRAM an",
+    "hour with llama.cpp's HIP graphs on, until it died (c12-stability, 19-20-10-2026), and",
+    "EuLLM's ROCm builds now leave them out. CUDA builds keep CUDA graphs on: these points",
+    "run Qwen3-32B at 32 requests for 90 minutes with them on and off",
+    "(GGML_CUDA_DISABLE_GRAPHS=1), and the node's VRAM samples (vram_slopes.py) say whether",
+    "a CUDA server grows the same way. On a ROCm build without graphs both are the control.",
+    "speed: three models, one to 32 requests. docs/sites-comparison.md says how each site",
+    "runs its part and where the results go."
+  ],
+  "defaults": {"kind": "throughput", "repeats": 3, "gcds": 1, "slot_ctx": 4096,
+               "kv": "f16/f16", "extra_args": ["--fit-strict"]},
+  "groups": [
+    {"name": "graphs", "priority": 98,
+     "set": {"kind": "workload", "model": "qwen3-32b", "batch": 32, "concurrency": 32,
+             "sets": ["gsm8k", "arc-easy", "arc-challenge"],
+             "min_duration_s": 3600, "max_duration_s": 5400, "interval_s": 60},
+     "axes": {"env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"},
+                      {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}]}},
+    {"name": "speed", "priority": 97, "est_s": 900,
+     "axes": {"model": ["qwen3-8b", "qwen3-32b", "qwen3.6-35b-a3b"], "batch": [1, 4, 16, 32]}}
+  ]
+}
