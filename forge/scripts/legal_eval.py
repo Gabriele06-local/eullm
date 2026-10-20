@@ -196,7 +196,7 @@ def split_reasoning(text: str) -> tuple[str, str, bool]:
     return text, "", True
 
 
-def chat_prompt(tok, content: str, think: bool = False) -> str:
+def chat_prompt(tok, content: str, think: bool = False, system: str | None = None) -> str:
     """One user turn in the model's chat format, with thinking switched off.
 
     Qwen3's hybrid models (Qwen3-8B and the like) think by default: they open
@@ -204,11 +204,16 @@ def chat_prompt(tok, content: str, think: bool = False) -> str:
     answer. ``enable_thinking=False`` is the switch their template reads; a
     template that has no such switch (Qwen3-4B-Instruct-2507, base models)
     ignores the extra variable, so every model is asked the same way.
+
+    ``system`` goes before the question as a system message. Without one,
+    Ministral's template puts in its own default (~525 tokens, "Le Chat"),
+    which is what legal-it-8b was trained and examined with.
     """
     # Mistral Small 4 reads reasoning_effort ("none", its default, or "high")
     # instead; other templates ignore a variable they do not use.
     extra = {"reasoning_effort": "high"} if think else {}
-    return tok.apply_chat_template([{"role": "user", "content": content}],
+    messages = [{"role": "system", "content": system}] if system else []
+    return tok.apply_chat_template(messages + [{"role": "user", "content": content}],
                                    tokenize=False, add_generation_prompt=True,
                                    enable_thinking=think, **extra)
 
@@ -272,6 +277,10 @@ def main() -> int:
                     help="let a reasoning model reason before it answers (give a larger "
                          "--max-new-tokens, e.g. 3000): the reasoning is kept apart in the "
                          "answers file and only the answer after it is scored and graded")
+    ap.add_argument("--system-file", type=Path,
+                    help="ask with this system prompt (e.g. forge/model_cards/legal-it-8b/"
+                         "system-prompt.txt) instead of the template's default, which for "
+                         "Ministral is its ~525-token \"Le Chat\" one")
     ap.add_argument("--csv", help="append the summary row here")
     ap.add_argument("--answers", help="write every answer, with its score, here")
     ap.add_argument("--norms", nargs="+",
@@ -336,6 +345,9 @@ def main() -> int:
     end_ids = [i for i in (tok.convert_tokens_to_ids("<|im_end|>"), tok.eos_token_id)
                if isinstance(i, int) and i >= 0]
 
+    system = args.system_file.read_text(encoding="utf-8").strip() if args.system_file else None
+    if system:
+        print(f"[eval] system prompt: {args.system_file} ({len(system)} chars)", flush=True)
     contexts, in_hand, prompts = {}, {}, []
     for it in items:
         content = it.question
@@ -345,7 +357,7 @@ def main() -> int:
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
-        prompts.append(chat_prompt(tok, content, think=args.think))
+        prompts.append(chat_prompt(tok, content, think=args.think, system=system))
     if args.gguf:
         from eullm_forge.eval.gguf import LlamaServer, generate_answers_gguf
         log = Path(args.answers).with_suffix(".server.log") if args.answers else None
