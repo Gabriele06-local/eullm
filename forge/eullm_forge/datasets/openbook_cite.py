@@ -41,14 +41,19 @@ def passages(instruction: str) -> list[tuple[int, str, str]]:
 
 
 def article_passage(instruction: str, code: str, number: str) -> tuple[int, str] | None:
-    """The first passage that is the article: by its label, else by its header."""
+    """The passage that is the article: by its label, else by its header."""
     label = code.replace("_", " ")
     numbered = _article_number_pattern(number)
-    for pos, head, text in passages(instruction):
-        if not head.startswith(label):
-            continue
-        if re.search(rf",\s*art\.\s*{numbered}\s*$", head) or re.search(
-                rf"(?im)^\s*(?:art\.\s*)?art(?:icolo)?\.?\s*{numbered}", text):
+    candidates = [(pos, head, text) for pos, head, text in passages(instruction)
+                  if head.startswith(label)]
+    # Label first, over every passage: a c.p.a. index chunk also carries
+    # "Art. 120 - ..." lines, so the header fallback found the TOC before the
+    # article whose label names it, and the pair quoted the index.
+    for pos, head, text in candidates:
+        if re.search(rf",\s*art\.\s*{numbered}\s*$", head):
+            return pos, text
+    for pos, _head, text in candidates:
+        if re.search(rf"(?im)^\s*(?:art\.\s*)?art(?:icolo)?\.?\s*{numbered}", text):
             return pos, text
     return None
 

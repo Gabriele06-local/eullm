@@ -54,6 +54,30 @@ def test_a_pair_that_cannot_be_cited_by_program_is_left_alone():
     assert cite({**_pair(ANSWER), "task": "openbook_missing"}) is None
 
 
+def test_a_label_match_beats_a_table_of_contents_that_lists_the_article():
+    """The c.p.a. index is a passage of the same code and carried "Art. 120"
+    lines: the header fallback returned the TOC before the article whose
+    label names it, so the pair cited [index] and quoted the index."""
+    index = {"code": "codice_processo_amministrativo", "article_num": "", "chunk_index": 0,
+             "text": "INDICE GENERALE \n Art. 119 - Rito abbreviato comune a determinate "
+                     "materie \n Art. 120 - Disposizioni specifiche ai giudizi di cui "
+                     "all'articolo 119, comma 1, lettera a)"}
+    art = {"code": "codice_processo_amministrativo", "article_num": "", "chunk_index": 1,
+           "text": "Art. 120 \n Disposizioni specifiche ai giudizi di cui all'articolo 119. \n "
+                   "1. Gli atti delle procedure di affidamento di lavori, servizi e forniture "
+                   "sono impugnabili unicamente mediante ricorso al tribunale amministrativo "
+                   "regionale competente."}
+    answer = ("Secondo l'art. 120 del codice del processo amministrativo, gli atti delle "
+              "procedure di affidamento di lavori, servizi e forniture sono impugnabili "
+              "mediante ricorso al tribunale amministrativo regionale.")
+    pair = {"instruction": open_book_prompt(QUESTION, [index, art]), "output": answer,
+            "task": "openbook_grounded", "key": "ob-g-codice_processo_amministrativo-120"}
+    assert article_passage(pair["instruction"], "codice_processo_amministrativo", "120")[0] == 2
+    out = cite(pair)
+    assert out["cited"] == 2
+    assert out["output"].split("«", 1)[1].startswith("Gli atti delle procedure")
+
+
 def test_the_script_copies_every_row_and_prints_counts_only(tmp_path, capsys):
     src = tmp_path / "v04.jsonl"
     rows = [_pair(ANSWER), {"instruction": "x", "output": "y", "task": "openbook_missing",
