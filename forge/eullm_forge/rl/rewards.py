@@ -10,6 +10,15 @@ Three kinds of question have an answer that needs no judge:
 * ``assente``: a question by topic whose article was taken out of the
   retrieved texts; the answer must say the texts do not contain it.
 
+And three built on a false premise (`eullm_forge.datasets.premise_gen`):
+
+* ``premessa_termine``: the question states a wrong deadline; the answer
+  must say the premise is wrong and state the right one.
+* ``premessa_inesistente``: the question takes for granted an article that
+  is not there, with no note saying so; checked as ``inesistente``.
+* ``premessa_abrogato``: the question treats a repealed article as in force;
+  the answer must say it was repealed.
+
 Each check is written against the ways a policy learns to game it, because
 under RL it will:
 
@@ -31,7 +40,8 @@ import re
 from ..eval.metrics import ANY_DEADLINE, DEADLINE_UNITS, keyword_coverage, number_of
 
 DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
-ABSTAIN_TYPES = frozenset({"inesistente", "assente"})
+ABSTAIN_TYPES = frozenset({"inesistente", "assente", "premessa_inesistente"})
+PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa_abrogato"})
 # Kinds no program can check: what an article provides is graded by a judge
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
 # "pratica": the practical questions of eval.practical, as GRPO prompts
@@ -67,6 +77,11 @@ _ABSTAIN = re.compile(
     r"|non (?:risulta|risultano) (?:alcun[ao]?|nessun[ao]?)\s+(?:articol[oi]|norm[ae]"
     r"|disposizion[ei]|riferiment[oi]|testo)\b|non risulta nulla nei testi"
     r"|non (?:si )?trova(?:no)? (?:nei|tra i) testi"
+    # How the false-premise answers (premise_gen) say it, and models with them:
+    # the article "non c'è", and "non mi risulta che esista" -- scored nothing
+    # until 2026-10-20, so the generator's own right answers were worth 0.
+    r"|non c['’]è\s+(?:l['’]\s*)?(?:articol[oi]|art\.|norm[ae]|disposizion[ei])"
+    r"|non (?:mi )?risulta che esist"
     r"|non (?:posso|sono in grado di) (?:rispondere|indicare)",
 )
 
@@ -144,12 +159,33 @@ def refuses(answer: str) -> bool:
     return bool(_REFUSAL.search(answer.lower()))
 
 
+# Ways of saying the question's premise is wrong. Required of a corrected
+# deadline: "Il termine è di 60 giorni" after "mi confermi che è di 30?" gives
+# the right number and still lets the wrong one stand.
+_CORRECTS = re.compile(
+    r"\berrat[ao]\b|\binesatt[ao]\b|non (?:è|e') (?:corrett|esatt|cosi|così)|in realtà"
+    r"|^\W*no\b|\bnon (?:di|è di|sono)\s+(?:\d+|[a-zà-ù]+)\s+(?:giorni|giorno|mesi|mese|anni"
+    r"|anno|ore)\b",
+    re.IGNORECASE)
+
+
+def corrects(answer: str) -> bool:
+    """Whether the answer says the premise of the question is wrong."""
+    return bool(_CORRECTS.search(answer.strip()))
+
+
 def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> float:
     """1.0 for a verifiably right answer, 0.0 otherwise.
 
     Raises ValueError for a kind it cannot check: a question that silently
     scored 0 whatever the model said would only teach it noise.
     """
+    if tipo == "premessa_termine":
+        if not corrects(answer):
+            return 0.0
+        return score_answer(answer, "termine", keywords)
+    if tipo == "premessa_abrogato":
+        return 1.0 if "abrogat" in answer.lower() and not mentioned_deadlines(answer) else 0.0
     if tipo in DEADLINE_TYPES:
         if not keywords:
             raise ValueError(f"a {tipo} question needs its deadline keyword")
