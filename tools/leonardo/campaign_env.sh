@@ -14,7 +14,12 @@
 #   $EULLM_BIN        default $WORK/eullm-engine/<version>/eullm, the
 #                     published data-center CUDA build setup_campaign.sh
 #                     downloads (sm_80, CUDA 12.4, built on Rocky Linux 8 for
-#                     RHEL 8's glibc: docs/cineca/leonardo.md)
+#                     RHEL 8's glibc: docs/cineca/leonardo.md). It runs on
+#                     compute nodes only: a login node has no GPU driver, and
+#                     the binary does not start without libcuda.so.1
+#   $EULLM_CPU_BIN    the CPU build of the same version, beside it: what
+#                     pulls, lists and plans on the login node, into the
+#                     same store
 
 LEONARDO_ACCOUNT="${LEONARDO_ACCOUNT:-AIFAC_P02_1147}"
 export SBATCH_ACCOUNT="${SBATCH_ACCOUNT:-$LEONARDO_ACCOUNT}"
@@ -22,12 +27,14 @@ export SALLOC_ACCOUNT="${SALLOC_ACCOUNT:-$SBATCH_ACCOUNT}"
 export SLURM_ACCOUNT="${SLURM_ACCOUNT:-$SBATCH_ACCOUNT}"
 : "${WORK:?no \$WORK: this is for Leonardo}"
 
-if [ -z "${EULLM_REPO:-}" ]; then
-    EULLM_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-fi
+# Always the checkout this file is in: forge/scripts/leonardo/env.sh exports
+# EULLM_REPO for the pinned training trees ($WORK/eullm-v12), and a shell that
+# sourced it first sent the first setup to a tree without these scripts.
+EULLM_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export EULLM_REPO
 export EULLM_VERSION="${EULLM_VERSION:-0.7.90}"
 export EULLM_BIN="${EULLM_BIN:-$WORK/eullm-engine/$EULLM_VERSION/eullm}"
+export EULLM_CPU_BIN="${EULLM_CPU_BIN:-$WORK/eullm-engine/$EULLM_VERSION/eullm-cpu}"
 export EULLM_MODELS_DIR="${EULLM_MODELS_DIR:-/leonardo_scratch/fast/$LEONARDO_ACCOUNT/eullm-models}"
 export CAMPAIGN_DIR="${CAMPAIGN_DIR:-$WORK/eullm-campaign}"
 export REFLEXBENCH_CACHE="${REFLEXBENCH_CACHE:-$CAMPAIGN_DIR/reflexbench-cache}"
