@@ -49,7 +49,8 @@ JUPITER, named by its Slurm job id.
   refused, a GPU out of memory at 48 questions a batch (§8).
 * A maintenance reservation held four jobs whose time limits were wider
   than needed; resubmitted as two, they started at once. All six answer
-  sets done by the evening, ~11 GPU-hours for the day's Mistral runs.
+  sets done by the evening, ~14 GPU-hours for the six runs (~9 more for
+  the failed attempts before them).
 
 **19-10-2026**
 * JUPITER unavailable most of the day (34.6 GPU-hours spent).
