@@ -75,3 +75,18 @@ def test_an_fp8_tensor_without_a_scale_stops_the_conversion(tmp_path):
     (src / "config.json").write_text("{}")
     with pytest.raises(SystemExit):
         _load().main([str(src), str(tmp_path / "out")])
+
+
+def test_the_output_is_written_in_parts(tmp_path):
+    mod = _load()
+    src = tmp_path / "fp8"
+    src.mkdir()
+    tensors = {f"l{i}.weight": _fp8(torch.ones(4, 4)) for i in range(3)}
+    tensors.update({f"l{i}.weight_scale_inv": torch.tensor(0.01) for i in range(3)})
+    st.save_file(tensors, str(src / "m.safetensors"))
+    (src / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {k: "m.safetensors" for k in tensors}}))
+    (src / "config.json").write_text("{}")
+    mod.convert(src, tmp_path / "out", part_bytes=30)
+    index = json.loads((tmp_path / "out" / "model.safetensors.index.json").read_text())
+    assert len(set(index["weight_map"].values())) == 3

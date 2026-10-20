@@ -16,9 +16,9 @@ from config.json:
 
 The scale of ``X`` is ``X_scale_inv`` (fused experts) or, for ``*.weight``,
 ``*.weight_scale_inv``, and it multiplies: W = W_fp8 * scale_inv. A scale
-with one value per expert is broadcast along the expert axis. Shard by
-shard, tensor by tensor: memory holds one tensor at a time. The output is
-twice the input on disk (~240 GB for Mistral Small 4).
+with one value per expert is broadcast along the expert axis. Tensor by
+tensor, written out in parts of ~5 GB: memory holds one part at a time. The
+output is twice the input on disk (~240 GB for Mistral Small 4).
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ def dequantize(weight, scale):
     return (w * s).to(torch.bfloat16)
 
 
-def convert(src: Path, dst: Path) -> dict:
+def convert(src: Path, dst: Path, part_bytes: int = 5 * 10**9) -> dict:
     import torch
     from safetensors import safe_open
     from safetensors.torch import save_file
@@ -76,8 +76,25 @@ def convert(src: Path, dst: Path) -> dict:
             handles[shard] = safe_open(str(src / shard), framework="pt")
         return handles[shard].get_tensor(name)
 
+    out: dict[str, torch.Tensor] = {}
+    pending = 0
+    written: list[str] = []
+
+    def flush() -> None:
+        nonlocal out, pending
+        if not out:
+            return
+        part = f"model-{len(written) + 1:05d}.safetensors"
+        tmp = dst / (part + ".tmp")
+        save_file(out, str(tmp), metadata={"format": "pt"})
+        tmp.replace(dst / part)
+        for name in out:
+            new_map[name] = part
+        written.append(part)
+        print(f"[fp8] {part}: {len(out)} tensors, {pending / 1e9:.1f} GB", flush=True)
+        out, pending = {}, 0
+
     for shard in sorted(set(weight_map.values())):
-        out: dict[str, torch.Tensor] = {}
         for name in sorted(n for n, s in weight_map.items() if s == shard):
             if is_dropped(name):
                 stats["dropped"] += 1
@@ -94,13 +111,15 @@ def convert(src: Path, dst: Path) -> dict:
             else:
                 stats["copied"] += 1
             out[name] = t.contiguous()
-            new_map[name] = shard
-            stats["bytes"] += t.numel() * t.element_size()
-        tmp = dst / (shard + ".tmp")
-        save_file(out, str(tmp), metadata={"format": "pt"})
-        tmp.replace(dst / shard)
-        print(f"[fp8] {shard}: {len(out)} tensors written", flush=True)
+            size = t.numel() * t.element_size()
+            stats["bytes"] += size
+            pending += size
+            # Written out in parts of ~5 GB: a whole input shard in BF16 is
+            # ~100 GB, more than a login node should be asked to hold.
+            if pending >= part_bytes:
+                flush()
         handles.pop(shard, None)
+    flush()
 
     (dst / "model.safetensors.index.json").write_text(json.dumps(
         {"metadata": {"total_size": stats["bytes"]}, "weight_map": new_map}, indent=2))
