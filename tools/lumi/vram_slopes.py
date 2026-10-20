@@ -83,11 +83,21 @@ def report(points: dict, samples: list, settle_s: float, dead_gib: float) -> lis
             hi = p["end"] if p["end"] is not None else float("inf")
             series = [(t, d[dev] / GIB) for t, d in samples if lo <= t <= hi and dev in d]
             # A server that died leaves its device empty before the point ends.
+            # A normal point ends the other way round: the runner stops its
+            # servers inside point.run, before the END line is printed, so the
+            # device is already empty by the point's own end timestamp. Do not
+            # read that as a death -- truncate the trailing zeros and keep the
+            # state clean. A drop earlier than the last minute of a done or
+            # released point is still a death.
+            normal_stop = p["state"] in ("done", "released")
             died_at = None
             for i, (t, v) in enumerate(series):
                 if v < dead_gib and i > 0 and series[i - 1][1] >= dead_gib:
-                    died_at = t
-                    series = series[:i]
+                    if normal_stop and p["end"] is not None and t >= p["end"] - 60:
+                        series = series[:i]
+                    else:
+                        died_at = t
+                        series = series[:i]
                     break
             if not series:
                 rows.append((pid, dev, 0.0, None, None, None, 0.0, p["state"]))
