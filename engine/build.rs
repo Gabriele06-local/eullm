@@ -34,8 +34,25 @@ fn main() {
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
 
+    // `-dirty` when what the binary is built from differs from the commit:
+    // this crate (sources, the vendored llama.cpp bindings and their patches,
+    // untracked files included, since the build applies every patch it finds),
+    // the catalog it embeds, and the workspace manifest and lock file. Not the
+    // rest of the checkout: on LUMI-G every binary from 18 to 20-10-2026 said
+    // `-dirty` because of core dumps at the repository root, and a flag that
+    // is always on tells nothing.
     let dirty = Command::new("git")
-        .args(["-c", "safe.directory=*", "status", "--porcelain"])
+        .args([
+            "-c",
+            "safe.directory=*",
+            "status",
+            "--porcelain",
+            "--",
+            ":/engine",
+            ":/catalog",
+            ":/Cargo.toml",
+            ":/Cargo.lock",
+        ])
         .output()
         .ok()
         .filter(|o| o.status.success())
