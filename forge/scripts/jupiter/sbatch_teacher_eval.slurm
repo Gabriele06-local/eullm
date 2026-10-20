@@ -100,6 +100,10 @@ nvidia-smi --query-gpu=timestamp,index,power.draw,utilization.gpu,memory.used \
     --format=csv,noheader,nounits -l 5 >"$POWER" 2>/dev/null &
 SAMPLER=$!
 
+# GPU 0 holds the embedder and the reranker besides its share of the model:
+# with 48 questions at once it ran out of memory (jobs 2419008-2419009,
+# 20-10-2026). Fragmentation made it worse; batches of 24 fit.
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 THINK_ARGS=()
 [ "$THINK" = 1 ] && THINK_ARGS=(--think)
 t1=$(date +%s)
