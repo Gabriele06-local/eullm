@@ -18,6 +18,9 @@ something changed, less so for understanding what it means.
 ### Performance
 - **A model split with `--split-mode tensor` should load far faster on ROCm.** Each weight split along its rows' length (the attention output and the feed-forward down projections, experts included) gives every GPU part of every row, and was copied to each as one strided copy from pageable memory: on LUMI-G's MI250X such loads ran at 100-230 MB/s, 10 to 50 times slower than split by layer (Qwen3-235B Q4_K_M over four GCDs in 943-1,269 s against 19-145 s, Qwen3-Coder-480B over eight in 1,679 s against 113), slower the more GPUs. Each GPU's part is now gathered in memory and copied whole (llama.cpp patch 0010; `GGML_META_GATHER_ROWS=0` copies as before). Being measured on LUMI-G; the figures will be here.
 
+### Fixed
+- **A server on AMD GPUs should no longer run out of VRAM after hours of answering.** llama.cpp's memory pool on ROCm keeps every temporary buffer it ever allocated, and under many requests at once it grew by 1.3 to 2.5 GiB an hour until the GPU was full: on LUMI-G's MI250X, Qwen3-32B went from 52 to 63.9 GiB in about eight hours, and then its answers turned to NaN, or it aborted with "ROCm error: out of memory", or with a GPU memory fault; soaks of Qwen3-32B at 32 requests died 6 to 11.5 hours in, the sooner the less VRAM the model left free. The pool now frees its cached buffers before it would leave less than 512 MiB free (`GGML_CUDA_POOL_KEEP_FREE_MB`), and the GPU graphs captured before a flush, which pointed into the freed buffers, are captured again (llama.cpp patch 0011). Being validated on LUMI-G with soaks of 12 to 16 hours.
+
 ## 0.7.90 — 2026-10-19
 
 ### Fixed
