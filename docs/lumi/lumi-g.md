@@ -237,6 +237,10 @@ candidate experiment axes rather than defaults to change blindly:
 `GGML_HIP_MMQ_MFMA` (on by default — it is what uses the matrix cores),
 `GGML_HIP_RCCL` (off; links RCCL for multi-device collectives),
 `GGML_HIP_GRAPHS`, `GGML_HIP_NO_VMM`, `GGML_CUDA_FA_ALL_QUANTS`.
+`GGML_HIP_GRAPHS` is off in EuLLM's builds unless set (since 20-10-2026):
+with the graphs on, every server under continuous batching grew 1.3-2.5
+GiB of VRAM an hour until its GCD was full and it died, and they bought
+nothing on the MI250X (c12-stability, `docs/lumi/allocation-plan.md`).
 
 ## First-login reconnaissance
 
