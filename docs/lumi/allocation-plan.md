@@ -137,6 +137,21 @@ configurations three hours with the graphs on and off
 (`GGML_CUDA_DISABLE_GRAPHS=1`); the node's VRAM samples
 (`results/<job>.node.jsonl`) say whether it still grows without them.
 
+The node's samples of that job: every server's VRAM grew in a straight
+line, 1.3-2.5 GiB an hour whatever the model (Qwen3-14B 27 → 48 GiB in ten
+hours), and the servers died where their GCD was full, at 63.9 GiB: the two
+Qwen3-32B Q8_0 at 02:04 UTC, a Qwen3-32B Q4_K_M with an f16 cache at
+about 05:45. The Qwen3-30B-A3B fell from 60.4 to 43.2 GiB at 05:29 and went
+on answering: llama.cpp's legacy pool, the only one on HIP, keeps every
+buffer it allocated until an allocation fails, then frees its cached
+buffers and retries, so all its growth was the pool's cache. The servers
+that died hit the full GCD outside the pool (graph instantiation) or
+replayed graphs captured before such a flush, which point into the freed
+buffers: NaN from then on, or a memory fault. The MoE has no graphs on
+gfx90a and survived the flush. Patch 0011 keeps 512 MiB free by flushing
+the cache earlier and drops the graphs after any flush; the long groups
+run again on it (`next20`, round `r-pool`).
+
 The 0.7.90 round (`r-0.7.90`, `next18`, 19-20-10-2026): 142 points, none
 failed, and every server stopped with 0. Against the last measurement of
 each configuration, the medians of new over old are 0.99-1.01 in every
