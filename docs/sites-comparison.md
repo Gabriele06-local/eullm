@@ -50,6 +50,8 @@ CUDA builds do not have).
   beside the speed points, without c07's conversations:
   `EULLM_SKIP_CONVERSATIONS=1 submit.sh LABEL --time=02:30:00`. About 10
   GPU-hours. The job writes its summary itself, as on LUMI.
+  `tools/jupiter/sites.sh` does all of it unattended, build included:
+  `tmux new -d -s sites 'bash tools/jupiter/sites.sh'`.
 - **Leonardo** (its chat): the runner has not run there yet. It needs the
   engine (a CUDA build for sm_80, or the published `eullm-linux-x64-cuda`),
   the models and workload sets fetched on a login node (`campaign.py pulls`
