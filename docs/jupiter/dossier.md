@@ -48,7 +48,9 @@ JUPITER, named by its Slurm job id.
   experts left in FP8 by dequantizing on loading, a snapshot the Hub client
   refused, a GPU out of memory at 48 questions a batch (§8).
 * A maintenance reservation held four jobs whose time limits were wider
-  than needed; resubmitted as two, they started at once.
+  than needed; resubmitted as two, they started at once. All six answer
+  sets done by the evening, ~14 GPU-hours for the six runs (~9 more for
+  the failed attempts before them).
 
 **19-10-2026**
 * JUPITER unavailable most of the day (34.6 GPU-hours spent).
@@ -495,12 +497,16 @@ node's four GPUs.
 | traps, direct | 2419006 | 1,615 s | 15/36 | 10/36 | 7/36 | 0.28 kWh |
 | traps, reasoning | 2419007 | 2,463 s | 34/36 | 10/36 | 6/36 | 0.52 kWh |
 | practical, direct | 2422086 | 922 s | 45/145 | 3/145 | 12/145 | 0.22 kWh |
-| practical, reasoning | 2422087 | running | | | | |
+| practical, reasoning | 2422087 | 4,782 s | 140/145 | 2/145 | 17/145 | 1.36 kWh |
+| traps, direct, 1,000 tokens | 2424181 | 868 s | 34/36 | 9/36 | 6/36 | 0.19 kWh |
+| practical, direct, 1,000 tokens | 2424182 | 1,922 s | 130/145 | 3/145 | 14/145 | 0.49 kWh |
 
 Answering directly, the model ran out of its 400 tokens in 21 of 36 and
-100 of 145 answers: it writes long. Both sets are being answered again
-directly with 1,000 tokens (jobs 2424181, 2424182), the 400-token answers
-kept for comparison with the other candidates.
+100 of 145 answers: it writes long. With 1,000 tokens 34 of 36 and 130 of
+145 end their turn, in about twice the time; reasoning first, 34 of 36 and
+140 of 145, in three to five times the time of the 400-token run. The six
+answer sets (543 answers) go to Leonardo's judge; the 400-token ones are
+kept for comparison with the candidates examined there at that length.
 
 ## 6. Energy
 
@@ -521,6 +527,8 @@ figures below with the site's energy mix.
 | 2403329 | 14,209 open-book pairs, EULLM Engine | 0.40 kWh in 0.31 h (1,269 W mean) |
 | 2419006, 2419007 | Mistral Small 4 on 36 questions, direct and reasoning | 0.28 and 0.52 kWh |
 | 2422086 | Mistral Small 4 on 145 questions, direct | 0.22 kWh in 0.26 h (856 W mean) |
+| 2422087 | Mistral Small 4 on 145 questions, reasoning | 1.36 kWh in 1.33 h (1,021 W mean) |
+| 2424181, 2424182 | Mistral Small 4, direct, 1,000 tokens, 36 and 145 questions | 0.19 kWh in 0.24 h, 0.49 kWh in 0.53 h |
 
 ## 7. Data governance
 
