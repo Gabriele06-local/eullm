@@ -63,13 +63,5 @@ done
 
 # The job's own summary, so that what it measured is read, not assembled:
 # its points, by group, and how each point's VRAM moved while it ran.
-SUMMARY="$CAMPAIGN_DIR/logs/summary-$SLURM_JOB_ID.txt"
-{
-    echo "=== what job $SLURM_JOB_ID measured ==="
-    $CAMPAIGN report --queue "$CAMPAIGN_DIR" --job "$SLURM_JOB_ID"
-    echo
-    echo "=== VRAM of each point while it ran ==="
-    "$PY" "$EULLM_REPO/tools/lumi/vram_slopes.py" --queue "$CAMPAIGN_DIR" "$SLURM_JOB_ID"
-} > "$SUMMARY" 2>&1
-echo "summary: $SUMMARY"
+bash "$EULLM_REPO/tools/lumi/job_summary.sh" "$SLURM_JOB_ID"
 exit "$STATUS"
