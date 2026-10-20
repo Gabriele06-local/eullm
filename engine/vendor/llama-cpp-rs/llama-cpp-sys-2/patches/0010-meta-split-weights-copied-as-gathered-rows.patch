@@ -1,0 +1,64 @@
+The meta backend (--split-mode tensor) copies a weight split along axis 0
+(attn_output, ffn_down, ffn_down_exps: part of every row on each device) by
+gathering each device's rows into a host buffer and copying it whole, in pieces
+of 64 MiB, instead of one 2D copy from pageable memory. On LUMI-G's MI250X,
+loads split as tensor ran at 100-230 MB/s, 10-50 times slower than split by
+layer (Qwen3-235B Q4_K_M over four GCDs 943-1269 s against 19-145 s, the 480B
+over eight 1679 s against 113, c11-placement, 18-19-10-2026), slower the more
+GPUs, as if each of the hundreds of thousands of rows an expert tensor has per
+device were copied on its own. GGML_META_GATHER_ROWS=0 restores the 2D copy.
+
+diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
+index 8ed5f4e..ac6d08e 100644
+--- a/ggml/src/ggml-backend-meta.cpp
++++ b/ggml/src/ggml-backend-meta.cpp
+@@ -1428,6 +1428,40 @@ static void ggml_backend_meta_buffer_memset_tensor(
+     }
+ }
+ 
++// Copies n_rows rows of row_size bytes, stride_data apart in host memory, to
++// consecutive bytes of simple_tensor from offset. A weight split along axis 0
++// (attn_output, ffn_down, ffn_down_exps) gives each device part of every row,
++// and an expert tensor has ne1 x n_expert rows: 524,288 a device for each
++// ffn_down_exps of Qwen3-235B. As one 2D copy from pageable memory they loaded
++// at 100-230 MB/s on ROCm (Qwen3-235B over four MI250X GCDs in 943-1269 s, in
++// 19-145 s split by layer), as if each row were copied on its own. The rows
++// are gathered into a buffer instead and copied in pieces of 64 MiB;
++// GGML_META_GATHER_ROWS=0 restores the 2D copy.
++static void ggml_backend_meta_set_rows_contiguous(ggml_tensor * simple_tensor, const char * data, size_t offset,
++        size_t row_size, size_t n_rows, size_t stride_data) {
++    static const bool gather = [] {
++        const char * env = getenv("GGML_META_GATHER_ROWS");
++        return env == nullptr || atoi(env) != 0;
++    }();
++    if (n_rows <= 1 || row_size == stride_data) {
++        ggml_backend_tensor_set(simple_tensor, data, offset, row_size*n_rows);
++        return;
++    }
++    if (!gather) {
++        ggml_backend_tensor_set_2d(simple_tensor, data, offset, row_size, n_rows, row_size, stride_data);
++        return;
++    }
++    const size_t rows_per_piece = std::max<size_t>(1, (size_t(64) << 20) / row_size);
++    std::unique_ptr<char[]> piece(new char[std::min(n_rows, rows_per_piece) * row_size]);
++    for (size_t i0 = 0; i0 < n_rows; i0 += rows_per_piece) {
++        const size_t n = std::min(rows_per_piece, n_rows - i0);
++        for (size_t i = 0; i < n; i++) {
++            memcpy(piece.get() + i*row_size, data + (i0 + i)*stride_data, row_size);
++        }
++        ggml_backend_tensor_set(simple_tensor, piece.get(), offset + i0*row_size, n*row_size);
++    }
++}
++
+ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
+     const size_t n_bufs = ggml_backend_meta_buffer_n_bufs(buffer);
+     const ggml_backend_meta_split_state split_state = ggml_backend_meta_get_split_state(tensor, /*assume_sync =*/ false);
+@@ -1512,7 +1546,7 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+                     continue;
+                 }
+                 const size_t simple_offset = i_start * chunk_size_j;
+-                ggml_backend_tensor_set_2d(simple_tensor, (const char *) data + offset_j, simple_offset, chunk_size_j, i_stop - i_start, chunk_size_j, chunk_size_full);
++                ggml_backend_meta_set_rows_contiguous(simple_tensor, (const char *) data + offset_j, simple_offset, chunk_size_j, i_stop - i_start, chunk_size_full);
+                 offset_j += chunk_size_j;
+             }
+             GGML_ASSERT(offset_j == chunk_size_full);

@@ -205,7 +205,7 @@ sustained load; dense and MoE; one device to a full node).
 | `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
-| `c11-placement` | 35 | ~22 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
+| `c11-placement` | 41 | ~28 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
 | `c12-stability` | 14 | ~22 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
@@ -822,8 +822,15 @@ In order:
    layer: 21.5 tokens/s at one request, 44.5 at 32. Tensor's loads are
    slow: 943-1,269 s for the 235B against 19-145 with layer, 1,679 s for
    the 480B against 113, 255-626 s for gpt-oss-120b against 10-46. A
-   server loaded once a day can afford that, a swap cannot; why tensor
-   reads that slowly is the next thing to look at.
+   server loaded once a day can afford that, a swap cannot. Why: llama.cpp
+   gives a weight split along axis 0 (attention output, feed-forward down,
+   experts included) part of every row on each GPU, and copied it as one 2D
+   copy from pageable memory; Qwen3-235B's `ffn_down_exps` has 524,288 rows
+   a GCD in each of its 94 layers, and 100-230 MB/s, slower the more GCDs, is
+   what a copy per row would give. Patch 0010 gathers each GCD's rows in
+   memory and copies them whole; c11's `load-*` groups load the 235B, the
+   480B and gpt-oss-120b cold with it and without it
+   (`GGML_META_GATHER_ROWS=0`), on one binary (`next19`).
 
 
 Every change that lands in `main` from these is a new round of `c01`+`c02`.

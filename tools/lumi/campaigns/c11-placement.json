@@ -11,7 +11,11 @@
     "against one wider one, each split as layer and as tensor, at the same total of requests.",
     "batch is per server: 2 servers x 32 and 1 x 64 are the same 64 requests on the node.",
     "DeepSeek-V3.1 (MLA attention) may not have tensor parallelism in llama.cpp: a load that",
-    "fails is the measurement. Needs an RCCL build (next16 or later)."
+    "fails is the measurement. Needs an RCCL build (next16 or later).",
+    "Loads split as tensor ran at 100-230 MB/s, 10-50 times slower than layer (next16): the",
+    "load-* groups load each model cold twice on one binary, with patch 0010 (each device's",
+    "rows of a weight split along axis 0 gathered and copied whole) and with",
+    "GGML_META_GATHER_ROWS=0 (the 2D copy as before). Needs a build with 0010 (next19)."
   ],
   "pull": [
     "hf.co/Qwen/Qwen3-235B-A22B-GGUF:Q4_K_M",
@@ -47,6 +51,18 @@
              "extra_args": ["--fit-strict", "--split-mode", "tensor"]}},
     {"name": "place-32b-r4", "priority": 82, "est_s": 1200,
      "set": {"model": "qwen3-32b", "replica_gcds": 4, "batch": 64,
-             "extra_args": ["--fit-strict", "--split-mode", "tensor"]}}
+             "extra_args": ["--fit-strict", "--split-mode", "tensor"]}},
+    {"name": "load-235b", "priority": 92, "est_s": 2400,
+     "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m", "replica_gcds": 4, "batch": 32, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"env": [{}, {"GGML_META_GATHER_ROWS": "0"}]}},
+    {"name": "load-480b", "priority": 92, "est_s": 3600,
+     "set": {"model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m", "batch": 64, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"env": [{}, {"GGML_META_GATHER_ROWS": "0"}]}},
+    {"name": "load-120b", "priority": 92, "est_s": 1500,
+     "set": {"model": "gpt-oss-120b-gguf-mxfp4", "replica_gcds": 2, "batch": 32, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
+     "axes": {"env": [{}, {"GGML_META_GATHER_ROWS": "0"}]}}
   ]
 }

@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Performance
+- **A model split with `--split-mode tensor` should load far faster on ROCm.** Each weight split along its rows' length (the attention output and the feed-forward down projections, experts included) gives every GPU part of every row, and was copied to each as one strided copy from pageable memory: on LUMI-G's MI250X such loads ran at 100-230 MB/s, 10 to 50 times slower than split by layer (Qwen3-235B Q4_K_M over four GCDs in 943-1,269 s against 19-145 s, Qwen3-Coder-480B over eight in 1,679 s against 113), slower the more GPUs. Each GPU's part is now gathered in memory and copied whole (llama.cpp patch 0010; `GGML_META_GATHER_ROWS=0` copies as before). Being measured on LUMI-G; the figures will be here.
+
 ## 0.7.90 — 2026-10-19
 
 ### Fixed
