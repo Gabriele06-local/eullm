@@ -20,7 +20,11 @@
     "four seconds after its sequences' logits turned NaN; its VRAM had grown, 52 GB at a",
     "throughput point, 58-61 GB at the end of a six-hour soak. The graphs-* groups run the same",
     "configurations three hours with llama.cpp's HIP graphs on and off",
-    "(GGML_CUDA_DISABLE_GRAPHS=1), one node, to see whether VRAM still grows without them."
+    "(GGML_CUDA_DISABLE_GRAPHS=1), one node, to see whether VRAM still grows without them.",
+    "Third pass (20-10-2026): in their first half hour the graphs-* servers grew 0.6-2.3 GiB",
+    "an hour with the graphs on and not at all with them off. nographs-* soaks the configurations",
+    "that died 12 to 16 hours with the graphs off; graphs-speed measures what the graphs are",
+    "worth, Qwen3-8B and Qwen3-32B at 1 to 32 requests, on and off."
   ],
   "pull": ["hf.co/Qwen/Qwen3-32B-GGUF:Q8_0", "hf.co/Qwen/Qwen3-30B-A3B-GGUF:Q8_0",
            "hf.co/Qwen/Qwen3-14B-GGUF:Q8_0"],
@@ -61,6 +65,18 @@
      "axes": {"env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"}, {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}]}},
     {"name": "graphs-14b", "priority": 97,
      "set": {"min_duration_s": 7200, "max_duration_s": 10800, "model": "qwen3-14b-gguf-q8_0", "kv": "q8_0/q8_0"},
-     "axes": {"env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"}, {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}]}}
+     "axes": {"env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"}, {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}]}},
+    {"name": "nographs-32b", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-32b", "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}},
+     "axes": {"kv": ["f16/f16", "q8_0/q8_0"]}},
+    {"name": "nographs-32b-q8", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-32b-gguf-q8_0", "kv": "q8_0/q8_0", "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}}},
+    {"name": "nographs-30b-a3b", "priority": 96,
+     "set": {"min_duration_s": 43200, "max_duration_s": 57600, "model": "qwen3-30b-a3b-gguf-q8_0", "kv": "f16/f16", "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}}},
+    {"name": "graphs-speed", "priority": 97, "est_s": 900,
+     "set": {"kind": "throughput", "repeats": 3, "sets": [], "concurrency": null,
+             "min_duration_s": 0, "max_duration_s": 0, "kv": "f16/f16"},
+     "axes": {"model": ["qwen3-8b", "qwen3-32b"], "batch": [1, 4, 16, 32],
+              "env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"}, {"RUST_LOG": "eullm=info,llama-cpp-2=info", "GGML_CUDA_DISABLE_GRAPHS": "1"}]}}
   ]
 }

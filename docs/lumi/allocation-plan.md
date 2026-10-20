@@ -142,15 +142,30 @@ line, 1.3-2.5 GiB an hour whatever the model (Qwen3-14B 27 → 48 GiB in ten
 hours), and the servers died where their GCD was full, at 63.9 GiB: the two
 Qwen3-32B Q8_0 at 02:04 UTC, a Qwen3-32B Q4_K_M with an f16 cache at
 about 05:45. The Qwen3-30B-A3B fell from 60.4 to 43.2 GiB at 05:29 and went
-on answering: llama.cpp's legacy pool, the only one on HIP, keeps every
-buffer it allocated until an allocation fails, then frees its cached
-buffers and retries, so all its growth was the pool's cache. The servers
-that died hit the full GCD outside the pool (graph instantiation) or
-replayed graphs captured before such a flush, which point into the freed
-buffers: NaN from then on, or a memory fault. The MoE has no graphs on
-gfx90a and survived the flush. Patch 0011 keeps 512 MiB free by flushing
-the cache earlier and drops the graphs after any flush; the long groups
-run again on it (`next20`, round `r-pool`).
+on answering: llama.cpp's legacy pool, the only one on HIP, frees the
+buffers it keeps when an allocation fails and retries, and the GPU
+graphs captured before still point into them, so a replay computes NaN
+or faults. Patch 0011 drops the graphs after any flush and flushes before
+less than 512 MiB would be left; the long groups run again on it
+(`next20`, round `r-pool`).
+
+20-10-2026, the first half hour of `graphs-*` (`next19`): with the HIP
+graphs on the servers grew 0.6-2.3 GiB an hour (Qwen3-14B 2.11, the
+30B-A3B 2.29, Qwen3-32B 0.61-0.65), with them off not at all (0.00 on all
+four). The growth comes with the graphs, the MoE included, and may be
+the ROCm runtime's rather than the pool's: the pool takes and returns
+its buffers the same way with or without a capture. `nographs-*` soaks
+the configurations that died 12 to 16 hours with the graphs off, and
+`graphs-speed` measures what they are worth (Qwen3-8B and 32B, 1 to 32
+requests, on and off), before the engine turns them off on ROCm.
+
+`c11`'s `load-*` (`next19`, cold, one binary each way), seconds to load
+with patch 0010 against without (`GGML_META_GATHER_ROWS=0`): Qwen3-235B
+as two servers of four GCDs 352 against 599, Qwen3-Coder-480B over eight
+569 against 1,567, gpt-oss-120b as four servers of two 158 against 346.
+1.7-2.8 times faster, and still slower than layer split (19-145, 113 and
+10-46 s); throughput is the same within one repeat's noise (the 235B 366
+and 370 tokens/s, the 480B 238 and 257, gpt-oss-120b 1,298 and 1,518).
 
 The 0.7.90 round (`r-0.7.90`, `next18`, 19-20-10-2026): 142 points, none
 failed, and every server stopped with 0. Against the last measurement of
