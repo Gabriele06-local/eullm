@@ -240,7 +240,7 @@ def _repealed_sentence(article) -> str:
     for s in re.split(r"(?<=[.;])\s+|\n+", article.text):
         if pattern.search(s):
             return s
-    if article.heading.lower() in ("abrogato", "abrogata"):
+    if article.heading.strip("()[] ").lower() in ("abrogato", "abrogata"):
         return next((s for s in re.split(r"(?<=[.;])\s+|\n+", article.text)
                      if "abrogat" in s.lower()), "")
     return ""
