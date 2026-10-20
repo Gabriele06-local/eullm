@@ -37,7 +37,13 @@ from __future__ import annotations
 
 import re
 
-from ..eval.metrics import ANY_DEADLINE, DEADLINE_UNITS, keyword_coverage, number_of
+from ..eval.metrics import (
+    ANY_DEADLINE,
+    DEADLINE_UNITS,
+    NUMBER_WORDS,
+    keyword_coverage,
+    number_of,
+)
 
 DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente", "premessa_inesistente"})
@@ -162,10 +168,25 @@ def refuses(answer: str) -> bool:
 # Ways of saying the question's premise is wrong. Required of a corrected
 # deadline: "Il termine è di 60 giorni" after "mi confermi che è di 30?" gives
 # the right number and still lets the wrong one stand.
+#
+# The first version knew only "errata", "in realtà", "no" and "non di 30
+# giorni", and the samples of 2026-10-20 showed right corrections it scored
+# 0: "il termine di 20 giorni non è previsto dal codice civile", "non compare
+# alcun riferimento a un termine di 60 giorni", "60 giorni, non 30".
+_UNIT = r"(?:giorni|giorno|mesi|mese|anni|anno|ore)"
+# Without "un", "uno", "una": ", non una semplice facoltà" denies nothing.
+_NUM = r"(?:\d+|" + "|".join(sorted(set(NUMBER_WORDS) - {"un", "uno", "una"}, key=len,
+                                     reverse=True)) + r")"
 _CORRECTS = re.compile(
     r"\berrat[ao]\b|\binesatt[ao]\b|non (?:è|e') (?:corrett|esatt|cosi|così)|in realtà"
-    r"|^\W*no\b|\bnon (?:di|è di|sono)\s+(?:\d+|[a-zà-ù]+)\s+(?:giorni|giorno|mesi|mese|anni"
-    r"|anno|ore)\b",
+    rf"|^\W*no\b|\bnon (?:di|è di|sono)\s+{_NUM}\s+{_UNIT}\b"
+    # "60 giorni, non 30": the wrong number denied after the right one
+    rf"|,\s*non\s+(?:di\s+|a\s+)?{_NUM}\b"
+    # "il termine di 20 giorni non è previsto", "non prevede un termine di 20 giorni"
+    r"|non (?:è|e') (?:previst|stabilit|fissat|indicat)"
+    rf"|non (?:prevede|stabilisce|fissa|indica)\s+(?:un |il |alcun )?(?:termine )?(?:di )?"
+    rf"{_NUM}\s+{_UNIT}\b"
+    r"|non compare alcun riferimento|non (?:vi è|c['’]è) alcun riferimento",
     re.IGNORECASE)
 
 

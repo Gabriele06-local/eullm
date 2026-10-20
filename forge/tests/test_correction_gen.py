@@ -105,3 +105,19 @@ def test_the_script_prints_counts_only(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "[corr]" in out and "giorni" not in out
     assert (tmp_path / "d.jsonl").read_text().count("\n") == 1
+
+
+def test_the_script_grades_again_and_writes_the_informative_questions(tmp_path, capsys):
+    row = _row(answers=["Il termine è di 60 giorni [2].", "Il termine è di 30 giorni."])
+    for s in row["samples"]:
+        s["score"] = 0.0                     # as an older reward scored them
+    samples = tmp_path / "samples.jsonl"
+    samples.write_text(json.dumps(row) + "\n")
+    spec = importlib.util.spec_from_file_location("make_correction_pairs", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    keep = tmp_path / "informative.jsonl"
+    assert mod.main([str(samples), "--informative-out", str(keep)]) == 0
+    [k] = [json.loads(ln) for ln in keep.read_text().splitlines()]
+    assert "samples" not in k and k["id"] == row["id"]
+    assert "pass rate 0.50" in capsys.readouterr().out

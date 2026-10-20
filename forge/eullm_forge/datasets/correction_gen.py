@@ -143,8 +143,13 @@ def graded(row: dict) -> tuple[list[str], list[str]]:
 
 
 def informative(row: dict) -> bool:
-    """Whether GRPO can learn from the question: some answers right, some wrong."""
-    scores = [s["score"] for s in row.get("samples", [])]
+    """Whether GRPO can learn from the question: some answers right, some wrong.
+
+    Graded again rather than read from the stored scores, so a reward fixed
+    after the sampling applies to it without asking the model again.
+    """
+    scores = [score_answer(s["answer"], row["tipo"], row.get("keywords"))
+              for s in row.get("samples", [])]
     return bool(scores) and 0 < sum(scores) < len(scores)
 
 
