@@ -12,7 +12,7 @@ repository) and updated as the work goes; the working notes behind it are in
 `docs/jupiter/allocation-plan.md`. Every figure below comes from a job on
 JUPITER, named by its Slurm job id.
 
-**Last updated: 20-10-2026, morning.**
+**Last updated: 20-10-2026, afternoon.**
 
 ## 1. At a glance
 
@@ -20,7 +20,7 @@ JUPITER, named by its Slurm job id.
 |---|---|
 | Awarded | 06-10-2026; first job on 14-10-2026 |
 | System | JUPITER Booster: 4× GH200 (H100 96 GB HBM3, 72-core Neoverse-V2 Grace) a node, whole nodes only |
-| Spent so far | 207.4 GPU-hours (4.1%) by the morning of 18-10-2026, 4,792.6 left (`tools/jupiter/budget.sh` gives the running total and each day's); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
+| Spent so far | 317.4 GPU-hours (6.3%) by 20-10-2026 in JSC's own count (`jutil user cpuquota`, 72 core-hours a GPU-hour), 4,682.6 left (`tools/jupiter/budget.sh` gives it, with each day's from Slurm's accounting); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
 | Codes | EULLM Engine (Rust, llama.cpp), EULLM Forge (Python: PyTorch 2.9.1 of the site, Transformers 5.19, PEFT 0.21) |
 | Data on JUPITER | Legislation (Normattiva, EUR-Lex) and public benchmarks; pseudonymised court decisions once JSC's data-protection addendum is signed, asked for on 15-10-2026 (§7) |
 
@@ -39,6 +39,25 @@ JUPITER, named by its Slurm job id.
 | 9 | Energy use and carbon footprint | — | GPU energy per job: generation, instruction tuning, distillation (§6) |
 
 ## 3. Log
+
+**20-10-2026**
+* Mistral Small 4 converted from FP8 to BF16 on a login node (238.8 GB,
+  `dequantize_fp8.py`) and examined as a candidate teacher on two private
+  question sets, open book, answers kept for Leonardo's judge (§5.10).
+* Faults fixed on the way: FP8 weights needing kernels from the Hub,
+  experts left in FP8 by dequantizing on loading, a snapshot the Hub client
+  refused, a GPU out of memory at 48 questions a batch (§8).
+* A maintenance reservation held four jobs whose time limits were wider
+  than needed; resubmitted as two, they started at once.
+
+**19-10-2026**
+* JUPITER unavailable most of the day (34.6 GPU-hours spent).
+* The open-book pairs graded: every model up 7.8–15.5 points, Qwen3.5-4B
+  186 of 217 against 159 for the reference (job 2413383, §5.8).
+* Judges stopped at their one-hour limit: the grader took 3,495 s to load
+  from `$PROJECT`. Graders are now copied into node memory like the teacher
+  (`stage_model.sh`, `3746ea8`); the next judge took 18 minutes.
+* `budget.sh` prints JSC's own figure for the allocation besides Slurm's.
 
 **18-10-2026**
 * The instruction pairs were found to overlap the exam (105 of its 153
@@ -451,6 +470,38 @@ optimiser steps, two-hour links.
   front of the model, so the exam measures reading it, which distillation
   on the law is not expected to change; its effect is the held-out loss.
 
+### 5.10 A candidate teacher: Mistral Small 4 (from 19-10-2026)
+
+Mistral Small 4 (`mistralai/Mistral-Small-4-119B-2603`, Apache 2.0, a 119B
+mixture of experts that can reason before answering), examined as Leonardo
+examines its candidates: `legal_eval.py` open book, retrieval hybrid (BM25,
+Qwen3-Embedding-0.6B, Qwen3-Reranker-0.6B) over the Italian codes, no note
+on missing articles, once answering directly (400 new tokens) and once
+reasoning first (`reasoning_effort` high, 4,000). Two question sets that are
+not public: 36 trap questions and 145 practical ones. The questions and the
+answers stay on the project storage, readable by the user alone, and travel
+to Leonardo only over SSH; Leonardo's judge grades them with the other
+candidates. The log carries counts and times only (`--quiet`).
+
+The checkpoint is FP8. Transformers runs it through kernels it fetches from
+the Hugging Face Hub, out of a compute node's reach (jobs 2414120, 2414122),
+and its dequantize-on-load left the fused experts in FP8 (jobs
+2418651–2418654); the model was converted once to BF16 on a login node
+(`dequantize_fp8.py`, 238.8 GB) and is read from `$PROJECT` over the
+node's four GPUs.
+
+| set, mode | job | time | ended its turn | abstained | cites articles not retrieved | GPU energy |
+|---|---|---:|---:|---:|---:|---:|
+| traps, direct | 2419006 | 1,615 s | 15/36 | 10/36 | 7/36 | 0.28 kWh |
+| traps, reasoning | 2419007 | 2,463 s | 34/36 | 10/36 | 6/36 | 0.52 kWh |
+| practical, direct | 2422086 | 922 s | 45/145 | 3/145 | 12/145 | 0.22 kWh |
+| practical, reasoning | 2422087 | running | | | | |
+
+Answering directly, the model ran out of its 400 tokens in 21 of 36 and
+100 of 145 answers: it writes long. Both sets are being answered again
+directly with 1,000 tokens (jobs 2424181, 2424182), the 400-token answers
+kept for comparison with the other candidates.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
@@ -468,6 +519,8 @@ figures below with the site's energy mix.
 | 2371747 | the judge, 30 answer sets of 217 questions | 0.44 kWh in 0.57 h (765 W mean) |
 | 2390452 | 19,141 instruction pairs from the EU acts, EULLM Engine | 1.17 kWh in 0.79 h (1,469 W mean) |
 | 2403329 | 14,209 open-book pairs, EULLM Engine | 0.40 kWh in 0.31 h (1,269 W mean) |
+| 2419006, 2419007 | Mistral Small 4 on 36 questions, direct and reasoning | 0.28 and 0.52 kWh |
+| 2422086 | Mistral Small 4 on 145 questions, direct | 0.22 kWh in 0.26 h (856 W mean) |
 
 ## 7. Data governance
 
@@ -518,6 +571,11 @@ figures below with the site's energy mix.
 | 17-10 | A link killed while saving left a truncated checkpoint; every later link failed on it | atomic save, truncated state skipped on resume (`18f0611`) |
 | 17-10 | Loading the teacher took 50–70 minutes of a two-hour link | teacher copied once per node into memory (`9d093b7`) |
 | 18-10 | 105 of the exam's 153 articles had instruction pairs about them | overlap traced (`d746b11`); instruction tuning rerun on the 8,972 pairs without it: scores within a few questions |
+| 19-10 | Judges stopped at their one-hour limit, the grader loading for 3,495 s from `$PROJECT` | grader copied into node memory, two-hour limit (`3746ea8`): 18 minutes |
+| 19-10 | Mistral Small 4's FP8 weights need kernels from the Hub, which compute nodes cannot reach | — |
+| 20-10 | Dequantizing on loading left the fused experts in FP8 | converted once to BF16 on a login node (`dequantize_fp8.py`, `1059ee8`, `2a7c5fc`) |
+| 20-10 | The Hub client refused a snapshot without the consolidated files | the snapshot directory found in the cache (`a08780b`) |
+| 20-10 | GPU 0, also holding the retrieval models, out of memory at 48 questions a batch | 24 a batch, expandable CUDA segments (`6691261`) |
 
 ## 9. Resource use
 
@@ -544,23 +602,28 @@ figures below with the site's energy mix.
 From 16-10-2026 the jobs are too many to list one by one; `budget.sh` splits
 Slurm's accounting by day (GPU-hours; a node pays 4 an hour):
 
-| day | 14-10 | 15-10 | 16-10 | 17-10 | 18-10 (to ~10:00) |
-|---|---:|---:|---:|---:|---:|
-| GPU-hours | 3.4 | 29.9 | 30.6 | 101.6 | 41.9 |
+| day | 14-10 | 15-10 | 16-10 | 17-10 | 18-10 | 19-10 |
+|---|---:|---:|---:|---:|---:|---:|
+| GPU-hours | 3.4 | 29.9 | 30.6 | 101.6 | 117.5 | 34.6 |
 
 207.4 in all by the morning of 18-10-2026: distillation 162.2 (120.2 of it
 norms-v2), instruction tuning 30.5, the judge 8.4, engine and probes the
-rest.
+rest. 317.4 by 20-10-2026 in JSC's count (`jutil user cpuquota`); 19-10 was
+low because JUPITER was down most of the day.
 
 ## 10. Next
 
-1. The open-book pairs: instruction tuning on them, alone and with the clean
-   pairs, and the exam (queued 18-10-2026, deliverables 4, 6).
-2. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
+1. Mistral Small 4's answers graded on Leonardo with the other candidates;
+   if it is the better teacher, the pairs and the distillation are redone
+   with it (§5.10).
+2. On the open-book pairs, Leonardo's recipe (one epoch), Ministral-3-8B as
+   a further base, the exam also without the note on missing articles, then
+   reinforcement learning (GRPO) on the best model (deliverables 4, 6).
+3. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
    GGUF Q4_K_M, served by EULLM Engine on GH200 and examined through it
    (deliverables 1, 8).
-3. The Qwen3.5 distillation on a sample of norms-v2, for deliverable 7's
+4. The Qwen3.5 distillation on a sample of norms-v2, for deliverable 7's
    epoch figures; on this exam it is not expected to move the score.
-4. The rest of Normattiva (the full collections, `prepare_legislation.py
+5. The rest of Normattiva (the full collections, `prepare_legislation.py
    --all-acts`) for more open-book pairs; ruling summaries and court
    decisions once the data-protection addendum is signed (§7).
