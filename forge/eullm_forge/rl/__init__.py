@@ -15,10 +15,12 @@ from .rewards import (
     ABSTAIN_TYPES,
     DEADLINE_TYPES,
     JUDGED_TYPES,
+    PREMISE_TYPES,
     abstains,
     answer_reward,
+    corrects,
     score_answer,
 )
 
-__all__ = ["ABSTAIN_TYPES", "DEADLINE_TYPES", "JUDGED_TYPES", "abstains", "answer_reward",
-           "score_answer"]
+__all__ = ["ABSTAIN_TYPES", "DEADLINE_TYPES", "JUDGED_TYPES", "PREMISE_TYPES", "abstains",
+           "answer_reward", "corrects", "score_answer"]
