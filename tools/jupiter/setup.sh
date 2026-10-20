@@ -12,7 +12,13 @@
 # labelled LABEL so that only jobs of this build run them. They are the
 # points measured on LUMI's MI250X on 14-10-2026 (r-27b-next10), so the two
 # machines compare row by row. EULLM_GROUPS='rt27-* rt-throughput' widens
-# it, EULLM_PULL='…' changes the models pulled.
+# it, EULLM_PULL='…' changes the models pulled. EULLM_SPEC plans another
+# campaign file in place of c07's, ROUND another round: the three sites'
+# comparison (docs/sites-comparison.md) is
+#
+#     EULLM_SPEC=tools/lumi/campaigns/c13-sites.json ROUND=r-sites \
+#         EULLM_GROUPS='graphs speed' EULLM_PULL='qwen3-8b qwen3-32b qwen3.6-35b-a3b' \
+#         EULLM_BIN=... bash tools/jupiter/setup.sh LABEL
 #
 # Then: bash tools/jupiter/submit.sh LABEL
 
@@ -21,7 +27,9 @@ set -uo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 LABEL="${1:?give the label of the engine build, as given to build_engine.sh}"
 : "${EULLM_BIN:?set EULLM_BIN to the CUDA eullm binary (build_engine.sh prints it)}"
-SPEC="$EULLM_REPO/tools/lumi/campaigns/c07-runtimes.json"
+SPEC="${EULLM_SPEC:-$EULLM_REPO/tools/lumi/campaigns/c07-runtimes.json}"
+[ -f "$SPEC" ] || SPEC="$EULLM_REPO/$SPEC"
+[ -f "$SPEC" ] || { echo "[!!] no campaign file $SPEC"; exit 1; }
 read -r -a GROUP_PATTERNS <<<"${EULLM_GROUPS:-rt27-*}"
 # The models of the planned groups, and the conversations' 35B-A3B.
 read -r -a MODELS <<<"${EULLM_PULL:-qwen3.6-27b qwen3-32b qwen3.6-35b-a3b}"
@@ -69,4 +77,4 @@ $CAMPAIGN plan "$SPEC" --queue "$CAMPAIGN_DIR" --engine "$EULLM_BIN" \
     --round "${ROUND:-r-gh200}" --engine-label "$LABEL" "${GROUP_ARGS[@]}"
 $CAMPAIGN unblock --queue "$CAMPAIGN_DIR" >/dev/null
 echo
-echo "Next: EULLM_BIN=$EULLM_BIN bash tools/jupiter/submit.sh $LABEL"
+echo "Next: EULLM_BIN=$EULLM_BIN bash tools/jupiter/submit.sh $LABEL [--time=...]"

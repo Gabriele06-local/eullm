@@ -94,4 +94,17 @@ else
     done
 fi
 echo
+# The job's own summary, as on LUMI (tools/lumi/job_summary.sh): its points by
+# group, failures included, and how each point's VRAM moved while it ran, in
+# $CAMPAIGN_DIR/logs/summary-<job>.txt, so that what it measured is read, not
+# assembled.
+SUMMARY="$CAMPAIGN_DIR/logs/summary-${SLURM_JOB_ID:-local}.txt"
+{
+    echo "=== what job ${SLURM_JOB_ID:-local} measured ==="
+    $CAMPAIGN report --queue "$CAMPAIGN_DIR" --job "${SLURM_JOB_ID:-local}"
+    echo
+    echo "=== VRAM of each point while it ran ==="
+    "$PY" "$EULLM_REPO/tools/lumi/vram_slopes.py" --queue "$CAMPAIGN_DIR" "${SLURM_JOB_ID:-local}"
+} >"$SUMMARY" 2>&1
+echo "summary: $SUMMARY"
 echo "=== done $(date -Is) ==="
