@@ -616,8 +616,9 @@ low because JUPITER was down most of the day.
 1. Mistral Small 4's answers graded on Leonardo with the other candidates;
    if it is the better teacher, the pairs and the distillation are redone
    with it (§5.10).
-2. The open-book pairs: instruction tuning on them, alone and with the clean
-   pairs, and the exam (queued 18-10-2026, deliverables 4, 6).
+2. On the open-book pairs, Leonardo's recipe (one epoch), Ministral-3-8B as
+   a further base, the exam also without the note on missing articles, then
+   reinforcement learning (GRPO) on the best model (deliverables 4, 6).
 3. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
    GGUF Q4_K_M, served by EULLM Engine on GH200 and examined through it
    (deliverables 1, 8).
