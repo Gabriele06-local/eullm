@@ -36,6 +36,18 @@ def test_the_article_is_found_among_the_passages_by_its_label():
     assert passage_of(PROMPT, "codice_civile", "3") is None
 
 
+def test_a_bis_article_is_not_taken_for_the_base_article():
+    """The label "art. 2-bis" starts with "art. 2": the old boundary matched
+    the hyphen and quoted the 30-day neighbour as if it stated 60."""
+    prompt = ("Testi normativi:\n\n[1] codice civile, art. 2-bis\n"
+              "La domanda si propone entro trenta giorni.\n\n"
+              "[2] codice civile, art. 2\n"
+              "La domanda si propone entro sessanta giorni.\n\n"
+              "Domanda: in materia di termine di prova, qual è il termine?")
+    assert passage_of(prompt, "codice_civile", "2") == 2
+    assert passage_of(prompt, "codice_civile", "2-bis") == 1
+
+
 def test_what_is_wrong_is_said_from_what_the_program_checked():
     where = "il testo [2]"
     assert diagnosis("Il termine è di 30 giorni.", "termine", KW, where) == (

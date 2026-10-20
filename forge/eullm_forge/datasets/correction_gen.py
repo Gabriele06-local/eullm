@@ -65,9 +65,19 @@ def right_deadline(keywords: list[str]) -> tuple[int, str] | None:
 def passage_of(prompt: str, code: str, article: str) -> int | None:
     """The number of the passage that is the article, as the prompt labels it."""
     label = code.replace("_", " ")
+    # The suffix is part of the identity: "art. 2-bis" is not "art. 2", and a
+    # by-topic question can retrieve both. A plain number also refuses the
+    # suffixed labels, so a 2-bis passage is never quoted as 2's.
+    base, sep, suffix = article.partition("-")
+    numbered = re.escape(base)
+    if suffix:
+        numbered += rf"\s*[-–]?\s*{re.escape(suffix)}\b"
+    else:
+        numbered += (r"\b(?!\s*[-–]?\s*(?:bis|ter|quater|quinquies|sexies|septies|"
+                     r"octies|novies|decies)\b)")
     for m in re.finditer(r"^\[(\d+)\] ([^\n]*)$", prompt, re.MULTILINE):
         if m.group(2).startswith(label) and re.search(
-                rf"\bartt?\. {re.escape(article)}(?:\b|-)", m.group(2)):
+                rf"\bartt?\. {numbered}", m.group(2)):
             return int(m.group(1))
     return None
 
