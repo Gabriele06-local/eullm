@@ -15,7 +15,8 @@ set -euo pipefail
 # shellcheck source=campaign_env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/campaign_env.sh"
 LINKS="${1:-2}"
-[ -x "$EULLM_BIN" ] || { echo "no engine at $EULLM_BIN: run setup_campaign.sh" >&2; exit 1; }
+[ -x "$EULLM_BIN" ] && [ -s "$CAMPAIGN_DIR/setup-ok" ] ||
+    { echo "setup_campaign.sh has not finished: nothing submitted" >&2; exit 1; }
 if [ -n "$(squeue --me -h -n eullm-campaign -o %i 2>/dev/null)" ]; then
     echo "a campaign chain is already queued: nothing submitted"
     squeue --me -n eullm-campaign
