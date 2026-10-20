@@ -52,6 +52,13 @@ and `bench/campaign/` are shared by all of them: a change there is made in
 one branch at a time and reaches the others through `main`, or two chats
 end up pushing over each other.
 
+The user works on all the sites at once and does not watch the clock for
+any of them: nothing is handed over that has to be launched at a given
+time, or after something else ends. What goes in a queue either runs long
+and starts its own next steps (dependencies, chains, a job that does the
+follow-up itself), or is quick. A job does its own finishing too (merging
+parts, a summary in its log), so the user only reads the result.
+
 - **LUMI-G** (EuroHPC EHPC-DEV-2026D09-278, `project_465003366`): engine
   inference and benchmarks only, on MI250X (gfx90a). One node per new
   engine build; spending is slowed down. `docs/lumi/allocation-plan.md`,
