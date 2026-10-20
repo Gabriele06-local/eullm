@@ -129,10 +129,21 @@ class LlamaServer:
                 self.proc.kill()
                 self.proc.wait()
 
-    def complete(self, ids: list[int], max_new_tokens: int) -> dict:
-        """One greedy completion of a tokenized prompt: the server's JSON reply."""
+    def complete(self, ids: list[int], max_new_tokens: int, temperature: float = 0.0,
+                 seed: int | None = None) -> dict:
+        """One completion of a tokenized prompt: the server's JSON reply.
+
+        Greedy by default, as the exams ask. With a ``temperature`` it samples
+        from the whole distribution (no top-k, top-p or min-p cut), ``seed``
+        making each sample repeatable: several answers to one question, for
+        sample_answers.py.
+        """
         body = {"prompt": ids, "n_predict": max_new_tokens, "temperature": 0.0,
                 "top_k": 1, "cache_prompt": False, "return_tokens": True}
+        if temperature > 0:
+            body.update(temperature=temperature, top_k=0, top_p=1.0, min_p=0.0)
+            if seed is not None:
+                body["seed"] = seed
         try:
             return _post(self.url + "/completion", body, timeout=3600)
         except urllib.error.HTTPError as e:
@@ -142,16 +153,19 @@ class LlamaServer:
 
 
 def generate_answers_gguf(server, tok, prompts: list[str], *, max_new_tokens: int,
-                          end_ids: list[int], parallel: int = 4) -> list[tuple[str, bool]]:
+                          end_ids: list[int], parallel: int = 4, temperature: float = 0.0,
+                          seeds: list[int] | None = None) -> list[tuple[str, bool]]:
     """(answer, ended_its_turn) per templated prompt, in order, like generate_answers.
 
     A turn has ended when the server stopped on an end-of-generation token
     rather than on the token budget, or when an end token is among the ids it
-    returns (cut there, as the bf16 path does).
+    returns (cut there, as the bf16 path does). ``temperature`` and one seed
+    per prompt sample instead of decoding greedily (`LlamaServer.complete`).
     """
-    def one(prompt: str) -> tuple[str, bool]:
+    def one(job: tuple[str, int | None]) -> tuple[str, bool]:
+        prompt, seed = job
         ids = tok(prompt, add_special_tokens=False)["input_ids"]
-        r = server.complete(ids, max_new_tokens)
+        r = server.complete(ids, max_new_tokens, temperature=temperature, seed=seed)
         if r.get("truncated"):
             raise RuntimeError(f"a prompt of {len(ids)} tokens did not fit the slot's "
                                "context: raise --server-ctx")
@@ -163,5 +177,6 @@ def generate_answers_gguf(server, tok, prompts: list[str], *, max_new_tokens: in
         text = tok.decode(out[:cut] if cut is not None else out, skip_special_tokens=True)
         return text.strip(), ended
 
+    jobs = list(zip(prompts, seeds or [None] * len(prompts)))
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
-        return list(pool.map(one, prompts))
+        return list(pool.map(one, jobs))

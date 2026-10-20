@@ -120,6 +120,19 @@ def test_answers_come_back_in_order_with_their_endings(server_bin, tmp_path):
     assert argv[argv.index("-m") + 1] == str(gguf)
 
 
+def test_sampling_sends_the_temperature_and_one_seed_per_prompt(server_bin, tmp_path):
+    binary, gguf, record = server_bin
+    with LlamaServer(gguf, binary=str(binary), parallel=2, ctx_per_slot=1000,
+                     log_path=tmp_path / "server.log") as server:
+        generate_answers_gguf(server, FakeTok(), ["7 1", "7 2"], max_new_tokens=3,
+                              end_ids=[END], parallel=2, temperature=0.8, seeds=[11, 12])
+    sent = sorted((json.loads(line) for line in record.read_text().splitlines()),
+                  key=lambda r: r["seed"])
+    assert [r["seed"] for r in sent] == [11, 12]
+    assert all(r["temperature"] == 0.8 and r["top_k"] == 0 and r["top_p"] == 1.0
+               for r in sent)
+
+
 def test_the_server_is_stopped_after_the_run(server_bin, tmp_path):
     binary, gguf, _ = server_bin
     with LlamaServer(gguf, binary=str(binary), log_path=tmp_path / "s.log") as server:
