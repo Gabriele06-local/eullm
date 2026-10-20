@@ -56,4 +56,7 @@ frac = d.get("assigned_fraction", {})
 print("  share of the job each GCD had a point: "
       + "  ".join(f"{k}:{v:.0%}" for k, v in sorted(frac.items())))
 PY
+    JOB=$(basename "$LAST" .summary.json)
+    [ -f "$CAMPAIGN_DIR/logs/summary-$JOB.txt" ] &&
+        echo "  what it measured: cat $CAMPAIGN_DIR/logs/summary-$JOB.txt"
 fi
