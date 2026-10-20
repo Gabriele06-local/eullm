@@ -44,9 +44,12 @@ CUDA builds do not have).
 - **JUPITER** (its chat; `tools/jupiter/`): plan with
   `$CAMPAIGN plan tools/lumi/campaigns/c13-sites.json --queue "$CAMPAIGN_DIR"
   --engine "$EULLM_BIN" --round r-sites --engine-label LABEL` (or `setup.sh`
-  with this spec in place of c07's), and give the job time for the two
-  90-minute points beside the speed points: `submit.sh LABEL --time=02:30:00`.
-  About 10 GPU-hours.
+  with this spec in place of c07's: `EULLM_SPEC=tools/lumi/campaigns/c13-sites.json
+  ROUND=r-sites EULLM_GROUPS='graphs speed' EULLM_PULL='qwen3-8b qwen3-32b
+  qwen3.6-35b-a3b'`), and give the job time for the two 90-minute points
+  beside the speed points, without c07's conversations:
+  `EULLM_SKIP_CONVERSATIONS=1 submit.sh LABEL --time=02:30:00`. About 10
+  GPU-hours. The job writes its summary itself, as on LUMI.
 - **Leonardo** (its chat): the runner has not run there yet. It needs the
   engine (a CUDA build for sm_80, or the published `eullm-linux-x64-cuda`),
   the models and workload sets fetched on a login node (`campaign.py pulls`
