@@ -52,13 +52,16 @@ CUDA builds do not have).
   GPU-hours. The job writes its summary itself, as on LUMI.
   `tools/jupiter/sites.sh` does all of it unattended, build included:
   `tmux new -d -s sites 'bash tools/jupiter/sites.sh'`.
-- **Leonardo** (its chat): the runner has not run there yet. It needs the
-  engine (a CUDA build for sm_80, or the published `eullm-linux-x64-cuda`),
-  the models and workload sets fetched on a login node (`campaign.py pulls`
-  and `eullm pull`, `campaign.py prefetch`), and a job of Leonardo's shape:
-  two hours, three GPUs, 24 cores, 340 GB, never the whole node, chained,
-  running `campaign.py run --queue "$CAMPAIGN_DIR" --devices 0-2 --backend
-  cuda --bind none --site leonardo-booster --engine "$EULLM_BIN"`. Two links
+- **Leonardo** (its chat): `tools/leonardo/`. From a login node,
+  `bash tools/leonardo/setup_campaign.sh` downloads the published
+  `eullm-linux-x64-cuda-12.4-datacenter` of 0.7.90 (sm_80, for RHEL 8's
+  glibc), pulls the three models into the fast scratch, freezes the sets and
+  plans the round; `bash tools/leonardo/submit_campaign.sh` then chains two
+  links of Leonardo's shape (two hours, three GPUs, 24 cores, 340 GB, never
+  the whole node) running `campaign.py run --devices 0-2 --backend cuda
+  --bind none --site leonardo-booster`. Each link writes its own
+  `logs/summary-JOB.txt` and checks the servers' logs for the CPU fallback
+  the site's old drivers caused once (`docs/cineca/leonardo.md`). Two links
   hold the 14 points; about 12 GPU-hours. The allocation ends on 02-11-2026.
 
 Each job's results are then read with

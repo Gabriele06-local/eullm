@@ -91,6 +91,20 @@ def test_an_article_not_in_the_collection_is_attributed_nothing():
     assert any(p.number.endswith("-bis") for p in pairs)
 
 
+def test_an_article_that_repeals_others_is_not_itself_repealed():
+    """A codifying decree's final article says "Sono abrogati: ..." about
+    other acts and is in force; treating the word as evidence about the
+    article itself teaches the inverse of the norm."""
+    records = RECORDS + [rec(
+        "codice_consumo",
+        "Art. 146. \n \n (Abrogazioni). \n \n Dalla data di entrata in vigore del "
+        "presente codice sono abrogati: a) il d.P.R. 24 maggio 1988, n. 224; "
+        "b) la legge 10 aprile 1991, n. 126." + FILLER)]
+    pairs = build_pairs(NormIndex(records), per_code=10, rng=random.Random(0))
+    assert "146" not in {p.number for p in pairs if p.kind == "premessa_abrogato"}
+    assert "4" in {p.number for p in pairs if p.kind == "premessa_abrogato"}
+
+
 def test_a_repealed_article_is_said_to_be_repealed_quoting_its_text():
     [p] = [p for p in _pairs() if p.kind == "premessa_abrogato"]
     assert p.number == "4"
