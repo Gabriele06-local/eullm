@@ -159,6 +159,18 @@ the configurations that died 12 to 16 hours with the graphs off, and
 `graphs-speed` measures what they are worth (Qwen3-8B and 32B, 1 to 32
 requests, on and off), before the engine turns them off on ROCm.
 
+The whole of `graphs-*`, three hours at 32 requests, graphs on → off:
+Qwen3-14B 267 → 270 tokens/s, VRAM +2.11 GiB an hour → flat;
+Qwen3-30B-A3B 226 → 232, +1.86 → flat; Qwen3-32B 172 → 175 and 172 → 176,
++1.37 and +1.35 → flat. `graphs-speed`, tokens/s at 1, 4, 16 and 32
+requests, on → off: Qwen3-32B 37.5 → 37.7, 75.6 → 75.2, 259 → 264, 378 →
+384; Qwen3-8B 113 → 112, 228 → 228, 680 → 692, 958 → 953. The graphs buy
+nothing on the MI250X, at one request either, and are the growth: EuLLM's
+ROCm builds leave them out from `next21` (`GGML_HIP_GRAPHS=OFF` unless the
+build sets it). `nographs-*` (`next20` with the graphs off at run time)
+checks 12 to 16 hours; `next21` repeats `c12`'s six-hour soaks and `c01`'s
+reference and one-GCD groups without the variable.
+
 `c11`'s `load-*` (`next19`, cold, one binary each way), seconds to load
 with patch 0010 against without (`GGML_META_GATHER_ROWS=0`): Qwen3-235B
 as two servers of four GCDs 352 against 599, Qwen3-Coder-480B over eight

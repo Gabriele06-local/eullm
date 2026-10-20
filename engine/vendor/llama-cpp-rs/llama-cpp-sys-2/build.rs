@@ -1203,6 +1203,23 @@ fn main() {
         // position-independent.
         config.define("CMAKE_POSITION_INDEPENDENT_CODE", "ON");
 
+        // EuLLM: no HIP graphs unless the build asks for them
+        // (`GGML_HIP_GRAPHS=ON` in its environment, which the loop over
+        // GGML_* variables above passes on). ggml turns them on by default,
+        // and under continuous batching, whose steps change shape all the
+        // time, every server on LUMI-G's MI250X grew by 1.3-2.5 GiB of VRAM an
+        // hour until its GCD was full and it died, after 6 to 11 hours at 32
+        // requests: NaN logits, then "ROCm error: out of memory" at
+        // hipGraphInstantiate, or a memory fault. With the graphs off the
+        // VRAM stayed flat over three hours, and they were worth nothing:
+        // Qwen3-8B and Qwen3-32B wrote within 2% either way at 1 to 32
+        // requests (37.5 against 37.7 tokens/s for the 32B alone), and 1-3%
+        // more without them at 32 (c12-stability, 20-10-2026).
+        println!("cargo:rerun-if-env-changed=GGML_HIP_GRAPHS");
+        if env::var_os("GGML_HIP_GRAPHS").is_none() {
+            config.define("GGML_HIP_GRAPHS", "OFF");
+        }
+
         // Which AMD GPU to generate device code for. `ggml-hip/CMakeLists.txt`
         // forwards AMDGPU_TARGETS -> GPU_TARGETS -> CMAKE_HIP_ARCHITECTURES and,
         // when all three are unset, leaves the choice to `enable_language(HIP)`,
