@@ -70,6 +70,26 @@ def test_a_climbing_server_that_died_and_a_flat_one(tmp_path):
     assert state == "done"
 
 
+def test_a_server_stopped_at_a_normal_end_is_not_reported_as_emptied(tmp_path):
+    """The runner stops the servers before the END line is printed, so a
+    clean point's device is already empty at its end timestamp. The trailing
+    zero is the normal stop, not a death."""
+    write_job(tmp_path, "22973477")
+    node = tmp_path / "results" / "22973477.node.jsonl"
+    rows = [json.loads(line) for line in node.read_text().splitlines()]
+    for r in rows:
+        if r["t"] == T0 + 6 * 3600:
+            r["d"]["1"]["used"] = 0
+    node.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    points = vram_slopes.points_of(str(tmp_path / "logs" / "eullm-campaign-22973477.out"))
+    samples = vram_slopes.samples_of(str(node))
+    out = {r[0]: r for r in vram_slopes.report(points, samples, settle_s=900, dead_gib=1.0)}
+    _, _, _, first, peak, last, slope, state = out["long-control-14b-bbbbbbbbbb"]
+    assert state == "done"
+    assert first == peak == last == 27.0
+    assert abs(slope) < 1e-9
+
+
 def test_the_command_line_prints_a_row_a_point_and_names_what_is_missing(tmp_path, capsys):
     write_job(tmp_path, "22973477")
     assert vram_slopes.main(["22973477", "99999999", "--queue", str(tmp_path)]) == 0
