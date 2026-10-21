@@ -16,8 +16,10 @@
 #
 # Submit through submit_distill.sh, which checks the inputs and chains the
 # links (--dependency=singleton). Whole node: 4 GPU-hours an hour. Two hours
-# a link: each run trains until FORGE_TRAIN_S (110 minutes by default) after
-# the link began and is then stopped. The teacher is first copied into the
+# a link by default, longer with FORGE_LINK_H: on JUPITER every job is a
+# whole node, and the 3-8 hour jobs of 20-10-2026 started as soon as the
+# 2-hour ones, so a link is as long as the work needs (fewer teacher loads);
+# each run trains until 10 minutes before the link's limit and is stopped. The teacher is first copied into the
 # node's memory and both runs load it from there (below); each run saves
 # every 100 steps, so a link loses little to its end.
 # The GPUs' power is sampled every 5 s into $FORGE_RUN_DIR/power/ (Slurm
@@ -38,7 +40,11 @@ source "$EULLM_REPO/forge/scripts/jupiter/env.sh"
 CFG_DIR="$EULLM_REPO/forge/training/configs/jupiter"
 ARMS="${FORGE_DISTILL_ARMS:-norms-4b:$CFG_DIR/distill_qwen3_30b_a3b_to_4b_norms.yaml norms-8b:$CFG_DIR/distill_qwen3_30b_a3b_to_8b_norms.yaml}"
 DATA="${FORGE_DISTILL_DATA:-$FORGE_DATA_DIR/norms}"
-TRAIN_S="${FORGE_TRAIN_S:-6600}"
+# Training stops 10 minutes before the job's own limit (two hours by
+# default; submit_distill.sh FORGE_LINK_H asks for longer links), so the
+# runs save in time; FORGE_TRAIN_S overrides it.
+LIMIT_S=$(job_time_limit_s)
+TRAIN_S="${FORGE_TRAIN_S:-$(( ${LIMIT_S:-7200} - 600 ))}"
 JOB="${SLURM_JOB_ID:-local}"
 T_JOB=$(date +%s)
 GPUS=("0,1" "2,3")

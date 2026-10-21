@@ -61,7 +61,12 @@ RUNS="$FORGE_RUN_DIR"
 ARMS="${FORGE_SFT_ARMS:-d4b=$RUNS/norms-4b/checkpoints/qwen3_4b_norms_distilled/merged d8b=$RUNS/norms-8b/checkpoints/qwen3_8b_norms_distilled/merged b4b=Qwen/Qwen3-4B-Base b8b=Qwen/Qwen3-8B-Base}"
 PAIRS="${FORGE_SFT_PAIRS:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
 REF="${FORGE_SFT_REFERENCE:-Qwen/Qwen3-4B-Instruct-2507}"
-TRAIN_S="${FORGE_SFT_TRAIN_S:-5700}"
+# Training stops in time for the evaluations: 25 minutes before the job's
+# own limit in a two-hour link, an hour before it in a longer one
+# (submit_sft_chain.sh FORGE_LINK_H); FORGE_SFT_TRAIN_S overrides it.
+LIMIT_S=$(job_time_limit_s)
+LIMIT_S="${LIMIT_S:-7200}"
+TRAIN_S="${FORGE_SFT_TRAIN_S:-$(( LIMIT_S - (LIMIT_S > 7200 ? 3600 : 1500) ))}"
 read -r -a SFT_ARGS <<<"${FORGE_SFT_ARGS:-}"
 SYSTEM_FILE="${FORGE_SFT_SYSTEM_FILE:-}"
 [ -z "$SYSTEM_FILE" ] || [ -s "$SYSTEM_FILE" ] || { echo "[!!] no system prompt at $SYSTEM_FILE"; exit 1; }
