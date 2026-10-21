@@ -348,6 +348,29 @@ class OpenBookTest(unittest.TestCase):
         self.assertEqual([c.sufficient for c in loaded.cases], [True, False])
         self.assertEqual([c.document for c in loaded.cases], ["codice_civile/2043"] * 2)
 
+    def test_a_continuation_chunk_counts_as_the_article(self):
+        """Long articles are split: only the header chunk has article_num.
+        The abstain case must drop the continuation too, or it keeps the
+        passage that answers the question while the label says it does not."""
+        import rg_openbook
+
+        records = [
+            {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+             "text": "Art. 41. \n \n (Rubrica quarantuno). \n \n Il creditore e il debitore."},
+            {"code": "codice_civile", "article_num": "", "chunk_index": 1,
+             "text": "Il creditore agisce entro sessanta giorni dalla notifica."},
+            {"code": "codice_civile", "article_num": "", "chunk_index": 0,
+             "text": "Art. 42. \n \n (Rubrica quarantadue). \n \n Il debitore deve dare "
+                     "preavviso al creditore nel codice civile."},
+        ]
+        index = rg_openbook.NormIndex(records)
+        answer, abstain = rg_openbook.contexts(
+            "ob-g-codice_civile-41",
+            "Nel codice civile, entro quanto deve agire il creditore?",
+            "codice_civile", "41", index, k=3)
+        self.assertTrue(any("sessanta giorni" in p for p in answer["passages"]))
+        self.assertFalse(any("sessanta giorni" in p for p in abstain["passages"]))
+
     def test_a_set_written_before_cases_named_their_article_gets_it_from_the_key(self):
         import rg_openbook
 

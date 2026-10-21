@@ -96,7 +96,10 @@ def contexts(key, question, code, number, index, k):
     retrieved for it, and without."""
 
     def own(record):
-        return record.get("code") == code and number in record_articles(record)
+        # articles_of follows a continuation chunk back to the article whose
+        # header its predecessor carried; record_articles alone sees [] there,
+        # so the abstain case kept the chunk holding the answer.
+        return record.get("code") == code and number in index.articles_of(record)
 
     mine = [r for r in index.records if own(r)]
     if not mine:
