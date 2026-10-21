@@ -15,7 +15,8 @@
 # official figure, and `jutil user cpuquota` prints it on a login node, in
 # core-hours: 72 a GPU-hour (a GH200's Grace cores; the award's 5,000
 # GPU-hours are its 360,000), and it lags Slurm's accounting. Both are shown
-# at the end; this script's own figure is for steering.
+# at the end; this script's own figure is for steering. The last table says
+# whether the spending is on pace, to the plan's end and to JSC's.
 
 set -uo pipefail
 END="${1:-2026-12-15}"
@@ -104,9 +105,69 @@ if [ -n "$QUEUED" ]; then
 fi
 
 # JSC's own count of the budget, core-hours turned into GPU-hours.
-jutil user cpuquota 2>/dev/null | awk -F= -v acct="$ACCOUNT" '
+JSC=$(jutil user cpuquota 2>/dev/null | awk -F= -v acct="$ACCOUNT" '
     $1 == "budget-account" { mine = ($2 == acct) }
     mine && $1 == "coreh-quota-total" { q = $2 }
     mine && $1 == "coreh-consumed-total" { c = $2 }
+    mine && $1 == "acct-period-start" { s = $2 }
     mine && $1 == "acct-period-end" { e = $2 }
-    END { if (q > 0) printf "\n  JSC (jutil user cpuquota): %.1f of %.0f GPU-hours used (%.1f%%), %.1f left, period to %s\n", c / 72, q / 72, 100 * c / q, (q - c) / 72, e }'
+    END { if (q > 0) print c / 72, q / 72, s, e }')
+[ -n "$JSC" ] && awk '{ printf "\n  JSC (jutil user cpuquota): %.1f of %.0f GPU-hours used (%.1f%%), %.1f left, period %s to %s\n", $1, $2, 100 * $1 / $2, $2 - $1, ($3 == "" ? "?" : $3), $4 }' <<<"$JSC"
+
+# Whether the spending is on pace, as on Leonardo: billed against a uniform
+# pace from the start of the period, what is left by JSC's count and by
+# Slurm's (which includes today, JSC's lags), the daily rate that spends it
+# by the plan's end and by JSC's, and the last 24 hours against them.
+ROWS="$ROWS" JSC="$JSC" python3 - "$now" "$TOTAL" "$START" "$END" <<'PY2'
+import os
+import sys
+from datetime import datetime
+
+now, total, start, plan_end = float(sys.argv[1]), float(sys.argv[2]), sys.argv[3], sys.argv[4]
+jsc = os.environ.get("JSC", "").split()
+billed = float(jsc[0]) if jsc else None
+period_start = jsc[2] if len(jsc) > 3 and jsc[2] else start
+jsc_end = jsc[-1] if len(jsc) > 2 else "2026-12-31"
+
+
+def ts(day, end_of_day=False):
+    d = datetime.fromisoformat(day[:10])
+    return d.timestamp() + (86400 - 1 if end_of_day else 0)
+
+
+slurm = last24 = 0.0
+for line in os.environ["ROWS"].splitlines():
+    f = line.split("|")
+    if len(f) < 7 or "PENDING" in f[2] or f[5] in ("", "Unknown", "None"):
+        continue
+    gpus = sum(int(t.split("=")[1]) for t in f[4].split(",") if t.startswith("gres/gpu="))
+    t0 = datetime.fromisoformat(f[5]).timestamp()
+    t1 = now if f[6] in ("", "Unknown", "None") else datetime.fromisoformat(f[6]).timestamp()
+    slurm += (t1 - t0) * gpus / 3600
+    last24 += max(0.0, min(t1, now) - max(t0, now - 86400)) * gpus / 3600
+
+p0, p1 = ts(period_start), ts(jsc_end, True)
+pace = (now - p0) / (p1 - p0)
+rows = [("Allocation", f"{total:,.0f}", f"{total / 4:,.0f}")]
+if billed is not None:
+    ahead = (billed - pace * total) / 4   # node-hours spent beyond a uniform pace
+    rows += [("Billed (jutil, lags a day)", f"{billed:,.1f} ({100 * billed / total:.1f}%)", f"~{billed / 4:,.0f}"),
+             (f"Uniform pace today (from {period_start[:10]})", f"{100 * pace:.1f}%",
+              f"{ahead:+,.0f} node-hours ({'ahead' if ahead >= 0 else 'behind: unspent hours lapse'})"),
+             ("Left by JSC's count", f"{total - billed:,.1f}", f"~{(total - billed) / 4:,.0f}")]
+rows.append(("Left by Slurm's count (today included)", f"{total - slurm:,.1f}", f"~{(total - slurm) / 4:,.0f}"))
+need = {}
+for label, end in ((f"plan, to {plan_end}", plan_end), (f"JSC's period, to {jsc_end[:10]}", jsc_end)):
+    days = (ts(end, True) - now) / 86400
+    lo = (total - slurm) / days
+    hi = (total - billed) / days if billed is not None else lo
+    lo, hi = min(lo, hi), max(lo, hi)
+    need[end] = lo
+    rows.append((f"Needed a day, {label} ({days:.1f} days)", f"{lo:,.0f}-{hi:,.0f}", f"{lo / 4:.1f}-{hi / 4:.1f}"))
+mark = "  [!!] below the pace" if last24 < min(need.values()) else ""
+rows.append(("Last 24 hours", f"{last24:,.1f}", f"{last24 / 4:.1f}{mark}"))
+w = max(len(r[0]) for r in rows)
+print(f"\n  {'':{w}}  {'GPU-hours':>18}  node-hours")
+for a, b, c in rows:
+    print(f"  {a:{w}}  {b:>18}  {c}")
+PY2
