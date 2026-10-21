@@ -54,6 +54,13 @@ JUPITER, named by its Slurm job id.
   exam also open book without the note on missing articles, as the product
   asks: links 2429166-2429167, then the judge 2429168
   (`submit_sft_chain.sh`, `3dd7a08`).
+* Spending behind pace: 347.9 GPU-hours by Slurm's count on 21-10 (7.0%),
+  against 9.4% for a uniform pace from 14-10 to 31-12, 30 node-hours short;
+  the rest by 31-12 needs 65 a day, the last 24 hours spent 16 (`budget.sh`
+  now prints the pace table). A
+  second chain beside the first: the Qwen3.5 distillation on norms-v2, the
+  35B-A3B teaching the 4B and the 9B, one epoch unpacked (deliverable 7's
+  GPU-hours an epoch against Qwen3's on the same corpus).
 
 **20-10-2026**
 * Mistral Small 4 converted from FP8 to BF16 on a login node (238.8 GB,
