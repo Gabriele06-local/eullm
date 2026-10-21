@@ -51,6 +51,11 @@ for m in sorted(set(sys.argv[1:])):
 PY
 
 NAME="${FORGE_CHAIN_NAME:-forge-distill}"
+# A partition down for maintenance or a silent controller is waited out
+# (sbatch_retry.sh); any other refusal stops at once.
+# shellcheck source=sbatch_retry.sh
+source "$HERE/sbatch_retry.sh"
+wait_for_slurm || err "no Slurm controller"
 QUEUED=$(squeue --me -h -n "$NAME" -o %i | wc -l)
 if [ "$QUEUED" -gt 0 ] && [ "${FORGE_CHAIN_MORE:-0}" != 1 ]; then
     squeue --me -n "$NAME"
@@ -60,10 +65,6 @@ fi
 DEP=singleton
 [ -z "${FORGE_CHAIN_AFTER:-}" ] || DEP="afterany:$FORGE_CHAIN_AFTER,singleton"
 mkdir -p "$FORGE_RUN_DIR/logs"
-# A partition down for maintenance or a silent controller is waited out
-# (sbatch_retry.sh); any other refusal stops at once.
-# shellcheck source=sbatch_retry.sh
-source "$HERE/sbatch_retry.sh"
 submit_link() {
     sbatch_retry --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
         --time="${FORGE_LINK_H:-2}:00:00" \
