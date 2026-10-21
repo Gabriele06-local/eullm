@@ -47,6 +47,13 @@ JUPITER, named by its Slurm job id.
   (0.00 GiB an hour, as with them off), where LUMI's grew 1.3-2.5 GiB an hour
   with HIP graphs until they died; speed of three models at 1-32 requests
   (§5.1). `tools/jupiter/sites.sh` builds, sets up and submits it unattended.
+* Queued: Leonardo's open-book recipe (one epoch on the 14,209 open-book
+  pairs, lr 1e-4, 4,096-token sequences; instruct bases keep their chat rows,
+  Ministral our system prompt in place of its "Le Chat" one) on Qwen3.5-4B
+  and 9B Base, Ministral-3-8B-Instruct-2512 and Qwen3-4B-Instruct-2507, the
+  exam also open book without the note on missing articles, as the product
+  asks: links 2429166-2429167, then the judge 2429168
+  (`submit_sft_chain.sh`, `3dd7a08`).
 
 **20-10-2026**
 * Mistral Small 4 converted from FP8 to BF16 on a login node (238.8 GB,
@@ -654,8 +661,9 @@ low because JUPITER was down most of the day.
    if it is the better teacher, the pairs and the distillation are redone
    with it (§5.10).
 2. On the open-book pairs, Leonardo's recipe (one epoch), Ministral-3-8B as
-   a further base, the exam also without the note on missing articles, then
-   reinforcement learning (GRPO) on the best model (deliverables 4, 6).
+   a further base, the exam also without the note on missing articles
+   (queued 21-10-2026), then reinforcement learning (GRPO) on the best model
+   (deliverables 4, 6).
 3. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
    GGUF Q4_K_M, served by EULLM Engine on GH200 and examined through it
    (deliverables 1, 8).
