@@ -1120,6 +1120,10 @@ def cmd_budget(args):
     # How fast the gap closes: the last day's spend and what burns now.
     last_day = budget.spent_between(jobs, now - dt.timedelta(days=1), now)
     last_day /= budget.GPU_HOURS_PER_NODE_HOUR
+    # A week's rate a day: the last day alone swings with every burst of
+    # nodes, which makes a poor date to ask for more hours by.
+    week = budget.spent_between(jobs, now - dt.timedelta(days=7), now)
+    week /= 7 * budget.GPU_HOURS_PER_NODE_HOUR
     burn = 24 * budget.burning(jobs) / budget.GPU_HOURS_PER_NODE_HOUR
     rec = budget.recovery(args.budget_node_hours, start, end, pace["behind_node_hours"], burn)
     billed = None
@@ -1130,9 +1134,10 @@ def cmd_budget(args):
         out = None
         if billed:
             left = (billed["allocated"] - billed["used"]) / budget.GPU_HOURS_PER_NODE_HOUR
-            out = budget.runs_out(left, last_day, now, end)
+            out = budget.runs_out(left, week, now, end)
         print(json.dumps(dict(pace, gpu_hours=round(gpu_h, 1), by_partition=by_part,
                               last_24h_node_hours=round(last_day, 1),
+                              last_7d_node_hours_per_day=round(week, 1),
                               burn_node_hours_per_day=round(burn, 1), billed=billed,
                               runs_out=out, **rec)))
         return 0
@@ -1165,14 +1170,16 @@ def cmd_budget(args):
         verdict = "not enough to close the gap: it grows at this rate"
     print(f"now        {burn:8.1f} node-h/day ({burn / 24:.1f} nodes busy): {verdict}")
     if billed:
-        print_billed(billed, start, end, now, last_day)
+        print_billed(billed, start, end, now, last_day, week)
     return 0
 
 
-def print_billed(billed: dict, start, end, now, last_day_node_h: float) -> None:
+def print_billed(billed: dict, start, end, now, last_day_node_h: float,
+                 week_node_h_per_day: float = None) -> None:
     """Where the spend stands on what is billed (lumi-allocations), in
     GPU-hours and node-hours: allocation, billed, the straight line to date,
-    what is left and the rate that spends it by the end date."""
+    what is left, the rate that spends it by the end date, and the day it
+    runs out at the last 24 hours' and the last seven days' rates."""
     per = budget.GPU_HOURS_PER_NODE_HOUR
     used, alloc = billed["used"], billed["allocated"]
     p = budget.pace(alloc / per, start, end, now, used / per)
@@ -1193,12 +1200,21 @@ def print_billed(billed: dict, start, end, now, last_day_node_h: float) -> None:
         print(f"  {'needed a day':24} {need * per:9.1f} {need:8.1f}  "
               f"{p['needed_nodes_continuous']} nodes around the clock, {p['days_left']} days")
     print(f"  {'last 24 h (sacct)':24} {last_day_node_h * per:9.1f} {last_day_node_h:8.1f}")
-    out = budget.runs_out((alloc - used) / per, last_day_node_h, now, end)
-    if out["date"]:
-        print(f"  {'at the last 24 h':24} {'':>9} {'':>8}  runs out on {out['date']}, "
-              f"{out['days_early']:.0f} days before the end: ask for more hours by then")
-    elif last_day_node_h > 0:
-        print(f"  {'at the last 24 h':24} {'':>9} {'':>8}  lasts to the end")
+    rates = [("last 24 h", last_day_node_h)]
+    if week_node_h_per_day is not None:
+        print(f"  {'last 7 days, a day':24} {week_node_h_per_day * per:9.1f} "
+              f"{week_node_h_per_day:8.1f}")
+        rates.append(("last 7 days", week_node_h_per_day))
+    out = None
+    for name, rate in rates:
+        out = budget.runs_out((alloc - used) / per, rate, now, end)
+        if out["date"]:
+            print(f"  {'at the ' + name:24} {'':>9} {'':>8}  runs out on {out['date']}, "
+                  f"{out['days_early']:.0f} days before the end")
+        elif rate > 0:
+            print(f"  {'at the ' + name:24} {'':>9} {'':>8}  lasts to the end")
+    if out and out["date"]:
+        print(f"  {'':24} {'':>9} {'':>8}  ask for more hours by {out['date']}")
 
 
 def main(argv=None):
