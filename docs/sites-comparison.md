@@ -114,3 +114,36 @@ neighbours) the same points are equal at 1 and 16 requests for the dense
 models, lower for Qwen3-32B at 32 (794 against 875) and for Qwen3.6-35B-A3B
 at 16 (736 against 888): a different build and a node shared with the graphs
 points, so a question for the engine, not yet a regression.
+
+### Leonardo Booster (job 61575507, 20-21-10-2026)
+
+The published 0.7.90 `eullm-linux-x64-cuda-12.4-datacenter` (sm_80, CUDA
+12.4), one A100 64 GB a point, three of a node's four GPUs: the two graphs
+points and the speed points beside them (`neigh` 2). The first link of
+`tools/leonardo/submit_campaign.sh` measured all 14 points; the second found
+the queue empty. Every server found the GPU (no `failed to initialize CUDA`).
+
+**graphs: a CUDA server keeps its memory here too.** Qwen3-32B Q4_K_M, 32
+requests, 90 minutes each:
+
+| CUDA graphs | tok/s | requests | gsm8k | arc-easy | arc-challenge | VRAM first / peak / last | GiB an hour | died |
+|---|---:|---:|---:|---:|---:|---|---:|---:|
+| on | 247 | 20,264 | 0.955 | 0.984 | 0.951 | 50.9 / 50.9 / 50.9 GiB | 0.00 | 0 |
+| off (`GGML_CUDA_DISABLE_GRAPHS=1`) | 247 | 20,238 | 0.955 | 0.984 | 0.952 | 50.7 / 50.7 / 50.7 GiB | 0.00 | 0 |
+
+Flat for the 1.3 hours after each point's first 15 minutes, and the same
+speed with the graphs on and off: on an A100 as on a GH200, CUDA graphs do
+not grow the VRAM the way HIP graphs did on LUMI-G.
+
+**speed: tokens/s on one A100** (Q4_K_M, f16 KV cache, 4,096-token slots;
+three repeats a point, cv under 2% except Qwen3.6-35B-A3B at 16 and 32
+requests, 5.2% and 6.9%; Leonardo bills one A100 as a GPU-hour):
+
+| model | 1 | 4 | 16 | 32 | tokens a GPU-hour at 32 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B | 145 | 366 | 817 | 1,072 | 3.9 M |
+| Qwen3-32B | 44 | 118 | 354 | 498 | 1.8 M |
+| Qwen3.6-35B-A3B | 135 | 294 | 472 | 575 | 2.1 M |
+
+Against the GH200 above, at 32 requests an A100 writes 72% of its tokens/s
+on Qwen3-8B, 63% on Qwen3-32B and 74% on Qwen3.6-35B-A3B.
