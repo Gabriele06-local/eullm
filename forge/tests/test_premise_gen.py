@@ -206,3 +206,27 @@ def test_corrections_as_the_model_writes_them_are_recognised():
     assert score_answer("Il termine per agire è fissato in trenta giorni.",
                         "premessa_termine", kw) == 0.0
     assert not corrects("È una facoltà, non una semplice possibilità.")
+
+
+def test_a_true_premise_is_confirmed_and_shares_its_article_with_the_false_one():
+    pairs = build_pairs(_index(), per_code=10, rng=random.Random(0), true_share=1.0)
+    true = {p.number: p for p in pairs if p.kind == "premessa_vera"}
+    false = {p.number: p for p in pairs if p.kind == "premessa_termine"}
+    assert true and set(true) == set(false)
+    for n, p in true.items():
+        right = "60 giorni" if n == "2" else "10 giorni"
+        assert right in p.question and right not in false[n].question
+        assert "La premessa della domanda è corretta" in p.output
+        assert score_answer(p.output, p.kind, p.keywords) == 1.0
+        # the false twin's answer, a correction, is wrong here
+        assert score_answer(false[n].output, p.kind, p.keywords) == 0.0
+    assert not [p for p in build_pairs(_index(), per_code=10, rng=random.Random(0),
+                                       true_share=0.0) if p.kind == "premessa_vera"]
+
+
+def test_the_true_premise_reward_wants_the_deadline_and_no_correction():
+    kw = ["60 giorni|sessanta giorni"]
+    assert score_answer("Sì, il termine è di 60 giorni [1].", "premessa_vera", kw) == 1.0
+    assert score_answer("No, la premessa è errata: il termine è di 60 giorni.",
+                        "premessa_vera", kw) == 0.0
+    assert score_answer("Non trovo la disposizione nei testi.", "premessa_vera", kw) == 0.0
