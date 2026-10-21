@@ -367,7 +367,8 @@ def main() -> int:
                          ctx_per_slot=args.server_ctx, log_path=log) as server:
             results = generate_answers_gguf(server, tok, prompts,
                                             max_new_tokens=args.max_new_tokens,
-                                            end_ids=end_ids, parallel=args.server_parallel)
+                                            end_ids=end_ids, parallel=args.server_parallel,
+                                            keep_reasoning=args.think)
     else:
         import torch
         from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
