@@ -22,6 +22,15 @@ missing, as RAG Enterprise asks:
 * ``premessa_abrogato`` -- the question treats a repealed article as in
   force. Its text, among the others, says it was repealed; the answer says
   so, quoting it.
+* ``premessa_pena`` -- the question states a maximum penalty the criminal
+  code's article does not: "l'art. N c.p. punisce con la reclusione fino a
+  cinque anni?" where it says three. The LexIA traps are mostly of this kind
+  and of the next; the deadlines above were already learnt (0.94-0.99 on
+  2026-10-21) and moved the traps by one.
+* ``premessa_procedibilita`` -- the question takes an offence prosecuted on
+  complaint ("a querela della persona offesa") for one prosecuted ex officio,
+  or the other way round; only articles that state one of the two, and only
+  one, are used.
 * ``premessa_vera`` -- the same deadline question with the RIGHT deadline in
   it. The answer confirms it, quoting the text. Without these a model taught
   only false premises learns to correct everything: on 2026-10-21 one that
@@ -46,17 +55,20 @@ import random
 import re
 from dataclasses import dataclass, field
 
+from ..eval.metrics import DEADLINE_UNITS, number_of
 from ..eval.norm_exam import (
     CODE_LABELS,
     _deadline_keyword,
     _deadlines,
     _sentence_with,
+    _sentences,
     all_deadlines,
     articles_from_records,
 )
 from ..eval.retrieval import named_articles, named_code, open_book_prompt
 
-KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato", "premessa_vera")
+KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato", "premessa_pena",
+         "premessa_procedibilita", "premessa_vera")
 FORMATS = ("steps", "plain")
 
 # Deadlines a person might wrongly believe, by unit: the usual ones of
@@ -86,6 +98,24 @@ INESISTENTE = [
     "Secondo l'art. {n} {of}, chi è competente a decidere?",
     "Come si applica in concreto l'art. {n} {of}?",
 ]
+PENA_Q = [
+    "Mi confermi che l'art. {n} {of} punisce il fatto con la {pena} da {lo} a {hi}?",
+    "L'art. {n} {of} prevede la {pena} fino a {hi}: è questo il massimo che si rischia?",
+]
+# The procedibility as the article states it, and the question that gets it
+# wrong (false) or right (true).
+PROC = {
+    "querela": ("a querela della persona offesa",
+                ["Il reato previsto dall'art. {n} {of} è procedibile d'ufficio, giusto?",
+                 "Per il reato dell'art. {n} {of} non serve la querela della persona offesa, "
+                 "vero?"],
+                ["Il reato previsto dall'art. {n} {of} è procedibile a querela della persona "
+                 "offesa?"]),
+    "d'ufficio": ("d'ufficio",
+                  ["Il reato previsto dall'art. {n} {of} è procedibile solo a querela della "
+                   "persona offesa, giusto?"],
+                  ["Il reato previsto dall'art. {n} {of} è procedibile d'ufficio?"]),
+}
 ABROGATO = [
     "Che cosa prevede oggi l'art. {n} {of}?",
     "Posso invocare l'art. {n} {of} nel mio caso?",
@@ -208,6 +238,61 @@ def _vera_answer(fmt: str, n: str, of: str, right: str, pos: int, quote: str) ->
             f"un termine di {right}. La premessa della domanda è corretta.\n"
             f"Norma applicabile: art. {n} {of} [{pos}]: «{quote}».\n"
             f"Risposta: sì, il termine previsto è di {right}.")
+
+
+# One penalty range: "reclusione da sei mesi a tre anni", "arresto da uno a sei mesi"
+# (the lower bound's unit left to the upper one's). Normattiva's (( )) marks
+# are taken out first.
+_PENA = re.compile(r"\b(reclusione|arresto)\s+da\s+([a-z0-9]+)(?:\s+(giorni|mesi|anni))?\s+a\s+"
+                   r"([a-z0-9]+)\s+(giorni|mesi|anni)\b", re.IGNORECASE)
+_QUERELA = re.compile(r"\bsi procede a querela\b|\bpunibil[ei] a querela\b|"
+                      r"\ba querela della persona offesa\b", re.IGNORECASE)
+_UFFICIO = re.compile(r"\bsi procede d['’]ufficio\b", re.IGNORECASE)
+
+
+def penalty_of(text: str):
+    """(kind, low, low unit, high, unit, sentence) of an article stating one
+    penalty range, or None."""
+    flat = _flat(text.replace("((", " ").replace("))", " "))
+    found = list(_PENA.finditer(flat))
+    if len(found) != 1:
+        return None
+    m = found[0]
+    lo, hi = number_of(m.group(2).lower()), number_of(m.group(4).lower())
+    if not lo or not hi:
+        return None
+    unit = DEADLINE_UNITS[m.group(5).lower()]
+    lo_unit = DEADLINE_UNITS[m.group(3).lower()] if m.group(3) else unit
+    sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
+                    flat[max(0, m.start() - 150):m.end() + 50])
+    return m.group(1).lower(), lo, lo_unit, hi, unit, sentence
+
+
+def procedibility_of(text: str):
+    """("querela" | "d'ufficio", sentence) of an article that states exactly one, or None."""
+    flat = _flat(text.replace("((", " ").replace("))", " "))
+    q, u = _QUERELA.search(flat), _UFFICIO.search(flat)
+    if bool(q) == bool(u):
+        return None
+    m = q or u
+    sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
+                    flat[max(0, m.start() - 150):m.end() + 50])
+    return ("querela" if q else "d'ufficio"), sentence
+
+
+def _steps(fmt: str, false: bool, pos: str, label: str, states: str, wrong: str, quote: str,
+           answer: str) -> str:
+    """The checked steps (or one paragraph) for a premise the text decides."""
+    if fmt == "plain":
+        lead = "La premessa non è corretta" if false else "Sì"
+        tail = f", non {wrong}" if false else ""
+        return f"{lead}: {states}{tail} {pos}. Il testo dice: «{quote}»."
+    verdict = ("La premessa della domanda è errata." if false
+               else "La premessa della domanda è corretta.")
+    tail = f", non {wrong}" if false else ""
+    return (f"Verifica della premessa: {states}{tail} {pos}. {verdict}\n"
+            f"Norma applicabile: {label} {pos}: «{quote}».\n"
+            f"Risposta: {answer}")
 
 
 def _inesistente_answer(fmt: str, n: str, of: str) -> str:
@@ -355,6 +440,59 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 key=f"pf-i-{code}-{fake}", kind="premessa_inesistente", code=code,
                 number=fake, question=q, instruction=open_book_prompt(q, found),
                 output=_inesistente_answer(fmt, fake, of)))
+
+        if code == "codice_penale":
+            punished = [(a, p) for a in live if (p := penalty_of(a.text))]
+            for a, (pena, lo, lo_unit, hi, unit, sentence) in rng.sample(
+                    punished, min(per_code, len(punished))):
+                pool_hi = [m for m in USUAL.get(unit, []) if m != hi
+                           and (lo_unit != unit or m > lo)]
+                if not pool_hi:
+                    skip("pena:no_wrong_maximum")
+                    continue
+                wrong = rng.choice(pool_hi)
+                template = rng.choice(PENA_Q)
+                values = {"n": a.number, "of": of, "pena": pena, "lo": say(lo, lo_unit)}
+                quote = quote_span(sentence, anchor=str(hi))
+                states = (f"l'art. {a.number} {of} prevede la {pena} da {say(lo, lo_unit)} a "
+                          f"{say(hi, unit)}")
+                for false in [True] + ([False] if rng.random() < true_share else []):
+                    q = template.format(hi=say(wrong if false else hi, unit), **values)
+                    found, pos = _with_article(index, q, code, a.number, k, rng)
+                    if pos is None or not _quoted_in(quote, found, pos):
+                        skip("pena:quote_not_shown")
+                        break
+                    pairs.append(PremisePair(
+                        key=f"pf-{'p' if false else 'pv'}-{code}-{a.number}",
+                        kind="premessa_pena" if false else "premessa_vera", code=code,
+                        number=a.number, question=q, instruction=open_book_prompt(q, found),
+                        output=_steps(fmt, false, f"[{pos}]", f"art. {a.number} {of}", states,
+                                      f"fino a {say(wrong, unit)}", quote,
+                                      f"la pena prevista è la {pena} da {say(lo, lo_unit)} a "
+                                      f"{say(hi, unit)}."),
+                        keywords=[_deadline_keyword(hi, unit)]))
+
+            stated = [(a, p) for a in live if (p := procedibility_of(a.text))]
+            for a, (how, sentence) in rng.sample(stated, min(per_code, len(stated))):
+                said, false_qs, true_qs = PROC[how]
+                quote = quote_span(sentence, anchor="querela" if how == "querela" else "ufficio")
+                other = "d'ufficio" if how == "querela" else "a querela della persona offesa"
+                states = f"l'art. {a.number} {of} stabilisce che si procede {said}"
+                for false in [True] + ([False] if rng.random() < true_share else []):
+                    q = rng.choice(false_qs if false else true_qs).format(n=a.number, of=of)
+                    found, pos = _with_article(index, q, code, a.number, k, rng)
+                    if pos is None or not _quoted_in(quote, found, pos):
+                        skip("procedibilita:quote_not_shown")
+                        break
+                    pairs.append(PremisePair(
+                        key=f"pf-{'q' if false else 'qv'}-{code}-{a.number}",
+                        kind="premessa_procedibilita" if false else "premessa_vera",
+                        code=code, number=a.number, question=q,
+                        instruction=open_book_prompt(q, found),
+                        output=_steps(fmt, false, f"[{pos}]", f"art. {a.number} {of}", states,
+                                      other, quote,
+                                      f"il reato è procedibile {said}."),
+                        keywords=[how]))
 
         repealed = [a for a in pool if _repealed_sentence(a)]
         for a in rng.sample(repealed, min(per_code, len(repealed))):
