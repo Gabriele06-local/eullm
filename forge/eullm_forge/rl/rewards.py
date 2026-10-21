@@ -198,21 +198,6 @@ def corrects(answer: str) -> bool:
     return bool(_CORRECTS.search(answer.strip()))
 
 
-# The subset that denies the premise itself: a contrast inside a confirmation
-# ("60 giorni, non 30"; "non è prevista alcuna proroga, il termine è 60")
-# matches _CORRECTS but leaves the question's premise standing. On a
-# premessa_vera that distinction is the difference between the gold answer and
-# the false twin's correction.
-_DENIES_PREMISE = re.compile(
-    r"\berrat[ao]\b|\binesatt[ao]\b|non (?:è|e') (?:corrett|esatt|cosi|così|ver[oa])\b"
-    r"|in realtà|^\W*no\b", re.IGNORECASE)
-
-
-def denies_premise(answer: str) -> bool:
-    """Whether the answer says the question's own premise is wrong."""
-    return bool(_DENIES_PREMISE.search(answer.strip()))
-
-
 def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> float:
     """1.0 for a verifiably right answer, 0.0 otherwise.
 
