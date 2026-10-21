@@ -145,6 +145,22 @@ def recovery(budget_node_hours: float, start: dt.date, end: dt.date, behind: flo
     return {"line_node_hours_per_day": round(line, 1), "catch_up_days": catch_up}
 
 
+def runs_out(left_node_hours: float, rate_node_hours_per_day: float, now: dt.datetime,
+             end: dt.date) -> dict:
+    """When what is left is spent at a rate a day: the date, and how many days
+    before the end date that is (None for both when nothing is spent at that
+    rate, or when it lasts past the end). Spending the allocation by need
+    rather than by the straight line makes this the date by which more
+    hours have to be asked for."""
+    if rate_node_hours_per_day <= 0:
+        return {"date": None, "days_early": None}
+    when = now + dt.timedelta(days=max(left_node_hours, 0.0) / rate_node_hours_per_day)
+    early = (dt.datetime.combine(end, dt.time()) - when).total_seconds() / 86400
+    if early <= 0:
+        return {"date": None, "days_early": None}
+    return {"date": when.date().isoformat(), "days_early": round(early, 1)}
+
+
 def read_sacct(start: str, account=None) -> list:
     cmd = ["sacct", "-X", "-n", "-P", "-S", start, "-E", "now", "-o", SACCT_FIELDS]
     if account:

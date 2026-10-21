@@ -1127,9 +1127,14 @@ def cmd_budget(args):
         with (sys.stdin if args.allocations == "-" else open(args.allocations)) as f:
             billed = budget.parse_allocations(f.read(), args.account)
     if args.json:
+        out = None
+        if billed:
+            left = (billed["allocated"] - billed["used"]) / budget.GPU_HOURS_PER_NODE_HOUR
+            out = budget.runs_out(left, last_day, now, end)
         print(json.dumps(dict(pace, gpu_hours=round(gpu_h, 1), by_partition=by_part,
                               last_24h_node_hours=round(last_day, 1),
-                              burn_node_hours_per_day=round(burn, 1), billed=billed, **rec)))
+                              burn_node_hours_per_day=round(burn, 1), billed=billed,
+                              runs_out=out, **rec)))
         return 0
     print(f"spent      {pace['spent_node_hours']:8.1f} node-h  ({pace['spent_pct']}% of "
           f"{args.budget_node_hours:.0f}; {gpu_h:.1f} GPU-h, from sacct)")
@@ -1188,6 +1193,12 @@ def print_billed(billed: dict, start, end, now, last_day_node_h: float) -> None:
         print(f"  {'needed a day':24} {need * per:9.1f} {need:8.1f}  "
               f"{p['needed_nodes_continuous']} nodes around the clock, {p['days_left']} days")
     print(f"  {'last 24 h (sacct)':24} {last_day_node_h * per:9.1f} {last_day_node_h:8.1f}")
+    out = budget.runs_out((alloc - used) / per, last_day_node_h, now, end)
+    if out["date"]:
+        print(f"  {'at the last 24 h':24} {'':>9} {'':>8}  runs out on {out['date']}, "
+              f"{out['days_early']:.0f} days before the end: ask for more hours by then")
+    elif last_day_node_h > 0:
+        print(f"  {'at the last 24 h':24} {'':>9} {'':>8}  lasts to the end")
 
 
 def main(argv=None):

@@ -355,6 +355,30 @@ def test_budget_prints_what_is_billed(capsys, monkeypatch, tmp_path):
     assert "needed a day" in out and "nodes around the clock" in out
 
 
+def test_the_day_the_allocation_runs_out_at_a_rate():
+    """Spent by need, the allocation can end before its date: the day it runs
+    out at the last day's rate is when more hours have to be asked for."""
+    now = dt.datetime(2026, 10, 21, 12, 0)
+    end = dt.date(2027, 3, 12)
+    # 3,466 node-hours left at four nodes around the clock (96 a day): 36 days.
+    out = budget.runs_out(3466.2, 96.0, now, end)
+    assert out["date"] == "2026-11-26"
+    assert 105 < out["days_early"] < 106
+    # At the straight line's rate or slower it lasts to the end.
+    assert budget.runs_out(3466.2, 24.0, now, end) == {"date": None, "days_early": None}
+    assert budget.runs_out(3466.2, 0.0, now, end) == {"date": None, "days_early": None}
+
+
+def test_the_billed_table_says_when_it_runs_out(capsys):
+    billed = {"used": 4135.0, "allocated": 18000.0, "updated": "2026-10-21 09:38:55"}
+    now = dt.datetime(2026, 10, 21, 12, 0)
+    campaign.print_billed(billed, dt.date(2026, 9, 12), dt.date(2027, 3, 12), now, 96.0)
+    out = capsys.readouterr().out
+    assert "runs out on 2026-11-26, 105 days before the end" in out
+    campaign.print_billed(billed, dt.date(2026, 9, 12), dt.date(2027, 3, 12), now, 20.0)
+    assert "lasts to the end" in capsys.readouterr().out
+
+
 def test_shipped_campaigns_expand():
     """The specs in tools/lumi/campaigns are valid, and every model named in
     one is either a catalog id or covered by the spec's own `pull` list."""

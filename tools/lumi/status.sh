@@ -39,7 +39,8 @@ if [ "$RUNNING" -eq 0 ] && [ "$PENDING" -eq 0 ]; then
     echo "  !!! NO WHOLE-NODE JOB RUNNING OR QUEUED — every hour from now is budget lost."
     echo "  !!! bash $EULLM_REPO/tools/lumi/submit_campaign.sh"
 elif [ "$PENDING" -le 1 ]; then
-    echo "  (chains are nearly used up: top them up with submit_campaign.sh)"
+    echo "  (chains are nearly used up: TOP_UP=1 bash $EULLM_REPO/tools/lumi/submit_campaign.sh N" \
+         "keeps N of them)"
 fi
 
 echo
