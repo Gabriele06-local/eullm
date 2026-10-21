@@ -112,6 +112,7 @@ JSC=$(jutil user cpuquota 2>/dev/null | awk -F= -v acct="$ACCOUNT" '
     mine && $1 == "acct-period-start" { s = $2 }
     mine && $1 == "acct-period-end" { e = $2 }
     END { if (q > 0) print c / 72, q / 72, s, e }')
+[ -n "$JSC" ] || echo -e "\n  [..] jutil user cpuquota gave no figure for $ACCOUNT: JSC's rows left out (try again; JSC's count lags a day anyway)"
 [ -n "$JSC" ] && awk '{ printf "\n  JSC (jutil user cpuquota): %.1f of %.0f GPU-hours used (%.1f%%), %.1f left, period %s to %s\n", $1, $2, 100 * $1 / $2, $2 - $1, ($3 == "" ? "?" : $3), $4 }' <<<"$JSC"
 
 # Whether the spending is on pace, as on Leonardo: billed against a uniform
