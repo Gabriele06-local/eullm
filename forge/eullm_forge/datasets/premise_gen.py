@@ -22,6 +22,12 @@ missing, as RAG Enterprise asks:
 * ``premessa_abrogato`` -- the question treats a repealed article as in
   force. Its text, among the others, says it was repealed; the answer says
   so, quoting it.
+* ``premessa_vera`` -- the same deadline question with the RIGHT deadline in
+  it. The answer confirms it, quoting the text. Without these a model taught
+  only false premises learns to correct everything: on 2026-10-21 one that
+  had been through the false premises answered 1 of the 9 LexIA questions
+  whose premise was sound. Asked of the same article as its false twin, it
+  is the article that decides, not the shape of the question.
 
 The answer reasons in fixed steps before it answers (``fmt="steps"``):
 "Verifica della premessa", "Norma applicabile", "Risposta". Each step can be
@@ -50,7 +56,7 @@ from ..eval.norm_exam import (
 )
 from ..eval.retrieval import named_articles, named_code, open_book_prompt
 
-KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato")
+KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato", "premessa_vera")
 FORMATS = ("steps", "plain")
 
 # Deadlines a person might wrongly believe, by unit: the usual ones of
@@ -194,6 +200,16 @@ def _termine_answer(fmt: str, n: str, of: str, right: str, wrong: str, pos: int,
             f"Risposta: il termine previsto è di {right}.")
 
 
+def _vera_answer(fmt: str, n: str, of: str, right: str, pos: int, quote: str) -> str:
+    if fmt == "plain":
+        return (f"Sì: l'art. {n} {of} prevede proprio un termine di {right} [{pos}]. "
+                f"Il testo dice: «{quote}».")
+    return (f"Verifica della premessa: il testo [{pos}] è l'art. {n} {of}, e prevede proprio "
+            f"un termine di {right}. La premessa della domanda è corretta.\n"
+            f"Norma applicabile: art. {n} {of} [{pos}]: «{quote}».\n"
+            f"Risposta: sì, il termine previsto è di {right}.")
+
+
 def _inesistente_answer(fmt: str, n: str, of: str) -> str:
     if fmt == "plain":
         return (f"La domanda parte da un riferimento errato: tra i testi riportati non c'è "
@@ -252,8 +268,13 @@ def _quoted_in(quote: str, records: list[dict], pos: int) -> bool:
 
 def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 exclude: set[tuple[str, str]] = frozenset(), k: int = 3,
-                bis_share: float = 0.5, stats: dict | None = None) -> list[PremisePair]:
-    """Up to ``per_code`` pairs of each kind for each code, none on an excluded article."""
+                bis_share: float = 0.5, true_share: float = 0.5,
+                stats: dict | None = None) -> list[PremisePair]:
+    """Up to ``per_code`` pairs of each kind for each code, none on an excluded article.
+
+    ``true_share`` of the wrong-deadline questions also get their twin with
+    the right deadline (``premessa_vera``).
+    """
     if fmt not in FORMATS:
         raise ValueError(f"fmt must be one of {FORMATS}")
     stats = stats if stats is not None else {}
@@ -296,6 +317,19 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 output=_termine_answer(fmt, a.number, of, say(n, unit), say(wrong, unit),
                                        pos, quote),
                 keywords=[_deadline_keyword(n, unit)]))
+            if rng.random() < true_share:
+                # The twin, with the deadline the article states: the same
+                # template, so only the number tells the two apart.
+                tq = q.replace(say(wrong, unit), say(n, unit))
+                tfound, tpos = _with_article(index, tq, code, a.number, k, rng)
+                if tpos is None or not _quoted_in(quote, tfound, tpos):
+                    skip("vera:quote_not_shown")
+                    continue
+                pairs.append(PremisePair(
+                    key=f"pf-v-{code}-{a.number}", kind="premessa_vera", code=code,
+                    number=a.number, question=tq, instruction=open_book_prompt(tq, tfound),
+                    output=_vera_answer(fmt, a.number, of, say(n, unit), tpos, quote),
+                    keywords=[_deadline_keyword(n, unit)]))
 
         taken = {a.number for a in pool}
         last = max(int(re.match(r"\d+", a.number).group()) for a in pool)

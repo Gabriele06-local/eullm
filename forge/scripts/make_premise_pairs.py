@@ -60,6 +60,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="steps: verifica, norma, risposta; plain: one paragraph")
     ap.add_argument("--bis-share", type=float, default=0.5,
                     help="share of the nonexistent articles made as the -bis of a real one")
+    ap.add_argument("--true-share", type=float, default=0.5,
+                    help="share of the wrong-deadline questions also asked with the right "
+                         "deadline, to be confirmed (premessa_vera)")
     ap.add_argument("--grpo-share", type=float, default=0.5,
                     help="share of the pairs written as GRPO prompts instead of SFT pairs")
     ap.add_argument("-k", type=int, default=3, help="retrieved texts per question, as the exam")
@@ -86,7 +89,8 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
     skipped: dict[str, int] = {}
     pairs = build_pairs(index, per_code=args.per_code, rng=rng, fmt=args.format,
-                        exclude=exclude, k=args.k, bis_share=args.bis_share, stats=skipped)
+                        exclude=exclude, k=args.k, bis_share=args.bis_share,
+                        true_share=args.true_share, stats=skipped)
 
     # Split by article, so a GRPO prompt is never on an article SFT answered.
     articles = sorted({(p.code, p.number) for p in pairs})
