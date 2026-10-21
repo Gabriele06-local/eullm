@@ -59,10 +59,16 @@ fi
 DEP=singleton
 [ -z "${FORGE_CHAIN_AFTER:-}" ] || DEP="afterany:$FORGE_CHAIN_AFTER,singleton"
 mkdir -p "$FORGE_RUN_DIR/logs"
+# A partition down for maintenance or a silent controller is waited out
+# (sbatch_retry.sh); any other refusal stops at once.
+# shellcheck source=sbatch_retry.sh
+source "$HERE/sbatch_retry.sh"
+submit_link() {
+    sbatch_retry --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
+        --output="$FORGE_RUN_DIR/logs/distill-%j.out" "$HERE/sbatch_distill.slurm"
+}
 for _ in $(seq 1 "$N"); do
-    sbatch --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
-        --output="$FORGE_RUN_DIR/logs/distill-%j.out" \
-        "$HERE/sbatch_distill.slurm"
+    submit_link || err "sbatch refused a link"
 done
 squeue --me -n "$NAME"
 echo "The output of each link: $FORGE_RUN_DIR/logs/distill-<job>.out"
