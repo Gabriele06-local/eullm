@@ -59,10 +59,31 @@ fi
 DEP=singleton
 [ -z "${FORGE_CHAIN_AFTER:-}" ] || DEP="afterany:$FORGE_CHAIN_AFTER,singleton"
 mkdir -p "$FORGE_RUN_DIR/logs"
+# sbatch refuses while the partition is down for maintenance ("Required
+# partition not available", 21-10-2026) or the controller does not answer
+# ("Connection reset by peer", "Zero Bytes were transmitted"): those are
+# waited out, FORGE_SUBMIT_WAIT_H hours at most (default 24; run it under
+# tmux), a link at a time, so that nobody has to come back and submit.
+# Any other refusal stops at once.
+WAIT_UNTIL=$(( $(date +%s) + ${FORGE_SUBMIT_WAIT_H:-24} * 3600 ))
+submit_link() {
+    local out
+    while :; do
+        if out=$(sbatch --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
+                --output="$FORGE_RUN_DIR/logs/distill-%j.out" "$HERE/sbatch_distill.slurm" 2>&1); then
+            echo "$out"; return 0
+        fi
+        case "$out" in
+            *"partition not available"*|*"Connection reset"*|*"Zero Bytes"*|*"Socket timed out"*) ;;
+            *) echo "$out" >&2; return 1 ;;
+        esac
+        [ "$(date +%s)" -lt "$WAIT_UNTIL" ] || { echo "$out" >&2; err "still refused after ${FORGE_SUBMIT_WAIT_H:-24} h"; }
+        echo "[..] $(date '+%d-%m %H:%M') sbatch: ${out##*error: }; again in 15 minutes"
+        sleep 900
+    done
+}
 for _ in $(seq 1 "$N"); do
-    sbatch --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
-        --output="$FORGE_RUN_DIR/logs/distill-%j.out" \
-        "$HERE/sbatch_distill.slurm"
+    submit_link || err "sbatch refused a link"
 done
 squeue --me -n "$NAME"
 echo "The output of each link: $FORGE_RUN_DIR/logs/distill-<job>.out"
