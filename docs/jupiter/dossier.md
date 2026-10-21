@@ -54,6 +54,14 @@ JUPITER, named by its Slurm job id.
   exam also open book without the note on missing articles, as the product
   asks: links 2429166-2429167, then the judge 2429168
   (`submit_sft_chain.sh`, `3dd7a08`).
+* Leonardo's open-book recipe graded (job 2429168): Ministral-3-8B-Instruct
+  0.887 open book and the same without the note, Qwen3.5-4B 0.880, the
+  trained Qwen3-4B-Instruct 0.869, against 0.765 for the reference (§5.8).
+  The second two-hour link finished every run and every exam; the 6-hour
+  link behind it found nothing left and ended in 2 minutes.
+* Qwen3.5 distillation on norms-v2 started (job 2431499), seven 8-hour
+  links: 8-hour jobs get a node as soon as 2-hour ones on JUPITER (median
+  wait 0 minutes, 5 jobs), so links are as long as the work needs.
 * Spending behind pace: 347.9 GPU-hours by Slurm's count on 21-10 (7.0%),
   against 9.4% for a uniform pace from 14-10 to 31-12, 30 node-hours short;
   the rest by 31-12 needs 65 a day, the last 24 hours spent 16 (`budget.sh`
@@ -462,6 +470,31 @@ for the reference. Whether the clean instruction pairs add to them is mixed
 trained on open-book pairs alone. The judge loaded its grader from node
 memory: 18 minutes for 20 answer sets.
 
+**Leonardo's open-book recipe (21-10-2026).** The same 14,209 open-book
+pairs, one epoch instead of two, as Leonardo trained its published models
+(lr 1e-4, 4,096-token sequences, one pair at a time, 16 accumulated;
+instruct bases keep their chat rows, Ministral our system prompt in place of
+its "Le Chat" one), and the exam also asked without the note on missing
+articles, as the product asks (jobs 2429166-2429167, graded by 2429168):
+
+| model, one epoch on the open-book pairs | open book | correct | without the note | correct |
+|---|---:|---:|---:|---:|
+| Ministral-3-8B-Instruct-2512 | **0.887** | **189** | **0.887** | **189** |
+| Qwen3.5-4B Base | 0.880 | 187 | 0.841 | 178 |
+| Qwen3-4B-Instruct-2507 | 0.869 | 184 | 0.869 | 184 |
+| Qwen3.5-9B Base | 0.862 | 182 | 0.848 | 179 |
+| Qwen3-4B-Instruct-2507, not trained (reference) | 0.765 | 159 | 0.765 | 159 |
+
+One epoch does as well as two (Qwen3.5-4B 0.880 against 0.864, the 9B
+0.862 against 0.876), in half the training. Ministral-3-8B-Instruct, the
+base of Leonardo's published `legal-it-8b`, is the best model on this exam
+so far, 189 of 217 right, and loses nothing without the note; so does the
+trained Qwen3-4B-Instruct (184, 25 more than untrained). The Base models
+lose 3 to 9 answers without it: an instruct start reads missing articles
+right without being told. The top four are within 7 questions of each
+other, less than the exam separates reliably; their lead over the reference
+(+23 to +30) is not. Closed book every model stays at 0.000-0.023.
+
 Why, as far as the data say. Distillation did learn the law: the held-out
 loss fell from 0.914 to 0.674 for the 4B and from 0.827 to 0.625 for the 8B
 over the epoch (evaluations at steps 200 and 7,200). Open book, though, the
@@ -667,10 +700,9 @@ low because JUPITER was down most of the day.
 1. Mistral Small 4's answers graded on Leonardo with the other candidates;
    if it is the better teacher, the pairs and the distillation are redone
    with it (§5.10).
-2. On the open-book pairs, Leonardo's recipe (one epoch), Ministral-3-8B as
-   a further base, the exam also without the note on missing articles
-   (queued 21-10-2026), then reinforcement learning (GRPO) on the best model
-   (deliverables 4, 6).
+2. Reinforcement learning (GRPO) on the best of Leonardo's recipe,
+   Ministral-3-8B-Instruct and Qwen3.5-4B (0.887 and 0.880, §5.8;
+   deliverables 4, 6).
 3. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
    GGUF Q4_K_M, served by EULLM Engine on GH200 and examined through it
    (deliverables 1, 8).
