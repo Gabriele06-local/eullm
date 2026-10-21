@@ -154,13 +154,16 @@ class LlamaServer:
 
 def generate_answers_gguf(server, tok, prompts: list[str], *, max_new_tokens: int,
                           end_ids: list[int], parallel: int = 4, temperature: float = 0.0,
-                          seeds: list[int] | None = None) -> list[tuple[str, bool]]:
+                          seeds: list[int] | None = None,
+                          keep_reasoning: bool = False) -> list[tuple[str, bool]]:
     """(answer, ended_its_turn) per templated prompt, in order, like generate_answers.
 
     A turn has ended when the server stopped on an end-of-generation token
     rather than on the token budget, or when an end token is among the ids it
     returns (cut there, as the bf16 path does). ``temperature`` and one seed
     per prompt sample instead of decoding greedily (`LlamaServer.complete`).
+    ``keep_reasoning`` keeps the model's [THINK]/[/THINK] markers, which
+    skip_special_tokens would delete before split_reasoning can see them.
     """
     def one(job: tuple[str, int | None]) -> tuple[str, bool]:
         prompt, seed = job
@@ -174,7 +177,8 @@ def generate_answers_gguf(server, tok, prompts: list[str], *, max_new_tokens: in
         ended = cut is not None or r.get("stop_type") == "eos" or bool(r.get("stopped_eos"))
         if not out:           # a server that ignores return_tokens: its own text
             return (r.get("content") or "").strip(), ended
-        text = tok.decode(out[:cut] if cut is not None else out, skip_special_tokens=True)
+        text = tok.decode(out[:cut] if cut is not None else out,
+                          skip_special_tokens=not keep_reasoning)
         return text.strip(), ended
 
     jobs = list(zip(prompts, seeds or [None] * len(prompts)))

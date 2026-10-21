@@ -45,6 +45,10 @@ class _Tok:
         self.seen, self.messages = kw, messages
         return messages[-1]["content"]
 
+    def __call__(self, text, add_special_tokens=True):
+        assert add_special_tokens is False
+        return {"input_ids": [1]}
+
     def decode(self, ids, skip_special_tokens=False):
         out = [self.pieces[i] for i in ids]
         if skip_special_tokens:
@@ -76,3 +80,21 @@ def test_mistral_think_markers_survive_decoding_and_are_split_off():
     kept = mod.decode_answer(tok, ids, keep_reasoning=True)
     assert kept == "[THINK]ragiono[/THINK]Risposta."
     assert mod.split_reasoning(kept) == ("Risposta.", "ragiono", True)
+
+
+def test_the_gguf_path_keeps_the_markers_that_skip_special_tokens_deletes():
+    """legal_eval --gguf --think: [THINK] is a special token, so decoding it
+    away left the reasoning glued to the answer and the keyword coverage
+    graded the thinking block."""
+    from eullm_forge.eval.gguf import generate_answers_gguf
+
+    class Server:
+        def complete(self, ids, max_new_tokens, **kw):
+            return {"tokens": [3, 4, 5, 6, 2], "stop_type": "eos"}
+
+    tok = _Tok()
+    plain = generate_answers_gguf(Server(), tok, ["q"], max_new_tokens=8, end_ids=[2])
+    kept = generate_answers_gguf(Server(), tok, ["q"], max_new_tokens=8, end_ids=[2],
+                                 keep_reasoning=True)
+    assert plain == [("ragionoRisposta.", True)]
+    assert kept == [("[THINK]ragiono[/THINK]Risposta.", True)]
