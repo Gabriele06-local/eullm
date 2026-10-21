@@ -12,7 +12,7 @@ repository) and updated as the work goes; the working notes behind it are in
 `docs/jupiter/allocation-plan.md`. Every figure below comes from a job on
 JUPITER, named by its Slurm job id.
 
-**Last updated: 20-10-2026, afternoon.**
+**Last updated: 21-10-2026.**
 
 ## 1. At a glance
 
@@ -39,6 +39,14 @@ JUPITER, named by its Slurm job id.
 | 9 | Energy use and carbon footprint | — | GPU energy per job: generation, instruction tuning, distillation (§6) |
 
 ## 3. Log
+
+**21-10-2026**
+* Job 2427647: JUPITER's part of the three sites' comparison (c13-sites,
+  `docs/sites-comparison.md`), the engine built from `main` of 20-10. With
+  CUDA graphs on, a server at 32 requests for 90 minutes kept its VRAM flat
+  (0.00 GiB an hour, as with them off), where LUMI's grew 1.3-2.5 GiB an hour
+  with HIP graphs until they died; speed of three models at 1-32 requests
+  (§5.1). `tools/jupiter/sites.sh` builds, sets up and submits it unattended.
 
 **20-10-2026**
 * Mistral Small 4 converted from FP8 to BF16 on a login node (238.8 GB,
@@ -192,6 +200,26 @@ LUMI's Lustre, and on JUPITER's GPFS that is the slow way (job 2326997, one
 Four servers loading one 22 GB file at once: 34 s read in, 16 s mapped
 (job 2327213). The engine now keeps models on GPFS mapped (commit
 `ca0d19d`); Lustre keeps the rule.
+
+**The three sites' comparison (job 2427647, 21-10-2026).** The same points
+on LUMI-G, JUPITER and Leonardo, one device each (`docs/sites-comparison.md`).
+On LUMI every server under continuous batching grew 1.3-2.5 GiB of VRAM an
+hour with llama.cpp's HIP graphs on, until it died; on the GH200, Qwen3-32B
+at 32 requests for 90 minutes held 50.8 GiB from start to end with CUDA
+graphs on and off (0.00 GiB an hour, no server died, 34,425 and 34,771
+requests, the same accuracy on gsm8k and ARC). CUDA builds keep the graphs.
+Tokens/s on one GH200 (a GPU-hour writes 3,600 times as many):
+
+| model | 1 request | 4 | 16 | 32 |
+|---|---:|---:|---:|---:|
+| Qwen3-8B | 226 | 576 | 1,430 | 1,480 |
+| Qwen3-32B | 70 | 199 | 588 | 794 |
+| Qwen3.6-35B-A3B | 214 | 401 | 736 | 778 |
+
+Equal to 14-10's `next10` build at 1 and 16 requests on the dense models;
+lower for Qwen3-32B at 32 (794 against 875) and Qwen3.6-35B-A3B at 16 (736
+against 888), with the node shared by the 90-minute points this time: a
+question for the engine, measured again before it is called a regression.
 
 ### 5.2 The distillation step on GH200 (deliverables 2 and 3)
 
@@ -584,6 +612,7 @@ figures below with the site's energy mix.
 | 20-10 | Dequantizing on loading left the fused experts in FP8 | converted once to BF16 on a login node (`dequantize_fp8.py`, `1059ee8`, `2a7c5fc`) |
 | 20-10 | The Hub client refused a snapshot without the consolidated files | the snapshot directory found in the cache (`a08780b`) |
 | 20-10 | GPU 0, also holding the retrieval models, out of memory at 48 questions a batch | 24 a batch, expandable CUDA segments (`6691261`) |
+| 20-10 | sbatch failed once with "Connection reset by peer" and the script reported the job submitted | `sites.sh` tries again and says when nothing was submitted (`7eca038`) |
 
 ## 9. Resource use
 

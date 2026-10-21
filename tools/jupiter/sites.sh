@@ -33,6 +33,16 @@ if grep -qE '^\[!!\] (not pulled|prefetch failed)' "$SETUP"; then
     exit 1
 fi
 
-# c07's conversations are not part of this comparison.
-EULLM_SKIP_CONVERSATIONS=1 bash "$EULLM_REPO/tools/jupiter/submit.sh" "$LABEL" --time=02:30:00
-echo "=== submitted $(date -Is); the job writes logs/summary-<job>.txt when it ends ==="
+# c07's conversations are not part of this comparison. sbatch can fail for a
+# moment on the controller's side ("Connection reset by peer", 20-10-2026):
+# tried again, and never reported as submitted when it was not.
+for try in 1 2 3 4 5; do
+    if EULLM_SKIP_CONVERSATIONS=1 bash "$EULLM_REPO/tools/jupiter/submit.sh" "$LABEL" --time=02:30:00; then
+        echo "=== submitted $(date -Is); the job writes logs/summary-<job>.txt when it ends ==="
+        exit 0
+    fi
+    echo "[..] sbatch failed (try $try of 5), again in $((try * 30)) s"
+    sleep $((try * 30))
+done
+echo "[!!] not submitted: EULLM_BIN=$EULLM_BIN EULLM_SKIP_CONVERSATIONS=1 bash tools/jupiter/submit.sh $LABEL --time=02:30:00"
+exit 1
