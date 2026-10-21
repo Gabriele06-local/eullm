@@ -324,6 +324,37 @@ def test_budget_after_the_end_date_reports_instead_of_crashing(capsys, monkeypat
     assert "allocation ended 2026-10-01; nothing left to pace" in out
 
 
+LUMI_ALLOCATIONS = """Data updated: 2026-10-21 09:38:55
+  Project               |   CPU (used/allocated)|   GPU (used/allocated)|  Storage (used/allocated)
+  ---------------------------------------------------------------------------------------
+  project_465003366     |  0/1000 (0.0%) core/hours|  4135/18000 (23.0%) gpu/hours|  \
+1341/90000 (1.5%) TB/hours
+"""
+
+
+def test_lumi_allocations_are_read_for_the_project():
+    billed = budget.parse_allocations(LUMI_ALLOCATIONS, "project_465003366")
+    assert billed == {"used": 4135.0, "allocated": 18000.0, "updated": "2026-10-21 09:38:55"}
+    assert budget.parse_allocations(LUMI_ALLOCATIONS, "project_000000000") is None
+    assert budget.parse_allocations(LUMI_ALLOCATIONS)["used"] == 4135.0
+
+
+def test_budget_prints_what_is_billed(capsys, monkeypatch, tmp_path):
+    """The spend on what is billed, as the other sites report it: allocation,
+    billed, the straight line to date, what is left and the rate a day."""
+    monkeypatch.setattr(campaign.budget, "read_sacct", lambda start, account=None: [])
+    alloc = tmp_path / "alloc.txt"
+    alloc.write_text(LUMI_ALLOCATIONS)
+    args = SimpleNamespace(start="2026-09-12", end="2027-03-12", account="project_465003366",
+                           budget_node_hours=4500.0, json=False, allocations=str(alloc))
+    assert campaign.cmd_budget(args) == 0
+    out = capsys.readouterr().out
+    assert "--- billed (lumi-allocations, updated 2026-10-21 09:38:55) ---" in out
+    assert "18000" in out and "4500.0" in out and "4135" in out and "1033.8" in out
+    assert "13865" in out and "3466.2" in out
+    assert "needed a day" in out and "nodes around the clock" in out
+
+
 def test_shipped_campaigns_expand():
     """The specs in tools/lumi/campaigns are valid, and every model named in
     one is either a catalog id or covered by the spec's own `pull` list."""

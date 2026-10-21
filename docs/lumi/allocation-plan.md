@@ -440,16 +440,25 @@ questions). MMLU is not: its pinned source,
 
 ## Calendar
 
-Paced on 28.5 node-hours a day to 12-03-2027.
+Re-paced on 21-10-2026 on what `lumi-allocations` bills: 4,135 of 18,000
+GPU-hours (1,034 of 4,500 node-hours, 23.0%), 54 node-hours ahead of the
+straight line. The 3,466 node-hours left take 24.5 a day to 12-03-2027:
+one node busy around the clock spends the allocation, and a day with none
+costs 24 node-hours that the others have to make up. `status.sh` prints
+where this stands on every call (`campaign.py budget --allocations`).
+November to January carry a little more than the line, for the gaps
+between chains and the waits in the queue; March carries less, the
+reserve for the final round.
 
-| month | engine | on the machine | target node-h |
-|---|---|---|---:|
-| Oct | merge `feat/engine-roadmap`, live banner, split controls, Leonardo/JUPITER wrapper | **c01 now on two nodes**; c02 as its models arrive; round 2 on the merged roadmap branch | 750 |
-| Nov | anomalies: KV quant that gains nothing on gfx90a, batching that pays 3.6× here and 1.7× on A100 | c03 split modes; rounds on each release; the CUDA half if granted | 850 |
-| Dec | placement policy, served replicas, RCCL and HIP-graphs binaries | before/after rounds; **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs | 880 |
-| Jan | `--moe-cache` on HIP, load path | rounds; c04 multi-node | 880 |
-| Feb | release candidate | rounds on it | 800 |
-| Mar | release | final round to 12-03; data to Zenodo; Final Report draft | 340 |
+| period | days | node-h a day | node-h | GPU-h | engine | on the machine |
+|---|---:|---:|---:|---:|---|---|
+| 21-31 Oct | 10.6 | 24 | 254 | 1,016 | ROCm builds without HIP graphs; tensor loads (patch 0010) | `c13-sites`; `soak-node` on the fixed build (`next21`) |
+| Nov | 30 | 26 | 780 | 3,120 | a release with the ROCm fix; placement policy | rounds on each release; `c03`/`c11` on it |
+| Dec | 31 | 28 | 868 | 3,472 | served replicas, RCCL | **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs |
+| Jan | 31 | 26 | 806 | 3,224 | load path | rounds; `c04` multi-node |
+| Feb | 28 | 22 | 616 | 2,464 | release candidate | rounds on it |
+| 1-12 Mar | 12 | 12 | 144 | 576 | release | final round to 12-03; data to Zenodo; Final Report draft |
+| **total** | 142.6 | 24.3 | 3,468 | 13,872 | | |
 
 ## The engine's trainer (`c05-finetune`): withdrawn from LUMI
 

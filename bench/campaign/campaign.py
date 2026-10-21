@@ -1122,10 +1122,14 @@ def cmd_budget(args):
     last_day /= budget.GPU_HOURS_PER_NODE_HOUR
     burn = 24 * budget.burning(jobs) / budget.GPU_HOURS_PER_NODE_HOUR
     rec = budget.recovery(args.budget_node_hours, start, end, pace["behind_node_hours"], burn)
+    billed = None
+    if getattr(args, "allocations", None):
+        with (sys.stdin if args.allocations == "-" else open(args.allocations)) as f:
+            billed = budget.parse_allocations(f.read(), args.account)
     if args.json:
         print(json.dumps(dict(pace, gpu_hours=round(gpu_h, 1), by_partition=by_part,
                               last_24h_node_hours=round(last_day, 1),
-                              burn_node_hours_per_day=round(burn, 1), **rec)))
+                              burn_node_hours_per_day=round(burn, 1), billed=billed, **rec)))
         return 0
     print(f"spent      {pace['spent_node_hours']:8.1f} node-h  ({pace['spent_pct']}% of "
           f"{args.budget_node_hours:.0f}; {gpu_h:.1f} GPU-h, from sacct)")
@@ -1155,7 +1159,35 @@ def cmd_budget(args):
     else:
         verdict = "not enough to close the gap: it grows at this rate"
     print(f"now        {burn:8.1f} node-h/day ({burn / 24:.1f} nodes busy): {verdict}")
+    if billed:
+        print_billed(billed, start, end, now, last_day)
     return 0
+
+
+def print_billed(billed: dict, start, end, now, last_day_node_h: float) -> None:
+    """Where the spend stands on what is billed (lumi-allocations), in
+    GPU-hours and node-hours: allocation, billed, the straight line to date,
+    what is left and the rate that spends it by the end date."""
+    per = budget.GPU_HOURS_PER_NODE_HOUR
+    used, alloc = billed["used"], billed["allocated"]
+    p = budget.pace(alloc / per, start, end, now, used / per)
+    lead = -p["behind_node_hours"]
+    print()
+    print(f"--- billed (lumi-allocations, updated {billed['updated'] or '?'}) ---")
+    print(f"  {'':24} {'GPU-h':>9} {'node-h':>8}")
+    print(f"  {'allocation':24} {alloc:9.0f} {alloc / per:8.1f}  to {end}")
+    print(f"  {'billed':24} {used:9.0f} {used / per:8.1f}  {100 * used / alloc:.1f}%")
+    side = "ahead" if lead >= 0 else "behind"
+    print(f"  {'straight line to date':24} {p['target_to_date'] * per:9.0f} "
+          f"{p['target_to_date']:8.1f}  {abs(lead):.1f} node-h {side}")
+    print(f"  {'left':24} {alloc - used:9.0f} {(alloc - used) / per:8.1f}")
+    need = p["needed_node_hours_per_day"]
+    if need is None:
+        print(f"  {'needed a day':24} {'--':>9} {'--':>8}  the allocation has ended")
+    else:
+        print(f"  {'needed a day':24} {need * per:9.1f} {need:8.1f}  "
+              f"{p['needed_nodes_continuous']} nodes around the clock, {p['days_left']} days")
+    print(f"  {'last 24 h (sacct)':24} {last_day_node_h * per:9.1f} {last_day_node_h:8.1f}")
 
 
 def main(argv=None):
@@ -1234,6 +1266,9 @@ def main(argv=None):
     p.add_argument("--budget-node-hours", type=float, default=4500)
     p.add_argument("--account", default=os.environ.get("SBATCH_ACCOUNT"))
     p.add_argument("--json", action="store_true")
+    p.add_argument("--allocations",
+                   help="a file holding lumi-allocations' output ('-': stdin): also "
+                        "print where the spend stands on what is billed")
 
     args = ap.parse_args(argv)
     commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,

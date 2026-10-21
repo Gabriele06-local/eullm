@@ -9,12 +9,19 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=campaign_env.sh
 source "$(dirname "$0")/campaign_env.sh"
 
-echo "=== budget: EHPC-DEV-2026D09-278, 4,500 node-h, 12-09-2026 → 12-03-2027 ==="
-$CAMPAIGN budget || echo "  (sacct unavailable: run on a LUMI login node)"
+# lumi-allocations is what the allocation is charged; sacct is our own
+# recount, and the only source for the last 24 hours. Both are shown.
+ALLOC=""
 if command -v lumi-allocations >/dev/null 2>&1; then
+    ALLOC=$(mktemp) && lumi-allocations > "$ALLOC" 2>&1
+fi
+echo "=== budget: EHPC-DEV-2026D09-278, 4,500 node-h, 12-09-2026 → 12-03-2027 ==="
+$CAMPAIGN budget ${ALLOC:+--allocations "$ALLOC"} || echo "  (sacct unavailable: run on a LUMI login node)"
+if [ -n "$ALLOC" ]; then
     echo
     echo "--- lumi-allocations (the authority; sacct above is our own recount) ---"
-    lumi-allocations 2>&1 | sed 's/^/  /'
+    sed 's/^/  /' "$ALLOC"
+    rm -f "$ALLOC"
 fi
 
 echo

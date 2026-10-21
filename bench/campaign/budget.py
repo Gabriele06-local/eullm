@@ -105,6 +105,25 @@ def spent_between(jobs: list, since: dt.datetime, now: dt.datetime) -> float:
     return total
 
 
+ALLOCATIONS_GPU = re.compile(r"([\d.]+)\s*/\s*([\d.]+)\s*\(\s*[\d.]+%\)\s*gpu/hours", re.I)
+ALLOCATIONS_UPDATED = re.compile(r"Data updated:\s*(\S.*?)\s*$", re.M)
+
+
+def parse_allocations(text: str, project=None):
+    """The GPU-hours `lumi-allocations` bills `project` (the first project
+    listed when None): {"used", "allocated", "updated"}, or None when its
+    table has no such line. This is the figure the allocation is charged."""
+    for line in text.splitlines():
+        if project and project not in line:
+            continue
+        m = ALLOCATIONS_GPU.search(line)
+        if m:
+            updated = ALLOCATIONS_UPDATED.search(text)
+            return {"used": float(m.group(1)), "allocated": float(m.group(2)),
+                    "updated": updated.group(1) if updated else None}
+    return None
+
+
 def burning(jobs: list) -> float:
     """GPU-hours per hour the running jobs bill right now."""
     return sum(j["rate"] for j in jobs if j["state"] == "RUNNING")
