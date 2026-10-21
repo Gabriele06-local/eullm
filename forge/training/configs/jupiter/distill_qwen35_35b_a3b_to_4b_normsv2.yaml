@@ -1,0 +1,59 @@
+# distill_qwen35_35b_a3b_to_4b_norms.yaml on norms-v2 (deliverable 7): the
+# Italian codes with the EU acts in force in Italian, the fixed sample of
+# 250,000 training chunks (~139M tokens) and 3,000 held out that the Qwen3
+# norms-v2 runs read (build_norms_v2.sh; submit with FORGE_DISTILL_DATA
+# pointing at $FORGE_DATA_DIR/norms-v2). Qwen3.5-35B-A3B-Base teaching
+# Qwen3.5-4B-Base, one epoch, for the family's GPU-hours an epoch against
+# Qwen3's on the same corpus. Not packed, as in the norms run: the
+# linear-attention state would carry from one document into the next. The
+# step counts of a long run: 100 warm-up steps, a save every 100, the
+# held-out loss every 500 on 40 batches. Its own output directory.
+# Needs FORGE_EXTRA_LIBS=$FORGE_HOME/libs-qwen35 at submission.
+teacher_model: Qwen/Qwen3.5-35B-A3B-Base
+teacher_adapter: null
+student_model: Qwen/Qwen3.5-4B-Base
+teacher_load_in_8bit: false
+teacher_load_in_4bit: false
+teacher_device_map: split
+teacher_gpus: [0]
+teacher_gib_per_gpu: 80
+student_device: cuda:1
+student_finetune: lora
+student_lora_rank: 128
+student_lora_alpha: 256
+student_lora_dropout: 0.0
+student_lora_target_modules:
+  - q_proj
+  - k_proj
+  - v_proj
+  - o_proj
+  - in_proj_qkv
+  - in_proj_z
+  - out_proj
+  - gate_proj
+  - up_proj
+  - down_proj
+dataset_dir: ./datasets/norms   # overridden by sbatch_distill.slurm (--dataset-dir)
+train_file: train.jsonl
+val_file: val.jsonl
+cutoff_len: 2048
+max_train_samples: null
+output_dir: ./checkpoints/qwen35_4b_normsv2_distilled
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 1
+max_steps: -1
+warmup_steps: 100
+save_steps: 100
+save_total_limit: 3
+eval_steps: 500
+eval_max_batches: 40
+logging_steps: 20
+kl_temperature: 2.0
+kl_alpha: 0.7
+bf16: true
+gradient_checkpointing: true
+seed: 42
