@@ -78,4 +78,5 @@ else
         mv -f "$SA_OUT.jsonl.partial" "$SA_OUT.jsonl" || exit 1
 fi
 python "$REPO/forge/scripts/make_correction_pairs.py" "$SA_OUT.jsonl" \
-    --out-sft "$SA_OUT-correzione.jsonl" --out-dpo "$SA_OUT-dpo.jsonl"
+    --out-sft "$SA_OUT-correzione.jsonl" --out-dpo "$SA_OUT-dpo.jsonl" \
+    --informative-out "$SA_OUT-informative.jsonl"
