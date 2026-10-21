@@ -40,7 +40,8 @@ from ..rl.rewards import (
     score_answer,
 )
 
-VERIFIABLE = DEADLINE_TYPES | ABSTAIN_TYPES | {"premessa_termine", "premessa_abrogato"}
+VERIFIABLE = DEADLINE_TYPES | ABSTAIN_TYPES | {"premessa_termine", "premessa_abrogato",
+                                              "premessa_vera"}
 
 ASK = ("\n\nRisposta proposta:\n{answer}\n\nLa risposta proposta è corretta? Verificala sui "
        "testi riportati e, se è sbagliata, indica l'errore e scrivi la risposta corretta.")
@@ -86,7 +87,10 @@ def diagnosis(answer: str, tipo: str, keywords: list[str], where: str) -> str:
     """Why a wrong answer is wrong, from what the program checked."""
     right = right_deadline(keywords)
     named = mentioned_deadlines(answer)
-    if tipo in DEADLINE_TYPES or tipo == "premessa_termine":
+    if tipo == "premessa_vera" and corrects(answer):
+        return (f"dice che la premessa è errata, ma {where} prevede proprio il termine di "
+                f"{say(right)} indicato nella domanda")
+    if tipo in DEADLINE_TYPES or tipo in ("premessa_termine", "premessa_vera"):
         if tipo == "premessa_termine" and right in named and not corrects(answer):
             return (f"indica il termine giusto, {say(right)}, ma non dice che la premessa "
                     "della domanda è errata, e così la lascia in piedi")
@@ -110,6 +114,8 @@ def confirmation(tipo: str, keywords: list[str], where: str) -> str:
     """What a right answer gets right, said the same way."""
     if tipo in DEADLINE_TYPES:
         return f"indica il termine di {say(right_deadline(keywords))} che {where} prevede"
+    if tipo == "premessa_vera":
+        return f"conferma il termine di {say(right_deadline(keywords))} che {where} prevede"
     if tipo == "premessa_termine":
         return (f"corregge la premessa e indica il termine di "
                 f"{say(right_deadline(keywords))} che {where} prevede")

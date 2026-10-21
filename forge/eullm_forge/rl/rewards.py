@@ -18,6 +18,8 @@ And three built on a false premise (`eullm_forge.datasets.premise_gen`):
   is not there, with no note saying so; checked as ``inesistente``.
 * ``premessa_abrogato``: the question treats a repealed article as in force;
   the answer must say it was repealed.
+* ``premessa_vera``: the question states the right deadline; the answer must
+  state it and must not call the premise wrong.
 
 Each check is written against the ways a policy learns to game it, because
 under RL it will:
@@ -47,7 +49,8 @@ from ..eval.metrics import (
 
 DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente", "premessa_inesistente"})
-PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa_abrogato"})
+PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa_abrogato",
+                           "premessa_vera"})
 # Kinds no program can check: what an article provides is graded by a judge
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
 # "pratica": the practical questions of eval.practical, as GRPO prompts
@@ -203,6 +206,10 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
     """
     if tipo == "premessa_termine":
         if not corrects(answer):
+            return 0.0
+        return score_answer(answer, "termine", keywords)
+    if tipo == "premessa_vera":
+        if corrects(answer):
             return 0.0
         return score_answer(answer, "termine", keywords)
     if tipo == "premessa_abrogato":
