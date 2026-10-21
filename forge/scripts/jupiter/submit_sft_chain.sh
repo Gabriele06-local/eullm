@@ -11,11 +11,17 @@
 # Checked first, and nothing submitted when one fails: the pairs, the exam,
 # each arm's model in the offline cache (compute nodes have no network), the
 # system prompt, and no chain of the same tag already queued.
+# FORGE_CHAIN_MORE=1 adds LINKS links behind the last one queued and moves
+# the judge that waits for the chain behind them: runs slower than their
+# links (ob1, 21-10-2026: the 4B at 754 of 900 steps after the first).
 
 set -uo pipefail
 # shellcheck source=env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+# A partition down for maintenance or a silent controller is waited out.
+# shellcheck source=sbatch_retry.sh
+source "$(dirname "${BASH_SOURCE[0]}")/sbatch_retry.sh"
 LINKS="${1:-2}"
 TAG="${FORGE_SFT_TAG:?FORGE_SFT_TAG: the name of this set of runs}"
 PAIRS="${FORGE_SFT_PAIRS:?FORGE_SFT_PAIRS: the pairs to train on}"
@@ -42,20 +48,31 @@ for arm in $ARMS; do
         echo "[!!] ${arm%%=*}: $model is not in the offline cache (download it on this login node)"; bad=1
     fi
 done
-if [ -n "$(squeue -h -u "$USER" -n "$NAME" -o %i 2>/dev/null)" ]; then
-    echo "[!!] a $NAME chain is already queued: squeue -u $USER -n $NAME"; bad=1
+QUEUED=$(squeue -h -u "$USER" -n "$NAME" -o %i 2>/dev/null | sort -n | tail -1)
+if [ -n "$QUEUED" ] && [ "${FORGE_CHAIN_MORE:-0}" != 1 ]; then
+    echo "[!!] a $NAME chain is already queued: squeue -u $USER -n $NAME (FORGE_CHAIN_MORE=1 adds links)"; bad=1
 fi
 [ "$bad" = 0 ] || { echo "[!!] nothing submitted"; exit 1; }
 
 mkdir -p "$LOGS"
-prev="" jobs=()
+prev="${QUEUED:-}" jobs=()
 for i in $(seq 1 "$LINKS"); do
-    j=$(cd "$REPO" && sbatch --parsable --account "$ACCOUNT" --job-name "$NAME" \
+    j=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --job-name "$NAME" \
         ${prev:+--dependency=afterany:$prev} --output="$LOGS/sft-%j.out" \
         forge/scripts/jupiter/sbatch_sft.slurm) || { echo "[!!] sbatch failed at link $i"; exit 1; }
     prev="${j%%;*}" jobs+=("$prev")
 done
-judge=$(cd "$REPO" && sbatch --parsable --account "$ACCOUNT" --dependency="afterany:$prev" \
+# A judge already waiting for this chain is moved behind the new last link,
+# not submitted twice.
+judge=""
+if [ -n "${QUEUED:-}" ]; then
+    for j in $(squeue -h -u "$USER" -n forge-judge -t PENDING -o %i 2>/dev/null); do
+        scontrol show job "$j" 2>/dev/null | grep -q "Dependency=.*:${QUEUED}\b" || continue
+        scontrol update JobId="$j" Dependency="afterany:$prev" && judge="$j" &&
+            echo "[ok] judge $j now waits for $prev"
+    done
+fi
+[ -n "$judge" ] || judge=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --dependency="afterany:$prev" \
     --output="$LOGS/judge-%j.out" forge/scripts/jupiter/sbatch_judge.slurm) ||
     { echo "[!!] sbatch of the judge failed"; exit 1; }
 echo "[ok] $NAME: links ${jobs[*]}, then the judge ${judge%%;*}"
