@@ -209,7 +209,12 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
             return 0.0
         return score_answer(answer, "termine", keywords)
     if tipo == "premessa_vera":
-        if denies_premise(answer):
+        # Only a denial of the premise itself: a contrast inside a confirmation
+        # ("60 giorni, non 30"; "non è prevista alcuna proroga, il termine è 60")
+        # matches corrects() but leaves the question's premise standing.
+        if re.search(r"\berrat[ao]\b|\binesatt[ao]\b"
+                     r"|non (?:è|e') (?:corrett|esatt|cosi|così|ver[oa])\b"
+                     r"|in realtà|^\W*no\b", answer.strip(), re.IGNORECASE):
             return 0.0
         return score_answer(answer, "termine", keywords)
     if tipo == "premessa_abrogato":
