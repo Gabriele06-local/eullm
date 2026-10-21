@@ -31,6 +31,17 @@
 # sits it, into norm-exam.csv; with FORGE_SFT_NORMS (legislation chunk files)
 # it sits it open book too, as "<label>-open".
 #
+# Leonardo's recipe (docs/legal-it-experiments.md, section 2: legal-it-8b's
+# SFT) is FORGE_SFT_ARGS="--epochs 1 --lr 1e-4 --max-length 4096
+# --batch-size 1 --grad-accum 16", passed to every run; an arm whose model is
+# an instruct one ("Instruct" in its name) also gets --no-format-tokens, its
+# chat rows already trained. FORGE_SFT_SYSTEM_FILE replaces the default
+# system prompt of the arms whose template has one, Ministral's ~525 tokens
+# of "Le Chat" (a Mistral model: --default-system-file in training,
+# --system-file in every exam); Qwen's templates have none and are left as
+# they are. FORGE_SFT_NO_NOTE=1 adds the open-book exam without the
+# note on missing articles, as RAG Enterprise asks, as "<label>-open-nonote".
+#
 # Resumable: a rerun continues a run from its checkpoint, skips a finished
 # adapter, a merged model and an evaluation already done, so rerunning it on
 # finished runs only adds what is missing (the exam, say). Whole node: 4
@@ -51,6 +62,11 @@ ARMS="${FORGE_SFT_ARMS:-d4b=$RUNS/norms-4b/checkpoints/qwen3_4b_norms_distilled/
 PAIRS="${FORGE_SFT_PAIRS:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
 REF="${FORGE_SFT_REFERENCE:-Qwen/Qwen3-4B-Instruct-2507}"
 TRAIN_S="${FORGE_SFT_TRAIN_S:-5700}"
+read -r -a SFT_ARGS <<<"${FORGE_SFT_ARGS:-}"
+SYSTEM_FILE="${FORGE_SFT_SYSTEM_FILE:-}"
+[ -z "$SYSTEM_FILE" ] || [ -s "$SYSTEM_FILE" ] || { echo "[!!] no system prompt at $SYSTEM_FILE"; exit 1; }
+# The system prompt goes to models whose template inserts a default one.
+has_default_system() { [ -n "$SYSTEM_FILE" ] && case "$1" in *[Mm]istral*) true ;; *) false ;; esac; }
 SFT="$RUNS/sft${FORGE_SFT_TAG:+-$FORGE_SFT_TAG}"
 EXAM="${FORGE_SFT_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
 JOB="${SLURM_JOB_ID:-local}"
@@ -58,6 +74,7 @@ mkdir -p "$SFT" "$RUNS/power"
 
 echo "=== Forge instruction tuning: job $JOB on $(hostname), $(date -Is) ==="
 echo "  pairs $PAIRS ($(wc -l <"$PAIRS" 2>/dev/null || echo 0) lines), training at most ${TRAIN_S}s a run, into $SFT"
+echo "  stage3_sft.py ${SFT_ARGS[*]:-(defaults)}${SYSTEM_FILE:+, system prompt $SYSTEM_FILE}${FORGE_SFT_NO_NOTE:+, open book also without the note}"
 if [ -s "$EXAM" ]; then echo "  held-out exam $EXAM ($(wc -l <"$EXAM") questions; totals only in the logs)"
 else echo "  no held-out exam at $EXAM: make_norm_exam.py on a login node; the ten seed questions only"; fi
 [ -s "$PAIRS" ] || { echo "[!!] no pairs at $PAIRS: sbatch_gen_instruct.slurm first"; exit 1; }
@@ -74,18 +91,20 @@ have_model() {
 
 in_csv() { awk -F, -v l="$1" '$2 == l { found = 1 } END { exit !found }' "$2" 2>/dev/null; }
 
-evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers>
+evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers> [base model]
+    local ASK=()
+    has_default_system "${4:-$2}" && ASK=(--system-file "$SYSTEM_FILE")
     if in_csv "$1" "$SFT/legal-eval.csv"; then
         echo "[eval] $1 already in legal-eval.csv"
     else
         python "$EULLM_REPO/forge/scripts/chat_smoke.py" "$2" --label "$1" --csv "$SFT/chat-smoke.csv"
-        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" \
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" "${ASK[@]}" \
             --csv "$SFT/legal-eval.csv" --answers "$3/legal-eval-answers.jsonl" --quiet
     fi
     # The held-out exam drawn from the law (make_norm_exam.py), quiet: the
     # logs hold totals, never a question.
     if [ -s "$EXAM" ] && ! in_csv "$1" "$SFT/norm-exam.csv"; then
-        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" --items "$EXAM" \
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1" --items "$EXAM" "${ASK[@]}" \
             --csv "$SFT/norm-exam.csv" --answers "$3/norm-exam-answers.jsonl" --quiet
     fi
     # The same exam open book (FORGE_SFT_NORMS: legislation chunk files): each
@@ -95,8 +114,17 @@ evaluate() {   # evaluate <label> <merged dir or hub id> <dir for the answers>
     if [ -s "$EXAM" ] && [ -n "${FORGE_SFT_NORMS:-}" ] && ! in_csv "$1-open" "$SFT/norm-exam.csv"; then
         # shellcheck disable=SC2086
         python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1-open" --items "$EXAM" \
-            --norms $FORGE_SFT_NORMS --csv "$SFT/norm-exam.csv" \
+            --norms $FORGE_SFT_NORMS "${ASK[@]}" --csv "$SFT/norm-exam.csv" \
             --answers "$3/norm-exam-open-answers.jsonl" --quiet
+    fi
+    # Without the note on an article missing from the texts: the product
+    # never says so, and Leonardo's models lost answers without it.
+    if [ -s "$EXAM" ] && [ -n "${FORGE_SFT_NORMS:-}" ] && [ "${FORGE_SFT_NO_NOTE:-0}" = 1 ] &&
+            ! in_csv "$1-open-nonote" "$SFT/norm-exam.csv"; then
+        # shellcheck disable=SC2086
+        python "$EULLM_REPO/forge/scripts/legal_eval.py" "$2" --label "$1-open-nonote" --items "$EXAM" \
+            --norms $FORGE_SFT_NORMS --no-note "${ASK[@]}" --csv "$SFT/norm-exam.csv" \
+            --answers "$3/norm-exam-open-nonote-answers.jsonl" --quiet
     fi
 }
 
@@ -115,9 +143,12 @@ PY
         model="$out/start"
     fi
     if [ ! -f "$out/adapter/adapter_config.json" ]; then
+        local extra=("${SFT_ARGS[@]}")
+        case "$2" in *[Ii]nstruct*) extra+=(--no-format-tokens) ;; esac
+        has_default_system "$2" && extra+=(--default-system-file "$SYSTEM_FILE")
         t0=$(date +%s)
         timeout --signal=TERM "$TRAIN_S" python "$EULLM_REPO/forge/scripts/stage3_sft.py" \
-            --model "$model" --pairs "$PAIRS" --out "$out"
+            --model "$model" --pairs "$PAIRS" --out "$out" "${extra[@]}"
         rc=$?
         echo "$name,$model,$(wc -l <"$PAIRS"),$(( $(date +%s) - t0 )),$rc,$JOB" >>"$SFT/times.csv"
         [ -f "$out/adapter/adapter_config.json" ] || { echo "[!!] $name: no adapter (exit $rc)"; return 1; }
@@ -129,7 +160,7 @@ from eullm_forge.identity import merge_identity_adapter
 merge_identity_adapter(sys.argv[1], sys.argv[2], sys.argv[3])
 PY
     fi
-    evaluate "$name" "$out/merged" "$out"
+    evaluate "$name" "$out/merged" "$out" "$2"
 }
 # The merge imports eullm_forge from the checkout.
 export PYTHONPATH="$EULLM_REPO/forge${PYTHONPATH:+:$PYTHONPATH}"
