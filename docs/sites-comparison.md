@@ -75,3 +75,42 @@ which the other sites can do the same way.
 To be filled in from the three summaries: tokens/s per device, the `graphs`
 group's VRAM growth (GiB an hour, on and off) and tokens/s, and the same
 tokens/s per billed GPU-hour.
+
+### JUPITER Booster (job 2427647, 20-21-10-2026)
+
+The engine built on JUPITER from `main` of 20-10-2026 (label `sites`; the
+branch then differed from `main` only in `Cargo.lock`'s certificate crates),
+one GH200 a point, the speed points beside the two graphs points on the same
+node (`neigh`: 2-3 points at once).
+
+**graphs: a CUDA server keeps its memory.** Qwen3-32B Q4_K_M, 32 requests,
+90 minutes each:
+
+| CUDA graphs | tok/s | requests | gsm8k | arc-easy | arc-challenge | VRAM first / peak / last | GiB an hour | died |
+|---|---:|---:|---:|---:|---:|---|---:|---:|
+| on | 394 | 34,425 | 0.952 | 0.985 | 0.951 | 50.8 / 50.8 / 50.8 GiB | 0.00 | 0 |
+| off (`GGML_CUDA_DISABLE_GRAPHS=1`) | 408 | 34,771 | 0.956 | 0.984 | 0.951 | 50.8 / 50.8 / 50.8 GiB | 0.00 | 0 |
+
+Over the 1.3 hours after each point's first 15 minutes neither server's VRAM
+moved: the growth LUMI's servers showed with HIP graphs (1.3-2.5 GiB an hour)
+does not happen with CUDA graphs on a GH200. CUDA builds can keep them. With
+them on this run wrote 3.4% fewer tokens/s at the same accuracy; one run
+each, so whether that is the graphs or the run is not settled.
+
+**speed: tokens/s on one GH200** (Q4_K_M, f16 KV cache, 4,096-token slots;
+one measurement a point; a GH200 is the billed GPU-hour, so a GPU-hour
+writes tok/s × 3,600 tokens):
+
+| model | 1 | 4 | 16 | 32 | tokens a GPU-hour at 32 |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B | 226 | 576 | 1,430 | 1,480 | 5.3 M |
+| Qwen3-32B | 70 | 199 | 588 | 794 | 2.9 M |
+| Qwen3.6-35B-A3B | 214 | 401 | 736 | 778 | 2.8 M |
+
+Two points varied within their run (Qwen3-8B at 32, cv 29.7%; Qwen3.6-35B-A3B
+at 4, cv 36.9%, which also loaded in 112 s against 1-6 s for the others).
+Against the `next10` build on 14-10-2026 (jobs 2326571, 2327214, no
+neighbours) the same points are equal at 1 and 16 requests for the dense
+models, lower for Qwen3-32B at 32 (794 against 875) and for Qwen3.6-35B-A3B
+at 16 (736 against 888): a different build and a node shared with the graphs
+points, so a question for the engine, not yet a regression.
