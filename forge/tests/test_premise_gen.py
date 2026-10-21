@@ -227,6 +227,21 @@ def test_a_true_premise_is_confirmed_and_shares_its_article_with_the_false_one()
 def test_the_true_premise_reward_wants_the_deadline_and_no_correction():
     kw = ["60 giorni|sessanta giorni"]
     assert score_answer("Sì, il termine è di 60 giorni [1].", "premessa_vera", kw) == 1.0
+    # A contrast inside a confirmation leaves the premise standing: only the
+    # denial of the premise itself is a correction.
+    assert score_answer("Sì: il termine è di 60 giorni, non di 30.", "premessa_vera",
+                        kw) == 1.0
+    assert score_answer("La premessa è corretta: non è prevista alcuna proroga, "
+                        "il termine è di 60 giorni.", "premessa_vera", kw) == 1.0
+    # The gold answer of a generated true pair, quoting a statute that says
+    # "non è prevista alcuna proroga", must score its own reward.
+    records = [rec("codice_civile", "Art. 2. \n \n (Termine di prova). \n \n La domanda "
+                   "si propone entro sessanta giorni e non è prevista alcuna proroga."
+                   + FILLER)]
+    [p] = [p for p in build_pairs(NormIndex(records), per_code=10,
+                                  rng=random.Random(0), true_share=1.0)
+           if p.kind == "premessa_vera"]
+    assert score_answer(p.output, p.kind, p.keywords) == 1.0
     assert score_answer("No, la premessa è errata: il termine è di 60 giorni.",
                         "premessa_vera", kw) == 0.0
     assert score_answer("Non trovo la disposizione nei testi.", "premessa_vera", kw) == 0.0
