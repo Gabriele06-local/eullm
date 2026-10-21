@@ -377,6 +377,14 @@ def test_the_billed_table_says_when_it_runs_out(capsys):
     assert "runs out on 2026-11-26, 105 days before the end" in out
     campaign.print_billed(billed, dt.date(2026, 9, 12), dt.date(2027, 3, 12), now, 20.0)
     assert "lasts to the end" in capsys.readouterr().out
+    # A day of four nodes in a week of one and a half: the week's date is the
+    # one to go by, and both are shown.
+    campaign.print_billed(billed, dt.date(2026, 9, 12), dt.date(2027, 3, 12), now, 96.0, 36.0)
+    out = capsys.readouterr().out
+    assert "last 7 days, a day" in out and "144.0" in out
+    assert "at the last 24 h" in out and "runs out on 2026-11-26" in out
+    assert "at the last 7 days" in out and "runs out on 2027-01-25" in out
+    assert "ask for more hours by 2027-01-25" in out
 
 
 def test_shipped_campaigns_expand():

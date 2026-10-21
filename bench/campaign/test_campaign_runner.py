@@ -702,7 +702,7 @@ def test_a_point_past_its_time_limit_is_stopped_and_fails(tmp_path, engine, monk
     assert point.point_limit_s(soak) is None
     ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path))
     started = time.time()
-    with pytest.raises(point.PointError, match="stopped after 1 s"):
+    with pytest.raises(point.PointError, match="stopped after 1 s.*its servers, not a crash"):
         point.run(p, ctx)
     assert time.time() - started < 30
     assert all(s.proc.poll() is not None for s in ctx.servers)

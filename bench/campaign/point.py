@@ -1198,8 +1198,10 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
         result = _measure(p, ctx, servers, evicted, started, answers_path)
     except Exception as e:
         if expired.is_set():
-            err = PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
-                             f"estimate of {p.get('est_s', 0)} s: {e}")
+            # What the requests saw is the runner's own kill, not a crash: a
+            # 235B with --cpu-moe at 32 requests read as a server death in its
+            # "Connection refused" (21-10-2026). Say which came first.
+            err = PointError(f"{limit_note(p, limit)} (the requests then saw: {e})")
             for key in ("servers_died", "server_exits"):
                 if getattr(e, key, None) is not None:
                     setattr(err, key, getattr(e, key))
@@ -1210,8 +1212,7 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
             timer.cancel()
         ctx.stragglers = [s for s in servers if not s.stop()]
     if expired.is_set():
-        raise PointError(f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the "
-                         f"estimate of {p.get('est_s', 0)} s")
+        raise PointError(limit_note(p, limit))
     # How each server ended once asked to stop: 0 is a clean exit, -6 an
     # abort, -11 a segfault, -9 our own SIGKILL after it ignored SIGTERM;
     # None if it is still there. On LUMI nearly every engine server aborted
@@ -1219,6 +1220,11 @@ def run(p: dict, ctx: Context, answers_path=None) -> dict:
     result["server_exits"] = [s.proc.returncode if s.proc is not None else None
                               for s in servers]
     return result
+
+
+def limit_note(p: dict, limit: float) -> str:
+    return (f"stopped after {limit:.0f} s, {POINT_LIMIT_FACTOR} times the estimate of "
+            f"{p.get('est_s', 0)} s: the runner stopped its servers, not a crash")
 
 
 def _measure(p: dict, ctx: Context, servers: list, evicted, started: float, answers_path):
