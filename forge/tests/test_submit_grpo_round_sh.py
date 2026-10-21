@@ -189,3 +189,23 @@ def test_without_the_scratch_the_merged_weights_stay_on_work(tmp_path):
              "jg-x", str(Path(env["WORK"]) / "start"), "1", "750")
     assert r.returncode == 0, r.stderr
     assert not (Path(env["WORK"]) / "eullm_runs" / "grpo" / "jg-x" / "merged").exists()
+
+
+def test_the_trap_questions_are_examined_when_the_set_is_there(tmp_path):
+    env, log = _setup(tmp_path)
+    lexia = Path(env["WORK"]) / "eval" / "lexia"
+    lexia.mkdir()
+    (lexia / "lexia-trappole.jsonl").write_text("{}\n")
+    r = _run(env, "jg-x", str(Path(env["WORK"]) / "start"), "3", "750")
+    assert r.returncode == 0, r.stderr + r.stdout
+    calls = [ln.split("|") for ln in log.read_text().splitlines()]
+    exam, judge = calls[-2], calls[-1]
+    assert exam[7].endswith("lexia/lexia-trappole.jsonl")
+    assert f"--dependency=afterok:{calls[3][0]}" in exam[1]          # after the packaging
+    assert "JUDGE_GLOB=answers-jg-x-q4-hybnn.jsonl" in judge[1]
+    assert "lexia/graded" in judge[1] and f"afterany:{exam[0]}" in judge[1]
+    env["NO_LEXIA"] = "1"
+    log.unlink()
+    (Path(env["WORK"]) / "eullm_runs" / "grpo" / "jg-y").mkdir()
+    _run(env, "jg-y", str(Path(env["WORK"]) / "start"), "3", "750")
+    assert "lexia" not in log.read_text()

@@ -47,6 +47,7 @@
 #                  then not checked, since they do not exist yet
 #   NO_CDS=1       skip the case-law exam
 #   NO_PRACTICAL=1 skip the practical exam
+#   NO_LEXIA=1     skip the trap questions ($WORK/eval/lexia/lexia-trappole.jsonl)
 #   PACKAGED       the job id of a packaging already queued for NAME (LINKS=0):
 #                  only the exams are queued, after it, and no serial place is
 #                  taken -- to move a round's exams off the serial partition
@@ -187,5 +188,14 @@ echo "[round] statute exam without the note, graded by job $j3 (label $NAME-q4-h
 if [ -s "$E/practical-dev.jsonl" ] && [ "${NO_PRACTICAL:-0}" != 1 ]; then
     j2=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1 hyb) || exit 1
     echo "[round] practical exam, graded by job $j2 into $E/practical-answers"
+fi
+# The traps of an outside test (section 7 of docs/legal-it-experiments.md),
+# without the note, as the product asks: the set that decides a promotion,
+# so every round measures it. Private: the file stays on $WORK, and the log
+# holds totals only.
+if [ -s "$E/lexia/lexia-trappole.jsonl" ] && [ "${NO_LEXIA:-0}" != 1 ]; then
+    j4=$(exam "$E/lexia/lexia-trappole.jsonl" "$E/lexia/answers" "$E/lexia/graded" 1 hybnn \
+         --no-note) || exit 1
+    echo "[round] trap questions without the note, graded by job $j4 into $E/lexia/graded"
 fi
 echo "[round] $NAME: merged model will be $OUT/merged (job $pkg)"
