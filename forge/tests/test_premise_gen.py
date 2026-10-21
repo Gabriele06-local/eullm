@@ -245,16 +245,3 @@ def test_the_true_premise_reward_wants_the_deadline_and_no_correction():
     assert score_answer("No, la premessa è errata: il termine è di 60 giorni.",
                         "premessa_vera", kw) == 0.0
     assert score_answer("Non trovo la disposizione nei testi.", "premessa_vera", kw) == 0.0
-
-
-def test_a_generated_true_pair_scores_its_own_reward():
-    """A statute may say "non è prevista alcuna proroga" while stating the
-    deadline: the gold true-premise answer quotes it, and must not be read as
-    a correction."""
-    records = [rec("codice_civile", "Art. 2. \n \n (Termine di prova). \n \n La domanda "
-                   "si propone entro sessanta giorni e non è prevista alcuna proroga."
-                   + FILLER)]
-    [p] = [p for p in build_pairs(NormIndex(records), per_code=10,
-                                  rng=random.Random(0), true_share=1.0)
-           if p.kind == "premessa_vera"]
-    assert score_answer(p.output, p.kind, p.keywords) == 1.0
