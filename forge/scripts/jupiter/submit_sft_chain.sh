@@ -11,6 +11,8 @@
 # Checked first, and nothing submitted when one fails: the pairs, the exam,
 # each arm's model in the offline cache (compute nodes have no network), the
 # system prompt, and no chain of the same tag already queued.
+# FORGE_LINK_H sets a link's hours (default 2): training stops an hour
+# before a longer link's end, for the exams.
 # FORGE_CHAIN_MORE=1 adds LINKS links behind the last one queued and moves
 # the judge that waits for the chain behind them: runs slower than their
 # links (ob1, 21-10-2026: the 4B at 754 of 900 steps after the first).
@@ -58,6 +60,7 @@ mkdir -p "$LOGS"
 prev="${QUEUED:-}" jobs=()
 for i in $(seq 1 "$LINKS"); do
     j=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --job-name "$NAME" \
+        --time="${FORGE_LINK_H:-2}:00:00" \
         ${prev:+--dependency=afterany:$prev} --output="$LOGS/sft-%j.out" \
         forge/scripts/jupiter/sbatch_sft.slurm) || { echo "[!!] sbatch failed at link $i"; exit 1; }
     prev="${j%%;*}" jobs+=("$prev")

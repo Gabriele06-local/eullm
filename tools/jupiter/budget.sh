@@ -16,7 +16,8 @@
 # core-hours: 72 a GPU-hour (a GH200's Grace cores; the award's 5,000
 # GPU-hours are its 360,000), and it lags Slurm's accounting. Both are shown
 # at the end; this script's own figure is for steering. The last table says
-# whether the spending is on pace, to the plan's end and to JSC's.
+# whether the spending is on pace, to the plan's end and to JSC's; before it,
+# how long jobs wait for a node by the time they ask for.
 
 set -uo pipefail
 END="${1:-2026-12-15}"
@@ -102,6 +103,36 @@ if [ -n "$QUEUED" ]; then
     { h = secs($3) * $4 * 4 / 3600; q += h
       printf "    %-10s %-22s %10s  <= %5.1f GPU-hours\n", $1, $2, $3, h }
     END { printf "    %-45s <= %5.1f GPU-hours\n", "together", q }' <<<"$QUEUED"
+fi
+
+# How long jobs wait for a node, by the time they ask for: on JUPITER every
+# job is a whole node, so what can make a long job wait is its length (on
+# Leonardo whole nodes for 12-24 h waited a day, once 36 hours). Started jobs
+# of the last 7 days, and what waits now. Waits during a maintenance
+# reservation say nothing about length.
+sacct -X -n -P -A "$ACCOUNT" -S "$(date -d '-7 days' +%F)" -E now -o Timelimit,Submit,Start,State 2>/dev/null |
+python3 -c '
+import sys, statistics as st
+from datetime import datetime as D
+w = {}
+for line in sys.stdin:
+    f = line.strip().split("|")
+    if len(f) < 4 or f[2] in ("", "Unknown", "None") or f[3].startswith("PENDING"):
+        continue
+    w.setdefault(f[0], []).append((D.fromisoformat(f[2]) - D.fromisoformat(f[1])).total_seconds() / 60)
+if w:
+    print("\n  waits for a node, last 7 days (minutes, by the time asked for):")
+    for t, v in sorted(w.items(), key=lambda kv: kv[0]):
+        print(f"    {t:>11}  {len(v):3d} jobs  median {st.median(v):6.1f}  longest {max(v):7.1f}")
+'
+WAITING=$(squeue --me -h -t PENDING -o '%i|%j|%l|%V|%r' 2>/dev/null)
+if [ -n "$WAITING" ]; then
+    echo
+    echo "  waiting now:"
+    while IFS='|' read -r id name limit since reason; do
+        mins=$(( ($(date +%s) - $(date -d "$since" +%s)) / 60 ))
+        printf '    %-10s %-20s %10s  %5d min  %s\n' "$id" "$name" "$limit" "$mins" "$reason"
+    done <<<"$WAITING"
 fi
 
 # JSC's own count of the budget, core-hours turned into GPU-hours.

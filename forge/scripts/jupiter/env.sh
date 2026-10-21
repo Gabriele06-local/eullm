@@ -92,3 +92,16 @@ if [ -n "${FORGE_EXTRA_LIBS:-}" ] && [ -d "$FORGE_EXTRA_LIBS" ]; then
 fi
 
 mkdir -p "$FORGE_HOME" "$FORGE_DATA_DIR" "$FORGE_RUN_DIR/logs" "$HF_HOME"
+
+# This job's time limit in seconds (empty outside a job, or when Slurm does
+# not answer): the jobs size their training from it, so a link can be asked
+# for with any --time and still stop in time to save.
+job_time_limit_s() {
+    local l d=0 h m s
+    l=$(squeue -h -j "${SLURM_JOB_ID:-0}" -o %l 2>/dev/null) || return 0
+    [ -n "$l" ] || return 0
+    case "$l" in *-*) d=${l%%-*}; l=${l#*-} ;; esac
+    IFS=: read -r h m s <<<"$l"
+    [ -z "$s" ] && { s=$m; m=$h; h=0; }
+    echo $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#${s:-0} ))
+}

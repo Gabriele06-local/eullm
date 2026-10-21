@@ -68,8 +68,12 @@ parts, a summary in its log), so the user only reads the result.
 - **JUPITER Booster** (EuroHPC EHPC-AIF-2026PG01-1434, JSC budget
   `e-aif-2026pg01-1434`, 5,000 GPU-hours): Forge, with the engine as
   deliverable 5, on GH200 (aarch64, sm_90). `booster` hands out whole nodes
-  only (a job pays 4 GPU-hours an hour), so short jobs are the lever, not
-  fewer GPUs; compute nodes have no internet and no `git`.
+  only (a job pays 4 GPU-hours an hour, whatever it asks for). Jobs are as
+  long as the work needs, not Leonardo's two hours: the 3-8 hour jobs of
+  20-10-2026 got a node as soon as the 2-hour ones. What is watched is the
+  wait between asking and getting a node (`tools/jupiter/budget.sh` prints
+  it by the time asked for), since on Leonardo whole nodes for 12-24 hours
+  waited a day, once 36 hours. Compute nodes have no internet and no `git`.
   `docs/jupiter/allocation-plan.md`,
   `tools/jupiter/`, `forge/scripts/jupiter/`. Every result, fix and job
   goes into `docs/jupiter/dossier.md` too, the record that is sent out.

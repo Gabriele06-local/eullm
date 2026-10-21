@@ -13,7 +13,8 @@
 # that job to end, whatever its outcome (a probe, say), so the allocation
 # never runs more than two nodes at once. FORGE_CHAIN_NAME names the chain
 # (default forge-distill): a chain of another name runs beside this one
-# instead of waiting behind it.
+# instead of waiting behind it. FORGE_LINK_H sets a link's hours (default
+# 2); the runs train until 10 minutes before each link's end.
 
 set -euo pipefail
 N="${1:?give the number of two-hour links}"
@@ -65,6 +66,7 @@ mkdir -p "$FORGE_RUN_DIR/logs"
 source "$HERE/sbatch_retry.sh"
 submit_link() {
     sbatch_retry --account "$SBATCH_ACCOUNT" --job-name "$NAME" --dependency="$DEP" \
+        --time="${FORGE_LINK_H:-2}:00:00" \
         --output="$FORGE_RUN_DIR/logs/distill-%j.out" "$HERE/sbatch_distill.slurm"
 }
 for _ in $(seq 1 "$N"); do
