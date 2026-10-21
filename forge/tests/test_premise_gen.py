@@ -230,3 +230,62 @@ def test_the_true_premise_reward_wants_the_deadline_and_no_correction():
     assert score_answer("No, la premessa è errata: il termine è di 60 giorni.",
                         "premessa_vera", kw) == 0.0
     assert score_answer("Non trovo la disposizione nei testi.", "premessa_vera", kw) == 0.0
+
+
+PENAL = [
+    rec("codice_penale", "Art. 10. \n \n (Truffa semplice). \n \n Chiunque procura a sé un "
+        "ingiusto profitto è punito con la reclusione da sei mesi a tre anni e con la multa. "
+        "Il delitto è punibile a querela della persona offesa." + FILLER),
+    rec("codice_penale", "Art. 11. \n \n (Rapina semplice). \n \n Chiunque si impossessa "
+        "della cosa altrui con violenza è punito con la reclusione da tre a dieci anni. "
+        "Si procede d'ufficio." + FILLER),
+    rec("codice_penale", "Art. 12. \n \n (Disposizione generale). \n \n Le pene si applicano "
+        "secondo le norme che seguono." + FILLER),
+]
+
+
+def _penal_pairs(fmt="steps", true_share=1.0):
+    return build_pairs(NormIndex(PENAL), per_code=10, rng=random.Random(0), fmt=fmt,
+                       true_share=true_share)
+
+
+def test_a_wrong_maximum_penalty_is_corrected_and_a_right_one_confirmed():
+    pairs = _penal_pairs()
+    false = {p.number: p for p in pairs if p.kind == "premessa_pena"}
+    true = {p.number: p for p in pairs if p.kind == "premessa_vera" and p.key.startswith("pf-pv")}
+    assert set(false) == {"10", "11"} and set(true) == {"10", "11"}
+    assert "3 anni" in false["10"].output and "6 mesi" in false["10"].output
+    assert "3 anni" in true["10"].question and "3 anni" not in false["10"].question
+    assert "da 3 anni a 10 anni" in false["11"].output        # the low bound takes the unit
+    for n in false:
+        assert score_answer(false[n].output, "premessa_pena", false[n].keywords) == 1.0
+        assert score_answer(true[n].output, "premessa_vera", true[n].keywords) == 1.0
+        assert score_answer(true[n].output, "premessa_pena", false[n].keywords) == 0.0
+        assert score_answer(false[n].output, "premessa_vera", true[n].keywords) == 0.0
+        pos = int(re.search(r"\[(\d)\]", false[n].output).group(1))
+        assert re.search(r"«(.+?)»", false[n].output).group(1) in _passage(false[n].instruction,
+                                                                            pos)
+
+
+def test_the_procedibility_is_read_from_the_article_and_never_from_one_stating_both():
+    pairs = _penal_pairs()
+    false = {p.number: p for p in pairs if p.kind == "premessa_procedibilita"}
+    true = {p.number: p for p in pairs if p.key.startswith("pf-qv")}
+    assert false["10"].keywords == ["querela"] and false["11"].keywords == ["d'ufficio"]
+    assert "procedibile a querela" in true["10"].question
+    assert "procedibile a querela" not in false["10"].question
+    for n in false:
+        assert score_answer(false[n].output, "premessa_procedibilita", false[n].keywords) == 1.0
+        assert score_answer(true[n].output, "premessa_vera", true[n].keywords) == 1.0
+        assert score_answer(false[n].output, "premessa_vera", true[n].keywords) == 0.0
+    both = rec("codice_penale", "Art. 13. \n \n (Doppia). \n \n Si procede a querela della "
+               "persona offesa. Si procede d'ufficio se il fatto è grave." + FILLER)
+    assert not [p for p in build_pairs(NormIndex([both]), per_code=5, rng=random.Random(0))
+                if p.kind == "premessa_procedibilita"]
+
+
+def test_the_plain_format_holds_for_the_penal_kinds_too():
+    for p in _penal_pairs(fmt="plain"):
+        if p.kind in ("premessa_pena", "premessa_procedibilita", "premessa_vera"):
+            assert "\n" not in p.output
+            assert score_answer(p.output, p.kind, p.keywords) == 1.0

@@ -41,6 +41,7 @@ from ..rl.rewards import (
 )
 
 VERIFIABLE = DEADLINE_TYPES | ABSTAIN_TYPES | {"premessa_termine", "premessa_abrogato",
+                                              "premessa_pena", "premessa_procedibilita",
                                               "premessa_vera"}
 
 ASK = ("\n\nRisposta proposta:\n{answer}\n\nLa risposta proposta è corretta? Verificala sui "
@@ -88,8 +89,19 @@ def diagnosis(answer: str, tipo: str, keywords: list[str], where: str) -> str:
     right = right_deadline(keywords)
     named = mentioned_deadlines(answer)
     if tipo == "premessa_vera" and corrects(answer):
-        return (f"dice che la premessa è errata, ma {where} prevede proprio il termine di "
-                f"{say(right)} indicato nella domanda")
+        what = f"il termine di {say(right)}" if right else "quanto"
+        return (f"dice che la premessa è errata, ma {where} prevede proprio {what} indicato "
+                "nella domanda")
+    if tipo == "premessa_vera" and not right:
+        return f"non conferma la procedibilità {keywords[0]} che {where} stabilisce"
+    if tipo == "premessa_pena":
+        if not corrects(answer):
+            return "non dice che la premessa sulla pena è errata, e così la lascia in piedi"
+        return f"non indica il massimo di pena che {where} prevede, {say(right)}"
+    if tipo == "premessa_procedibilita":
+        if not corrects(answer):
+            return "non dice che la premessa sulla procedibilità è errata"
+        return f"non dice che il reato è procedibile {keywords[0]}, come stabilisce {where}"
     if tipo in DEADLINE_TYPES or tipo in ("premessa_termine", "premessa_vera"):
         if tipo == "premessa_termine" and right in named and not corrects(answer):
             return (f"indica il termine giusto, {say(right)}, ma non dice che la premessa "
@@ -115,7 +127,16 @@ def confirmation(tipo: str, keywords: list[str], where: str) -> str:
     if tipo in DEADLINE_TYPES:
         return f"indica il termine di {say(right_deadline(keywords))} che {where} prevede"
     if tipo == "premessa_vera":
-        return f"conferma il termine di {say(right_deadline(keywords))} che {where} prevede"
+        right = right_deadline(keywords)
+        if not right:
+            return f"conferma la procedibilità {keywords[0]} che {where} stabilisce"
+        return f"conferma il termine di {say(right)} che {where} prevede"
+    if tipo == "premessa_pena":
+        return (f"corregge la premessa e indica il massimo di pena di "
+                f"{say(right_deadline(keywords))} che {where} prevede")
+    if tipo == "premessa_procedibilita":
+        return (f"corregge la premessa: il reato è procedibile {keywords[0]}, come stabilisce "
+                f"{where}")
     if tipo == "premessa_termine":
         return (f"corregge la premessa e indica il termine di "
                 f"{say(right_deadline(keywords))} che {where} prevede")
