@@ -7,9 +7,10 @@
 > Leonardo AI-Factory allocation, whose arithmetic this one repeats:
 > [`../leonardo-allocation-plan.md`](../leonardo-allocation-plan.md).
 >
-> Updated 13-10-2026. Last measured consumption: **532.6 node-h, 11.8%**
-> (12-10-2026) — `tools/lumi/status.sh` and `campaign.py budget` recount it
-> from `sacct`.
+> Updated 21-10-2026. Billed: **4,135 of 18,000 GPU-hours, 1,034 node-h,
+> 23.0%** (`lumi-allocations`, 21-10-2026) — `tools/lumi/status.sh` prints it
+> on every call, beside `campaign.py budget`'s recount from `sacct`. Spent by
+> need since 21-10-2026, not by the straight line: [Calendar](#calendar).
 
 ## The number that governs everything
 
@@ -200,6 +201,18 @@ reserve now 1 GiB, Qwen3-32B with an f16 cache and 40,960-token slots at
 4 requests loads on one GCD (60.6 GB), where it did not fit before; the
 32B Q8_0 with an f16 cache at 32 requests still does not.
 
+21-10-2026, the PI's decision: the allocation is spent on what the work
+really needs, without holding to the straight line, and if it runs out
+before 12-03-2027 more hours are asked for. `next21` is the first engine
+whose soaks hold, and every soak of `c01` and `c02` before it measured
+servers dying with the HIP graphs (`quant-soak`'s 30 million failed
+requests): the whole round goes on it at once (`r-next21`: `c01`-`c03`,
+`c06`-`c11`, about 400 node-h at most), on four nodes
+(`TOP_UP=1 submit_campaign.sh 4 2` keeps four chains, counting those
+already queued), with `c13` and the 24-hour `soak-node` among its points.
+`budget` now says on which day the allocation runs out at the last 24
+hours' rate: the date by which more hours have to be asked for.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
@@ -278,13 +291,13 @@ sustained load; dense and MoE; one device to a full node).
 | `c02-quant-large-moe` | 75 | ~130 | ~1.2 TB pulled from Hugging Face first |
 | ~~`c05-finetune`~~ | — | — | withdrawn from LUMI on 06-10-2026, see below |
 | `c06-mtp` | 48 | ~4 | MTP GGUFs (~114 GiB): speculative decoding, objective (5) |
-| `c07-runtimes` | 60 | ~3 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
+| `c07-runtimes` | 110 | ~6 | llama-server and Ollama (`install_runtimes.sh`): the reference frame for (1) and (2) |
 | `c08-decision` | 128 | ~4 | Jev-Style releases: `/v1/systemone` under concurrency, objective (2) for decisions |
-| `c09-load` | 22 | ~8 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
+| `c09-load` | 45 | ~17 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
 | `c11-placement` | 41 | ~28 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
-| `c12-stability` | 14 | ~22 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
+| `c12-stability` | 42 | ~33 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
 | `c13-sites` | 14 | ~1 | the same points on LUMI-G, JUPITER and Leonardo, one device each (`docs/sites-comparison.md`): Qwen3-32B at 32 requests for 90 minutes with CUDA/HIP graphs on and off, whether a CUDA server's VRAM grows as LUMI's did; Qwen3-8B, Qwen3-32B and Qwen3.6-35B-A3B at 1-32 requests; on LUMI in the `next21` job |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250
@@ -440,16 +453,35 @@ questions). MMLU is not: its pinned source,
 
 ## Calendar
 
-Paced on 28.5 node-hours a day to 12-03-2027.
+Re-paced on 21-10-2026 on what `lumi-allocations` bills: 4,135 of 18,000
+GPU-hours (1,034 of 4,500 node-hours, 23.0%), 54 node-hours ahead of the
+straight line, 3,466 node-hours left. The straight line (24.5 node-hours a
+day to 12-03-2027) is no longer the pace: the PI's decision of 21-10-2026
+is to run what the work needs and ask for more hours if they run out
+early. The table is what that need looks like now, a forecast and not a
+cap: a full round on an engine that touches inference is about 400
+node-hours at most on four nodes (`r-next21`), and the engine is expected
+to change about every two weeks. `status.sh` prints on every call where
+the spend stands and on which day it runs out at the last 24 hours' rate
+(`campaign.py budget --allocations`).
 
-| month | engine | on the machine | target node-h |
-|---|---|---|---:|
-| Oct | merge `feat/engine-roadmap`, live banner, split controls, Leonardo/JUPITER wrapper | **c01 now on two nodes**; c02 as its models arrive; round 2 on the merged roadmap branch | 750 |
-| Nov | anomalies: KV quant that gains nothing on gfx90a, batching that pays 3.6× here and 1.7× on A100 | c03 split modes; rounds on each release; the CUDA half if granted | 850 |
-| Dec | placement policy, served replicas, RCCL and HIP-graphs binaries | before/after rounds; **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs | 880 |
-| Jan | `--moe-cache` on HIP, load path | rounds; c04 multi-node | 880 |
-| Feb | release candidate | rounds on it | 800 |
-| Mar | release | final round to 12-03; data to Zenodo; Final Report draft | 340 |
+| period | days | node-h | GPU-h | engine | on the machine |
+|---|---:|---:|---:|---|---|
+| 21-31 Oct | 10.6 | ~450 | ~1,800 | `next21`: ROCm without HIP graphs; tensor loads (patch 0010) | the whole round `r-next21` (`c01`-`c03`, `c06`-`c11`) on four nodes; `c13-sites`; `soak-node`, 24 h |
+| Nov | 30 | ~800 | ~3,200 | a release with the ROCm fix; placement policy | a round on each release, about two |
+| Dec | 31 | ~900 | ~3,600 | served replicas, RCCL | a round; **long soaks queued 20-12 → 06-01**, when nobody is watching and the queue still runs |
+| Jan | 31 | ~800 | ~3,200 | load path | a round; `c04` multi-node |
+| Feb | ~15 | ~516 | ~2,064 | release candidate | what is left: about mid-February at this pace |
+| **total** | | 3,466 | 13,865 | | |
+
+At that pace the allocation ends around mid-February, a month early, and
+the final round, the data for Zenodo and the Final Report's measurements
+need hours after it. The request for more goes in by the January cut-off,
+earlier if `status.sh`'s run-out date comes sooner: Development Access
+calls have monthly cut-offs and an allocation can be renewed (EuroHPC's
+access policy and FAQ say how; to be checked before writing it). The case
+is the record this plan keeps: every hour a measurement with its build and
+its node, and the crashes found and fixed with them.
 
 ## The engine's trainer (`c05-finetune`): withdrawn from LUMI
 

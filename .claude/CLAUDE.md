@@ -60,8 +60,10 @@ follow-up itself), or is quick. A job does its own finishing too (merging
 parts, a summary in its log), so the user only reads the result.
 
 - **LUMI-G** (EuroHPC EHPC-DEV-2026D09-278, `project_465003366`): engine
-  inference and benchmarks only, on MI250X (gfx90a). One node per new
-  engine build; spending is slowed down. `docs/lumi/allocation-plan.md`,
+  inference and benchmarks only, on MI250X (gfx90a). Spent on what the
+  work really needs, not held to the straight line: a round on each engine
+  that touches inference, on as many nodes as it takes; if the hours run
+  out early, more are asked for (PI, 21-10-2026). `docs/lumi/allocation-plan.md`,
   `docs/lumi/lumi-g.md`, `tools/lumi/`.
 - **JUPITER Booster** (EuroHPC EHPC-AIF-2026PG01-1434, JSC budget
   `e-aif-2026pg01-1434`, 5,000 GPU-hours): Forge, with the engine as

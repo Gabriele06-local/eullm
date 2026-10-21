@@ -9,12 +9,19 @@ set -uo pipefail
 # shellcheck source-path=SCRIPTDIR source=campaign_env.sh
 source "$(dirname "$0")/campaign_env.sh"
 
-echo "=== budget: EHPC-DEV-2026D09-278, 4,500 node-h, 12-09-2026 → 12-03-2027 ==="
-$CAMPAIGN budget || echo "  (sacct unavailable: run on a LUMI login node)"
+# lumi-allocations is what the allocation is charged; sacct is our own
+# recount, and the only source for the last 24 hours. Both are shown.
+ALLOC=""
 if command -v lumi-allocations >/dev/null 2>&1; then
+    ALLOC=$(mktemp) && lumi-allocations > "$ALLOC" 2>&1
+fi
+echo "=== budget: EHPC-DEV-2026D09-278, 4,500 node-h, 12-09-2026 → 12-03-2027 ==="
+$CAMPAIGN budget ${ALLOC:+--allocations "$ALLOC"} || echo "  (sacct unavailable: run on a LUMI login node)"
+if [ -n "$ALLOC" ]; then
     echo
     echo "--- lumi-allocations (the authority; sacct above is our own recount) ---"
-    lumi-allocations 2>&1 | sed 's/^/  /'
+    sed 's/^/  /' "$ALLOC"
+    rm -f "$ALLOC"
 fi
 
 echo
@@ -32,7 +39,8 @@ if [ "$RUNNING" -eq 0 ] && [ "$PENDING" -eq 0 ]; then
     echo "  !!! NO WHOLE-NODE JOB RUNNING OR QUEUED — every hour from now is budget lost."
     echo "  !!! bash $EULLM_REPO/tools/lumi/submit_campaign.sh"
 elif [ "$PENDING" -le 1 ]; then
-    echo "  (chains are nearly used up: top them up with submit_campaign.sh)"
+    echo "  (chains are nearly used up: TOP_UP=1 bash $EULLM_REPO/tools/lumi/submit_campaign.sh N" \
+         "keeps N of them)"
 fi
 
 echo

@@ -4,6 +4,12 @@
 # draining the same queue.
 #
 #   bash tools/lumi/submit_campaign.sh [nodes=2] [jobs-per-chain=3] [sbatch args...]
+#   TOP_UP=1 bash tools/lumi/submit_campaign.sh 4 2
+#
+# TOP_UP=1 makes N the number of chains to have, not to add: the chains
+# already in the queue (a campaign job running, or waiting for anything but
+# another job) are counted and only the missing ones submitted, so the same
+# command can be run again, or after an earlier one, without doubling them.
 #
 # Two nodes in parallel is the default because one is not enough any more:
 # with the first month of the window gone unused, spending the rest by
@@ -34,6 +40,16 @@ $CAMPAIGN status --queue "$CAMPAIGN_DIR" 2>/dev/null | head -3 || true
 # A job runs only the points planned with its label (plan --engine-label),
 # or only the unlabelled ones without one.
 echo "engine $EULLM_BIN, label ${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}"
+
+if [ "${TOP_UP:-0}" = 1 ]; then
+    # A chain's later links wait on a dependency; its head runs or waits
+    # for anything else (priority, resources).
+    HEADS=$(squeue --me -h -n eullm-campaign -o '%t %r' |
+        awk '$1=="R" || ($1=="PD" && $2 !~ /Dependency/)' | grep -c . || true)
+    echo "chains in the queue: $HEADS, wanted: $NODES"
+    NODES=$(( NODES > HEADS ? NODES - HEADS : 0 ))
+    [ "$NODES" -eq 0 ] && { echo "nothing to add"; exit 0; }
+fi
 
 for n in $(seq 1 "$NODES"); do
     prev=""
