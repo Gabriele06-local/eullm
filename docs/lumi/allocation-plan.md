@@ -171,6 +171,18 @@ build sets it). `nographs-*` (`next20` with the graphs off at run time)
 checks 12 to 16 hours; `next21` repeats `c12`'s six-hour soaks and `c01`'s
 reference and one-GCD groups without the variable.
 
+21-10-2026, the night's soaks. With the graphs off (`nographs-*`,
+`next20`), the four configurations that died ran 15.8 hours, none died,
+and their VRAM did not move (0.00 GiB an hour): Qwen3-30B-A3B Q8_0 at 42.6
+GiB and 227 tokens/s, Qwen3-32B at 51.1 GiB and 174 with an f16 cache,
+36.4 and 159 with q8_0, its Q8_0 at 50.1 and 139. `next21`, built without
+graphs, repeated `c12`'s six-hour soaks: flat as well, none died, 268,
+231, 176, 162 and 137 tokens/s against 267, 227, 169, 158 and 137 with the
+graphs (`next17`). Patch 0011 alone, graphs on (`r-pool`): five of eight
+died again, 6.3 to 11.9 hours in; its flush carried three to the end (a
+Qwen3-32B that reached 64 GiB, the 30B-A3B and the 14B). Leaving the
+graphs out is the fix; 0011 stays for builds that keep them.
+
 `c11`'s `load-*` (`next19`, cold, one binary each way), seconds to load
 with patch 0010 against without (`GGML_META_GATHER_ROWS=0`): Qwen3-235B
 as two servers of four GCDs 352 against 599, Qwen3-Coder-480B over eight
