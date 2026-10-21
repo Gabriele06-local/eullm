@@ -121,6 +121,7 @@ def generate(args, contents: list[str]) -> list[tuple[str, bool]]:
     if args.gguf:
         from eullm_forge.eval.gguf import LlamaServer, generate_answers_gguf
         with LlamaServer(args.gguf, binary=args.llama_server, parallel=args.batch_size,
+                         ctx_per_slot=args.server_ctx,
                          log_path=args.answers.with_suffix(".server.log")) as server:
             return generate_answers_gguf(server, tok, prompts, max_new_tokens=args.max_new_tokens,
                                          end_ids=end_ids, parallel=args.batch_size)
@@ -131,6 +132,21 @@ def generate(args, contents: list[str]) -> list[tuple[str, bool]]:
     model.eval()
     return le.generate_answers(model, tok, prompts, batch_size=args.batch_size,
                                max_new_tokens=args.max_new_tokens, end_ids=end_ids)
+
+
+def free_gpu() -> None:
+    """Give back what the retrieval models held on the GPU, before the model
+    that answers is loaded on it. Job 61543989 (2026-10-20) died there: the
+    embedder and the reranker still held their memory, and llama-server could
+    not place its 17 GB KV cache on the A100 that was left."""
+    import gc
+    gc.collect()
+    try:
+        import torch
+    except ImportError:
+        return
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -159,6 +175,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="answers decoded together (llama-server slots, with --gguf)")
     ap.add_argument("--gguf")
     ap.add_argument("--llama-server")
+    ap.add_argument("--server-ctx", type=int, default=8192,
+                    help="with --gguf: context tokens per slot; three rulings and the answer "
+                         "fit in 8,192, and 16,384 for eight slots was a 17 GB KV cache")
     ap.add_argument("--answers", type=Path, required=True)
     args = ap.parse_args(argv)
     try:
@@ -221,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
         contents.append(caselaw_prompt(it["question"], passages, the_court))
         contexts.append(ids)
 
+    # Retrieval is done: its models leave the GPU to the model that answers.
+    index.reranker = index.query_fn = None
+    emb = None  # noqa: F841
+    free_gpu()
     results = generate(args, contents)
 
     ok = src = found = cut = 0
