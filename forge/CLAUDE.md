@@ -245,5 +245,11 @@ Only fully permissive licenses:
 - **DeepSeek** — MIT
 - **GPT-OSS** — Apache 2.0
 - **Falcon 3** — Apache 2.0
+- **Gemma 4** — Apache 2.0 since its release (2026-03), Base models included
+  (E2B, E4B, 12B, 26B-A4B MoE, 31B). Earlier Gemma (2, 3) stays out: the
+  Gemma Terms of Use carry use restrictions. Gemma 4 is a multimodal
+  wrapper (`Gemma4ForConditionalGeneration`, text under `text_config`) and
+  needs transformers 5.5+ (the 12B 5.10+): check the venv can load it
+  before planning a run on it, and never upgrade the shared venv for it.
 
 Llama (Meta) is excluded from the default catalog due to "Built with Llama" branding requirement.
