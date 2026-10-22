@@ -22,6 +22,14 @@ its own (GGML_META_SET_THREADS=0 copies one device after the other) and
 gathers rows into buffers kept from call to call, one for each thread
 gathering at once.
 
+With the buffers reused, copying Qwen3-235B to its GCDs took 13-21 s instead
+of 26-53, but reading it still 209-253 s, against 130 s for the whole load
+split by layer (next23, 22-10-2026): each weight was read with one read of
+hundreds of MiB, where layer split reads 1 MiB at a time with the file
+system's read-ahead running ahead of it. Each weight of a meta buffer is
+now read by 8 threads at once, in positioned reads of 16 MiB
+(LLAMA_LOAD_READ_THREADS; 1 reads it with one read, as before).
+
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
 index ac6d08e..b10c549 100644
 --- a/ggml/src/ggml-backend-meta.cpp
@@ -157,10 +165,10 @@ index ac6d08e..b10c549 100644
          case GGML_BACKEND_SPLIT_AXIS_PARTIAL: {
              GGML_ASSERT(tensor->type == GGML_TYPE_F32);
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6cc0b20..e78ddd7 100644
+index 6cc0b20..26030f3 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
-@@ -8,6 +8,7 @@
+@@ -8,11 +8,18 @@
  
  #include <algorithm>
  #include <array>
@@ -168,7 +176,75 @@ index 6cc0b20..e78ddd7 100644
  #include <cinttypes>
  #include <cstdint>
  #include <cstring>
-@@ -1603,6 +1604,49 @@ bool llama_model_loader::load_all_data(
+ #include <future>
+ #include <regex>
++#include <thread>
++
++#if defined(__linux__) || defined(__APPLE__)
++#include <cerrno>
++#include <unistd.h>
++#endif
+ 
+ static const size_t kiB = 1024;
+ static const size_t MiB = 1024*kiB;
+@@ -1490,6 +1497,56 @@ const void * llama_model_loader::load_data_range(const llama_tensor_weight & w,
+     return data;
+ }
+ 
++// Reads n bytes from offs into dst with n_threads positioned reads at once, in
++// pieces of 16 MiB. A weight of a tensor-split model read into memory was read
++// with one read of hundreds of MiB, which a network file system serves one
++// request at a time: on LUMI-G's Lustre Qwen3-235B's 132 GiB took 209-253 s to
++// read so, where layer split, reading 1 MiB at a time with the file system's
++// read-ahead running, loaded the whole model in 130 s (next23, 22-10-2026).
++// Not for a file opened for direct I/O, whose reads have to be aligned.
++static void llama_read_at(llama_file & file, size_t offs, void * dst, size_t n, int n_threads) {
++#if defined(__linux__) || defined(__APPLE__)
++    const size_t piece = size_t(16) << 20;
++    if (n_threads > 1 && n > piece && !file.has_direct_io()) {
++        const int fd = file.file_id();
++        const size_t n_pieces = (n + piece - 1) / piece;
++        std::atomic<size_t> next{0};
++        std::atomic<int> err{0};
++        auto work = [&]() {
++            for (size_t i = next++; i < n_pieces && err.load() == 0; i = next++) {
++                size_t done = i * piece;
++                const size_t end = std::min(n, done + piece);
++                while (done < end) {
++                    const ssize_t r = pread(fd, (char *) dst + done, end - done, (off_t) (offs + done));
++                    if (r < 0 && errno == EINTR) {
++                        continue;
++                    }
++                    if (r <= 0) {
++                        err = r < 0 ? errno : -1;
++                        return;
++                    }
++                    done += (size_t) r;
++                }
++            }
++        };
++        std::vector<std::thread> threads;
++        for (size_t t = 1; t < std::min<size_t>(n_threads, n_pieces); t++) {
++            threads.emplace_back(work);
++        }
++        work();
++        for (std::thread & t : threads) {
++            t.join();
++        }
++        if (err.load() != 0) {
++            throw std::runtime_error(format("read error: %s", err.load() > 0 ? strerror(err.load()) : "unexpectedly reached end of file"));
++        }
++        return;
++    }
++#endif
++    file.seek(offs, SEEK_SET);
++    file.read_raw(dst, n);
++}
++
+ bool llama_model_loader::load_all_data(
+         struct ggml_context * ctx,
+         llama_buf_map & bufs,
+@@ -1603,6 +1660,56 @@ bool llama_model_loader::load_all_data(
              ggml_backend_name(upload_backend));
      }
  
@@ -183,6 +259,13 @@ index 6cc0b20..e78ddd7 100644
 +        ggml_backend_dev_t dev = ggml_backend_buft_get_device(ggml_backend_buffer_get_type(bufs.begin()->second));
 +        const char * env = getenv("LLAMA_LOAD_OVERLAP");
 +        overlap = dev && ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_META && (env == nullptr || atoi(env) != 0);
++    }
++    // threads reading each weight of a meta buffer at once (llama_read_at);
++    // LLAMA_LOAD_READ_THREADS=1 reads it with one read, as before
++    int read_threads = 1;
++    if (overlap) {
++        const char * env = getenv("LLAMA_LOAD_READ_THREADS");
++        read_threads = env != nullptr ? std::max(1, atoi(env)) : 8;
 +    }
 +    size_t staged_n = 0;
 +    size_t staged_bytes = 0;
@@ -218,7 +301,7 @@ index 6cc0b20..e78ddd7 100644
      std::vector<ggml_tensor *> tensors;
      for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
          tensors.push_back(cur);
-@@ -1733,13 +1777,38 @@ bool llama_model_loader::load_all_data(
+@@ -1733,13 +1840,37 @@ bool llama_model_loader::load_all_data(
                          ++buffer_idx;
                          buffer_idx %= n_buffers;
                      }
@@ -226,8 +309,7 @@ index 6cc0b20..e78ddd7 100644
 +                    // the buffer the copy before last read from, done by now
 +                    no_init<uint8_t> * read_buf = staged_buf(n_size);
 +                    int64_t t0 = ggml_time_us();
-+                    file->seek(weight->offs, SEEK_SET);
-+                    file->read_raw(read_buf, n_size);
++                    llama_read_at(*file, weight->offs, read_buf, n_size, read_threads);
 +                    staged_read_us += ggml_time_us() - t0;
 +                    staged_n++;
 +                    staged_bytes += n_size;
@@ -262,14 +344,14 @@ index 6cc0b20..e78ddd7 100644
                          throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
                      }
                  }
-@@ -1748,6 +1817,13 @@ bool llama_model_loader::load_all_data(
+@@ -1748,6 +1879,13 @@ bool llama_model_loader::load_all_data(
  
          size_done += n_size;
      }
 +    staged_finish();
 +    if (staged_n > 0) {
-+        LLAMA_LOG_INFO("%s: %zu weights, %.2f GiB, read into memory and copied%s: reading %.1f s, copying %.1f s, "
-+            "waiting for a copy %.1f s\n", __func__, staged_n, staged_bytes / 1073741824.0,
++        LLAMA_LOG_INFO("%s: %zu weights, %.2f GiB, read into memory (%d threads) and copied%s: reading %.1f s, copying %.1f s, "
++            "waiting for a copy %.1f s\n", __func__, staged_n, staged_bytes / 1073741824.0, read_threads,
 +            overlap ? " while the next was read" : " in turn",
 +            staged_read_us / 1e6, staged_copy_us.load() / 1e6, staged_wait_us / 1e6);
 +    }

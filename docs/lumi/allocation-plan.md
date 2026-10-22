@@ -239,6 +239,17 @@ it, and reading into pages never touched before runs at a fifth of the speed
 every weight into the same two buffers and gathers rows into buffers kept
 from call to call; `next23` measures it the same way.
 
+`next23` (job 23068061), with layer split in the same job as the reference,
+seconds to load cold: Qwen3-235B as two servers of four GCDs 223 with 0012,
+278 with its threads only, 260 with neither, 130 by layer; Qwen3-Coder-480B
+over eight 285, 292, 327 and 158; gpt-oss-120b as four servers of two 107,
+116, 110 and 61. The reused buffers halved the copying (the 235B 13-21 s,
+from 26-53) but not the reading (209-253 s): 1.7-1.8 times layer split,
+from 3-5 times on `next21`. Layer split reads 1 MiB at a time with Lustre's
+read-ahead running ahead of it; a tensor load read each weight with one
+read of hundreds of MiB. 0012 now reads it with 8 threads at once in pieces
+of 16 MiB; `next24` measures 8 against 1 and 16 (`LLAMA_LOAD_READ_THREADS`).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
