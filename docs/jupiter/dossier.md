@@ -66,6 +66,11 @@ JUPITER, named by its Slurm job id.
 * Qwen3.5 distillation on norms-v2 started (job 2431499), seven 8-hour
   links: 8-hour jobs get a node as soon as 2-hour ones on JUPITER (median
   wait 0 minutes, 5 jobs), so links are as long as the work needs.
+* Distilled against Base under the open-book recipe (job 2455477, §5.8):
+  the Qwen3 models distilled on norms-v2 ahead in every comparison, the
+  8B by 9 questions without the note (183 against 174 of 217).
+* JSC's Data Protection Team answered on the pseudonymised decisions: the
+  data fall under the GDPR, and it asks for its checklist with the DPO (§7).
 * Spending behind pace: 347.9 GPU-hours by Slurm's count on 21-10 (7.0%),
   against 9.4% for a uniform pace from 14-10 to 31-12, 30 node-hours short;
   the rest by 31-12 needs 65 a day, the last 24 hours spent 16 (`budget.sh`
@@ -499,6 +504,29 @@ right without being told. The top four are within 7 questions of each
 other, less than the exam separates reliably; their lead over the reference
 (+23 to +30) is not. Closed book every model stays at 0.000-0.023.
 
+**Distilled or not, under the open-book recipe (22-10-2026).** The
+experiment Leonardo listed and never ran (`docs/legal-it-experiments.md`,
+§6, item 3), on the law instead of the rulings: Qwen3 4B and 8B distilled
+on norms-v2 (139M tokens, one epoch, §5.9) against the same Base models,
+all four through the same recipe (one epoch on the open-book pairs), the
+exam with and without the note (jobs 2455477, graded by 2455480):
+
+| model | open book | correct | without the note | correct |
+|---|---:|---:|---:|---:|
+| Qwen3-8B distilled on norms-v2 | **0.873** | **184** | **0.866** | **183** |
+| Qwen3-8B Base | 0.859 | 181 | 0.827 | 174 |
+| Qwen3-4B distilled on norms-v2 | 0.855 | 178 | 0.832 | 173 |
+| Qwen3-4B Base | 0.836 | 176 | 0.818 | 172 |
+| Qwen3-4B-Instruct-2507 (reference) | 0.765 | 159 | 0.765 | 159 |
+
+The distilled model is ahead in all four comparisons, by 1 to 3 questions
+with the note and by 1 (4B) and 9 (8B) without it: the distilled 8B loses 1
+answer when the note is taken away, its Base 7. With the note the margins
+are within what the exam separates; without it, the 8B's is the largest
+difference distillation has made on this exam. Whether it holds for
+Qwen3.5 is the same comparison on the 4B and the 9B, once their
+distillation on norms-v2 ends.
+
 **The complete vertical (22-10-2026, deliverables 1 and 8).** The two best
 models of the recipe above, merged, made into what ships and examined as it
 ships (`sbatch_vertical.slurm`, jobs 2447162 and 2449393, graded by 2447164
@@ -669,6 +697,11 @@ figures below with the site's energy mix.
   first submitted by mistake declaring no personal data; that submission is
   withdrawn by e-mail to the Data Protection Team and replaced by one for
   the pseudonymised decisions.
+* **22-10-2026: JSC's answer.** The data as described fall under the GDPR;
+  JSC's Data Protection Team asks for its checklist (data, purpose, who
+  processes and accesses them, storage, legal basis, retention, data
+  minimisation, technical and organisational measures), to assess them
+  with its DPO, and for any prior approval of ours or consent form.
 * **Until the addendum is signed** JUPITER holds legislation (Normattiva,
   EUR-Lex: public), public benchmarks, synthetic pairs generated from them
   and ruling summaries that carry nothing of the case, and no court
