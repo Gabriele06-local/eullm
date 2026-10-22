@@ -13,6 +13,7 @@ import pytest
 from eullm_forge.datasets.premise_gen import (
     build_pairs,
     excluded_articles,
+    procedibility_of,
     quote_span,
     say,
     wrong_deadline,
@@ -297,6 +298,40 @@ def test_the_procedibility_is_read_from_the_article_and_never_from_one_stating_b
                "persona offesa. Si procede d'ufficio se il fatto è grave." + FILLER)
     assert not [p for p in build_pairs(NormIndex([both]), per_code=5, rng=random.Random(0))
                 if p.kind == "premessa_procedibilita"]
+
+
+def test_an_article_stating_both_with_words_in_between_is_left_out():
+    # Art. 624 c.p.: taken for querela alone by the first version.
+    assert procedibility_of("Il delitto è punibile a querela della persona offesa. Si "
+                            "procede, tuttavia, d'ufficio se ricorre taluna delle "
+                            "circostanze.") is None
+    assert procedibility_of("Il delitto è punibile a querela della persona offesa. Il "
+                            "giudice provvede d'ufficio.") is None
+    assert procedibility_of("Si procede, in ogni caso, d'ufficio.")[0] == "d'ufficio"
+    assert procedibility_of("Il colpevole è punibile, nei casi indicati, a querela della "
+                            "persona offesa.")[0] == "querela"
+
+
+def test_the_procedibility_reward_takes_the_ways_a_model_corrects_it():
+    querela, ufficio = ["querela"], ["d'ufficio"]
+    # The 8B's answers of 2026-10-22, scored 0 by the first version.
+    for a in ["Pertanto, il reato non è procedibile d'ufficio, ma richiede la querela della "
+              "persona offesa [1].",
+              "Pertanto, la querela è necessaria [1].",
+              "Si procede solo a querela della persona offesa [2].",
+              "No, serve la querela della persona offesa."]:
+        assert score_answer(a, "premessa_procedibilita", querela) == 1.0, a
+    for a in ["Non è necessaria la querela: si procede d'ufficio [1].",
+              "Il reato non è procedibile a querela: si procede d'ufficio.",
+              "Si procede d'ufficio, senza bisogno di querela."]:
+        assert score_answer(a, "premessa_procedibilita", ufficio) == 1.0, a
+    # Agreeing with the claim, or the right word without denying the claim.
+    assert score_answer("Sì, non serve la querela: si procede d'ufficio.",
+                        "premessa_procedibilita", querela) == 0.0
+    assert score_answer("Sì, il reato è procedibile a querela.", "premessa_procedibilita",
+                        ufficio) == 0.0
+    assert score_answer("Il reato è previsto dall'art. 10 e riguarda la querela.",
+                        "premessa_procedibilita", querela) == 0.0
 
 
 def test_the_plain_format_holds_for_the_penal_kinds_too():

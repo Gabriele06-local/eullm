@@ -245,9 +245,15 @@ def _vera_answer(fmt: str, n: str, of: str, right: str, pos: int, quote: str) ->
 # are taken out first.
 _PENA = re.compile(r"\b(reclusione|arresto)\s+da\s+([a-z0-9]+)(?:\s+(giorni|mesi|anni))?\s+a\s+"
                    r"([a-z0-9]+)\s+(giorni|mesi|anni)\b", re.IGNORECASE)
-_QUERELA = re.compile(r"\bsi procede a querela\b|\bpunibil[ei] a querela\b|"
-                      r"\ba querela della persona offesa\b", re.IGNORECASE)
-_UFFICIO = re.compile(r"\bsi procede d['’]ufficio\b", re.IGNORECASE)
+# Words may sit in between: art. 624 c.p. reads "Il delitto è punibile a
+# querela della persona offesa. Si procede, tuttavia, d'ufficio [se ...]",
+# and the first version, knowing only "si procede d'ufficio", took it for
+# querela alone. An article naming the other procedibility anywhere is left out.
+_QUERELA = re.compile(r"\b(?:si procede|punibil[ei]|procedibil[ei]|perseguibil[ei])\b[^.;]{0,40}?"
+                      r"\ba querela\b|\ba querela della persona offesa\b", re.IGNORECASE)
+_UFFICIO = re.compile(r"\b(?:si procede|procedibil[ei]|perseguibil[ei])\b[^.;]{0,40}?"
+                      r"\bd['’]ufficio\b", re.IGNORECASE)
+_ANY_UFFICIO = re.compile(r"\bd['’]ufficio\b", re.IGNORECASE)
 
 
 def penalty_of(text: str):
@@ -272,7 +278,7 @@ def procedibility_of(text: str):
     """("querela" | "d'ufficio", sentence) of an article that states exactly one, or None."""
     flat = _flat(text.replace("((", " ").replace("))", " "))
     q, u = _QUERELA.search(flat), _UFFICIO.search(flat)
-    if bool(q) == bool(u):
+    if bool(q) == bool(u) or (q and _ANY_UFFICIO.search(flat)) or (u and "querel" in flat.lower()):
         return None
     m = q or u
     sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
