@@ -94,7 +94,7 @@ eullm run ./model.gguf --threads 8         # Limit CPU threads
 | `--fit-strict` | false | Refuse to load rather than offload a partial split |
 | `--cpu-moe` | false | MoE models: all expert tensors on CPU RAM (sized automatically when unset) |
 | `--n-cpu-moe` | `0` | MoE models: expert tensors on CPU for the first N layers only |
-| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another) or `tensor` (llama.cpp's experimental tensor parallelism). No effect with one GPU visible. No `none` (make one GPU visible instead) and no `row` (llama.cpp's CUDA and ROCm backends no longer support it) |
+| `--split-mode` | `layer` | How a model goes across several GPUs: `layer` (whole layers per GPU, one after another) or `tensor` (llama.cpp's experimental tensor parallelism; not for every architecture: DeepSeek-V3's `deepseek2` has none and fails to load. A model read into memory loads about as fast either way, each weight read by 16 threads at once, `LLAMA_LOAD_READ_THREADS`). No effect with one GPU visible. No `none` (make one GPU visible instead) and no `row` (llama.cpp's CUDA and ROCm backends no longer support it) |
 | `--tensor-split` | (by free memory) | Each GPU's share of the model, as proportions, e.g. `3,1` |
 | `--ctx-size, -c` | `4096` | Total context window (split across batch slots), or `auto`: the largest that keeps every layer on the GPU (dense models; never below 4096, up to what the model was trained for and 131072) |
 | `--threads, -t` | all CPUs | Number of CPU threads |

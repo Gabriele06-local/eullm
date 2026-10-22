@@ -250,6 +250,28 @@ read-ahead running ahead of it; a tensor load read each weight with one
 read of hundreds of MiB. 0012 now reads it with 8 threads at once in pieces
 of 16 MiB; `next24` measures 8 against 1 and 16 (`LLAMA_LOAD_READ_THREADS`).
 
+`next24` (job 23083787), seconds to load cold with 1, 8 and 16 threads
+reading each weight, and by layer in the same job: Qwen3-235B 248, 206, 140
+and 124; Qwen3-Coder-480B 275, 160, 121 and 162; gpt-oss-120b 120, 83, 59
+and 69. Reading the 235B took 234, 192 and 125 s, the 480B 240, 127 and 93,
+gpt-oss-120b 112, 76 and 53; copying stayed 8-26 s. With 16 threads a tensor
+load is as fast as layer split or faster: the 480B and gpt-oss-120b load
+faster split as tensor than by layer, the 235B in 13% more time. From
+`next16`'s 943-1,269, 1,679 and 255-626 s, 4 to 14 times faster. 16 is
+0012's default from `next25`; tokens/s are the same whichever way a model
+loaded (one measurement a point: gpt-oss-120b's four servers wrote 1,226 to
+1,722 tokens/s from point to point, whatever the load).
+
+22-10-2026, the night's queue, all of it on `next25` (0012 reading with 16
+threads by default), as two jobs of one node each, label `next25`:
+`c11`'s `load-*` (16 threads against 32 and 64, layer split beside them;
+12 points, up to 7 node-h) and `c12`'s `days-*`: two days at 32 requests on
+one GCD each (44-46 hours) of the configurations that died with the HIP
+graphs (Qwen3-32B with an f16 and a q8_0 cache, twice each, its Q8_0,
+Qwen3-30B-A3B Q8_0) with Qwen3.6-35B-A3B and Qwen3-14B Q8_0 beside them, the
+stability objective (6) on the build a release would carry: 8 points, up to
+46 node-h. The round `r-next21` goes on on its four chains.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
@@ -333,8 +355,8 @@ sustained load; dense and MoE; one device to a full node).
 | `c09-load` | 45 | ~17 | cold loads from Lustre with and without `--load-threads`, objective (5); a runner of 07-10-2026 or later |
 | `c03-split-modes` | 72 | ~38 | `--split-mode` layer and tensor on 2, 4 and 8 GCDs (Qwen3-32B, Qwen3.6-35B-A3B, Qwen3-235B), objective (3); an engine of 15-10-2026 (`next12`); the `rccl-*` groups (40 points) only on an RCCL build, in jobs labelled `rccl` |
 | `c10-moe-ram` | 78 | ~57 | large MoE on one GCD with the experts in the node's RAM (`--moe-cache`, `--cpu-moe`, `--fit`'s own split), objective (5); an engine of 14-10-2026 (`next11`) and its runner |
-| `c11-placement` | 38 | ~23 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1 on layer split only, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
-| `c12-stability` | 42 | ~33 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node |
+| `c11-placement` | 44 | ~26 | a whole node of 8 GCDs: replicas of a smaller split against one wider one, layer and tensor, at the same total of requests (Qwen3-235B, gpt-oss-120b, Qwen3-Coder-480B, DeepSeek-V3.1 on layer split only, Qwen3-32B as control), objective (3); an RCCL build (`next16`) |
+| `c12-stability` | 50 | ~79 | the soaks that crashed while working (Qwen3-32B Q4_K_M and Q8_0 with f16 and q8_0 KV, Qwen3-30B-A3B Q8_0, at 32 requests on one GCD) again, with llama.cpp's own log on and a runner that records a server that dies, Qwen3-14B Q8_0 as control; an engine that stops cleanly (`next17`); six hours was too short, the `long-*` groups run 12-16 h, Qwen3-32B twice, one node; the `days-*` groups two days on `next25` |
 | `c13-sites` | 14 | ~1 | the same points on LUMI-G, JUPITER and Leonardo, one device each (`docs/sites-comparison.md`): Qwen3-32B at 32 requests for 90 minutes with CUDA/HIP graphs on and off, whether a CUDA server's VRAM grows as LUMI's did; Qwen3-8B, Qwen3-32B and Qwen3.6-35B-A3B at 1-32 requests; on LUMI in the `next21` job |
 
 Measured honestly, the matrix the proposal describes is cheap: ~250

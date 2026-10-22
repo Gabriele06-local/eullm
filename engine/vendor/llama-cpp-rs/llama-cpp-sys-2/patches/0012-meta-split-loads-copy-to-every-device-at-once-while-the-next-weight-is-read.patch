@@ -27,8 +27,12 @@ of 26-53, but reading it still 209-253 s, against 130 s for the whole load
 split by layer (next23, 22-10-2026): each weight was read with one read of
 hundreds of MiB, where layer split reads 1 MiB at a time with the file
 system's read-ahead running ahead of it. Each weight of a meta buffer is
-now read by 8 threads at once, in positioned reads of 16 MiB
-(LLAMA_LOAD_READ_THREADS; 1 reads it with one read, as before).
+now read by 16 threads at once, in positioned reads of 16 MiB
+(LLAMA_LOAD_READ_THREADS; 1 reads it with one read, as before). With 1, 8
+and 16 threads (next24, 22-10-2026) Qwen3-235B as two servers of four GCDs
+loaded in 248, 206 and 140 s (124 by layer), Qwen3-Coder-480B over eight in
+275, 160 and 121 s (162 by layer), gpt-oss-120b as four servers of two in
+120, 83 and 59 s (69 by layer).
 
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
 index ac6d08e..b10c549 100644
@@ -165,7 +169,7 @@ index ac6d08e..b10c549 100644
          case GGML_BACKEND_SPLIT_AXIS_PARTIAL: {
              GGML_ASSERT(tensor->type == GGML_TYPE_F32);
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6cc0b20..26030f3 100644
+index 6cc0b20..a1e1d93 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -8,11 +8,18 @@
@@ -187,16 +191,17 @@ index 6cc0b20..26030f3 100644
  
  static const size_t kiB = 1024;
  static const size_t MiB = 1024*kiB;
-@@ -1490,6 +1497,56 @@ const void * llama_model_loader::load_data_range(const llama_tensor_weight & w,
+@@ -1490,6 +1497,57 @@ const void * llama_model_loader::load_data_range(const llama_tensor_weight & w,
      return data;
  }
  
 +// Reads n bytes from offs into dst with n_threads positioned reads at once, in
 +// pieces of 16 MiB. A weight of a tensor-split model read into memory was read
-+// with one read of hundreds of MiB, which a network file system serves one
-+// request at a time: on LUMI-G's Lustre Qwen3-235B's 132 GiB took 209-253 s to
-+// read so, where layer split, reading 1 MiB at a time with the file system's
-+// read-ahead running, loaded the whole model in 130 s (next23, 22-10-2026).
++// with one read of hundreds of MiB: on LUMI-G's Lustre Qwen3-235B's 132 GiB
++// took 209-253 s to read so, where layer split, reading 1 MiB at a time with
++// the file system's read-ahead running, loaded the whole model in 130 s
++// (next23, 22-10-2026). With 1, 8 and 16 threads it read in 234, 192 and
++// 125 s, Qwen3-Coder-480B's 270 GiB in 240, 127 and 93 s (next24).
 +// Not for a file opened for direct I/O, whose reads have to be aligned.
 +static void llama_read_at(llama_file & file, size_t offs, void * dst, size_t n, int n_threads) {
 +#if defined(__linux__) || defined(__APPLE__)
@@ -244,7 +249,7 @@ index 6cc0b20..26030f3 100644
  bool llama_model_loader::load_all_data(
          struct ggml_context * ctx,
          llama_buf_map & bufs,
-@@ -1603,6 +1660,56 @@ bool llama_model_loader::load_all_data(
+@@ -1603,6 +1661,56 @@ bool llama_model_loader::load_all_data(
              ggml_backend_name(upload_backend));
      }
  
@@ -265,7 +270,7 @@ index 6cc0b20..26030f3 100644
 +    int read_threads = 1;
 +    if (overlap) {
 +        const char * env = getenv("LLAMA_LOAD_READ_THREADS");
-+        read_threads = env != nullptr ? std::max(1, atoi(env)) : 8;
++        read_threads = env != nullptr ? std::max(1, atoi(env)) : 16;
 +    }
 +    size_t staged_n = 0;
 +    size_t staged_bytes = 0;
@@ -301,7 +306,7 @@ index 6cc0b20..26030f3 100644
      std::vector<ggml_tensor *> tensors;
      for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
          tensors.push_back(cur);
-@@ -1733,13 +1840,37 @@ bool llama_model_loader::load_all_data(
+@@ -1733,13 +1841,37 @@ bool llama_model_loader::load_all_data(
                          ++buffer_idx;
                          buffer_idx %= n_buffers;
                      }
@@ -344,7 +349,7 @@ index 6cc0b20..26030f3 100644
                          throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
                      }
                  }
-@@ -1748,6 +1879,13 @@ bool llama_model_loader::load_all_data(
+@@ -1748,6 +1880,13 @@ bool llama_model_loader::load_all_data(
  
          size_done += n_size;
      }
