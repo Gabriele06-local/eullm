@@ -68,7 +68,7 @@ from ..eval.norm_exam import (
 from ..eval.retrieval import named_articles, named_code, open_book_prompt
 
 KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato", "premessa_pena",
-         "premessa_procedibilita", "premessa_vera")
+         "premessa_procedibilita", "premessa_vera", "premessa_sentenza", "premessa_sentenza_vera")
 FORMATS = ("steps", "plain")
 
 # Deadlines a person might wrongly believe, by unit: the usual ones of
@@ -87,6 +87,17 @@ TERMINE_NAMED = [
     "L'art. {n} {of} prevede un termine di {wrong}: entro quando devo quindi agire?",
     "Mi confermi che il termine previsto dall'art. {n} {of} è di {wrong}?",
     "Il mio avvocato dice che l'art. {n} {of} dà {wrong} di tempo. È così?",
+]
+# A deadline attributed to a ruling. The ruling is made up, so it is never
+# among the texts: the answer cannot confirm what it held, says so, and
+# checks the claim against the statute it does have. The outside traps the
+# numbered premises did not move include principles attributed to rulings
+# that do not state them (2026-10-22).
+SENTENZA_Q = [
+    "La Cassazione ({sez}), con la sentenza n. {num}/{year}, ha affermato che il termine previsto "
+    "dall'art. {n} {of} è di {claim}. Mi confermi che è così?",
+    "Secondo Cass. {sez} n. {num}/{year}, per l'art. {n} {of} il termine è di {claim}: posso fare "
+    "affidamento su questa sentenza?",
 ]
 TERMINE_TOPIC = [
     "{In}, in materia di «{heading}», il termine è di {wrong}, giusto?",
@@ -258,6 +269,28 @@ def _termine_answer(fmt: str, n: str, of: str, right: str, wrong: str, pos: int,
             f"termine di {right}, non di {wrong}. La premessa della domanda è errata.\n"
             f"Norma applicabile: art. {n} {of} [{pos}]: «{quote}».\n"
             f"Risposta: il termine previsto è di {right}.")
+
+
+def _sentenza_answer(fmt: str, n: str, of: str, right: str, wrong: str | None, pos: int,
+                     quote: str, ruling: str) -> str:
+    """A claim attributed to a ruling not in the texts: wrong (``wrong``) or right."""
+    unverified = (f"tra i testi riportati non c'è la sentenza {ruling}, quindi non posso "
+                  "verificare che cosa abbia stabilito")
+    if fmt == "plain":
+        verdict = (f"la premessa è errata: l'art. {n} {of} prevede un termine di {right}, non "
+                   f"di {wrong}" if wrong
+                   else f"l'art. {n} {of} prevede proprio un termine di {right}")
+        return (f"{unverified[0].upper()}{unverified[1:]}. Quanto al termine, {verdict} [{pos}]. "
+                f"Il testo dice: «{quote}». La sentenza citata va verificata sulla fonte.")
+    check = (f"prevede un termine di {right}, non di {wrong}: la premessa della domanda è errata"
+             if wrong else f"prevede proprio un termine di {right}: su questo la premessa è "
+             "corretta")
+    answer = (f"il termine previsto è di {right}" if wrong
+              else f"sì, il termine previsto è di {right}")
+    return (f"Verifica della premessa: {unverified}. Il testo [{pos}] è l'art. {n} {of}, e "
+            f"{check}.\n"
+            f"Norma applicabile: art. {n} {of} [{pos}]: «{quote}».\n"
+            f"Risposta: {answer}; la sentenza citata va verificata sulla fonte.")
 
 
 def _vera_answer(fmt: str, n: str, of: str, right: str, pos: int, quote: str) -> str:
@@ -493,6 +526,33 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                     key=f"pf-v-{code}-{a.number}", kind="premessa_vera", code=code,
                     number=a.number, question=tq, instruction=open_book_prompt(tq, tfound),
                     output=_vera_answer(fmt, a.number, of, say(n, unit), tpos, quote),
+                    keywords=[_deadline_keyword(n, unit)]))
+
+        # The same deadlines, attributed to a made-up ruling: half of them
+        # wrongly, half rightly (the twin, so that "I cannot verify the
+        # ruling" is not read as "the premise is wrong").
+        sez = "pen." if "penal" in code else "civ."
+        for a, (n, unit) in rng.sample(timed, min(per_code // 2, len(timed))):
+            wrong = wrong_deadline(n, unit, all_deadlines(a.text), rng)
+            num, year = rng.randrange(1000, 40000), rng.randrange(2015, 2026)
+            ruling = f"n. {num}/{year}"
+            template = rng.choice(SENTENZA_Q)
+            quote = quote_span(_sentence_with(a.text, n, unit), anchor=str(n))
+            for false in ([True] if wrong else []) + [False]:
+                q = template.format(sez=sez, num=num, year=year, n=a.number, of=of,
+                                    claim=say(wrong if false else n, unit))
+                found, pos = _with_article(index, q, code, a.number, k, rng)
+                if pos is None or not _quoted_in(quote, found, pos):
+                    skip("sentenza:quote_not_shown")
+                    break
+                pairs.append(PremisePair(
+                    key=f"pf-{'s' if false else 'sv'}-{code}-{a.number}",
+                    kind="premessa_sentenza" if false else "premessa_sentenza_vera",
+                    code=code, number=a.number, question=q,
+                    instruction=open_book_prompt(q, found),
+                    output=_sentenza_answer(fmt, a.number, of, say(n, unit),
+                                            say(wrong, unit) if false else None, pos, quote,
+                                            ruling),
                     keywords=[_deadline_keyword(n, unit)]))
 
         taken = {a.number for a in pool}

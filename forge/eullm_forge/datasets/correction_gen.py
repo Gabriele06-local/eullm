@@ -39,11 +39,13 @@ from ..rl.rewards import (
     mentioned_deadlines,
     refuses,
     score_answer,
+    unverified_ruling,
 )
 
 VERIFIABLE = DEADLINE_TYPES | ABSTAIN_TYPES | {"premessa_termine", "premessa_abrogato",
                                               "premessa_pena", "premessa_procedibilita",
-                                              "premessa_vera"}
+                                              "premessa_vera", "premessa_sentenza",
+                                              "premessa_sentenza_vera"}
 
 ASK = ("\n\nRisposta proposta:\n{answer}\n\nLa risposta proposta è corretta? Verificala sui "
        "testi riportati e, se è sbagliata, indica l'errore e scrivi la risposta corretta.")
@@ -89,6 +91,11 @@ def diagnosis(answer: str, tipo: str, keywords: list[str], where: str) -> str:
     """Why a wrong answer is wrong, from what the program checked."""
     right = right_deadline(keywords)
     named = mentioned_deadlines(answer)
+    if tipo in ("premessa_sentenza", "premessa_sentenza_vera"):
+        if not unverified_ruling(answer):
+            return ("tratta come verificata una sentenza che non è tra i testi riportati, "
+                    "invece di dire che non si può controllare")
+        tipo = "premessa_termine" if tipo == "premessa_sentenza" else "premessa_vera"
     if tipo == "premessa_vera" and corrects(answer):
         what = f"il termine di {say(right)}" if right else "quanto"
         return (f"dice che la premessa è errata, ma {where} prevede proprio {what} indicato "
@@ -127,6 +134,11 @@ def confirmation(tipo: str, keywords: list[str], where: str) -> str:
     """What a right answer gets right, said the same way."""
     if tipo in DEADLINE_TYPES:
         return f"indica il termine di {say(right_deadline(keywords))} che {where} prevede"
+    if tipo in ("premessa_sentenza", "premessa_sentenza_vera"):
+        verdict = "corregge" if tipo == "premessa_sentenza" else "conferma"
+        return (f"dice che la sentenza citata non è tra i testi e non si può verificare, e "
+                f"{verdict} il termine sul testo di legge: {say(right_deadline(keywords))}, "
+                f"come prevede {where}")
     if tipo == "premessa_vera":
         right = right_deadline(keywords)
         if not right:
