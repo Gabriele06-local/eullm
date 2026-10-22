@@ -24,6 +24,13 @@ pyyaml==6.0.3
 requests==2.34.2
 beautifulsoup4==4.15.0
 
+# llama.cpp's convert_hf_to_gguf.py imports it before looking for a
+# tokenizer.model, and falls back to the HF tokenizer only when the file is
+# missing: without the package Ministral's conversion stopped there (job
+# 2447162, 22-10-2026). 0.2.2, latest on PyPI that day, Apache-2.0, an
+# aarch64 cp313 wheel.
+sentencepiece==0.2.2
+
 # Qwen3.5's linear-attention kernels (deliverable 7). Without them
 # Transformers runs the reference PyTorch path, "more than an order of
 # magnitude" slower for chunk_gated_delta_rule on an H100; the teacher probe

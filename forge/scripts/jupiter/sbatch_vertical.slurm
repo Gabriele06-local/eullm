@@ -52,8 +52,8 @@ bad=0
 [ -x "$RT/llama-server" ] || { echo "[!!] no $RT/llama-server: tools/jupiter/install_runtimes.sh"; bad=1; }
 [ -x "$EULLM_BIN" ] || { echo "[!!] no engine at $EULLM_BIN"; bad=1; }
 [ -s "$EXAM" ] || { echo "[!!] no exam at $EXAM"; bad=1; }
-python -c "import sys; sys.path.insert(1, sys.argv[1]); import gguf" "$LCPP/gguf-py" ||
-    { echo "[!!] llama.cpp's gguf-py does not import in the venv"; bad=1; }
+python -c "import sys; sys.path.insert(1, sys.argv[1]); import gguf, sentencepiece" "$LCPP/gguf-py" ||
+    { echo "[!!] llama.cpp's gguf-py or sentencepiece does not import in the venv: setup_venv.sh"; bad=1; }
 for arm in "${ARMS[@]}"; do
     [ -f "$SFT/$arm/merged/config.json" ] || { echo "[!!] no merged model at $SFT/$arm/merged"; bad=1; }
 done

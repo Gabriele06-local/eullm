@@ -31,8 +31,8 @@ done
     { echo "[!!] no engine at $EULLM_BIN"; bad=1; }
 [ -f "$LCPP/convert_hf_to_gguf.py" ] && echo "[ok] llama.cpp $(git -C "$LCPP" rev-parse --short HEAD 2>/dev/null)" ||
     { echo "[!!] no llama.cpp submodule: git submodule update --init --recursive"; bad=1; }
-python -c "import sys; sys.path.insert(1, sys.argv[1]); import gguf" "$LCPP/gguf-py" 2>/dev/null &&
-    echo "[ok] gguf-py imports" || { echo "[!!] llama.cpp's gguf-py does not import in the venv"; bad=1; }
+python -c "import sys; sys.path.insert(1, sys.argv[1]); import gguf, sentencepiece" "$LCPP/gguf-py" 2>/dev/null &&
+    echo "[ok] gguf-py imports" || { echo "[!!] llama.cpp's gguf-py or sentencepiece does not import in the venv: setup_venv.sh"; bad=1; }
 [ "$bad" = 0 ] || { echo "[!!] nothing submitted"; exit 1; }
 wait_for_slurm || exit 1
 [ -z "$(squeue -h -u "$USER" -n forge-vertical -o %i)" ] ||
