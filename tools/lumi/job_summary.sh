@@ -22,8 +22,23 @@ for JOB in "$@"; do
         echo
         echo "=== VRAM of each point while it ran ==="
         "$PY" "$EULLM_REPO/tools/lumi/vram_slopes.py" --queue "$CAMPAIGN_DIR" "$JOB"
-        LOADS=$(grep -H "load_all_data: .* weights" "$CAMPAIGN_DIR/results/logs/$JOB"/*.log 2>/dev/null |
-            sed -E 's|^.*/([^/]+)\.server([0-9]+)\.log:.*load_all_data: |\1 server\2: |')
+        # The engine's log drops llama.cpp's "load_all_data: " in front of the
+        # line; the point's environment (RUST_LOG left out) says which way it
+        # loaded.
+        LOADS=$(for f in $(grep -l "weights, .* read into memory and copied" \
+                    "$CAMPAIGN_DIR/results/logs/$JOB"/*.log 2>/dev/null); do
+            p=$(basename "$f"); p=${p%.server*}
+            env=$("$PY" - "$CAMPAIGN_DIR" "$p.$JOB.json" <<'PY'
+import glob, json, os, sys
+paths = glob.glob(os.path.join(sys.argv[1], "results", "*", sys.argv[2]))
+env = json.load(open(paths[0]))["params"].get("env") or {} if paths else {}
+print(" ".join(f"{k}={v}" for k, v in sorted(env.items()) if k != "RUST_LOG") or "-")
+PY
+)
+            grep -h "weights, .* read into memory and copied" "$f" |
+                sed -E 's|^.* ([0-9]+ weights, .*waiting for a copy [0-9.]+ s).*$|\1|' |
+                while read -r line; do printf '%s (%s): %s\n' "$p" "$env" "$line"; done
+        done)
         if [ -n "$LOADS" ]; then
             echo
             echo "=== how each server read and copied its weights (llama.cpp's load_all_data) ==="
