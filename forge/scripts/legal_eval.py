@@ -366,6 +366,9 @@ def main() -> int:
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
         prompts.append(chat_prompt(tok, content, think=args.think, system=system))
+    # Retrieval is done: its models leave the GPU to the model that answers.
+    if hasattr(index, "release"):
+        index.release()
     if args.gguf and args.runtime == "eullm":
         from eullm_forge.eval.gguf import EullmServer, generate_answers_eullm
         log = Path(args.answers).with_suffix(".server.log") if args.answers else None

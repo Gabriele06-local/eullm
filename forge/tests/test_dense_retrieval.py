@@ -109,3 +109,9 @@ def test_hits_count_a_continuation_chunk_as_its_article():
                                           "code": "codice_civile", "articolo": "2"})
     idx = _index({q: 2}, use_bm25=False)
     assert retrieval_hits([item], idx, k=1)["termine_argomento"]["top1"] == 1.0
+
+
+def test_release_gives_back_the_retrieval_models():
+    idx = HybridIndex(NormIndex([]), None, query_fn=lambda q: [0.0], reranker=object())
+    idx.release()
+    assert idx.query_fn is None and idx.reranker is None

@@ -186,6 +186,22 @@ class HybridIndex:
         self.use_bm25 = use_bm25
         self._pos = {id(r): i for i, r in enumerate(self.records)}
 
+    def release(self) -> None:
+        """Give the GPU back once retrieval is done, before the model that
+        answers is loaded on it. The embedder and the reranker kept their
+        memory, and llama-server could not create its context beside them:
+        the case-law exam (job 61543989) and the teachers' practical exam
+        (61490568-79, 2026-10-19) died there. Searching after this fails."""
+        import gc
+        self.query_fn = self.reranker = None
+        gc.collect()
+        try:
+            import torch
+        except ImportError:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     # What callers of NormIndex use, passed through.
     def by_article(self, question: str) -> list[dict]:
         return self.base.by_article(question)
