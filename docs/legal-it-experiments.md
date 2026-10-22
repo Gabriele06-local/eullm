@@ -327,3 +327,86 @@ differ only in the premise answers' format, three checked steps or one
 paragraph; then GRPO on the mixed-answer questions; every model examined
 on devbig with and without the note, the practical exam and the LexIA
 traps.
+
+## 9. 2026-10-21/22: what moved the traps, what saturated, and why
+
+**Mistral Small 4 as a teacher.** Measured on JUPITER on the same 36 traps,
+answers graded on Leonardo by the same judge (the answer files stay private):
+10 of 36 at 400 tokens, 11 at 1,000, 12 with reasoning on, against 16 for
+Qwen3.6-27B. It cites articles that are not among the texts, and the judge
+marks most of those citations wrong (4 of 6 on the traps, 12 of 17 on the
+practical exam with reasoning). Not a better teacher for the traps; its
+practical-exam comparison waits for judgements cancelled by mistake on
+10-20 and queued again.
+
+**The rounds after r2b, on the traps without the note** (no system prompt,
+so the reference is the published model's 14):
+
+| Model | Right | Corrected (of 18) | Abstained (of 9) | Answered (of 9) |
+|---|---|---|---|---|
+| legal-it-8b (published) | 14 | 5 | 5 | 4 |
+| r2b-steps + GRPO | 15 | 7 | 6 | 2 |
+| r2d, + true-premise twins | 14 | 6 | 6 | 2 |
+| r2e, + practical GRPO | 15 | 7 | 5 | 3 |
+| r2f, + penal premises | 15 | 6 | 7 | 2 |
+| jpn4 / jpn6 / jpn7 (Qwen3.5-4B) | 6 / 7 / 7 | 1-2 | 4-5 | 0-2 |
+
+No round reaches the promotion rule (20 of 36); the gains are one question,
+inside the noise of 36, and every 8B round answers one or two plain
+questions fewer than the published model: the over-suspicion is still
+there. The 4B line corrects almost no premise.
+
+**Saturation.** The GRPO rounds on generated premises stopped by themselves
+(20 steps in a row with every group all-equal: r2d, r2f at step 154, jpn4 at
+202). Sampled 6 times, the 8B candidate is already at 0.87-1.00 on every
+numbered premise kind; GRPO has nothing to learn from a question it always
+gets right or always wrong.
+
+**Two bugs, found by reading answers.** The procedibility reward scored 0
+every right 8B answer ("non è procedibile d'ufficio, ma richiede la querela",
+"la querela è necessaria"): `corrects()` knew no way of denying a
+procedibility. Fixed (`corrects_procedibility`), the same samples rescored
+without asking the model again: 0.05 becomes 0.69. And the generator took
+art. 624 c.p. ("Si procede, tuttavia, d'ufficio") for complaint-only; articles
+naming both procedibilities are now left out. The penalty premises, limited
+to articles with a single range, gave 44 questions over the whole penal code;
+taking the first-comma range of articles with several (asked "al primo
+comma") gives 136.
+
+**Which traps nobody solves.** Per trap, across seven models including the
+27B teacher: the nonexistent-article traps and the nonexistent or future
+rulings are solved by five to seven models; 11 of 36 by none. They are of
+three kinds the numbered premises never ask:
+
+1. a wrong penalty or measure, naming the offence or the institution and no
+   article number;
+2. a principle attributed to a ruling number that does not say it, which the
+   statute texts cannot confirm or deny;
+3. a question outside the areas the collection covers (tax, tenancy), where
+   the right answer is to abstain.
+
+So the practical ceiling with today's models is about 25 of 36, and reaching
+20 means teaching these three. A related data gap: a repealed article keeps
+no heading in the corpus ("Art. 323. ((ARTICOLO ABROGATO DALLA L. 9 AGOSTO
+2024, N. 114))"), so a question naming "abuso d'ufficio" cannot retrieve it.
+
+**The first of the three, built.** Half of the penalty and procedibility
+premises now name the offence by the article's heading ("il reato di truffa
+semplice"), when the heading names one offence of the code alone; the answer
+still says which article it is (`--named-share`). Since an outside set may
+name no article, the articles its questions retrieve are left out of the
+generated pairs as well as the ones they name: the traps stay a test. They
+are a test now looked at by category, so from here the held-out exam,
+asked once, and devbig and the practical exam carry the decision.
+
+**Gemma 4.** Apache 2.0 since 2026-03, Base models included, so admitted
+(`forge/CLAUDE.md`). E4B, 12B, 26B-A4B (MoE, 4B active) and 31B, Google's
+Q4_0 GGUFs, examined like the teachers on the traps and the practical exam:
+E4B against the Qwen3.5-4B line, 26B-A4B as the ready-made sparse model, 31B
+as a teacher.
+
+**Queued on 10-22.** Four GRPO rounds on the practical prompts mixed with the
+rescored mixed-answer premises (r2g and jpn8 from r2b and jpn4, r2h and jpn9
+continuing r2e and jpn6); then r2i and jpn10, which sample r2g and jpn8 on the
+by-name premises and train on what they still get wrong. Each round ends in
+its own packaging and exams.
