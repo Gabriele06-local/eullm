@@ -63,8 +63,9 @@ The catalog favours permissive licenses. The families it draws on:
 | **DeepSeek** | MIT | Free | Unlimited |
 | **GPT-OSS** (OpenAI) | Apache 2.0 | Free | Unlimited |
 | **Falcon 3** (TII) | Apache 2.0 | Free | Unlimited |
+| **Gemma 4** (Google) | Apache 2.0 | Free | Unlimited |
 | ~~Llama (Meta)~~ | Custom | Requires "Built with Llama" | Restrictions |
 
-Two Gemma models in the catalog come under Google's Gemma Terms of Use and one DeepSeek model under the DeepSeek License Agreement, which carry use restrictions of their own; the chat UI's model browser shows each model's licence before you download it.
+One DeepSeek model in the catalog comes under the DeepSeek License Agreement, which carries use restrictions of its own; the chat UI's model browser shows each model's licence before you download it. Gemma models before Gemma 4 came under Google's Gemma Terms of Use; Gemma 4 is Apache 2.0.
 
 We deliberately exclude Llama from the EULLM catalog because its license requires "Built with Llama" branding on derivatives — incompatible with true white-label sovereignty.

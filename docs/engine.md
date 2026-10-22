@@ -2002,9 +2002,10 @@ The engine ships with a catalog of 25 open models (Qwen, Mistral, DeepSeek,
 Gemma and others),
 downloaded from Hugging Face by `eullm pull NAME`. `eullm list` shows them, and
 the chat UI's model browser says whether each fits your hardware and under
-which licence it comes. 24 are Apache 2.0 or MIT; two Gemma models come under
-Google's Gemma Terms of Use and one DeepSeek model under the DeepSeek License
-Agreement, which carry use restrictions of their own.
+which licence it comes. 24 are Apache 2.0 or MIT, the two Gemma 4 models
+among them (Google moved Gemma to Apache 2.0 with Gemma 4); one DeepSeek model
+comes under the DeepSeek License Agreement, which carries use restrictions of
+its own.
 
 ## Audit Trail
 

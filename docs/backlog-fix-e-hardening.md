@@ -1464,6 +1464,14 @@ diligenza manuale.
   Correggere le tre stringhe e aggiungere al catalogo un campo che distingua licenza del
   codice e licenza dei pesi.
 
+  **Rettifica (22-10-2026) sulle due voci Gemma:** la correzione applicava a Gemma 4 la
+  licenza dei Gemma precedenti, ma con Gemma 4 Google è passato ad Apache 2.0. Le schede su
+  Hugging Face di `google/gemma-4-E4B-it` e `google/gemma-4-12B-it`, e delle GGUF
+  `unsloth/gemma-4-E4B-it-GGUF` e `unsloth/gemma-4-12b-it-GGUF` che il catalogo scarica,
+  dichiarano `license: apache-2.0`. Le due voci tornano `Apache-2.0`; DeepSeek resta com'è.
+  Il criterio resta quello sopra: la licenza si legge sulla scheda del modello, per versione,
+  non per famiglia.
+
 - [ ] **H3-E · Riproducibilità della pipeline Forge** *(P2)*
   `forge/pyproject.toml:18-31` dichiara tutte le dipendenze con `>=` e senza limite
   superiore, non esiste lockfile, e `it-core-news-lg` è installato da una URL GitHub senza
