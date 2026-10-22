@@ -184,3 +184,104 @@ def generate_answers_gguf(server, tok, prompts: list[str], *, max_new_tokens: in
     jobs = list(zip(prompts, seeds or [None] * len(prompts)))
     with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
         return list(pool.map(one, jobs))
+
+
+class EullmServer:
+    """An EULLM Engine server on a free local port with one GGUF, for a ``with``.
+
+    The same exam as `LlamaServer`, through the runtime that ships: the
+    prompt templated by the merged model's HF tokenizer and sent as text with
+    ``raw`` set, so the engine applies no template and adds no BOS of its own
+    (a template's own ``<s>`` is in the text); greedy decoding, no repeat
+    penalty. Its ``parallel`` slots of ``ctx_per_slot`` tokens decode the
+    questions together, in continuous batching. The answer comes back as
+    text, with ``done_reason`` saying whether the turn ended ("stop") or the
+    token budget did ("length").
+    """
+
+    def __init__(self, gguf: str | Path, *, binary: str | None = None, parallel: int = 4,
+                 ctx_per_slot: int = 16384, log_path: str | Path | None = None,
+                 start_timeout: float = 900.0, devices: str | None = None):
+        self.gguf = Path(gguf).resolve()
+        self.binary = binary or os.environ.get("EULLM_BIN", "eullm")
+        self.parallel = parallel
+        self.ctx_per_slot = ctx_per_slot
+        self.log_path = Path(log_path) if log_path else self.gguf.with_suffix(".eullm.log")
+        self.start_timeout = start_timeout
+        self.devices = devices
+        self.port = 0
+        self.proc: subprocess.Popen | None = None
+
+    url = LlamaServer.url
+    log_tail = LlamaServer.log_tail
+    __exit__ = LlamaServer.__exit__
+
+    def command(self) -> list[str]:
+        return [self.binary, "serve", "--port", str(self.port),
+                "--default-model", str(self.gguf), "--batch-size", str(self.parallel),
+                "--ctx-size", str(self.parallel * self.ctx_per_slot)]
+
+    def __enter__(self) -> EullmServer:
+        if not os.access(self.binary, os.X_OK):
+            raise FileNotFoundError(f"no eullm binary at {self.binary} -- set EULLM_BIN")
+        if not self.gguf.is_file():
+            raise FileNotFoundError(f"no GGUF at {self.gguf}")
+        self.port = _free_port()
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = self.log_path.open("w")
+        env = None
+        if self.devices is not None:
+            env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.devices}
+        self.proc = subprocess.Popen(self.command(), stdout=log, stderr=subprocess.STDOUT, env=env)
+        log.close()
+        deadline = time.monotonic() + self.start_timeout
+        while True:
+            if self.proc.poll() is not None:
+                raise RuntimeError(f"eullm exited ({self.proc.returncode}) while starting:"
+                                   f"\n{self.log_tail()}")
+            try:
+                with urllib.request.urlopen(self.url + "/api/version", timeout=5) as r:
+                    if r.status == 200:
+                        break
+            except (urllib.error.URLError, OSError):
+                pass
+            if time.monotonic() > deadline:
+                self.__exit__(None, None, None)
+                raise TimeoutError(f"eullm not answering after {self.start_timeout:.0f} s:"
+                                   f"\n{self.log_tail()}")
+            time.sleep(1)
+        # An empty prompt loads the model and generates nothing, so its load
+        # time is not counted in the first question's.
+        try:
+            _post(self.url + "/api/generate", {"model": str(self.gguf), "prompt": ""},
+                  timeout=self.start_timeout)
+        except (urllib.error.URLError, OSError) as e:
+            self.__exit__(None, None, None)
+            raise RuntimeError(f"eullm did not load {self.gguf.name}: {e}\n{self.log_tail()}")
+        return self
+
+    def complete_text(self, prompt: str, max_new_tokens: int) -> dict:
+        """One greedy completion of a templated prompt: the server's JSON reply."""
+        body = {"model": str(self.gguf), "prompt": prompt, "raw": True, "stream": False,
+                "options": {"temperature": 0.0, "top_k": 1, "top_p": 1.0, "min_p": 0.0,
+                            "repeat_penalty": 1.0, "num_predict": max_new_tokens}}
+        try:
+            return _post(self.url + "/api/generate", body, timeout=3600)
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode(errors="replace")[:300]
+            raise RuntimeError(f"eullm refused a prompt ({e.code}): {detail}") from None
+
+
+def generate_answers_eullm(server, prompts: list[str], *, max_new_tokens: int,
+                           parallel: int = 4) -> list[tuple[str, bool]]:
+    """(answer, ended_its_turn) per templated prompt, in order, through EULLM Engine.
+
+    ``parallel`` requests in flight at once, as many as the server has slots,
+    so its continuous batching decodes them together.
+    """
+    def one(prompt: str) -> tuple[str, bool]:
+        r = server.complete_text(prompt, max_new_tokens)
+        return (r.get("response") or "").strip(), r.get("done_reason") == "stop"
+
+    with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
+        return list(pool.map(one, prompts))

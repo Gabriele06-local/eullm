@@ -306,6 +306,11 @@ def main() -> int:
                     "bf16 weights; the positional model gives the tokenizer")
     ap.add_argument("--llama-server", help="llama-server binary (default $LCPP_SERVER, else "
                     "$LCPP_DIR/build-cuda/bin/llama-server)")
+    ap.add_argument("--runtime", choices=("llama-server", "eullm"), default="llama-server",
+                    help="with --gguf: what serves it, llama.cpp's llama-server (the prompt as "
+                         "token ids) or EULLM Engine (the runtime that ships; the prompt as raw "
+                         "text, binary $EULLM_BIN or --eullm)")
+    ap.add_argument("--eullm", help="with --runtime eullm: the eullm binary (default $EULLM_BIN)")
     ap.add_argument("--server-parallel", type=int, default=4,
                     help="with --gguf: questions decoded together")
     ap.add_argument("--server-ctx", type=int, default=16384,
@@ -315,6 +320,9 @@ def main() -> int:
                          "held-out exam, whose questions nobody improving the models "
                          "should read (see make_norm_exam.py)")
     args = ap.parse_args()
+    if args.think and args.gguf and args.runtime == "eullm":
+        ap.error("--think with --runtime eullm: the engine's text drops the reasoning "
+                 "markers split_reasoning needs; use --runtime llama-server")
     if args.absent and not args.norms:
         ap.error("--absent takes the article out of retrieved texts: give --norms")
     # Dangling retrieval flags are silently ignored below -- the strings are
@@ -358,7 +366,16 @@ def main() -> int:
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
         prompts.append(chat_prompt(tok, content, think=args.think, system=system))
-    if args.gguf:
+    if args.gguf and args.runtime == "eullm":
+        from eullm_forge.eval.gguf import EullmServer, generate_answers_eullm
+        log = Path(args.answers).with_suffix(".server.log") if args.answers else None
+        print(f"[eval] {len(items)} items from {args.gguf} via EULLM Engine, "
+              f"{args.server_parallel} at a time", flush=True)
+        with EullmServer(args.gguf, binary=args.eullm, parallel=args.server_parallel,
+                         ctx_per_slot=args.server_ctx, log_path=log) as server:
+            results = generate_answers_eullm(server, prompts, max_new_tokens=args.max_new_tokens,
+                                             parallel=args.server_parallel)
+    elif args.gguf:
         from eullm_forge.eval.gguf import LlamaServer, generate_answers_gguf
         log = Path(args.answers).with_suffix(".server.log") if args.answers else None
         print(f"[eval] {len(items)} items from {args.gguf} via llama-server, "

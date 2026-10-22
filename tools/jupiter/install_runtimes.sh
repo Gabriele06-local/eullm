@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# llama-server, llama-batched-bench and llama-bench for GH200, built on a
+# llama-server, llama-batched-bench, llama-bench and llama-quantize for GH200, built on a
 # JUPITER login node from the engine's own llama.cpp submodule: the same
 # commit, without EuLLM's patches, so a difference with EuLLM is EuLLM's
 # runtime (tools/lumi/install_runtimes.sh does the same for the MI250X).
@@ -31,9 +31,9 @@ if CC=gcc CXX=g++ CUDACXX="$CUDA_PATH/bin/nvcc" \
     cmake -S "$LCPP" -B "$BUILD" -DGGML_CUDA=ON -DGGML_CUDA_NCCL=OFF \
         -DCMAKE_CUDA_ARCHITECTURES="${CMAKE_CUDA_ARCHITECTURES:-90}" \
         -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF >"$RT/llama-cmake.log" 2>&1 &&
-   cmake --build "$BUILD" --target llama-server llama-batched-bench llama-bench \
+   cmake --build "$BUILD" --target llama-server llama-batched-bench llama-bench llama-quantize \
         -j "${BUILD_JOBS:-32}" >"$RT/llama-build.log" 2>&1; then
-    for tool in llama-server llama-batched-bench llama-bench; do
+    for tool in llama-server llama-batched-bench llama-bench llama-quantize; do
         cp -f "$BUILD/bin/$tool" "$RT/$tool"
         echo "[ok] $RT/$tool ($(git -C "$LCPP" describe --tags --always 2>/dev/null))"
     done
