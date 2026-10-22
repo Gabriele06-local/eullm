@@ -13,9 +13,11 @@ import pytest
 from eullm_forge.datasets.premise_gen import (
     build_pairs,
     excluded_articles,
+    offence_name,
     penalty_of,
     procedibility_of,
     quote_span,
+    retrieved_articles,
     say,
     wrong_deadline,
 )
@@ -357,6 +359,50 @@ def test_the_procedibility_reward_takes_the_ways_a_model_corrects_it():
                         ufficio) == 0.0
     assert score_answer("Il reato è previsto dall'art. 10 e riguarda la querela.",
                         "premessa_procedibilita", querela) == 0.0
+
+
+def test_the_offence_is_named_by_the_heading_and_only_when_the_heading_names_one():
+    assert offence_name("Art. 624. \n (Furto). \n Chiunque si impossessa") == "furto"
+    assert offence_name("Art. 624-bis. \n ((Furto in abitazione e furto con strappo)). \n "
+                        "Chiunque") == "furto in abitazione e furto con strappo"
+    assert offence_name("Art. 61. \n (Circostanze aggravanti comuni). \n Aggravano") is None
+    # A repealed article keeps no heading: "abuso d'ufficio" retrieves nothing.
+    assert offence_name("Art. 323. \n ((ARTICOLO ABROGATO DALLA L. 9 AGOSTO 2024, "
+                        "N. 114))") is None
+
+
+def test_penal_questions_can_name_the_offence_instead_of_the_article():
+    pairs = build_pairs(NormIndex(PENAL), per_code=10, rng=random.Random(0), true_share=1.0,
+                        named_share=1.0)
+    penal = [p for p in pairs if p.kind in ("premessa_pena", "premessa_procedibilita")
+             or p.key.startswith(("pf-pv", "pf-qv"))]
+    assert penal
+    for p in penal:
+        assert "art." not in p.question.lower(), p.question
+        assert re.search(r"reato di (truffa|rapina) semplice", p.question), p.question
+        # The answer still says which article it is.
+        assert f"art. {p.number}" in p.output
+        assert score_answer(p.output, p.kind, p.keywords) == 1.0
+    numbered = build_pairs(NormIndex(PENAL), per_code=10, rng=random.Random(0),
+                           true_share=1.0, named_share=0.0)
+    assert all("art. 1" in p.question for p in numbered
+               if p.kind in ("premessa_pena", "premessa_procedibilita"))
+    # Two articles under one heading: the name would not say which.
+    twin = rec("codice_penale", PENAL[0]["text"].replace("Art. 10.", "Art. 13."))
+    pairs = build_pairs(NormIndex([*PENAL, twin]), per_code=10, rng=random.Random(0),
+                        named_share=1.0)
+    assert all("truffa" not in p.question for p in pairs)
+
+
+def test_an_outside_set_leaves_out_what_its_questions_retrieve_and_its_source():
+    items = [{"id": "x", "question": "Quale pena rischia chi commette una rapina semplice?",
+              "metadata": {}},
+             {"id": "y", "question": "Che cosa prevede la truffa semplice?",
+              "metadata": {"code": "codice_civile", "articolo": "2"}}]
+    got = retrieved_articles(NormIndex(PENAL), items, k=1)
+    assert got == {("codice_penale", "11")}
+    assert ("codice_penale", "585") in excluded_articles(
+        [{"question": "Quanto rischia chi ferisce?", "metadata": {"source": "art. 585 c.p."}}])
 
 
 def test_the_plain_format_holds_for_the_penal_kinds_too():

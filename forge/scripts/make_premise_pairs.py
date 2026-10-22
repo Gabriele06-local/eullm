@@ -21,7 +21,9 @@ ablation between the two: the same seed gives the same pairs.
 
 No article of an ``--exclude-exam`` file is used, whether the exam records
 it in its metadata or only names it in a question (the LexIA traps, which
-stay a test and are never trained on). Counts only, never a question.
+stay a test and are never trained on); for a set without our metadata, the
+articles its questions retrieve are left out as well, since a question may
+name the offence and no article. Counts only, never a question.
 """
 
 from __future__ import annotations
@@ -35,7 +37,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from eullm_forge.datasets.premise_gen import FORMATS, build_pairs, excluded_articles  # noqa: E402
+from eullm_forge.datasets.premise_gen import (  # noqa: E402
+    FORMATS,
+    build_pairs,
+    excluded_articles,
+    retrieved_articles,
+)
 from eullm_forge.eval import NormIndex, load_eval_set  # noqa: E402
 
 
@@ -63,6 +70,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--true-share", type=float, default=0.5,
                     help="share of the wrong-deadline questions also asked with the right "
                          "deadline, to be confirmed (premessa_vera)")
+    ap.add_argument("--named-share", type=float, default=0.5,
+                    help="share of the penalty and procedibility questions naming the offence "
+                         "by its heading instead of the article")
     ap.add_argument("--grpo-share", type=float, default=0.5,
                     help="share of the pairs written as GRPO prompts instead of SFT pairs")
     ap.add_argument("-k", type=int, default=3, help="retrieved texts per question, as the exam")
@@ -79,18 +89,20 @@ def main(argv: list[str] | None = None) -> int:
     if not 0 <= args.grpo_share <= 1:
         ap.error("--grpo-share must be in [0, 1]")
 
-    exclude = excluded_articles([it for p in args.exclude_exam for it in load_eval_set(p)])
+    held_out = [it for p in args.exclude_exam for it in load_eval_set(p)]
     if args.embedder:
         from eullm_forge.eval.dense import build_hybrid
         index = build_hybrid(args.norms, args.embedder, reranker_id=args.reranker,
                              cache_dir=args.retrieval_cache)
     else:
         index = NormIndex.from_files(args.norms)
+    exclude = excluded_articles(held_out) | retrieved_articles(index, held_out, args.k)
     rng = random.Random(args.seed)
     skipped: dict[str, int] = {}
     pairs = build_pairs(index, per_code=args.per_code, rng=rng, fmt=args.format,
                         exclude=exclude, k=args.k, bis_share=args.bis_share,
-                        true_share=args.true_share, stats=skipped)
+                        true_share=args.true_share, named_share=args.named_share,
+                        stats=skipped)
 
     # Split by article, so a GRPO prompt is never on an article SFT answered.
     articles = sorted({(p.code, p.number) for p in pairs})
