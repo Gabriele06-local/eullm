@@ -59,9 +59,10 @@ JUPITER, named by its Slurm job id.
   trained Qwen3-4B-Instruct 0.869, against 0.765 for the reference (§5.8).
   The second two-hour link finished every run and every exam; the 6-hour
   link behind it found nothing left and ended in 2 minutes.
-* The complete vertical (§5.8): Qwen3.5-4B to GGUF Q4_K_M, examined
-  through EULLM Engine at the bf16 score (189 against 187 of 217), in about
-  two and a half minutes after training (job 2447162).
+* The complete vertical (§5.8): Qwen3.5-4B and Ministral-3-8B-Instruct to
+  GGUF Q4_K_M, examined through EULLM Engine at their bf16 scores (Ministral
+  189 of 217 with the note, 187 without; jobs 2447162, 2449393), in minutes
+  after training.
 * Qwen3.5 distillation on norms-v2 started (job 2431499), seven 8-hour
   links: 8-hour jobs get a node as soon as 2-hour ones on JUPITER (median
   wait 0 minutes, 5 jobs), so links are as long as the work needs.
@@ -498,33 +499,39 @@ right without being told. The top four are within 7 questions of each
 other, less than the exam separates reliably; their lead over the reference
 (+23 to +30) is not. Closed book every model stays at 0.000-0.023.
 
-**The complete vertical (22-10-2026, deliverables 1 and 8).** Qwen3.5-4B
-of the recipe above, merged, made into what ships and examined as it ships
-(`sbatch_vertical.slurm`, job 2447162, graded by 2447164): converted to
+**The complete vertical (22-10-2026, deliverables 1 and 8).** The two best
+models of the recipe above, merged, made into what ships and examined as it
+ships (`sbatch_vertical.slurm`, jobs 2447162 and 2449393, graded by 2447164
+and 2449394): converted to
 GGUF F16 by llama.cpp's converter at the commit EULLM Engine is built on,
 quantized to Q4_K_M, and asked the same exam through EULLM Engine
 (`legal_eval.py --runtime eullm`, the prompt sent raw, 16 questions at once
 in continuous batching) and through llama-server at once:
 
-| Qwen3.5-4B, open-book recipe | open book | correct | without the note | correct |
+| model, open-book recipe | open book | correct | without the note | correct |
 |---|---:|---:|---:|---:|
-| bf16, Transformers | 0.880 | 187 | 0.841 | 178 |
-| Q4_K_M, EULLM Engine | **0.887** | **189** | 0.841 | 178 |
-| Q4_K_M, llama-server | 0.878 | 186 | 0.850 | 180 |
+| Ministral-3-8B-Instruct, bf16, Transformers | 0.887 | 189 | 0.887 | 189 |
+| Ministral-3-8B-Instruct, Q4_K_M, EULLM Engine | **0.889** | **189** | 0.882 | 187 |
+| Ministral-3-8B-Instruct, Q4_K_M, llama-server | 0.885 | 188 | 0.887 | 188 |
+| Qwen3.5-4B, bf16, Transformers | 0.880 | 187 | 0.841 | 178 |
+| Qwen3.5-4B, Q4_K_M, EULLM Engine | 0.887 | 189 | 0.841 | 178 |
+| Qwen3.5-4B, Q4_K_M, llama-server | 0.878 | 186 | 0.850 | 180 |
 
-| stage | seconds |
-|---|---:|
-| instruction tuning, one GH200 | 8,029 |
-| GGUF F16 | 78 |
-| Q4_K_M | 13 |
-| the 217-question exam through EULLM Engine | 66 |
+| stage (seconds) | Qwen3.5-4B | Ministral-3-8B |
+|---|---:|---:|
+| instruction tuning, one GH200 | 8,029 | (two links, the same job) |
+| GGUF F16 | 78 | 96 |
+| Q4_K_M | 13 | 41 |
+| the 217-question exam through EULLM Engine | 66 | |
 
 Quantization to Q4_K_M and the engine cost nothing the exam can see: the
-three answer sets are within 3 questions of each other, in both directions.
+answer sets of each model are within 3 questions of each other, in both
+directions, and Ministral without the note keeps its lead (187-189).
 From merged weights to a graded GGUF served by EULLM Engine takes about two
 and a half minutes of a node; the vertical is its instruction tuning. The
-same for Ministral-3-8B-Instruct stopped at the conversion, which imports
-`sentencepiece` before it falls back to the HF tokenizer (`03821b8`).
+first try for Ministral-3-8B-Instruct stopped at the conversion, which
+imports `sentencepiece` before it falls back to the HF tokenizer (`03821b8`);
+its rerun took 5.5 minutes of a node.
 
 Why, as far as the data say. Distillation did learn the law: the held-out
 loss fell from 0.914 to 0.674 for the 4B and from 0.827 to 0.625 for the 8B
