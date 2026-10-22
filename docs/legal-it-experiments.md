@@ -410,3 +410,45 @@ rescored mixed-answer premises (r2g and jpn8 from r2b and jpn4, r2h and jpn9
 continuing r2e and jpn6); then r2i and jpn10, which sample r2g and jpn8 on the
 by-name premises and train on what they still get wrong. Each round ends in
 its own packaging and exams.
+
+**Results of 10-22 (evening).** Against the published 8B (devbig 437 with
+the note, 440 without; practical 60 correct + 21 partial) and, for the 4B,
+against jpn4; strict counts, McNemar:
+
+| Model | devbig with note | devbig without | Practical (correct + partial) | Traps |
+|---|---|---|---|---|
+| r2g (r2b + mix) | 443 (+6, p=0.36) | 442 (+2) | 79 + 1 (23:4, p<0.001) | 14 |
+| **r2h (r2e + mix)** | 443 (+6, p=0.38) | 435 (-5, p=0.46) | **83 + 2** (29:6, p<0.001) | **16** (7 / 6 / 3) |
+| r2i (r2g + by-name premises) | 436 (-1) | 431 (-9; lenient p=0.004) | 79 + 0 (25:6, p=0.001) | 16 (8 / 5 / 3) |
+| jpn8 (jpn4 + mix), 4B | 421 (-1) | 440 (0) | 77 + 1 | 7 |
+| **jpn9 (jpn6 + mix), 4B** | **441 (+19, p=0.004)** | 447 (+7; lenient p=0.031) | **82 + 1** | 7 |
+| Qwen3-30B-A3B-Instruct (teacher) | | | 74 + 0 | |
+| Qwen3.6-27B / reasoning on | | | 76 + 0 / 85 + 1 | 16 / 10 |
+| Gemma 4 E4B / 12B / 26B-A4B / 31B | | | 71 / 70 / 68 / 74 (+1-2) | 7 / 8 / 11 / 13 |
+
+What it says:
+
+* **The practical GRPO works, for both sizes.** r2h answers 83 practical
+  questions right against the published model's 60, more than either
+  teacher without reasoning; the 4B jpn9 82. With "partial" counted as
+  right the gap closes (the published model's 21 partials), and the judge
+  prefers the longer answer, which ours are not (about 740 characters
+  against 1,000-1,350), so the strict gain is the conservative reading.
+* **No 8B reaches 20 traps.** r2h and r2i are at 16, two over the published
+  model; r2i corrects 8 premises of 18, the most so far.
+* **A cost to watch: nonexistent articles without the note.** On devbig
+  without the note, r2i loses 7 nonexistent-article questions and wins none
+  (r2h 0:5, r2g 0:2): the by-name premises and the practical rounds wear
+  away the abstention that GRPO only rewards while some answers still get
+  it wrong. Every candidate is read on this column before it is promoted.
+* **Gemma 4 does not change the plan.** Not a better teacher (31B: 74
+  practical, 13 traps, against 76 and 16 for Qwen3.6-27B) and, untrained,
+  below our trained models of the same size; 26B-A4B stays the candidate
+  for a sparse student, to be tried only with time to train it.
+* **By-name premises are not harder.** Sampled on premise4, the 8B passes
+  penalty questions 0.93 of the time and procedibility 0.59; 38 questions
+  had mixed answers (87 for the 4B), so the premise rounds stop early.
+
+Mistral Small 4 on the practical exam, graded without the "partial" grade
+(regrading under rubric v3 is queued): 55-60 correct, against 74-76 for the
+two teachers. Below them on both sets.
