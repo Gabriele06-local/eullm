@@ -1,35 +1,95 @@
 With --split-mode tensor a model's weights loaded far slower than split by
 layer, also after 0010 gathered the rows (Qwen3-235B Q4_K_M over four MI250X
 GCDs 352 s cold against 113 s by layer, Qwen3-Coder-480B over eight 569 s
-against 113, c11-placement load-*, 20-10-2026). Two causes in the way a
-weight reached the devices. The meta buffer has no events or host buffers, so
-the loader gave it no async uploads: each weight read into memory was read
-whole, then copied, the file idle during the copy and the devices idle during
-the read. And the meta buffer copied a weight to its devices one after the
-other, from one thread, though each device has its own link to the host.
+against 113, c11-placement load-*, 20-10-2026). The meta buffer has no
+events or host buffers, so the loader gave it no async uploads from pinned
+memory: each weight read into memory was read whole, then copied, the file
+idle during the copy and the devices idle during the read; the meta buffer
+copied it to its devices one after the other from one thread; and both the
+buffer each weight was read into and the one its rows were gathered in were
+allocated anew for every weight. Reading into pages never touched before ran
+at a fifth of the speed of reading into pages already touched (0.33-0.49
+against 2.6-2.9 GB/s, 512 MiB pieces from memory), and on LUMI-G the reading
+was most of the load: 221-272 s of Qwen3-235B's, the copying 26-53 s
+(next22, 22-10-2026).
 
-Now the loader reads the next weight while the last one is copied, for a
-meta buffer (two weights in memory at most; LLAMA_LOAD_OVERLAP=0 reads and
-copies in turn), and logs how long reading, copying and waiting took. The meta
-buffer copies a weight of 16 MiB or more to each device on a thread of its own
-(GGML_META_SET_THREADS=0 copies one device after the other).
+Now, for a meta buffer, the loader reads the next weight while the last one
+is copied (LLAMA_LOAD_OVERLAP=0 reads and copies in turn) and logs how long
+reading, copying and waiting took; the weights are read into the same buffers
+one after the other, two at most, allocated at the size of the largest. The
+meta buffer copies a weight of 16 MiB or more to each device on a thread of
+its own (GGML_META_SET_THREADS=0 copies one device after the other) and
+gathers rows into buffers kept from call to call, one for each thread
+gathering at once.
 
 diff --git a/ggml/src/ggml-backend-meta.cpp b/ggml/src/ggml-backend-meta.cpp
-index ac6d08e..7532255 100644
+index ac6d08e..b10c549 100644
 --- a/ggml/src/ggml-backend-meta.cpp
 +++ b/ggml/src/ggml-backend-meta.cpp
-@@ -15,6 +15,7 @@
+@@ -13,8 +13,10 @@
+ #include <cstring>
+ #include <map>
  #include <memory>
++#include <mutex>
  #include <set>
  #include <string>
 +#include <thread>
  #include <tuple>
  #include <utility>
  #include <vector>
-@@ -1462,6 +1463,36 @@ static void ggml_backend_meta_set_rows_contiguous(ggml_tensor * simple_tensor, c
+@@ -1437,6 +1439,35 @@ static void ggml_backend_meta_buffer_memset_tensor(
+ // 19-145 s split by layer), as if each row were copied on its own. The rows
+ // are gathered into a buffer instead and copied in pieces of 64 MiB;
+ // GGML_META_GATHER_ROWS=0 restores the 2D copy.
++//
++// The buffers the rows are gathered in are kept from call to call, one for
++// each thread gathering at once (a device each, at most 64 MiB): one allocated
++// for every weight was paged in anew each time, and filling pages never
++// touched before ran at a fifth of the speed of filling pages already touched
++// (0.33-0.49 against 2.6-2.9 GB/s in 512 MiB pieces).
++static std::mutex ggml_backend_meta_pieces_mutex;
++static std::vector<std::vector<char>> ggml_backend_meta_pieces;
++
++struct ggml_backend_meta_piece {
++    std::vector<char> buf;
++    explicit ggml_backend_meta_piece(size_t size) {
++        {
++            std::lock_guard<std::mutex> lock(ggml_backend_meta_pieces_mutex);
++            if (!ggml_backend_meta_pieces.empty()) {
++                buf = std::move(ggml_backend_meta_pieces.back());
++                ggml_backend_meta_pieces.pop_back();
++            }
++        }
++        if (buf.size() < size) {
++            buf.resize(size);
++        }
++    }
++    ~ggml_backend_meta_piece() {
++        std::lock_guard<std::mutex> lock(ggml_backend_meta_pieces_mutex);
++        ggml_backend_meta_pieces.push_back(std::move(buf));
++    }
++};
++
+ static void ggml_backend_meta_set_rows_contiguous(ggml_tensor * simple_tensor, const char * data, size_t offset,
+         size_t row_size, size_t n_rows, size_t stride_data) {
+     static const bool gather = [] {
+@@ -1452,13 +1483,43 @@ static void ggml_backend_meta_set_rows_contiguous(ggml_tensor * simple_tensor, c
+         return;
      }
- }
- 
+     const size_t rows_per_piece = std::max<size_t>(1, (size_t(64) << 20) / row_size);
+-    std::unique_ptr<char[]> piece(new char[std::min(n_rows, rows_per_piece) * row_size]);
++    ggml_backend_meta_piece piece(std::min(n_rows, rows_per_piece) * row_size);
+     for (size_t i0 = 0; i0 < n_rows; i0 += rows_per_piece) {
+         const size_t n = std::min(rows_per_piece, n_rows - i0);
+         for (size_t i = 0; i < n; i++) {
+-            memcpy(piece.get() + i*row_size, data + (i0 + i)*stride_data, row_size);
++            memcpy(piece.buf.data() + i*row_size, data + (i0 + i)*stride_data, row_size);
+         }
+-        ggml_backend_tensor_set(simple_tensor, piece.get(), offset + i0*row_size, n*row_size);
++        ggml_backend_tensor_set(simple_tensor, piece.buf.data(), offset + i0*row_size, n*row_size);
++    }
++}
++
 +// Runs fn(j) for each of the n_bufs devices, each on a thread of its own when
 +// the copy is large: every device has its own link to the host, and one
 +// thread going through them in turn left all but one idle while a weight
@@ -57,13 +117,10 @@ index ac6d08e..7532255 100644
 +    }
 +    for (std::thread & t : threads) {
 +        t.join();
-+    }
-+}
-+
- static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
-     const size_t n_bufs = ggml_backend_meta_buffer_n_bufs(buffer);
-     const ggml_backend_meta_split_state split_state = ggml_backend_meta_get_split_state(tensor, /*assume_sync =*/ false);
-@@ -1538,24 +1569,28 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
+     }
+ }
+ 
+@@ -1538,24 +1599,28 @@ static void ggml_backend_meta_buffer_set_tensor(ggml_backend_buffer_t buffer, gg
              GGML_ASSERT(size   % chunk_size_full == 0);
              const int64_t i_start =  offset        /chunk_size_full;
              const int64_t i_stop  = (offset + size)/chunk_size_full;
@@ -100,7 +157,7 @@ index ac6d08e..7532255 100644
          case GGML_BACKEND_SPLIT_AXIS_PARTIAL: {
              GGML_ASSERT(tensor->type == GGML_TYPE_F32);
 diff --git a/src/llama-model-loader.cpp b/src/llama-model-loader.cpp
-index 6cc0b20..580b371 100644
+index 6cc0b20..e78ddd7 100644
 --- a/src/llama-model-loader.cpp
 +++ b/src/llama-model-loader.cpp
 @@ -8,6 +8,7 @@
@@ -111,7 +168,7 @@ index 6cc0b20..580b371 100644
  #include <cinttypes>
  #include <cstdint>
  #include <cstring>
-@@ -1603,6 +1604,32 @@ bool llama_model_loader::load_all_data(
+@@ -1603,6 +1604,49 @@ bool llama_model_loader::load_all_data(
              ggml_backend_name(upload_backend));
      }
  
@@ -132,6 +189,23 @@ index 6cc0b20..580b371 100644
 +    int64_t staged_read_us = 0;
 +    int64_t staged_wait_us = 0;
 +    std::atomic<int64_t> staged_copy_us{0};
++    // The weights are read into the same two buffers one after the other (the
++    // largest weight is read first, so they are allocated once): a buffer
++    // allocated for each weight was paged in anew, and reading into pages never
++    // touched before ran at a fifth of the speed of reading into pages already
++    // touched (0.33-0.49 against 2.6-2.9 GB/s in 512 MiB pieces from memory;
++    // 0.6 GB/s from Lustre on LUMI-G, Qwen3-235B's 132 GiB in 221 s). Declared
++    // before the copy that may still read one of them, so they outlive it.
++    std::vector<no_init<uint8_t>> staged_bufs[2];
++    size_t staged_next = 0;
++    auto staged_buf = [&](size_t n_size) -> no_init<uint8_t> * {
++        std::vector<no_init<uint8_t>> & buf = staged_bufs[staged_next];
++        staged_next = overlap ? staged_next ^ 1 : 0;
++        if (buf.size() < n_size) {
++            buf = std::vector<no_init<uint8_t>>(n_size);
++        }
++        return buf.data();
++    };
 +    std::future<void> staged_pending;
 +    auto staged_finish = [&]() {
 +        if (staged_pending.valid()) {
@@ -144,15 +218,16 @@ index 6cc0b20..580b371 100644
      std::vector<ggml_tensor *> tensors;
      for (struct ggml_tensor * cur = ggml_get_first_tensor(ctx); cur != NULL; cur = ggml_get_next_tensor(ctx, cur)) {
          tensors.push_back(cur);
-@@ -1733,12 +1760,37 @@ bool llama_model_loader::load_all_data(
+@@ -1733,13 +1777,38 @@ bool llama_model_loader::load_all_data(
                          ++buffer_idx;
                          buffer_idx %= n_buffers;
                      }
 +                } else if (overlap) {
-+                    auto read_buf = std::make_shared<std::vector<no_init<uint8_t>>>(n_size);
++                    // the buffer the copy before last read from, done by now
++                    no_init<uint8_t> * read_buf = staged_buf(n_size);
 +                    int64_t t0 = ggml_time_us();
 +                    file->seek(weight->offs, SEEK_SET);
-+                    file->read_raw(read_buf->data(), n_size);
++                    file->read_raw(read_buf, n_size);
 +                    staged_read_us += ggml_time_us() - t0;
 +                    staged_n++;
 +                    staged_bytes += n_size;
@@ -161,28 +236,33 @@ index 6cc0b20..580b371 100644
 +                    const bool check = check_tensors;
 +                    staged_pending = std::async(std::launch::async, [cur, read_buf, n_size, check, &staged_copy_us] {
 +                        const int64_t t1 = ggml_time_us();
-+                        ggml_backend_tensor_set(cur, read_buf->data(), 0, n_size);
++                        ggml_backend_tensor_set(cur, read_buf, 0, n_size);
 +                        staged_copy_us += ggml_time_us() - t1;
-+                        if (check && !ggml_validate_row_data(cur->type, read_buf->data(), n_size)) {
++                        if (check && !ggml_validate_row_data(cur->type, read_buf, n_size)) {
 +                            throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
 +                        }
 +                    });
                  } else {
-                     // scoped to one tensor so only one staging buffer is alive at a time
-                     std::vector<no_init<uint8_t>> read_buf(n_size);
+-                    // scoped to one tensor so only one staging buffer is alive at a time
+-                    std::vector<no_init<uint8_t>> read_buf(n_size);
++                    no_init<uint8_t> * read_buf = staged_buf(n_size);
 +                    int64_t t0 = ggml_time_us();
                      file->seek(weight->offs, SEEK_SET);
-                     file->read_raw(read_buf.data(), n_size);
+-                    file->read_raw(read_buf.data(), n_size);
+-                    ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
+-                    if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
++                    file->read_raw(read_buf, n_size);
 +                    const int64_t t1 = ggml_time_us();
-                     ggml_backend_tensor_set(cur, read_buf.data(), 0, n_size);
++                    ggml_backend_tensor_set(cur, read_buf, 0, n_size);
 +                    staged_read_us += t1 - t0;
 +                    staged_copy_us += ggml_time_us() - t1;
 +                    staged_n++;
 +                    staged_bytes += n_size;
-                     if (check_tensors && !ggml_validate_row_data(cur->type, read_buf.data(), n_size)) {
++                    if (check_tensors && !ggml_validate_row_data(cur->type, read_buf, n_size)) {
                          throw std::runtime_error(format("tensor '%s' has invalid data", ggml_get_name(cur)));
                      }
-@@ -1748,6 +1800,13 @@ bool llama_model_loader::load_all_data(
+                 }
+@@ -1748,6 +1817,13 @@ bool llama_model_loader::load_all_data(
  
          size_done += n_size;
      }

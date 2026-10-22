@@ -74,6 +74,19 @@
              "cold": true, "extra_args": ["--fit-strict", "--split-mode", "tensor"]},
      "axes": {"env": [{"RUST_LOG": "eullm=info,llama-cpp-2=info"},
                       {"RUST_LOG": "eullm=info,llama-cpp-2=info", "LLAMA_LOAD_OVERLAP": "0"},
-                      {"RUST_LOG": "eullm=info,llama-cpp-2=info", "LLAMA_LOAD_OVERLAP": "0", "GGML_META_SET_THREADS": "0"}]}}
+                      {"RUST_LOG": "eullm=info,llama-cpp-2=info", "LLAMA_LOAD_OVERLAP": "0", "GGML_META_SET_THREADS": "0"}]}},
+    {"name": "load-layer-235b", "priority": 92, "est_s": 1500,
+     "notes": ["The same loads split by layer, in the same job: what a tensor load is measured against."],
+     "set": {"model": "qwen3-235b-a22b-gguf-q4_k_m", "replica_gcds": 4, "batch": 32, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "layer"],
+             "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info"}}},
+    {"name": "load-layer-480b", "priority": 92, "est_s": 1800,
+     "set": {"model": "qwen3-coder-480b-a35b-instruct-gguf-q4_k_m", "batch": 64, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "layer"],
+             "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info"}}},
+    {"name": "load-layer-120b", "priority": 92, "est_s": 900,
+     "set": {"model": "gpt-oss-120b-gguf-mxfp4", "replica_gcds": 2, "batch": 32, "repeats": 1,
+             "cold": true, "extra_args": ["--fit-strict", "--split-mode", "layer"],
+             "env": {"RUST_LOG": "eullm=info,llama-cpp-2=info"}}}
   ]
 }
