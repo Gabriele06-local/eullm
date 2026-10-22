@@ -72,9 +72,54 @@ which the other sites can do the same way.
 
 ## Results
 
-To be filled in from the three summaries: tokens/s per device, the `graphs`
-group's VRAM growth (GiB an hour, on and off) and tokens/s, and the same
-tokens/s per billed GPU-hour.
+At 32 requests, tokens/s on one device and tokens a billed GPU-hour (Q4_K_M,
+f16 KV cache, 4,096-token slots). A billed GPU-hour is one GH200 on JUPITER
+and one A100 on Leonardo, and one MI250X module on LUMI-G: two GCDs, each
+running a server of its own, so a LUMI GPU-hour writes twice a GCD's tokens.
+
+| model | GCD (MI250X) | GH200 | A100 64 GB | a GPU-hour: LUMI-G | JUPITER | Leonardo |
+|---|---:|---:|---:|---:|---:|---:|
+| Qwen3-8B | 948 | 1,480 | 1,072 | 6.8 M | 5.3 M | 3.9 M |
+| Qwen3-32B | 380 | 794 | 498 | 2.7 M | 2.9 M | 1.8 M |
+| Qwen3.6-35B-A3B | 393 | 778 | 575 | 2.8 M | 2.8 M | 2.1 M |
+
+A GH200 writes about twice a GCD's tokens (1.6 times on Qwen3-8B), an A100
+1.1-1.5 times; for what is billed, a LUMI-G GPU-hour writes as much as a
+JUPITER one on the 35B-A3B, 93% of it on the 32B and 1.3 times it on the 8B,
+and 1.3-1.7 times a Leonardo one. Graphs: no server grew on any site with the graphs off, and
+on CUDA not with them on either; on LUMI-G the build has none (below).
+
+### LUMI-G (jobs 23029434-23029440, 21-22-10-2026)
+
+The engine `next21` (`main` of 21-10-2026, built on LUMI without HIP graphs:
+`GGML_HIP_GRAPHS=OFF`), one GCD a point, beside the round `r-next21` on the
+same nodes (`neigh` 1-7: other GCDs of the node busy with other points).
+
+**graphs: the control.** The build has no HIP graphs, so the two points
+differ only in a variable it does not read. Qwen3-32B Q4_K_M, 32 requests,
+90 minutes each:
+
+| `GGML_CUDA_DISABLE_GRAPHS` | tok/s | requests | gsm8k | arc-easy | arc-challenge | VRAM first / peak / last | GiB an hour | died |
+|---|---:|---:|---:|---:|---:|---|---:|---:|
+| unset | 175 | 14,925 | 0.956 | 0.985 | 0.951 | 51.0 / 51.0 / 51.0 GiB | 0.00 | 0 |
+| 1 | 173 | 14,892 | 0.954 | 0.985 | 0.950 | 51.0 / 51.0 / 51.0 GiB | 0.00 | 0 |
+
+Flat, as every server on LUMI-G since the graphs were left out (with them,
+1.3-2.5 GiB an hour until the GCD was full). The accuracy is within 0.004
+of the other sites'.
+
+**speed: tokens/s on one GCD** (three repeats a point, cv under 4%):
+
+| model | 1 | 4 | 16 | 32 | tokens a GPU-hour at 32 (two GCDs) |
+|---|---:|---:|---:|---:|---:|
+| Qwen3-8B | 112 | 226 | 670 | 948 | 6.8 M |
+| Qwen3-32B | 37.7 | 75.7 | 262 | 380 | 2.7 M |
+| Qwen3.6-35B-A3B | 94.1 | 159 | 286 | 393 | 2.8 M |
+
+At one request a GCD writes half a GH200's tokens on Qwen3-8B and the 32B
+(112 against 226, 37.7 against 70) and 44% on the 35B-A3B, and 77-86% of an
+A100's on the dense models: one request is bound by the memory a token
+reads, and a GCD has 1.6 TB/s of it against a GH200's 4.
 
 ### JUPITER Booster (job 2427647, 20-21-10-2026)
 

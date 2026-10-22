@@ -25,7 +25,7 @@ for JOB in "$@"; do
         # The engine's log drops llama.cpp's "load_all_data: " in front of the
         # line; the point's environment (RUST_LOG left out) says which way it
         # loaded.
-        LOADS=$(for f in $(grep -l "weights, .* read into memory and copied" \
+        LOADS=$(for f in $(grep -l "weights, .* read into memory" \
                     "$CAMPAIGN_DIR/results/logs/$JOB"/*.log 2>/dev/null); do
             p=$(basename "$f"); p=${p%.server*}
             env=$("$PY" - "$CAMPAIGN_DIR" "$p.$JOB.json" <<'PY'
@@ -35,7 +35,7 @@ env = json.load(open(paths[0]))["params"].get("env") or {} if paths else {}
 print(" ".join(f"{k}={v}" for k, v in sorted(env.items()) if k != "RUST_LOG") or "-")
 PY
 )
-            grep -h "weights, .* read into memory and copied" "$f" |
+            grep -h "weights, .* read into memory" "$f" |
                 sed -E 's|^.* ([0-9]+ weights, .*waiting for a copy [0-9.]+ s).*$|\1|' |
                 while read -r line; do printf '%s (%s): %s\n' "$p" "$env" "$line"; done
         done)
