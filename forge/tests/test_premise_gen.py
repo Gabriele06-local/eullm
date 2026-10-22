@@ -13,6 +13,7 @@ import pytest
 from eullm_forge.datasets.premise_gen import (
     build_pairs,
     excluded_articles,
+    penalty_of,
     procedibility_of,
     quote_span,
     say,
@@ -281,6 +282,30 @@ def test_a_wrong_maximum_penalty_is_corrected_and_a_right_one_confirmed():
         pos = int(re.search(r"\[(\d)\]", false[n].output).group(1))
         assert re.search(r"«(.+?)»", false[n].output).group(1) in _passage(false[n].instruction,
                                                                             pos)
+
+
+def test_the_first_comma_penalty_is_asked_when_the_article_states_several():
+    based = ("Art. 14. \n \n (Furto). \n \n Chiunque si impossessa della cosa altrui è "
+             "punito con la reclusione da sei mesi a tre anni. \n La pena è della reclusione "
+             "da due a sei anni se il fatto è commesso con violenza.")
+    assert penalty_of(based)[1:5] == (6, "mesi", 3, "anni")
+    assert penalty_of(based)[-1] == ", al primo comma,"
+    assert penalty_of(PENAL[0]["text"])[-1] == ""
+    # The first sentence states two ranges, or none: no range is the base one.
+    assert penalty_of("Art. 15. (Doppia). Chiunque è punito con la reclusione da uno a tre "
+                      "anni o con l'arresto da tre a sei mesi. La pena è della reclusione da "
+                      "due a cinque anni se il fatto è grave.") is None
+    assert penalty_of("Art. 16. (Rinvio). Le pene sono aumentate nei casi seguenti. Si "
+                      "applica la reclusione da uno a tre anni. Si applica la reclusione da "
+                      "due a sei anni se il fatto è grave.") is None
+    pairs = build_pairs(NormIndex([rec("codice_penale", based + FILLER)]), per_code=5,
+                        rng=random.Random(0), true_share=1.0)
+    false = [p for p in pairs if p.kind == "premessa_pena"]
+    true = [p for p in pairs if p.key.startswith("pf-pv")]
+    assert false and true
+    for p in false + true:
+        assert "al primo comma" in p.question and "al primo comma" in p.output
+        assert score_answer(p.output, p.kind, p.keywords) == 1.0
 
 
 def test_the_procedibility_is_read_from_the_article_and_never_from_one_stating_both():
