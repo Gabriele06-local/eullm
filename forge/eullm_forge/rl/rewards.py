@@ -203,6 +203,39 @@ def corrects(answer: str) -> bool:
     return bool(_CORRECTS.search(answer.strip()))
 
 
+# Ways of denying the procedibility the question claims, one per right answer.
+# corrects() alone scored 0 every right answer the 8B gave on 2026-10-22: "il
+# reato non è procedibile d'ufficio, ma richiede la querela", "la querela è
+# necessaria". "non serve la querela" must not read as "serve la querela".
+_NOT_UFFICIO = re.compile(
+    r"non (?:(?:è|e'|sia) )?(?:procedibil|perseguibil)[ei] d'ufficio|non si procede d'ufficio"
+    r"|(?<!non )(?:è|e') (?:necessari|richiest|indispensabil)[ao] (?:la )?querela"
+    r"|querela (?:della persona offesa )?(?:è|e') (?:necessari|richiest|indispensabil)"
+    r"|(?<!non )(?:richiede|serve|occorre|necessita(?: di)?) (?:la |una )?querela"
+    r"|(?:solo|soltanto|esclusivamente) (?:a|su|con) querela",
+    re.IGNORECASE)
+_NOT_QUERELA = re.compile(
+    r"non (?:(?:è|e') )?(?:necessari|richiest|indispensabil)[ao] (?:la )?querela"
+    r"|querela (?:della persona offesa )?non (?:è|e') (?:necessari|richiest|indispensabil)"
+    r"|non (?:serve|occorre|richiede|necessita(?: di)?) (?:la |una |alcuna )?querela"
+    r"|non (?:(?:è|e'|sia) )?(?:procedibil|perseguibil|punibil)[ei] (?:solo |soltanto )?a querela"
+    r"|non si procede (?:solo |soltanto )?a querela"
+    r"|senza (?:bisogno (?:di|della) |necessità (?:di|della) |che serva |la )?querela"
+    r"|indipendentemente dalla querela",
+    re.IGNORECASE)
+
+
+def corrects_procedibility(answer: str, right: str) -> bool:
+    """Whether the answer denies the procedibility the question claims.
+
+    ``right`` is the article's ("querela" or "d'ufficio"): the question
+    claimed the other one. A plain correction ("errata", "no") counts too.
+    """
+    text = answer.replace("’", "'")
+    denial = _NOT_UFFICIO if right == "querela" else _NOT_QUERELA
+    return corrects(answer) or bool(denial.search(text))
+
+
 def _said(keyword: str, answer: str) -> bool:
     """Whether the answer says the keyword, apostrophes either way."""
     return keyword.replace("’", "'").lower() in answer.replace("’", "'").lower()
@@ -225,8 +258,9 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
         return 1.0 if (corrects(answer) and not refuses(answer) and wanted
                        and all(w in named for w in wanted) and len(named) <= 4) else 0.0
     if tipo == "premessa_procedibilita":
-        return 1.0 if (corrects(answer) and not refuses(answer)
-                       and all(_said(kw, answer) for kw in keywords or [])) else 0.0
+        return 1.0 if (keywords and corrects_procedibility(answer, keywords[0])
+                       and not refuses(answer)
+                       and all(_said(kw, answer) for kw in keywords)) else 0.0
     if tipo == "premessa_vera":
         # Only a denial of the premise itself: a contrast inside a confirmation
         # ("60 giorni, non 30"; "non è prevista alcuna proroga, il termine è 60")

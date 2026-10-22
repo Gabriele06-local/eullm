@@ -1,0 +1,507 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EuLLM Decision Desk</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #12151b;
+    --line: #262b35;
+    --text: #e6e8eb;
+    --muted: #9aa3ad;
+    --bar: #3b4452;
+    --find: #60a5fa;
+    --decide: #c084fc;
+    --rule: #facc15;
+    --write: #4ade80;
+    --reply: #4ade80;
+    --person: #fb923c;
+    --quarantine: #f87171;
+    --spam: #94a3b8;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 1280px; margin: 0 auto; padding: 18px 16px 40px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+  h1 { margin: 0; font-size: 24px; font-weight: 700; letter-spacing: 0.2px; }
+  h1 span { color: var(--muted); font-weight: 500; }
+  .sub { color: var(--muted); margin: 4px 0 0; }
+  .local { font-size: 13px; font-weight: 650; color: var(--reply); border: 1px solid rgba(74, 222, 128, 0.5); border-radius: 999px; padding: 3px 12px; white-space: nowrap; }
+  .models { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+  @media (max-width: 760px) { .models { grid-template-columns: minmax(0, 1fr); } }
+  .model { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; display: grid; grid-template-columns: auto 1fr; gap: 0 10px; align-items: center; }
+  .model .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--bar); grid-row: 1 / 3; }
+  .model .dot.ok { background: var(--reply); box-shadow: 0 0 10px rgba(74, 222, 128, 0.6); }
+  .model .dot.wait { background: var(--rule); animation: pulse 1s infinite; }
+  .model .dot.bad { background: var(--quarantine); }
+  .model b { font-size: 14px; }
+  .model small { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .role { font-size: 11px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; margin-right: 6px; }
+  .stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-bottom: 16px; }
+  @media (max-width: 760px) { .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; text-align: center; }
+  .stat .v { font-size: 28px; font-weight: 750; font-variant-numeric: tabular-nums; line-height: 1.15; }
+  .stat .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
+  main { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 16px; align-items: start; }
+  @media (max-width: 920px) { main { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .panel + .panel { margin-top: 12px; }
+  h2 { margin: 0 0 10px; font-size: 12px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  button { font: inherit; color: var(--text); background: #222834; border: 1px solid var(--line); border-radius: 10px; padding: 7px 14px; cursor: pointer; }
+  button:hover { background: #2a3140; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button.primary { background: var(--reply); color: #062b14; border-color: var(--reply); font-weight: 700; }
+  button:focus-visible, .mail:focus-visible { outline: 2px solid var(--find); outline-offset: 2px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .inbox { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
+  .mail { text-align: left; display: grid; grid-template-columns: 30px minmax(0, 1fr) auto; gap: 2px 8px; align-items: center; padding: 8px 10px; border-radius: 10px; background: var(--panel-2); border: 1px solid transparent; }
+  .mail.current { border-color: var(--find); }
+  .mail .lang { font-size: 11px; font-weight: 750; color: var(--muted); grid-row: 1 / 3; text-align: center; border: 1px solid var(--line); border-radius: 6px; padding: 2px 0; }
+  .mail .subj { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 600; font-size: 14px; }
+  .mail .who { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-size: 12px; grid-column: 2; }
+  .mail .badge { grid-row: 1 / 3; grid-column: 3; }
+  .badge { font-size: 11px; font-weight: 750; text-transform: uppercase; letter-spacing: 0.4px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+  .badge.reply { background: rgba(74, 222, 128, 0.15); color: var(--reply); }
+  .badge.person { background: rgba(251, 146, 60, 0.15); color: var(--person); }
+  .badge.quarantine { background: rgba(248, 113, 113, 0.15); color: var(--quarantine); }
+  .badge.spam { background: rgba(148, 163, 184, 0.15); color: var(--spam); }
+  .badge.busy { background: rgba(96, 165, 250, 0.15); color: var(--find); animation: pulse 1s infinite; }
+  textarea, input[type=text] { width: 100%; font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+  textarea { min-height: 110px; resize: vertical; }
+  .compose { display: none; margin-top: 10px; gap: 8px; flex-direction: column; }
+  .compose.show { display: flex; }
+  .email-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 10px; font-size: 14px; }
+  .email-head span:nth-child(odd) { color: var(--muted); }
+  .email-body { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); white-space: pre-wrap; }
+  .empty { color: var(--muted); font-size: 14px; }
+  .steps { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+  @media (max-width: 1100px) { .steps { grid-template-columns: minmax(0, 1fr); } }
+  .step { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; border-top: 3px solid var(--line); transition: border-color 200ms, opacity 200ms; min-height: 120px; }
+  .step.idle { opacity: 0.55; }
+  .step.active { animation: glow 1.2s infinite; }
+  .step.skipped { opacity: 0.75; }
+  .step[data-s=find].on { border-top-color: var(--find); }
+  .step[data-s=decide].on { border-top-color: var(--decide); }
+  .step[data-s=rule].on { border-top-color: var(--rule); }
+  .step[data-s=write].on { border-top-color: var(--write); }
+  .step h3 { margin: 0 0 8px; font-size: 13px; letter-spacing: 0.4px; display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .step h3 .n { font-weight: 800; text-transform: uppercase; }
+  .step[data-s=find] .n { color: var(--find); }
+  .step[data-s=decide] .n { color: var(--decide); }
+  .step[data-s=rule] .n { color: var(--rule); }
+  .step[data-s=write] .n { color: var(--write); }
+  .step h3 .t { color: var(--muted); font-weight: 500; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .ms { font-variant-numeric: tabular-nums; font-weight: 750; color: var(--text); }
+  .passage { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .passage:last-child { border-bottom: none; }
+  .passage .top { display: grid; grid-template-columns: 22px minmax(0, 1fr) 46px; gap: 8px; align-items: center; font-size: 13px; }
+  .passage .txt { color: var(--muted); font-size: 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; margin-left: 30px; }
+  .bar { height: 7px; background: #20252e; border-radius: 99px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--bar); border-radius: 99px; transition: width 300ms ease-out; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-size: 13px; }
+  .q { padding: 6px 0; }
+  .q + .q { border-top: 1px solid var(--line); }
+  .q .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .opt { display: grid; grid-template-columns: 112px minmax(0, 1fr) 42px; gap: 8px; align-items: center; font-size: 13px; }
+  .opt .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+  .opt.chosen .name { color: var(--text); font-weight: 650; }
+  .opt.chosen .bar > i { background: var(--decide); }
+  .passage .bar > i { background: var(--find); }
+  .verdict { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+  .verdict .big { font-size: 22px; font-weight: 800; }
+  .verdict .big.reply { color: var(--reply); }
+  .verdict .big.person { color: var(--person); }
+  .verdict .big.quarantine { color: var(--quarantine); }
+  .verdict .big.spam { color: var(--spam); }
+  .why { margin-top: 8px; font-size: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .chip { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: #222834; color: var(--muted); }
+  .chip.warn { background: rgba(251, 146, 60, 0.15); color: var(--person); }
+  .chip.high { background: rgba(248, 113, 113, 0.15); color: var(--quarantine); }
+  details { margin-top: 10px; font-size: 13px; color: var(--muted); }
+  details pre { white-space: pre-wrap; margin: 6px 0 0; font-size: 12px; }
+  .draft { white-space: pre-wrap; font-size: 14px; line-height: 1.5; min-height: 4em; }
+  .draft.writing::after { content: "▍"; color: var(--write); animation: blink 0.8s steps(1) infinite; }
+  .saved { font-size: 15px; }
+  .saved b { color: var(--reply); font-size: 22px; display: block; }
+  .meta { margin-top: 8px; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #audit-file { text-transform: none; letter-spacing: 0; font-weight: 500; }
+  .audit pre { margin: 0; padding: 10px 12px; border-radius: 10px; background: var(--panel-2); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; word-break: break-all; color: #cbd5e1; }
+  .error { display: none; margin-top: 12px; padding: 10px 12px; border-radius: 10px; background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.4); color: #fecaca; font-size: 14px; }
+  .error.show { display: block; }
+  footer { margin-top: 18px; color: var(--muted); font-size: 12px; text-align: center; }
+  @keyframes pulse { 50% { opacity: 0.45; } }
+  @keyframes blink { 50% { opacity: 0; } }
+  @keyframes glow { 50% { box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.25), 0 0 18px rgba(148, 163, 184, 0.12); } }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <h1>EuLLM <span>Decision Desk</span></h1>
+      <p class="sub" id="tagline">Three local models on one server: one finds, one decides, one writes — and writes only when it should.</p>
+    </div>
+    <span class="local">● all local · nothing leaves this machine</span>
+  </header>
+
+  <section class="models" aria-label="Models">
+    <div class="model"><span class="dot" id="dot-embedding"></span><b><span class="role" style="color:var(--find)">Finds</span><span id="name-embedding">embedding model</span></b><small id="state-embedding">…</small></div>
+    <div class="model"><span class="dot" id="dot-decision"></span><b><span class="role" style="color:var(--decide)">Decides</span><span id="name-decision">decision model</span></b><small id="state-decision">…</small></div>
+    <div class="model"><span class="dot" id="dot-chat"></span><b><span class="role" style="color:var(--write)">Writes</span><span id="name-chat">chat model</span></b><small id="state-chat">…</small></div>
+  </section>
+
+  <section class="stats" aria-label="Totals">
+    <div class="stat"><div class="v" id="s-emails">0</div><div class="k">emails handled</div></div>
+    <div class="stat"><div class="v" id="s-decision">–</div><div class="k">median decision</div></div>
+    <div class="stat"><div class="v" id="s-written">0</div><div class="k">drafts written</div></div>
+    <div class="stat"><div class="v" id="s-avoided">0</div><div class="k">generations avoided</div></div>
+    <div class="stat"><div class="v" id="s-tokens">0</div><div class="k">tokens written</div></div>
+  </section>
+
+  <main>
+    <aside>
+      <div class="panel">
+        <h2><span>Inbox · <span id="company">—</span></span><span id="inbox-count"></span></h2>
+        <div class="row">
+          <button class="primary" id="run-all">▶ Run the inbox</button>
+          <button id="stop" disabled>■ Stop</button>
+          <button id="compose-btn">✎ Write one</button>
+        </div>
+        <form class="compose" id="compose">
+          <input type="text" id="c-from" placeholder="From" value="You <you@example.eu>" aria-label="From">
+          <input type="text" id="c-subject" placeholder="Subject" aria-label="Subject">
+          <textarea id="c-body" placeholder="Write an email in any language: a complaint, a question, a phishing attempt…" aria-label="Text"></textarea>
+          <div class="row"><button class="primary" type="submit">Send to the desk</button><button type="button" id="c-cancel">Cancel</button></div>
+        </form>
+        <div class="inbox" id="inbox"></div>
+      </div>
+    </aside>
+
+    <section>
+      <div class="panel" id="email-panel">
+        <h2><span>The email</span><span id="total-ms"></span></h2>
+        <div id="email"><p class="empty">Pick an email from the inbox, or press “Run the inbox”.</p></div>
+        <div class="error" id="error"></div>
+      </div>
+
+      <div class="steps">
+        <div class="step idle" data-s="find">
+          <h3><span class="n">1 · Find</span><span class="t" id="t-find"></span></h3>
+          <div id="find"><p class="empty">The embedding model ranks the shop's policies by how close they are to the email.</p></div>
+        </div>
+        <div class="step idle" data-s="decide">
+          <h3><span class="n">2 · Decide</span><span class="t" id="t-decide"></span></h3>
+          <div id="decide"><p class="empty">The decision model answers five questions at once, with probabilities. Nothing is generated.</p></div>
+        </div>
+        <div class="step idle" data-s="rule">
+          <h3><span class="n">3 · Rule</span><span class="t" id="t-rule">plain code</span></h3>
+          <div id="rule"><p class="empty">Code acts on the probabilities: set aside, hand to a person, or draft a reply.</p></div>
+          <details><summary>The rules</summary><pre id="rules"></pre></details>
+        </div>
+        <div class="step idle" data-s="write">
+          <h3><span class="n">4 · Write</span><span class="t" id="t-write"></span></h3>
+          <div id="write"><p class="empty">Only then the chat model drafts the reply, in the customer's language, from the passages found.</p></div>
+        </div>
+      </div>
+
+      <div class="panel audit" style="margin-top:12px">
+        <h2><span>Audit trail</span><span id="audit-file"></span></h2>
+        <pre id="audit">The lines EuLLM writes for each email appear here — the email itself only as a SHA-256.</pre>
+      </div>
+    </section>
+  </main>
+  <footer>EuLLM · the page and the models run on your machine · <span id="server"></span></footer>
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+
+// A DOM element from a tag, attributes and children; text is always text.
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (k === "class") el.className = v;
+    else if (k === "style") el.style.cssText = v;
+    else el.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c == null) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+const pct = (p) => `${Math.round(p * 100)}%`;
+const ms = (v) => v == null ? "–" : v >= 1000 ? `${(v / 1000).toFixed(1)} s` : `${Math.round(v)} ms`;
+const median = (xs) => { const s = [...xs].sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const ACTION_NAMES = { reply: "Reply drafted", person: "To a person", quarantine: "Quarantined", spam: "Spam" };
+const SHORT = { reply: "reply", person: "person", quarantine: "phishing", spam: "spam" };
+
+let status = null;
+let samples = [];
+const totals = { emails: 0, decisions: [], written: 0, avoided: 0, tokens: 0 };
+let running = false;   // an email is being handled
+let autoplay = false;  // "Run the inbox" is going through the samples
+let controller = null;
+
+function bar(p, cls) {
+  const i = h("i");
+  requestAnimationFrame(() => { i.style.width = pct(Math.max(0, Math.min(1, p))); });
+  return h("div", { class: "bar" + (cls ? " " + cls : "") }, i);
+}
+
+function setStep(name, state) {
+  const el = document.querySelector(`.step[data-s=${name}]`);
+  el.classList.remove("idle", "active", "skipped");
+  el.classList.toggle("on", state !== "idle");
+  if (state !== "done") el.classList.add(state);
+}
+
+function showTotals() {
+  $("s-emails").textContent = totals.emails;
+  $("s-decision").textContent = totals.decisions.length ? ms(median(totals.decisions)) : "–";
+  $("s-written").textContent = totals.written;
+  $("s-avoided").textContent = totals.avoided;
+  $("s-tokens").textContent = totals.tokens.toLocaleString();
+}
+
+function modelState(key, m, warm) {
+  const dot = $("dot-" + key), state = $("state-" + key);
+  $("name-" + key).textContent = m.name || (key === "decision" ? "not loaded" : "–");
+  dot.className = "dot";
+  if (!status || status.error) { dot.classList.add("bad"); state.textContent = "server not reachable"; return; }
+  if (m.loaded) { dot.classList.add("ok"); state.textContent = key === "chat" ? "loaded" : "loaded, resident"; return; }
+  if (key === "decision") { dot.classList.add("bad"); state.textContent = "start eullm serve with --decision-model"; return; }
+  if (key === "chat" && warm.chat === "failed") { dot.classList.add("bad"); state.textContent = warm.error || "failed to load"; return; }
+  dot.classList.add("wait");
+  state.textContent = key === "chat" ? "loading…" : "loads on the first email";
+}
+
+async function refreshStatus() {
+  try {
+    const r = await fetch("/api/status");
+    status = await r.json();
+  } catch (e) {
+    status = { error: "the desk is not running", models: { embedding: {}, decision: {}, chat: {} }, warmup: {} };
+  }
+  for (const key of ["embedding", "decision", "chat"]) modelState(key, status.models[key] || {}, status.warmup || {});
+  $("server").textContent = status.error ? status.error : `EuLLM ${status.server} at ${status.url}`;
+  if (status.samples && !samples.length) {
+    samples = status.samples.map((s) => ({ ...s, result: null }));
+    $("company").textContent = status.company;
+    const r = status.rules;
+    $("rules").textContent =
+      `phishing ≥ ${r.quarantine}            → quarantine, nothing generated\n` +
+      `spam ≥ ${r.quarantine}                → spam, nothing generated\n` +
+      `health ≥ ${r.threshold}               → a person (GDPR art. 9)\n` +
+      `team = legal                → a person\n` +
+      `P(team) < ${r.min_team}              → a person\n` +
+      `otherwise                   → the chat model drafts the reply\n` +
+      `urgent ≥ ${r.threshold} or mood ≥ angry  → high priority\n` +
+      `IBAN, card, tax code        → found by checksum, by code`;
+    drawInbox();
+  }
+  $("audit-file").textContent = status.audit_file || "";
+  const ready = status.models && status.models.decision.loaded && status.models.chat.loaded && status.models.embedding.loaded;
+  setTimeout(refreshStatus, ready ? 15000 : 2000);
+}
+
+function drawInbox(current) {
+  const list = $("inbox");
+  list.replaceChildren(...samples.map((s, i) => {
+    const res = s.result;
+    const badge = res ? h("span", { class: "badge " + res }, SHORT[res]) : s.busy ? h("span", { class: "badge busy" }, "…") : null;
+    const el = h("button", { class: "mail" + (i === current ? " current" : ""), type: "button", title: s.subject },
+      h("span", { class: "lang" }, s.lang || "··"),
+      h("span", { class: "subj" }, s.subject),
+      h("span", { class: "who" }, s.from),
+      badge);
+    el.addEventListener("click", () => {
+      if (running || autoplay) return;
+      // On a phone the steps are below the inbox: bring them into view.
+      if (window.matchMedia("(max-width: 920px)").matches) $("email-panel").scrollIntoView({ behavior: "smooth" });
+      handle(i);
+    });
+    return el;
+  }));
+  $("inbox-count").textContent = `${samples.filter((s) => s.result).length}/${samples.length}`;
+}
+
+function resetSteps() {
+  for (const s of ["find", "decide", "rule", "write"]) { setStep(s, "idle"); $(s).replaceChildren(); $("t-" + s).textContent = ""; }
+  $("t-rule").textContent = "plain code";
+  $("total-ms").textContent = "";
+  $("error").classList.remove("show");
+  $("audit").textContent = "…";
+}
+
+function showEmail(mail) {
+  $("email").replaceChildren(
+    h("div", { class: "email-head" }, h("span", {}, "From"), h("span", {}, mail.from), h("span", {}, "Subject"), h("b", {}, mail.subject)),
+    h("div", { class: "email-body" }, mail.body));
+}
+
+const handlers = {
+  start(e) { showEmail(e.email); setStep("find", "active"); },
+  find(e) {
+    setStep("find", "done");
+    $("t-find").replaceChildren(e.model + " · ", h("span", { class: "ms" }, ms(e.ms)));
+    $("find").replaceChildren(...e.passages.map((p, n) => h("div", { class: "passage" },
+      h("div", { class: "top" }, h("b", {}, `[${n + 1}]`), h("span", {}, p.title), h("span", { class: "num" }, p.score.toFixed(2))),
+      bar(p.score),
+      h("div", { class: "txt" }, p.text))));
+    setStep("decide", "active");
+  },
+  decide(e) {
+    setStep("decide", "done");
+    totals.decisions.push(e.ms);
+    $("t-decide").replaceChildren((e.model || "") + " · ", h("span", { class: "ms" }, ms(e.ms)));
+    $("decide").replaceChildren(...e.questions.map((q) => h("div", { class: "q" },
+      h("div", { class: "label" }, q.label),
+      ...q.options.slice(0, 3).map((o) => h("div", { class: "opt" + (o.chosen ? " chosen" : "") },
+        h("span", { class: "name" }, (status.teams && status.teams[o.name]) || o.name), bar(o.p), h("span", { class: "num" }, pct(o.p)))))));
+    setStep("rule", "active");
+  },
+  rule(e) {
+    setStep("rule", "done");
+    const chips = [];
+    if (e.team && e.action !== "reply") chips.push(h("span", { class: "chip" }, `team: ${e.team_label}`));
+    if (e.priority === "high") chips.push(h("span", { class: "chip high" }, "high priority"));
+    for (const f of e.flags) chips.push(h("span", { class: "chip warn" }, `⚠ ${f}`));
+    $("rule").replaceChildren(
+      h("div", { class: "verdict" }, h("span", { class: "big " + e.action }, e.action === "reply" ? `→ ${e.team_label}` : ACTION_NAMES[e.action])),
+      h("div", { class: "why" }, e.rule),
+      h("div", { class: "chips" }, chips));
+    current().result = e.action;
+    drawInbox(currentIndex);
+  },
+  write(e) {
+    setStep("write", "active");
+    $("t-write").textContent = e.model + " · writing";
+    $("write").replaceChildren(h("div", { class: "draft writing", id: "draft" }));
+  },
+  token(e) { $("draft").append(e.text); },
+  written(e) {
+    setStep("write", "done");
+    $("draft").classList.remove("writing");
+    totals.written += 1;
+    totals.tokens += e.tokens;
+    $("t-write").replaceChildren(e.model + " · ", h("span", { class: "ms" }, ms(e.ms)));
+    $("write").append(h("div", { class: "meta" },
+      `${e.tokens} tokens · first token ${ms(e.first_token_ms)}` + (e.tokens_per_s ? ` · ${e.tokens_per_s.toFixed(1)} tokens/s` : "")));
+  },
+  skip(e) {
+    setStep("write", "skipped");
+    totals.avoided += 1;
+    $("t-write").textContent = "not called";
+    $("write").replaceChildren(h("div", { class: "saved" }, h("b", {}, "0 tokens"), "The chat model was not called: ", e.why, "."));
+  },
+  audit(e) {
+    $("audit").textContent = e.lines && e.lines.length
+      ? e.lines.map((l) => JSON.stringify(l)).join("\n")
+      : e.file ? "No new line found in " + e.file : "The audit trail is on the server's machine (~/.eullm/audit/audit.jsonl).";
+  },
+  done(e) {
+    totals.emails += 1;
+    $("total-ms").textContent = "whole email " + ms(e.ms);
+    showTotals();
+  },
+  error(e) {
+    $("error").textContent = e.message;
+    $("error").classList.add("show");
+    for (const s of document.querySelectorAll(".step.active")) s.classList.remove("active");
+  },
+};
+
+let currentIndex = null;
+const current = () => samples[currentIndex];
+
+async function handle(index) {
+  running = true;
+  currentIndex = index;
+  const s = samples[index];
+  s.busy = true;
+  drawInbox(index);
+  resetSteps();
+  const request = s.custom ? { email: { from: s.from, subject: s.subject, body: s.body } } : { sample: s.id };
+  controller = new AbortController();
+  let failed = false;
+  try {
+    const r = await fetch("/api/process", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request), signal: controller.signal });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, i);
+        buffer = buffer.slice(i + 1);
+        if (!line.trim()) continue;
+        const event = JSON.parse(line);
+        if (event.stage === "error") failed = true;
+        (handlers[event.stage] || (() => {}))(event);
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") { handlers.error({ message: String(e.message || e) }); failed = true; }
+  } finally {
+    s.busy = false;
+    running = false;
+    drawInbox(index);
+  }
+  return !failed;
+}
+
+async function runAll() {
+  autoplay = true;
+  $("run-all").disabled = true;
+  $("stop").disabled = false;
+  for (let i = 0; i < samples.length && autoplay; i++) {
+    if (samples[i].result) continue;
+    const ok = await handle(i);
+    if (!ok) break;
+    // A moment to read the result, unless this was the last email.
+    if (samples.slice(i + 1).some((s) => !s.result)) await new Promise((r) => setTimeout(r, 1800));
+  }
+  autoplay = false;
+  $("run-all").disabled = false;
+  $("stop").disabled = true;
+  if (samples.every((s) => s.result)) $("run-all").textContent = "▶ Run it again";
+}
+
+$("run-all").addEventListener("click", () => {
+  if (running) return;
+  if (samples.length && samples.every((s) => s.result)) for (const s of samples) s.result = null;
+  runAll();
+});
+$("stop").addEventListener("click", () => { autoplay = false; if (controller) controller.abort(); });
+$("compose-btn").addEventListener("click", () => { $("compose").classList.toggle("show"); $("c-subject").focus(); });
+$("c-cancel").addEventListener("click", () => $("compose").classList.remove("show"));
+$("compose").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (running || autoplay || !$("c-body").value.trim()) return;
+  samples.unshift({ id: "custom-" + Date.now(), custom: true, lang: "✎", from: $("c-from").value, subject: $("c-subject").value || "(no subject)", body: $("c-body").value, result: null });
+  $("compose").classList.remove("show");
+  $("c-subject").value = ""; $("c-body").value = "";
+  handle(0);
+});
+
+refreshStatus();
+</script>
+</body>
+</html>

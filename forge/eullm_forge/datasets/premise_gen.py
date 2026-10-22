@@ -99,22 +99,28 @@ INESISTENTE = [
     "Come si applica in concreto l'art. {n} {of}?",
 ]
 PENA_Q = [
-    "Mi confermi che l'art. {n} {of} punisce il fatto con la {pena} da {lo} a {hi}?",
-    "L'art. {n} {of} prevede la {pena} fino a {hi}: è questo il massimo che si rischia?",
+    "Mi confermi che l'art. {n} {of}{comma} punisce il fatto con la {pena} da {lo} a {hi}?",
+    "L'art. {n} {of}{comma} prevede la {pena} fino a {hi}: è questo il massimo che si rischia?",
+]
+# The same, naming the offence by its heading instead of the article: people
+# ask about "il furto", not "l'art. 624", and so do the outside tests the
+# numbered questions did not move (2026-10-22).
+PENA_NAMED_Q = [
+    "Mi confermi che per il reato di {name}{base} la pena è la {pena} da {lo} a {hi}?",
+    "Per il reato di {name}{base} è prevista la {pena} fino a {hi}: è questo il massimo che "
+    "si rischia?",
 ]
 # The procedibility as the article states it, and the question that gets it
-# wrong (false) or right (true).
+# wrong (false) or right (true). {reato} is "il reato previsto dall'art. ..."
+# or "il reato di <heading>".
 PROC = {
     "querela": ("a querela della persona offesa",
-                ["Il reato previsto dall'art. {n} {of} è procedibile d'ufficio, giusto?",
-                 "Per il reato dell'art. {n} {of} non serve la querela della persona offesa, "
-                 "vero?"],
-                ["Il reato previsto dall'art. {n} {of} è procedibile a querela della persona "
-                 "offesa?"]),
+                ["{Reato} è procedibile d'ufficio, giusto?",
+                 "Per {reato} non serve la querela della persona offesa, vero?"],
+                ["{Reato} è procedibile a querela della persona offesa?"]),
     "d'ufficio": ("d'ufficio",
-                  ["Il reato previsto dall'art. {n} {of} è procedibile solo a querela della "
-                   "persona offesa, giusto?"],
-                  ["Il reato previsto dall'art. {n} {of} è procedibile d'ufficio?"]),
+                  ["{Reato} è procedibile solo a querela della persona offesa, giusto?"],
+                  ["{Reato} è procedibile d'ufficio?"]),
 }
 ABROGATO = [
     "Che cosa prevede oggi l'art. {n} {of}?",
@@ -173,6 +179,26 @@ def shown(records: list[dict], max_chars: int = 3000) -> list[str]:
     return [_flat(r.get("text", "")[:max_chars]) for r in records]
 
 
+def retrieved_articles(index, items, k: int = 3) -> set[tuple[str, str]]:
+    """(code, article) of what retrieval returns for each item without our metadata.
+
+    An outside set's question may name the offence and no article ("le
+    lesioni aggravate"): the articles it is about are then the ones its
+    question retrieves, and those are left out too. Our own exams record
+    theirs, and retrieving for thousands of them would leave out far more
+    than they are about.
+    """
+    out = set()
+    for it in items:
+        md = it.metadata if hasattr(it, "metadata") else it.get("metadata", {})
+        if (md.get("code") and md.get("articolo")) or md.get("gruppo"):
+            continue
+        question = it.question if hasattr(it, "question") else it.get("question", "")
+        for r in index.search(question, k):
+            out.update((r.get("code"), n) for n in index.articles_of(r))
+    return out
+
+
 def wrong_deadline(n: int, unit: str, stated: set[tuple[int, str]],
                    rng: random.Random) -> int | None:
     """A usual deadline of the same unit that the article does not state."""
@@ -193,6 +219,10 @@ def excluded_articles(items) -> set[tuple[str, str]]:
         md = it.metadata if hasattr(it, "metadata") else it.get("metadata", {})
         if md.get("code") and md.get("articolo"):
             out.add((md["code"], str(md["articolo"])))
+        # An outside set may say the article only where it records its source.
+        for said in (md.get("source"), md.get("false_element")):
+            if isinstance(said, str) and (c := named_code(said)):
+                out.update((c, n) for n in named_articles(said))
         for ref in md.get("gruppo") or []:
             c, _, a = str(ref).partition(":")
             if c and a:
@@ -245,19 +275,44 @@ def _vera_answer(fmt: str, n: str, of: str, right: str, pos: int, quote: str) ->
 # are taken out first.
 _PENA = re.compile(r"\b(reclusione|arresto)\s+da\s+([a-z0-9]+)(?:\s+(giorni|mesi|anni))?\s+a\s+"
                    r"([a-z0-9]+)\s+(giorni|mesi|anni)\b", re.IGNORECASE)
-_QUERELA = re.compile(r"\bsi procede a querela\b|\bpunibil[ei] a querela\b|"
-                      r"\ba querela della persona offesa\b", re.IGNORECASE)
-_UFFICIO = re.compile(r"\bsi procede d['’]ufficio\b", re.IGNORECASE)
+# Words may sit in between: art. 624 c.p. reads "Il delitto è punibile a
+# querela della persona offesa. Si procede, tuttavia, d'ufficio [se ...]",
+# and the first version, knowing only "si procede d'ufficio", took it for
+# querela alone. An article naming the other procedibility anywhere is left out.
+_QUERELA = re.compile(r"\b(?:si procede|punibil[ei]|procedibil[ei]|perseguibil[ei])\b[^.;]{0,40}?"
+                      r"\ba querela\b|\ba querela della persona offesa\b", re.IGNORECASE)
+_UFFICIO = re.compile(r"\b(?:si procede|procedibil[ei]|perseguibil[ei])\b[^.;]{0,40}?"
+                      r"\bd['’]ufficio\b", re.IGNORECASE)
+_ANY_UFFICIO = re.compile(r"\bd['’]ufficio\b", re.IGNORECASE)
+
+
+def _opening(flat: str) -> str:
+    """The article's first sentence after its number and heading."""
+    body = re.sub(r"^\s*Art\.?\s*\d+[\w-]*\.?\s*(?:\([^)]*\)\.?\s*)?", "", flat)
+    return next((st.strip() for _, st in _sentences(body) if st.strip()), "")
 
 
 def penalty_of(text: str):
-    """(kind, low, low unit, high, unit, sentence) of an article stating one
-    penalty range, or None."""
+    """(kind, low, low unit, high, unit, sentence, comma) of the penalty range
+    an article states, or None.
+
+    One range only, or the first of several when the article's first sentence
+    states it alone: the base offence of the first comma ("Chiunque ... è
+    punito con la reclusione da sei mesi a tre anni"), the later ranges being
+    its aggravated or lesser forms. That one is asked about "al primo comma"
+    (``comma``), the only form the question can name without ambiguity. One
+    range alone gave 44 questions over the whole penal code.
+    """
     flat = _flat(text.replace("((", " ").replace("))", " "))
     found = list(_PENA.finditer(flat))
-    if len(found) != 1:
+    if not found:
         return None
-    m = found[0]
+    m, comma = found[0], ""
+    if len(found) > 1:
+        opening = _opening(flat)
+        if len(_PENA.findall(opening)) != 1 or m.group(0) not in opening:
+            return None
+        comma = ", al primo comma,"
     lo, hi = number_of(m.group(2).lower()), number_of(m.group(4).lower())
     if not lo or not hi:
         return None
@@ -265,14 +320,36 @@ def penalty_of(text: str):
     lo_unit = DEADLINE_UNITS[m.group(3).lower()] if m.group(3) else unit
     sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
                     flat[max(0, m.start() - 150):m.end() + 50])
-    return m.group(1).lower(), lo, lo_unit, hi, unit, sentence
+    return m.group(1).lower(), lo, lo_unit, hi, unit, sentence, comma
+
+
+# The heading after the number: "Art. 624. (Furto).", Normattiva's (( )) marks
+# made plain. Not every heading names an offence: the general and procedural
+# ones are left out.
+_HEADING = re.compile(r"^\s*Art\.?\s*[\w-]+\.?\s*\(([^()]{3,70})\)")
+_NOT_AN_OFFENCE = re.compile(
+    r"^(?:circostanz|disposizion|pen[ae]\b|casi\b|effett|applicazion|norm[ae]\b|definizion|"
+    r"caus[ae]\b|misur|confisca|estinzion|querela|procedibilit|aument|diminu|concorso|"
+    r"reati?\b|delitti?\b|contravvenzion|sanzion|pubblicazion|interdizion|sospension|"
+    r"limit|ambito|abrogat|modific|articol)", re.IGNORECASE)
+
+
+def offence_name(text: str) -> str | None:
+    """The offence the article's heading names, as a question says it, or None."""
+    m = _HEADING.match(_flat(text.replace("((", "(").replace("))", ")")))
+    if not m:
+        return None
+    name = m.group(1).strip(" .")
+    if _NOT_AN_OFFENCE.match(name) or not name[:1].isalpha():
+        return None
+    return name[0].lower() + name[1:]
 
 
 def procedibility_of(text: str):
     """("querela" | "d'ufficio", sentence) of an article that states exactly one, or None."""
     flat = _flat(text.replace("((", " ").replace("))", " "))
     q, u = _QUERELA.search(flat), _UFFICIO.search(flat)
-    if bool(q) == bool(u):
+    if bool(q) == bool(u) or (q and _ANY_UFFICIO.search(flat)) or (u and "querel" in flat.lower()):
         return None
     m = q or u
     sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
@@ -353,12 +430,14 @@ def _quoted_in(quote: str, records: list[dict], pos: int) -> bool:
 
 def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 exclude: set[tuple[str, str]] = frozenset(), k: int = 3,
-                bis_share: float = 0.5, true_share: float = 0.5,
+                bis_share: float = 0.5, true_share: float = 0.5, named_share: float = 0.5,
                 stats: dict | None = None) -> list[PremisePair]:
     """Up to ``per_code`` pairs of each kind for each code, none on an excluded article.
 
     ``true_share`` of the wrong-deadline questions also get their twin with
-    the right deadline (``premessa_vera``).
+    the right deadline (``premessa_vera``). ``named_share`` of the penalty
+    and procedibility questions name the offence by its heading instead of
+    the article, when the heading names one offence of the code alone.
     """
     if fmt not in FORMATS:
         raise ValueError(f"fmt must be one of {FORMATS}")
@@ -442,8 +521,15 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 output=_inesistente_answer(fmt, fake, of)))
 
         if code == "codice_penale":
+            names = [offence_name(a.text) for a in live]
+            unique = {n for n in names if n and names.count(n) == 1}
+
+            def named(a) -> str | None:
+                name = offence_name(a.text)
+                return name if name in unique and rng.random() < named_share else None
+
             punished = [(a, p) for a in live if (p := penalty_of(a.text))]
-            for a, (pena, lo, lo_unit, hi, unit, sentence) in rng.sample(
+            for a, (pena, lo, lo_unit, hi, unit, sentence, comma) in rng.sample(
                     punished, min(per_code, len(punished))):
                 pool_hi = [m for m in USUAL.get(unit, []) if m != hi
                            and (lo_unit != unit or m > lo)]
@@ -451,11 +537,14 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                     skip("pena:no_wrong_maximum")
                     continue
                 wrong = rng.choice(pool_hi)
-                template = rng.choice(PENA_Q)
-                values = {"n": a.number, "of": of, "pena": pena, "lo": say(lo, lo_unit)}
+                name = named(a)
+                template = rng.choice(PENA_NAMED_Q if name else PENA_Q)
+                values = {"n": a.number, "of": of, "comma": comma, "pena": pena,
+                          "lo": say(lo, lo_unit), "name": name,
+                          "base": ", nell'ipotesi del primo comma," if comma else ""}
                 quote = quote_span(sentence, anchor=str(hi))
-                states = (f"l'art. {a.number} {of} prevede la {pena} da {say(lo, lo_unit)} a "
-                          f"{say(hi, unit)}")
+                states = (f"l'art. {a.number} {of}{comma} prevede la {pena} da "
+                          f"{say(lo, lo_unit)} a {say(hi, unit)}")
                 for false in [True] + ([False] if rng.random() < true_share else []):
                     q = template.format(hi=say(wrong if false else hi, unit), **values)
                     found, pos = _with_article(index, q, code, a.number, k, rng)
@@ -478,8 +567,12 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                 quote = quote_span(sentence, anchor="querela" if how == "querela" else "ufficio")
                 other = "d'ufficio" if how == "querela" else "a querela della persona offesa"
                 states = f"l'art. {a.number} {of} stabilisce che si procede {said}"
+                name = named(a)
+                reato = (f"il reato di {name}" if name
+                         else f"il reato previsto dall'art. {a.number} {of}")
                 for false in [True] + ([False] if rng.random() < true_share else []):
-                    q = rng.choice(false_qs if false else true_qs).format(n=a.number, of=of)
+                    q = rng.choice(false_qs if false else true_qs).format(
+                        reato=reato, Reato=reato[0].upper() + reato[1:])
                     found, pos = _with_article(index, q, code, a.number, k, rng)
                     if pos is None or not _quoted_in(quote, found, pos):
                         skip("procedibilita:quote_not_shown")

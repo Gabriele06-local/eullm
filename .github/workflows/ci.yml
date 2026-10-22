@@ -613,6 +613,8 @@ jobs:
         run: python -m unittest discover -s examples/decision-langgraph -v
       - name: Test the n8n workflow
         run: python -m unittest discover -s examples/decision-n8n -v
+      - name: Test the Decision Desk
+        run: python -m unittest discover -s examples/decision-desk -v
       - name: Audit dependencies
         # Blocking, as in the forge and reflex_mcp jobs: the requirements are
         # what a reader installs to run the example.

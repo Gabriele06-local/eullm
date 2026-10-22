@@ -213,6 +213,32 @@ already queued), with `c13` and the 24-hour `soak-node` among its points.
 `budget` now says on which day the allocation runs out at the last 24
 hours' rate: the date by which more hours have to be asked for.
 
+22-10-2026, why tensor loads are still slow after patch 0010 (3-5 times
+layer split): the meta buffer of `--split-mode tensor` has no events or
+host buffers, so llama.cpp's loader gives it none of the async uploads from
+pinned memory that a GCD of layer split gets. Each weight read into memory
+is read whole and then copied, the file idle while the GCDs copy and the
+GCDs idle while the file is read, and the meta buffer copies it to its GCDs
+one after the other from one thread. Patch 0012 reads the next weight while
+the last is copied and copies to every GCD at once, and logs how long each
+part took; `c11`'s `load-*` groups measure it three ways on `next22` (both,
+threads only, neither), 9 points, up to 6 node-h. DeepSeek-V3.1's tensor
+points failed because llama.cpp has no tensor split for its architecture
+(`deepseek2`); `c11` keeps it on layer split.
+
+The first measurement (`next22`, job 23062162), seconds to load cold with
+0012, with only its threads, and with neither: Qwen3-235B as two servers of
+four GCDs 346, 421 and 389; Qwen3-Coder-480B over eight 474, 516 and 577;
+gpt-oss-120b as four servers of two 159, 176 and 171. 7-18% off, still about
+three times layer split. Its log line said where the rest goes: of the
+235B's load, reading the file took 221-272 s and copying to the GCDs 26-53 s
+(29 with the threads, 53 without). The read went at 0.6 GB/s where layer
+split reads at about 1.2: each weight was read into a buffer allocated for
+it, and reading into pages never touched before runs at a fifth of the speed
+(0.33-0.49 against 2.6-2.9 GB/s, 512 MiB pieces from memory). 0012 now reads
+every weight into the same two buffers and gathers rows into buffers kept
+from call to call; `next23` measures it the same way.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it

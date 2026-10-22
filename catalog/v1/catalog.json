@@ -207,7 +207,7 @@
         "ko"
       ],
       "domain": "general",
-      "license": "Gemma Terms of Use",
+      "license": "Apache-2.0",
       "tags": [
         "instruct",
         "multilingual",
@@ -398,7 +398,7 @@
         "ko"
       ],
       "domain": "general",
-      "license": "Gemma Terms of Use",
+      "license": "Apache-2.0",
       "tags": [
         "instruct",
         "multilingual",

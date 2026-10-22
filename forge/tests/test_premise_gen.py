@@ -13,7 +13,11 @@ import pytest
 from eullm_forge.datasets.premise_gen import (
     build_pairs,
     excluded_articles,
+    offence_name,
+    penalty_of,
+    procedibility_of,
     quote_span,
+    retrieved_articles,
     say,
     wrong_deadline,
 )
@@ -282,6 +286,30 @@ def test_a_wrong_maximum_penalty_is_corrected_and_a_right_one_confirmed():
                                                                             pos)
 
 
+def test_the_first_comma_penalty_is_asked_when_the_article_states_several():
+    based = ("Art. 14. \n \n (Furto). \n \n Chiunque si impossessa della cosa altrui è "
+             "punito con la reclusione da sei mesi a tre anni. \n La pena è della reclusione "
+             "da due a sei anni se il fatto è commesso con violenza.")
+    assert penalty_of(based)[1:5] == (6, "mesi", 3, "anni")
+    assert penalty_of(based)[-1] == ", al primo comma,"
+    assert penalty_of(PENAL[0]["text"])[-1] == ""
+    # The first sentence states two ranges, or none: no range is the base one.
+    assert penalty_of("Art. 15. (Doppia). Chiunque è punito con la reclusione da uno a tre "
+                      "anni o con l'arresto da tre a sei mesi. La pena è della reclusione da "
+                      "due a cinque anni se il fatto è grave.") is None
+    assert penalty_of("Art. 16. (Rinvio). Le pene sono aumentate nei casi seguenti. Si "
+                      "applica la reclusione da uno a tre anni. Si applica la reclusione da "
+                      "due a sei anni se il fatto è grave.") is None
+    pairs = build_pairs(NormIndex([rec("codice_penale", based + FILLER)]), per_code=5,
+                        rng=random.Random(0), true_share=1.0)
+    false = [p for p in pairs if p.kind == "premessa_pena"]
+    true = [p for p in pairs if p.key.startswith("pf-pv")]
+    assert false and true
+    for p in false + true:
+        assert "al primo comma" in p.question and "al primo comma" in p.output
+        assert score_answer(p.output, p.kind, p.keywords) == 1.0
+
+
 def test_the_procedibility_is_read_from_the_article_and_never_from_one_stating_both():
     pairs = _penal_pairs()
     false = {p.number: p for p in pairs if p.kind == "premessa_procedibilita"}
@@ -297,6 +325,84 @@ def test_the_procedibility_is_read_from_the_article_and_never_from_one_stating_b
                "persona offesa. Si procede d'ufficio se il fatto è grave." + FILLER)
     assert not [p for p in build_pairs(NormIndex([both]), per_code=5, rng=random.Random(0))
                 if p.kind == "premessa_procedibilita"]
+
+
+def test_an_article_stating_both_with_words_in_between_is_left_out():
+    # Art. 624 c.p.: taken for querela alone by the first version.
+    assert procedibility_of("Il delitto è punibile a querela della persona offesa. Si "
+                            "procede, tuttavia, d'ufficio se ricorre taluna delle "
+                            "circostanze.") is None
+    assert procedibility_of("Il delitto è punibile a querela della persona offesa. Il "
+                            "giudice provvede d'ufficio.") is None
+    assert procedibility_of("Si procede, in ogni caso, d'ufficio.")[0] == "d'ufficio"
+    assert procedibility_of("Il colpevole è punibile, nei casi indicati, a querela della "
+                            "persona offesa.")[0] == "querela"
+
+
+def test_the_procedibility_reward_takes_the_ways_a_model_corrects_it():
+    querela, ufficio = ["querela"], ["d'ufficio"]
+    # The 8B's answers of 2026-10-22, scored 0 by the first version.
+    for a in ["Pertanto, il reato non è procedibile d'ufficio, ma richiede la querela della "
+              "persona offesa [1].",
+              "Pertanto, la querela è necessaria [1].",
+              "Si procede solo a querela della persona offesa [2].",
+              "No, serve la querela della persona offesa."]:
+        assert score_answer(a, "premessa_procedibilita", querela) == 1.0, a
+    for a in ["Non è necessaria la querela: si procede d'ufficio [1].",
+              "Il reato non è procedibile a querela: si procede d'ufficio.",
+              "Si procede d'ufficio, senza bisogno di querela."]:
+        assert score_answer(a, "premessa_procedibilita", ufficio) == 1.0, a
+    # Agreeing with the claim, or the right word without denying the claim.
+    assert score_answer("Sì, non serve la querela: si procede d'ufficio.",
+                        "premessa_procedibilita", querela) == 0.0
+    assert score_answer("Sì, il reato è procedibile a querela.", "premessa_procedibilita",
+                        ufficio) == 0.0
+    assert score_answer("Il reato è previsto dall'art. 10 e riguarda la querela.",
+                        "premessa_procedibilita", querela) == 0.0
+
+
+def test_the_offence_is_named_by_the_heading_and_only_when_the_heading_names_one():
+    assert offence_name("Art. 624. \n (Furto). \n Chiunque si impossessa") == "furto"
+    assert offence_name("Art. 624-bis. \n ((Furto in abitazione e furto con strappo)). \n "
+                        "Chiunque") == "furto in abitazione e furto con strappo"
+    assert offence_name("Art. 61. \n (Circostanze aggravanti comuni). \n Aggravano") is None
+    # A repealed article keeps no heading: "abuso d'ufficio" retrieves nothing.
+    assert offence_name("Art. 323. \n ((ARTICOLO ABROGATO DALLA L. 9 AGOSTO 2024, "
+                        "N. 114))") is None
+
+
+def test_penal_questions_can_name_the_offence_instead_of_the_article():
+    pairs = build_pairs(NormIndex(PENAL), per_code=10, rng=random.Random(0), true_share=1.0,
+                        named_share=1.0)
+    penal = [p for p in pairs if p.kind in ("premessa_pena", "premessa_procedibilita")
+             or p.key.startswith(("pf-pv", "pf-qv"))]
+    assert penal
+    for p in penal:
+        assert "art." not in p.question.lower(), p.question
+        assert re.search(r"reato di (truffa|rapina) semplice", p.question), p.question
+        # The answer still says which article it is.
+        assert f"art. {p.number}" in p.output
+        assert score_answer(p.output, p.kind, p.keywords) == 1.0
+    numbered = build_pairs(NormIndex(PENAL), per_code=10, rng=random.Random(0),
+                           true_share=1.0, named_share=0.0)
+    assert all("art. 1" in p.question for p in numbered
+               if p.kind in ("premessa_pena", "premessa_procedibilita"))
+    # Two articles under one heading: the name would not say which.
+    twin = rec("codice_penale", PENAL[0]["text"].replace("Art. 10.", "Art. 13."))
+    pairs = build_pairs(NormIndex([*PENAL, twin]), per_code=10, rng=random.Random(0),
+                        named_share=1.0)
+    assert all("truffa" not in p.question for p in pairs)
+
+
+def test_an_outside_set_leaves_out_what_its_questions_retrieve_and_its_source():
+    items = [{"id": "x", "question": "Quale pena rischia chi commette una rapina semplice?",
+              "metadata": {}},
+             {"id": "y", "question": "Che cosa prevede la truffa semplice?",
+              "metadata": {"code": "codice_civile", "articolo": "2"}}]
+    got = retrieved_articles(NormIndex(PENAL), items, k=1)
+    assert got == {("codice_penale", "11")}
+    assert ("codice_penale", "585") in excluded_articles(
+        [{"question": "Quanto rischia chi ferisce?", "metadata": {"source": "art. 585 c.p."}}])
 
 
 def test_the_plain_format_holds_for_the_penal_kinds_too():

@@ -51,8 +51,9 @@
 # AutoModelForCausalLM cannot load it and its 248k vocab does not match
 # any Qwen3 student. Qwen3.8 publishes no Base at all. Mistral's
 # Ministral-3 Base models are Mistral3ForConditionalGeneration for the
-# same reason. Gemma is excluded by the project's permissive-licence
-# rule (licence `gemma`, not Apache), DeepSeek-V4-Flash-Base is 274 GiB
+# same reason. Gemma 3 was excluded by the project's permissive-licence
+# rule (licence `gemma`, not Apache; Gemma 4 has been Apache 2.0 since
+# 2026-03 and is admitted), DeepSeek-V4-Flash-Base is 274 GiB
 # even in FP8, and V3.1-Base is 671B.
 #
 # That leaves Qwen3-30B-A3B-Base as the largest permissively licensed

@@ -35,6 +35,7 @@ from ..rl.rewards import (
     DEADLINE_TYPES,
     abstains,
     corrects,
+    corrects_procedibility,
     mentioned_deadlines,
     refuses,
     score_answer,
@@ -99,7 +100,7 @@ def diagnosis(answer: str, tipo: str, keywords: list[str], where: str) -> str:
             return "non dice che la premessa sulla pena è errata, e così la lascia in piedi"
         return f"non indica il massimo di pena che {where} prevede, {say(right)}"
     if tipo == "premessa_procedibilita":
-        if not corrects(answer):
+        if not corrects_procedibility(answer, keywords[0]):
             return "non dice che la premessa sulla procedibilità è errata"
         return f"non dice che il reato è procedibile {keywords[0]}, come stabilisce {where}"
     if tipo in DEADLINE_TYPES or tipo in ("premessa_termine", "premessa_vera"):
