@@ -621,6 +621,17 @@ Answering directly, the model ran out of its 400 tokens in 21 of 36 and
 answer sets (543 answers) go to Leonardo's judge; the 400-token ones are
 kept for comparison with the candidates examined there at that length.
 
+**Graded on Leonardo** (its judge and rubric; the files stayed where they
+are). On the 36 trap questions, without the note: 10 right answering
+directly, 11 with 1,000 tokens, 12 reasoning first, against 16 for
+Qwen3.6-27B and 14 for the published `legal-it-8b` (16 with our system
+prompt). Citations of articles not among the retrieved texts were judged
+wrong almost every time (4-5 of 6-7 on the traps, 8-12 of 12-17 on the
+practical questions), a real fault for a RAG model. On the practical exam,
+provisionally, 55-60 right of 145 against 60-61 for the published 8B.
+Mistral Small 4 is not a better teacher in any mode, and the teacher stays
+as it is: no more JUPITER time on it (`docs/legal-it-experiments.md`, §9).
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
@@ -736,9 +747,10 @@ low because JUPITER was down most of the day.
 
 ## 10. Next
 
-1. Mistral Small 4's answers graded on Leonardo with the other candidates;
-   if it is the better teacher, the pairs and the distillation are redone
-   with it (§5.10).
+1. Whether distillation on the law helps under the open-book recipe: the
+   Qwen3 4B and 8B distilled on norms-v2 against their Base, then the
+   Qwen3.5 4B and 9B when their distillation ends (Leonardo's §6, item 3,
+   never run there).
 2. Reinforcement learning (GRPO) on the best of Leonardo's recipe,
    Ministral-3-8B-Instruct and Qwen3.5-4B (0.887 and 0.880, §5.8;
    deliverables 4, 6).
