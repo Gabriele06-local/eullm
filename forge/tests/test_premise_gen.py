@@ -410,3 +410,30 @@ def test_the_plain_format_holds_for_the_penal_kinds_too():
         if p.kind in ("premessa_pena", "premessa_procedibilita", "premessa_vera"):
             assert "\n" not in p.output
             assert score_answer(p.output, p.kind, p.keywords) == 1.0
+
+
+def test_a_deadline_attributed_to_a_ruling_is_checked_on_the_statute_and_the_ruling_flagged():
+    records = [rec("codice_civile", "Art. 2. \n \n (Termine di prova). \n \n La domanda si "
+                   "propone entro sessanta giorni dalla notifica." + FILLER)]
+    for fmt in ("steps", "plain"):
+        pairs = build_pairs(NormIndex(records), per_code=10, rng=random.Random(0), fmt=fmt)
+        false = [p for p in pairs if p.kind == "premessa_sentenza"]
+        true = [p for p in pairs if p.kind == "premessa_sentenza_vera"]
+        assert false and true
+        for p in false + true:
+            assert re.search(r"sentenza n\. \d+/20\d\d", p.question)
+            assert score_answer(p.output, p.kind, p.keywords) == 1.0
+        assert score_answer(true[0].output, "premessa_sentenza", true[0].keywords) == 0.0
+        assert score_answer(false[0].output, "premessa_sentenza_vera", false[0].keywords) == 0.0
+    kw = ["60 giorni|sessanta giorni"]
+    # Right deadline, ruling taken on trust: the attribution is the trap.
+    assert score_answer("Sì, come ha stabilito la Cassazione il termine è di 60 giorni [1].",
+                        "premessa_sentenza_vera", kw) == 0.0
+    assert score_answer("La sentenza citata non è tra i testi riportati, non posso verificarla; "
+                        "l'art. 2 prevede comunque proprio 60 giorni [1].",
+                        "premessa_sentenza_vera", kw) == 1.0
+    assert score_answer("Non posso verificare la sentenza. La premessa è errata: il termine è "
+                        "di 60 giorni, non di 30 [1].", "premessa_sentenza", kw) == 1.0
+    # Flagging the ruling is not enough: the deadline still has to be right.
+    assert score_answer("Non posso verificare la sentenza citata.", "premessa_sentenza",
+                        kw) == 0.0

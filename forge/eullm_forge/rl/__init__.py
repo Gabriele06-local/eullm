@@ -21,7 +21,9 @@ from .rewards import (
     corrects,
     corrects_procedibility,
     score_answer,
+    unverified_ruling,
 )
 
 __all__ = ["ABSTAIN_TYPES", "DEADLINE_TYPES", "JUDGED_TYPES", "PREMISE_TYPES", "abstains",
-           "answer_reward", "corrects", "corrects_procedibility", "score_answer"]
+           "answer_reward", "corrects", "corrects_procedibility", "score_answer",
+           "unverified_ruling"]

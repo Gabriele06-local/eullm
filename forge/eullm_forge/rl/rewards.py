@@ -25,6 +25,12 @@ And three built on a false premise (`eullm_forge.datasets.premise_gen`):
 * ``premessa_vera``: the question states the right deadline, penalty or
   procedibility; the answer must state it and must not call the premise
   wrong.
+* ``premessa_sentenza``: the question attributes a wrong deadline to a ruling
+  that is not among the texts; the answer must say it cannot verify the
+  ruling, say the premise is wrong and state the right deadline.
+* ``premessa_sentenza_vera``: the same with the right deadline; the answer
+  must say it cannot verify the ruling, state the deadline, and not call
+  the premise wrong.
 
 Each check is written against the ways a policy learns to game it, because
 under RL it will:
@@ -55,7 +61,8 @@ from ..eval.metrics import (
 DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente", "premessa_inesistente"})
 PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa_abrogato",
-                           "premessa_pena", "premessa_procedibilita", "premessa_vera"})
+                           "premessa_pena", "premessa_procedibilita", "premessa_vera",
+                           "premessa_sentenza", "premessa_sentenza_vera"})
 # Kinds no program can check: what an article provides is graded by a judge
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
 # "pratica": the practical questions of eval.practical, as GRPO prompts
@@ -236,6 +243,25 @@ def corrects_procedibility(answer: str, right: str) -> bool:
     return corrects(answer) or bool(denial.search(text))
 
 
+# Saying that a ruling the question cites cannot be checked against the texts.
+_UNVERIFIED = re.compile(
+    r"sentenz[ae][^.]{0,80}?non (?:è|e'|compare|risulta|figura|c'è)[^.]{0,20}?"
+    r"(?:tra|fra|nei|nel|negli)\b"
+    r"|non (?:c'è|compare|figura|è presente|e' presente|risulta)[^.]{0,30}?sentenz"
+    r"|non (?:posso|è possibile|e' possibile|riesco a) (?:verificare|confermare|controllare)"
+    r"|non (?:è|e') verificabil|non verificabil|va verificat[ao] sulla fonte",
+    re.IGNORECASE)
+# Calling the premise itself wrong, not merely saying "non posso verificare".
+_DENIES = re.compile(r"\berrat[ao]\b|\binesatt[ao]\b"
+                     r"|non (?:è|e') (?:corrett|esatt|cosi|così|ver[oa])\b"
+                     r"|in realtà|^\W*no\b", re.IGNORECASE)
+
+
+def unverified_ruling(answer: str) -> bool:
+    """Whether the answer says the ruling it was asked about cannot be checked."""
+    return bool(_UNVERIFIED.search(answer.replace("’", "'")))
+
+
 def _said(keyword: str, answer: str) -> bool:
     """Whether the answer says the keyword, apostrophes either way."""
     return keyword.replace("’", "'").lower() in answer.replace("’", "'").lower()
@@ -265,14 +291,20 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
         # Only a denial of the premise itself: a contrast inside a confirmation
         # ("60 giorni, non 30"; "non è prevista alcuna proroga, il termine è 60")
         # matches corrects() but leaves the question's premise standing.
-        if re.search(r"\berrat[ao]\b|\binesatt[ao]\b"
-                     r"|non (?:è|e') (?:corrett|esatt|cosi|così|ver[oa])\b"
-                     r"|in realtà|^\W*no\b", answer.strip(), re.IGNORECASE):
+        if _DENIES.search(answer.strip()):
             return 0.0
         if keywords and all(_keyword_deadline(kw) for kw in keywords):
             return score_answer(answer, "termine", keywords)
         return 1.0 if (not refuses(answer) and keywords
                        and all(_said(kw, answer) for kw in keywords)) else 0.0
+    if tipo == "premessa_sentenza":
+        if not (unverified_ruling(answer) and corrects(answer)):
+            return 0.0
+        return score_answer(answer, "termine", keywords)
+    if tipo == "premessa_sentenza_vera":
+        if not unverified_ruling(answer) or _DENIES.search(answer.strip()):
+            return 0.0
+        return score_answer(answer, "termine", keywords)
     if tipo == "premessa_abrogato":
         return 1.0 if "abrogat" in answer.lower() and not mentioned_deadlines(answer) else 0.0
     if tipo in DEADLINE_TYPES:
