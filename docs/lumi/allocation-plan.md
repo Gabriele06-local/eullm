@@ -213,6 +213,19 @@ already queued), with `c13` and the 24-hour `soak-node` among its points.
 `budget` now says on which day the allocation runs out at the last 24
 hours' rate: the date by which more hours have to be asked for.
 
+22-10-2026, why tensor loads are still slow after patch 0010 (3-5 times
+layer split): the meta buffer of `--split-mode tensor` has no events or
+host buffers, so llama.cpp's loader gives it none of the async uploads from
+pinned memory that a GCD of layer split gets. Each weight read into memory
+is read whole and then copied, the file idle while the GCDs copy and the
+GCDs idle while the file is read, and the meta buffer copies it to its GCDs
+one after the other from one thread. Patch 0012 reads the next weight while
+the last is copied and copies to every GCD at once, and logs how long each
+part took; `c11`'s `load-*` groups measure it three ways on `next22` (both,
+threads only, neither), 9 points, up to 6 node-h. DeepSeek-V3.1's tensor
+points failed because llama.cpp has no tensor split for its architecture
+(`deepseek2`); `c11` keeps it on layer split.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
