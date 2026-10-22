@@ -59,6 +59,9 @@ JUPITER, named by its Slurm job id.
   trained Qwen3-4B-Instruct 0.869, against 0.765 for the reference (§5.8).
   The second two-hour link finished every run and every exam; the 6-hour
   link behind it found nothing left and ended in 2 minutes.
+* The complete vertical (§5.8): Qwen3.5-4B to GGUF Q4_K_M, examined
+  through EULLM Engine at the bf16 score (189 against 187 of 217), in about
+  two and a half minutes after training (job 2447162).
 * Qwen3.5 distillation on norms-v2 started (job 2431499), seven 8-hour
   links: 8-hour jobs get a node as soon as 2-hour ones on JUPITER (median
   wait 0 minutes, 5 jobs), so links are as long as the work needs.
@@ -495,6 +498,34 @@ right without being told. The top four are within 7 questions of each
 other, less than the exam separates reliably; their lead over the reference
 (+23 to +30) is not. Closed book every model stays at 0.000-0.023.
 
+**The complete vertical (22-10-2026, deliverables 1 and 8).** Qwen3.5-4B
+of the recipe above, merged, made into what ships and examined as it ships
+(`sbatch_vertical.slurm`, job 2447162, graded by 2447164): converted to
+GGUF F16 by llama.cpp's converter at the commit EULLM Engine is built on,
+quantized to Q4_K_M, and asked the same exam through EULLM Engine
+(`legal_eval.py --runtime eullm`, the prompt sent raw, 16 questions at once
+in continuous batching) and through llama-server at once:
+
+| Qwen3.5-4B, open-book recipe | open book | correct | without the note | correct |
+|---|---:|---:|---:|---:|
+| bf16, Transformers | 0.880 | 187 | 0.841 | 178 |
+| Q4_K_M, EULLM Engine | **0.887** | **189** | 0.841 | 178 |
+| Q4_K_M, llama-server | 0.878 | 186 | 0.850 | 180 |
+
+| stage | seconds |
+|---|---:|
+| instruction tuning, one GH200 | 8,029 |
+| GGUF F16 | 78 |
+| Q4_K_M | 13 |
+| the 217-question exam through EULLM Engine | 66 |
+
+Quantization to Q4_K_M and the engine cost nothing the exam can see: the
+three answer sets are within 3 questions of each other, in both directions.
+From merged weights to a graded GGUF served by EULLM Engine takes about two
+and a half minutes of a node; the vertical is its instruction tuning. The
+same for Ministral-3-8B-Instruct stopped at the conversion, which imports
+`sentencepiece` before it falls back to the HF tokenizer (`03821b8`).
+
 Why, as far as the data say. Distillation did learn the law: the held-out
 loss fell from 0.914 to 0.674 for the 4B and from 0.827 to 0.625 for the 8B
 over the epoch (evaluations at steps 200 and 7,200). Open book, though, the
@@ -659,6 +690,7 @@ figures below with the site's energy mix.
 | 20-10 | Dequantizing on loading left the fused experts in FP8 | converted once to BF16 on a login node (`dequantize_fp8.py`, `1059ee8`, `2a7c5fc`) |
 | 20-10 | The Hub client refused a snapshot without the consolidated files | the snapshot directory found in the cache (`a08780b`) |
 | 20-10 | GPU 0, also holding the retrieval models, out of memory at 48 questions a batch | 24 a batch, expandable CUDA segments (`6691261`) |
+| 22-10 | llama.cpp's converter stopped on Ministral: it imports `sentencepiece` before looking for a tokenizer.model | `sentencepiece` 0.2.2 in the venv (`03821b8`) |
 | 20-10 | sbatch failed once with "Connection reset by peer" and the script reported the job submitted | `sites.sh` tries again and says when nothing was submitted (`7eca038`) |
 
 ## 9. Resource use
