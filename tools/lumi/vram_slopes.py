@@ -147,7 +147,17 @@ def main(argv=None) -> int:
             print(f"== job {job}: missing {', '.join(missing)}")
             continue
         rows = report(points_of(out), samples_of(node), args.settle_s, args.dead_gib)
+        # A point done before its settle time has no line to draw: a load or
+        # throughput point of minutes. One line says how many, not eight
+        # rows of dashes each.
+        short = {r[0] for r in rows if r[3] is None and r[7] == "done"}
+        rows = [r for r in rows if r[0] not in short]
         print(f"== job {job}: GiB used, after the first {args.settle_s:.0f} s of each point")
+        if short:
+            print(f"  ({len(short)} points done within their first {args.settle_s:.0f} s "
+                  f"are left out)")
+        if not rows:
+            continue
         print(f"  {'point':34} {'dev':>3} {'hours':>5} {'first':>6} {'peak':>6} "
               f"{'last':>6} {'GiB/h':>6}  end")
         for pid, dev, hours, first, peak, last, slope, state in rows:
