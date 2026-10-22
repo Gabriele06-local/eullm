@@ -99,8 +99,8 @@ INESISTENTE = [
     "Come si applica in concreto l'art. {n} {of}?",
 ]
 PENA_Q = [
-    "Mi confermi che l'art. {n} {of} punisce il fatto con la {pena} da {lo} a {hi}?",
-    "L'art. {n} {of} prevede la {pena} fino a {hi}: è questo il massimo che si rischia?",
+    "Mi confermi che l'art. {n} {of}{comma} punisce il fatto con la {pena} da {lo} a {hi}?",
+    "L'art. {n} {of}{comma} prevede la {pena} fino a {hi}: è questo il massimo che si rischia?",
 ]
 # The procedibility as the article states it, and the question that gets it
 # wrong (false) or right (true).
@@ -256,14 +256,33 @@ _UFFICIO = re.compile(r"\b(?:si procede|procedibil[ei]|perseguibil[ei])\b[^.;]{0
 _ANY_UFFICIO = re.compile(r"\bd['’]ufficio\b", re.IGNORECASE)
 
 
+def _opening(flat: str) -> str:
+    """The article's first sentence after its number and heading."""
+    body = re.sub(r"^\s*Art\.?\s*\d+[\w-]*\.?\s*(?:\([^)]*\)\.?\s*)?", "", flat)
+    return next((st.strip() for _, st in _sentences(body) if st.strip()), "")
+
+
 def penalty_of(text: str):
-    """(kind, low, low unit, high, unit, sentence) of an article stating one
-    penalty range, or None."""
+    """(kind, low, low unit, high, unit, sentence, comma) of the penalty range
+    an article states, or None.
+
+    One range only, or the first of several when the article's first sentence
+    states it alone: the base offence of the first comma ("Chiunque ... è
+    punito con la reclusione da sei mesi a tre anni"), the later ranges being
+    its aggravated or lesser forms. That one is asked about "al primo comma"
+    (``comma``), the only form the question can name without ambiguity. One
+    range alone gave 44 questions over the whole penal code.
+    """
     flat = _flat(text.replace("((", " ").replace("))", " "))
     found = list(_PENA.finditer(flat))
-    if len(found) != 1:
+    if not found:
         return None
-    m = found[0]
+    m, comma = found[0], ""
+    if len(found) > 1:
+        opening = _opening(flat)
+        if len(_PENA.findall(opening)) != 1 or m.group(0) not in opening:
+            return None
+        comma = ", al primo comma,"
     lo, hi = number_of(m.group(2).lower()), number_of(m.group(4).lower())
     if not lo or not hi:
         return None
@@ -271,7 +290,7 @@ def penalty_of(text: str):
     lo_unit = DEADLINE_UNITS[m.group(3).lower()] if m.group(3) else unit
     sentence = next((st for off, st in _sentences(flat) if off <= m.start() < off + len(st)),
                     flat[max(0, m.start() - 150):m.end() + 50])
-    return m.group(1).lower(), lo, lo_unit, hi, unit, sentence
+    return m.group(1).lower(), lo, lo_unit, hi, unit, sentence, comma
 
 
 def procedibility_of(text: str):
@@ -449,7 +468,7 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
 
         if code == "codice_penale":
             punished = [(a, p) for a in live if (p := penalty_of(a.text))]
-            for a, (pena, lo, lo_unit, hi, unit, sentence) in rng.sample(
+            for a, (pena, lo, lo_unit, hi, unit, sentence, comma) in rng.sample(
                     punished, min(per_code, len(punished))):
                 pool_hi = [m for m in USUAL.get(unit, []) if m != hi
                            and (lo_unit != unit or m > lo)]
@@ -458,10 +477,11 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                     continue
                 wrong = rng.choice(pool_hi)
                 template = rng.choice(PENA_Q)
-                values = {"n": a.number, "of": of, "pena": pena, "lo": say(lo, lo_unit)}
+                values = {"n": a.number, "of": of, "comma": comma, "pena": pena,
+                          "lo": say(lo, lo_unit)}
                 quote = quote_span(sentence, anchor=str(hi))
-                states = (f"l'art. {a.number} {of} prevede la {pena} da {say(lo, lo_unit)} a "
-                          f"{say(hi, unit)}")
+                states = (f"l'art. {a.number} {of}{comma} prevede la {pena} da "
+                          f"{say(lo, lo_unit)} a {say(hi, unit)}")
                 for false in [True] + ([False] if rng.random() < true_share else []):
                     q = template.format(hi=say(wrong if false else hi, unit), **values)
                     found, pos = _with_article(index, q, code, a.number, k, rng)
