@@ -278,3 +278,28 @@ def test_questions_of_excluded_rulings_are_left_out_of_every_model(tmp_path, cap
                                 "--exclude-rulings", str(seen)]) == 0
     out = capsys.readouterr().out
     assert "leaving out the questions of 2 rulings" in out and "n=2" in out and "0:0" in out
+
+
+def test_show_prints_the_questions_each_side_won_with_both_answers(tmp_path, capsys):
+    d = tmp_path / "devbig"
+    d.mkdir()
+    ids = [f"norm-inesistente-codice_civile-{i}" for i in range(6)]
+    _write_graded(d, "base-open", [(i, "correct" if n < 4 else "wrong", 10)
+                                   for n, i in enumerate(ids)])
+    _write_graded(d, "new-open", [(i, "wrong" if n < 3 else "correct", 20)
+                                  for n, i in enumerate(ids)])
+    assert _script("compare_graded").main([str(d), "--baseline", "base-open",
+                                           "--show", "2"]) == 0
+    printed = capsys.readouterr().out
+    assert "only the model right: 2 shown" in printed      # items 4 and 5
+    assert "only the baseline right: 2 shown" in printed   # 2 of items 0-2
+    assert f"== {ids[4]}" in printed and f"== {ids[0]}" in printed
+    assert "new-open [correct]" in printed and "base-open [wrong]" in printed
+
+
+def test_show_is_refused_on_the_held_out_exam(tmp_path):
+    d = tmp_path / "norm-exam-answers"
+    d.mkdir()
+    _write_graded(d, "a", [("norm-contenuto-x-1", "correct", 5)])
+    _write_graded(d, "b", [("norm-contenuto-x-1", "wrong", 5)])
+    assert _script("compare_graded").main([str(d), "--baseline", "a", "--show", "1"]) == 2
