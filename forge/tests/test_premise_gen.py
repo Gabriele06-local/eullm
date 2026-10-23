@@ -460,3 +460,23 @@ def test_a_ruling_flagged_the_ways_the_model_writes_it_is_recognised():
     # Correcting the deadline but saying nothing of the ruling still misses the trap.
     assert score_answer("Il testo [1] prevede un termine di 20 giorni, non di 8 giorni. La "
                         "premessa della domanda è errata.", "premessa_sentenza", kw) == 0.0
+
+
+def test_sentences_are_never_cut_after_an_abbreviation():
+    from eullm_forge.eval.norm_exam import split_sentences
+    text = ("Si reputa che il valore dei beni ecceda la cautela se supera di un terzo "
+            "l'importo dei crediti iscritti, accresciuto degli accessori a norma dell'art. "
+            "2855. Il giudice, sentite le parti, provvede ai sensi del d.lgs. n. 150 del "
+            "2011 e della Cass. Sez. Un. n. 4767/2025; si applica l'art. 12 c.c. "
+            "Restano ferme le disposizioni speciali.")
+    got = [s for _, s in split_sentences(text)]
+    assert got[0].endswith("a norma dell'art. 2855.")
+    assert got[1].startswith("Il giudice") and got[1].endswith("4767/2025;")
+    # after "c.c." it does not end even where it could: a quotation too long is
+    # cut by quote_span, one cut short loses the article's number
+    assert got[2] == "si applica l'art. 12 c.c. Restano ferme le disposizioni speciali."
+    # offsets point at each sentence
+    assert all(text[o:o + len(s)] == s for o, s in split_sentences(text))
+    # ":" ends a sentence only when asked
+    assert len(split_sentences("Sono elementi: il prezzo.", marks=".;:")) == 2
+    assert len(split_sentences("Sono elementi: il prezzo.")) == 1
