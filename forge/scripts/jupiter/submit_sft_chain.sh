@@ -41,11 +41,19 @@ bad=0
     { echo "[!!] no system prompt at $FORGE_SFT_SYSTEM_FILE"; bad=1; }
 [ -n "${FORGE_SFT_NORMS:-}" ] && echo "[ok] open book over $(wc -w <<<"$FORGE_SFT_NORMS") norm files" ||
     echo "[..] no FORGE_SFT_NORMS: closed book only"
+in_cache() { python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pretrained(sys.argv[1], local_files_only=True)" "$1" >/dev/null 2>&1; }
 for arm in $ARMS; do
     model="${arm#*=}"
-    if [ -d "$model" ]; then
+    # "base+adapter": a distillation checkpoint, merged into its base by the job
+    # (sbatch_sft.slurm); the base in the cache or a directory, the adapter there.
+    if [[ "$model" == *+* ]]; then
+        base="${model%%+*}" adapter="${model#*+}"
+        { [ -f "$base/config.json" ] || in_cache "$base"; } && [ -f "$adapter/adapter_config.json" ] &&
+            echo "[ok] ${arm%%=*}: $base + $adapter" ||
+            { echo "[!!] ${arm%%=*}: no base $base or no adapter_config.json in $adapter"; bad=1; }
+    elif [ -d "$model" ]; then
         [ -f "$model/config.json" ] && echo "[ok] ${arm%%=*}: $model" || { echo "[!!] ${arm%%=*}: no model in $model"; bad=1; }
-    elif python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pretrained(sys.argv[1], local_files_only=True)" "$model" >/dev/null 2>&1; then
+    elif in_cache "$model"; then
         echo "[ok] ${arm%%=*}: $model in the offline cache"
     else
         echo "[!!] ${arm%%=*}: $model is not in the offline cache (download it on this login node)"; bad=1
