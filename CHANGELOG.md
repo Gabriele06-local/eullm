@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## 0.7.92 — 2026-10-23
+
+### Fixed
+- **`eullm update` installs the Windows ROCm build.** It refused `eullm-windows-x64-rocm.zip` and said to extract the ZIP by hand, because that build keeps ROCm's own layout: `eullm.exe` and its DLLs in `bin\`, rocBLAS's and hipBLASLt's GPU kernels in folders under it, and kernel packs in `.kpack\` beside it. The update now replaces the folder that holds `bin\`: the files in `bin\` one by one, the kernel folders and `.kpack\` whole, so no kernel of the old version stays beside the new ones. If anything fails, the previous version is put back. A running `eullm serve` holds its kernels open, and Windows will not move a folder with a file open in it: the update then says to stop the server and run it again. 0.7.91 and earlier still refuse, since the update runs the installed version's code: install 0.7.92 by hand once, over the folder that holds `bin\`, and later versions update themselves. The CPU, Vulkan and CUDA ZIPs for Windows, and every Linux and macOS binary, updated already and are unchanged.
+
 ## 0.7.91 — 2026-10-23
 
 ### Performance

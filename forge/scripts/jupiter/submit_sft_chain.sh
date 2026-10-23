@@ -17,6 +17,9 @@
 # FORGE_CHAIN_MORE=1 adds LINKS links behind the last one queued and moves
 # the judge that waits for the chain behind them: runs slower than their
 # links (ob1, 21-10-2026: the 4B at 754 of 900 steps after the first).
+# FORGE_CHAIN_AFTER=<job> starts the chain when that job ends (the last link
+# of a distillation chain): an arm's directory not there yet is accepted, as
+# the job will make it; a link that finds it still missing skips that arm.
 
 set -uo pipefail
 # shellcheck source=env.sh
@@ -31,6 +34,7 @@ PAIRS="${FORGE_SFT_PAIRS:?FORGE_SFT_PAIRS: the pairs to train on}"
 ARMS="${FORGE_SFT_ARMS:?FORGE_SFT_ARMS: name=model ...}"
 EXAM="${FORGE_SFT_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
 ACCOUNT="${SBATCH_ACCOUNT:-e-aif-2026pg01-1434}"
+AFTER="${FORGE_CHAIN_AFTER:-}"
 LOGS="$FORGE_RUN_DIR/logs"
 NAME="forge-sft-$TAG"
 bad=0
@@ -53,6 +57,8 @@ for arm in $ARMS; do
             { echo "[!!] ${arm%%=*}: no base $base or no adapter_config.json in $adapter"; bad=1; }
     elif [ -d "$model" ]; then
         [ -f "$model/config.json" ] && echo "[ok] ${arm%%=*}: $model" || { echo "[!!] ${arm%%=*}: no model in $model"; bad=1; }
+    elif [ -n "$AFTER" ] && [[ "$model" == /* ]]; then
+        echo "[..] ${arm%%=*}: $model not there yet, made by the time job $AFTER ends"
     elif in_cache "$model"; then
         echo "[ok] ${arm%%=*}: $model in the offline cache"
     else
@@ -60,6 +66,8 @@ for arm in $ARMS; do
     fi
 done
 wait_for_slurm || exit 1
+[ -z "$AFTER" ] || [ -n "$(squeue -h -j "$AFTER" -o %i 2>/dev/null)" ] ||
+    { echo "[!!] job $AFTER is not in the queue (FORGE_CHAIN_AFTER)"; bad=1; }
 # FORGE_CHAIN_REPLACE=1: the links of this chain not yet started, and the
 # judge waiting for them, are cancelled and the chain submitted again (other
 # link hours, say); a running link stays, and the new links follow it.
@@ -81,7 +89,7 @@ fi
 [ "$bad" = 0 ] || { echo "[!!] nothing submitted"; exit 1; }
 
 mkdir -p "$LOGS"
-prev="${QUEUED:-}" jobs=()
+prev="${QUEUED:-$AFTER}" jobs=()
 for i in $(seq 1 "$LINKS"); do
     j=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --job-name "$NAME" \
         --time="${FORGE_LINK_H:-2}:00:00" \
