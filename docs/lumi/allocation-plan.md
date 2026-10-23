@@ -272,6 +272,19 @@ Qwen3-30B-A3B Q8_0) with Qwen3.6-35B-A3B and Qwen3-14B Q8_0 beside them, the
 stability objective (6) on the build a release would carry: 8 points, up to
 46 node-h. The round `r-next21` goes on on its four chains.
 
+23-10-2026, morning: both `next25` jobs (23088874, 23088875) were still
+running twelve hours in and neither had written a summary, so neither had
+run `load-*`. Two jobs of one label starting together take the
+highest-priority points in turn: `days-*`'s eight went four to each node,
+and `load-*`, which wants a whole node, waits for them to end, while four
+GCDs of each node have nothing to do. `c12`'s `fill-models` puts eight more
+models on them (Qwen3-4B, 8B and its Q8_0, 14B, Qwen3.6-27B, Mistral Small
+24B, gpt-oss-20b, Qwen3-30B-A3B Q4_K_M), at 32 requests, one GCD each: the
+runner gives a workload point the time until the waiting whole-node point
+can start, so they soak until `days-*` ends and `load-*` then has the node.
+Points of different widths for one label go to one job, or to jobs started
+apart.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
