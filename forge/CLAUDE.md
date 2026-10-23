@@ -237,6 +237,35 @@ had its own passing test; nobody had run one after the other. Rules:
   a `[!!]` line for each thing that needs a human. If it finds a problem
   whose shape it did not know, teach it that shape.
 
+## A number decides nothing until the answers behind it are read
+
+Every grader we have -- the GRPO rewards, the exam's abstention check, the
+judge -- has scored right answers wrong, and each time the number alone
+pointed at the wrong conclusion. Between 2026-10-20 and 10-23: the deadline
+reward missed "60 giorni, non 30" (0.17 instead of 0.40); the procedibility
+reward missed every correction (0.05 instead of 0.69); the ruling reward
+stopped at the full stop of "Cass." and a round trained on it; the teachers'
+practical exams had died at load time and were compared for three days as
+if measured; and the judge failed five right abstentions in the three-step
+format on devbig without the note, so every candidate seemed to "lose" a
+skill it had. Five of these six were found by reading answers. Rules:
+
+* **Before a comparison decides anything** (a promotion, a recipe dropped,
+  a "saturated" or "cannot be learnt"), read at least five questions each
+  way: `compare_graded.py --show 5` prints them with both answers and the
+  judge's reasons. A loss nobody read is not a loss yet.
+* **A grader is checked in both directions**: that it passes the right
+  answers the model actually writes, and that it fails wrong ones. A reward
+  too lenient looks like saturation; one too strict looks like a skill the
+  model lacks.
+* **When the answer format changes, every grader is checked again** on
+  answers in the new format (the three-step format arrived on 10-20; the
+  judge was not checked on it until 10-23).
+* **A run that "finished" is opened** before its numbers are used: an exam
+  that died writes no answers, and a table built without them still prints.
+* What a check overturns goes into `docs/legal-it-experiments.md` beside the
+  conclusion it replaces.
+
 ## Base Models
 
 Only fully permissive licenses:

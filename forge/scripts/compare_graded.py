@@ -24,7 +24,12 @@ cannot be the reason for a difference.
 labelled (export_grade_review.py writes the sheet).
 
 Prints labels and counts only, never an item, so it is safe on the held-out
-exam's answers too.
+exam's answers too -- except with ``--show N``, which prints, for every
+comparison, N questions only the model got right and N only the baseline
+did, with both answers and the judge's reasons. A number that decides
+something is read before it decides it: on 2026-10-23 every candidate
+"lost" five nonexistent-article questions, and the answers were right, the
+judge wrong. Refused on the held-out exam's answers (``norm-exam-answers``).
 """
 
 from __future__ import annotations
@@ -33,6 +38,7 @@ import argparse
 import csv
 import json
 import sys
+import textwrap
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -51,6 +57,31 @@ def verdict(c) -> str:
     return "no difference shown"
 
 
+def _records(path: Path) -> dict[str, dict]:
+    with path.open(encoding="utf-8") as f:
+        return {r["id"]: r for r in map(json.loads, filter(str.strip, f))}
+
+
+def _block(who: str, r: dict) -> str:
+    answer = textwrap.shorten(r.get("answer", ""), 600, placeholder=" […]")
+    why = textwrap.shorten(str(r.get("why", "")), 300, placeholder=" […]")
+    return f"  {who} [{r.get('grade')}]: {answer}\n    giudice: {why}"
+
+
+def show(model_file: Path, base_file: Path, model, base, n: int) -> None:
+    """N items only the model got right and N only the baseline did, both answers."""
+    mine, theirs = _records(model_file), _records(base_file)
+    for title, won, lost in (("only the model right", model, base),
+                             ("only the baseline right", base, model)):
+        ids = [i for i in sorted(model.grades) if i in base.grades
+               and won.right(i) and not lost.right(i)][:n]
+        print(f"{'':<28} -- {title}: {len(ids)} shown")
+        for i in ids:
+            q = textwrap.shorten(mine[i].get("question", ""), 250, placeholder=" […]")
+            print(f"  == {i}\n  D: {q}\n{_block(model.label, mine[i])}\n"
+                  f"{_block(base.label, theirs[i])}")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -63,6 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--exclude-rulings", type=Path,
                     help="file of ruling ids (cds/NNN, one a line): their case-law questions "
                          "are left out of every model, e.g. rulings seen in training prompts")
+    ap.add_argument("--show", type=int, default=0, metavar="N",
+                    help="print N questions each side of every comparison won by one model "
+                         "only, with both answers and the judge's reasons (not on the "
+                         "held-out exam)")
     args = ap.parse_args(argv)
 
     files = []
@@ -74,7 +109,12 @@ def main(argv: list[str] | None = None) -> int:
                             if ln.strip())
         print(f"[paired] leaving out the questions of {len(exclude):,} rulings "
               f"({args.exclude_rulings.name})")
-    models = {g.label: g for g in (load_graded(f, exclude) for f in files)}
+    if args.show and any("norm-exam-answers" in str(f) for f in files):
+        print("[paired] --show prints items: not on the held-out exam", file=sys.stderr)
+        return 2
+    loaded = [(f, load_graded(f, exclude)) for f in files]
+    models = {g.label: g for _, g in loaded}
+    file_of = {g.label: f for f, g in loaded}
     if args.baseline and args.baseline not in models:
         print(f"[paired] no graded answers for baseline {args.baseline!r}; have: "
               f"{', '.join(sorted(models)) or 'none'}", file=sys.stderr)
@@ -109,6 +149,8 @@ def main(argv: list[str] | None = None) -> int:
             if c.verif_n:
                 print(f"{'':<28} no judge (deadlines, absent articles; n={c.verif_n}): "
                       f"{c.verif_a_only}:{c.verif_base_only} p={c.p_verif:.3f}")
+            if args.show:
+                show(file_of[label], file_of[args.baseline], models[label], base, args.show)
             rows.append([label, args.baseline, c.n, c.a_only, c.base_only, c.diff,
                          f"{c.p:.4f}", c.a_only_lenient - c.base_only_lenient,
                          f"{c.p_lenient:.4f}", v, lw, f"{models[label].mean_length():.0f}",
