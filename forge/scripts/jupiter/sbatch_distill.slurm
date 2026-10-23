@@ -86,12 +86,18 @@ for arm in $ARMS; do
     fi
     log="$run/logs/distill-$JOB.log"
     teacher=$(stage_model "$(sed -n 's/^teacher_model:[[:space:]]*//p' "$cfg" | sed 's/[[:space:]]*#.*//')")
+    # A student named by a path under $FORGE_RUN_DIR (a model distilled
+    # before, continued on more data): the variables expanded here, where
+    # they are set, and the path given to distill.py over the config's.
+    student=$(sed -n 's/^student_model:[[:space:]]*//p' "$cfg" | sed 's/[[:space:]]*#.*//')
+    student=$(python -c 'import os, sys; print(os.path.expandvars(sys.argv[1]))' "$student")
     # The copy's minutes come out of the training time, not the link's margin.
     train_s=$(( TRAIN_S - ($(date +%s) - T_JOB) ))
     echo "--- $name: GPUs ${GPUS[$i]}, cores ${CORES[$i]}, $cfg -> $run/$out, teacher from $teacher, ${train_s}s"
     (cd "$run" && CUDA_VISIBLE_DEVICES=${GPUS[$i]} timeout --signal=TERM "$train_s" \
         taskset -c "${CORES[$i]}" python "$EULLM_REPO/forge/scripts/distill.py" \
-        --config "$cfg" --dataset-dir "$DATA" --teacher-model "$teacher") >"$log" 2>&1 &
+        --config "$cfg" --dataset-dir "$DATA" --teacher-model "$teacher" \
+        --student-model "$student") >"$log" 2>&1 &
     PIDS+=($!) NAMES+=("$name") LOGS+=("$log")
     i=$((i + 1))
 done
