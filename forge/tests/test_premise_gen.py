@@ -437,3 +437,19 @@ def test_a_deadline_attributed_to_a_ruling_is_checked_on_the_statute_and_the_rul
     # Flagging the ruling is not enough: the deadline still has to be right.
     assert score_answer("Non posso verificare la sentenza citata.", "premessa_sentenza",
                         kw) == 0.0
+
+
+def test_a_ruling_flagged_the_ways_the_model_writes_it_is_recognised():
+    # The 8B's answers of 2026-10-23, scored 0 by the first version.
+    kw = ["20 giorni|venti giorni"]
+    assert score_answer("Verifica della premessa: il testo [1] è l'art. 27 del codice di "
+                        "procedura penale, e prevede un termine di 20 giorni. La sentenza n. "
+                        "37735/2018 della Cassazione (pen.) non è tra i testi riportati, quindi "
+                        "non posso confermarne il contenuto.\nRisposta: il termine previsto è "
+                        "di 20 giorni.", "premessa_sentenza_vera", kw) == 1.0
+    assert score_answer("La sentenza Cass. civ. n. 4767/2025 non è tra i testi riportati. "
+                        "L'art. 27 prevede comunque 20 giorni [1].",
+                        "premessa_sentenza_vera", kw) == 1.0
+    # Correcting the deadline but saying nothing of the ruling still misses the trap.
+    assert score_answer("Il testo [1] prevede un termine di 20 giorni, non di 8 giorni. La "
+                        "premessa della domanda è errata.", "premessa_sentenza", kw) == 0.0
