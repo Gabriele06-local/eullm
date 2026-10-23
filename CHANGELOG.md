@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Fixed
+- **The engine runs on tokio 1.54.1**, past RUSTSEC-2026-0386: tokio's `AsyncFd` let safe code register a file descriptor it did not own, which could end in a use-after-free when the descriptor was closed and its number reused. Neither EuLLM nor the HTTP libraries it uses create an `AsyncFd`, so no released binary was exposed; the update keeps a dependency audit of the binaries clean.
+
 ## 0.7.92 — 2026-10-23
 
 ### Fixed
