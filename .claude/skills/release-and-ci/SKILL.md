@@ -180,9 +180,11 @@ or incomplete run on 7 October 2026:
   175, eullm.exe 150). `rocm_kpack.dll` reads `ROCM_KPACK_PATH_PREFIX` and
   `ROCM_KPACK_DEBUG` with the shared UCRT's `getenv`.
 
-Its layout is not what `install.ps1` and `eullm update` handle yet: both
-copy the top-level files of a ZIP only, so both refuse it with a message
-saying to extract the ZIP by hand (`EULLM_VARIANT=rocm`, `keeps_rocm_layout`).
+`eullm update` installs that layout from 0.7.92 (`keeps_rocm_layout`): the
+files in `bin\` one by one, the kernel folders and `.kpack\` whole; 0.7.91
+and earlier refuse it. `install.ps1` copies the top-level files of a ZIP
+only, so it still refuses it with a message saying to extract the ZIP by
+hand (`EULLM_VARIANT=rocm`).
 
 **A llama.cpp bump makes the next release cold.** sccache keys on the C++/CUDA
 sources, so a new pin misses on every kernel. v0.7.30 moved the pin
