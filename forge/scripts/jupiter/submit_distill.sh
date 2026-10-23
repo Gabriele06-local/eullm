@@ -43,11 +43,14 @@ for arm in $ARMS; do
 done
 # The way the jobs will load them: offline, from $HF_HOME.
 HF_HUB_OFFLINE=1 python - "${MODELS[@]}" <<'PY' || err "a model is not in \$HF_HOME: prefetch_models.py --models ..."
-import sys
+import os, sys
 from transformers import AutoConfig
 for m in sorted(set(sys.argv[1:])):
+    # A student under $FORGE_RUN_DIR (a model distilled before) is a
+    # directory, read as the job will read it, its variables expanded.
+    m = os.path.expandvars(m)
     AutoConfig.from_pretrained(m, local_files_only=True)
-    print(f"[ok]  {m} in the offline cache")
+    print(f"[ok]  {m} in the offline cache" if not os.path.isdir(m) else f"[ok]  {m}")
 PY
 
 NAME="${FORGE_CHAIN_NAME:-forge-distill}"
