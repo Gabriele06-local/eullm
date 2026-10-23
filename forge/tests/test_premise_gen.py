@@ -480,3 +480,21 @@ def test_sentences_are_never_cut_after_an_abbreviation():
     # ":" ends a sentence only when asked
     assert len(split_sentences("Sono elementi: il prezzo.", marks=".;:")) == 2
     assert len(split_sentences("Sono elementi: il prezzo.")) == 1
+
+
+def test_an_answer_quoting_a_text_cut_short_earns_nothing():
+    from eullm_forge.rl import answer_reward
+    from eullm_forge.rl.rewards import quote_cut_short
+    kw = ["60 giorni|sessanta giorni"]
+    whole = ("La premessa è errata: il termine è di 60 giorni, non di 30 [1]. Il testo dice: "
+             "«La domanda si propone entro sessanta giorni a norma dell'art. 2855».")
+    cut = whole.replace("dell'art. 2855»", "dell'art»")
+    assert score_answer(whole, "premessa_termine", kw) == 1.0
+    assert score_answer(cut, "premessa_termine", kw) == 0.0
+    assert quote_cut_short("«…abrogato dal D.LGS»") and quote_cut_short("«…ai sensi del n.»")
+    assert not quote_cut_short("«Chiunque cagiona ad altri un danno ingiusto è obbligato.»")
+    assert not quote_cut_short("Secondo l'art. 2043 c.c. il danno va risarcito.")
+    # a sentence may end on a code's abbreviation
+    assert not quote_cut_short("«Il danno si risarcisce ai sensi dell'art. 2043 c.c.»")
+    scores = answer_reward([cut, whole], ["pratica", "pratica"], [[], []])
+    assert scores == [-1.0, None]
