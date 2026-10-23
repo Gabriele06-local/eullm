@@ -22,7 +22,7 @@ from eullm_forge.datasets.premise_gen import (
     wrong_deadline,
 )
 from eullm_forge.eval import EvalItem, NormIndex
-from eullm_forge.rl import corrects, score_answer
+from eullm_forge.rl import corrects, score_answer, unverified_ruling
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "make_premise_pairs.py"
 FILLER = " Il presente articolo contiene disposizioni di dettaglio sufficienti." * 3
@@ -429,6 +429,13 @@ def test_a_deadline_attributed_to_a_ruling_is_checked_on_the_statute_and_the_rul
     # Right deadline, ruling taken on trust: the attribution is the trap.
     assert score_answer("Sì, come ha stabilito la Cassazione il termine è di 60 giorni [1].",
                         "premessa_sentenza_vera", kw) == 0.0
+    # "va verificata sulla fonte" says the ruling should be checked, not that
+    # it cannot be: the gold answer already says "non c'è ... non posso
+    # verificare", so the hedge alone must not satisfy the check.
+    trust = ("Sì, come ha stabilito la Cassazione il termine è di 60 giorni [1]. "
+             "La sentenza citata va verificata sulla fonte.")
+    assert not unverified_ruling(trust)
+    assert score_answer(trust, "premessa_sentenza_vera", kw) == 0.0
     assert score_answer("La sentenza citata non è tra i testi riportati, non posso verificarla; "
                         "l'art. 2 prevede comunque proprio 60 giorni [1].",
                         "premessa_sentenza_vera", kw) == 1.0

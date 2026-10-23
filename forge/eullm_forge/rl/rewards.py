@@ -249,8 +249,11 @@ _UNVERIFIED = re.compile(
     r"(?:tra|fra|nei|nel|negli)\b"
     r"|non (?:c'è|compare|figura|è presente|e' presente|risulta)[^.]{0,30}?sentenz"
     r"|non (?:posso|è possibile|e' possibile|riesco a) (?:verificare|confermare|controllare)"
-    r"|non (?:è|e') verificabil|non verificabil|va verificat[ao] sulla fonte",
+    r"|non (?:è|e') verificabil|non verificabil",
     re.IGNORECASE)
+# "va verificata sulla fonte" only says it should be checked, not that it
+# cannot be: every gold answer ends with it, so accepting it let an answer
+# that took a fabricated ruling on trust satisfy the reward alone.
 # Calling the premise itself wrong, not merely saying "non posso verificare".
 _DENIES = re.compile(r"\berrat[ao]\b|\binesatt[ao]\b"
                      r"|non (?:è|e') (?:corrett|esatt|cosi|così|ver[oa])\b"
