@@ -2559,13 +2559,9 @@ jobs:
 
             LLM inference engine in Rust: one binary, any GGUF model, on CPU or GPU. Continuous batching, quantized KV cache, zero telemetry, and an AI Act-ready audit trail.
 
-            ### This release: AMD servers that stay up, tensor-split loads as fast as layer split, and a TLS fix
+            ### This release: `eullm update` for the Windows ROCm build
 
-            **A server on AMD GPUs no longer runs out of VRAM after hours of answering.** With llama.cpp's HIP graphs on, every server under many requests at once grew 1.3 to 2.5 GiB of VRAM an hour on LUMI-G's MI250X until the GPU was full, then answered NaN or aborted, 6 to 11.5 hours in. ROCm builds now leave the graphs out: the same servers ran 16 hours with their VRAM flat, at the same speed or 1-3% faster. The change is in every ROCm download (Linux gfx90a, Linux RDNA 3/4, Windows); the growth was measured on the MI250X.
-
-            **A model split with `--split-mode tensor` loads about as fast as split by layer**, where it was 10 to 50 times slower: cold from Lustre, Qwen3-235B over four MI250X GCDs in 140 s (943-1,269 s before; 124 by layer), Qwen3-Coder-480B over eight in 121 s (1,679 before; 162 by layer).
-
-            **Model downloads and `eullm update` no longer trust certificates issued through emSign's distrusted intermediates** (RUSTSEC-2026-0381, RUSTSEC-2026-0382).
+            **`eullm update` installs the Windows ROCm build.** It used to refuse `eullm-windows-x64-rocm.zip` and say to extract it by hand, because that ZIP keeps ROCm's own layout: `eullm.exe` and its DLLs in `bin\`, the GPU kernels in folders under it and in `.kpack\` beside it. The update now replaces the whole folder that holds `bin\`, and puts the previous version back if anything fails. 0.7.91 and earlier still refuse, since the update runs the installed version's code: extract this one by hand once, over the folder that holds `bin\`, and later versions update themselves. Nothing changes for the other downloads.
 
             ### Quick install
 
@@ -2655,7 +2651,7 @@ jobs:
             | `eullm-windows-x64.exe` | CPU only | Windows 10/11 x64 with the Visual C++ Redistributable already installed (otherwise it fails with "MSVCP140.dll was not found" — take the ZIP) |
             | `eullm-windows-x64-cuda-13.1.zip` | NVIDIA GPU (RTX 3000/4000/5000) | NVIDIA driver 580+ for Windows. ZIP bundles eullm.exe + CUDA and Visual C++ runtime DLLs — run from the extracted folder |
             | `eullm-windows-x64-vulkan.zip` | Any GPU with a Vulkan driver: AMD Radeon (cards and Ryzen integrated graphics), Intel Arc, and NVIDIA cards the CUDA build does not cover (GTX 1000, RTX 2000) | Windows 10/11 x64 and a current graphics driver, which installs the Vulkan loader. ZIP bundles eullm.exe + the Visual C++ runtime DLLs — run from the extracted folder |
-            | `eullm-windows-x64-rocm.zip` | AMD Radeon through ROCm 10.1: RX 7900 XTX/XT (gfx1100), RX 9070 XT/9070 and Radeon AI PRO R9700 (gfx1201). **Experimental: not yet run on a Radeon** | Windows 11 x64 and the AMD Software: Adrenalin Edition for ROCm 10.1 driver (26.10.41.05) or newer. ZIP bundles the HIP runtime, rocBLAS and hipBLASLt with the kernels of those cards, and the Visual C++ runtime, in ROCm's own layout: run `bin\eullm.exe` and keep `.kpack\` beside `bin\`. Not installed by `install.ps1` or `eullm update` yet |
+            | `eullm-windows-x64-rocm.zip` | AMD Radeon through ROCm 10.1: RX 7900 XTX/XT (gfx1100), RX 9070 XT/9070 and Radeon AI PRO R9700 (gfx1201). **Experimental: not yet run on a Radeon** | Windows 11 x64 and the AMD Software: Adrenalin Edition for ROCm 10.1 driver (26.10.41.05) or newer. ZIP bundles the HIP runtime, rocBLAS and hipBLASLt with the kernels of those cards, and the Visual C++ runtime, in ROCm's own layout: run `bin\eullm.exe` and keep `.kpack\` beside `bin\`. Not installed by `install.ps1` yet; `eullm update` updates it from 0.7.92 on |
             | `eullm-windows-x64-store.msix` | CPU + NVIDIA GPU | **Not for direct install**: the unsigned package submitted to the Microsoft Store, which signs it. Use the ZIPs or `install.ps1` instead |
 
             ### Pick a model interactively
