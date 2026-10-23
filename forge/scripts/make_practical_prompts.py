@@ -74,6 +74,24 @@ def prompt_row(item, index, k: int) -> dict:
             "question": item.question, "reference": item.reference, "rubric": item.rubric}
 
 
+def teacher_gpus(spec: str, retrieval: bool, ap) -> list[str]:
+    """The GPUs the teacher servers may use, leaving the retrieval GPU alone.
+
+    The embedder and reranker take the first visible GPU; llama-server with
+    the 27B teacher and a 128k context cannot create its context beside
+    them. The first entry of --gpus is that GPU, so it is reserved when the
+    script also loads retrieval models. With --url the answer servers are
+    elsewhere and every entry is kept.
+    """
+    gpus = [g for g in spec.split(",") if g]
+    if retrieval and len(gpus) > 1:
+        return gpus[1:]
+    if retrieval:
+        ap.error("--embedder/--reranker need one GPU for retrieval and one for the "
+                 "teacher: give at least two --gpus entries, or serve the teacher with --url")
+    return gpus
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -121,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         urls = list(args.url)
         if args.serve:
             from eullm_forge.eval.gguf import LlamaServer
-            for gpu in args.gpus.split(","):
+            for gpu in teacher_gpus(args.gpus, bool(args.embedder or args.reranker), ap):
                 srv = LlamaServer(args.serve, binary=args.llama_server, parallel=args.parallel,
                                   ctx_per_slot=args.ctx, devices=gpu,
                                   log_path=args.out.with_name(f"practical-server-gpu{gpu}.log"))
