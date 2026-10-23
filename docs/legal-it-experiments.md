@@ -501,3 +501,36 @@ note to the model (`legal_eval.py --gate-mode`); r2h is examined through it
 on the traps (both modes), devbig without the note and the practical exam,
 the last two being where a question gated wrongly would lose its answer.
 The traps' 20 of 36 stays the target.
+
+**What the answers said, read on 10-23 evening** (`compare_graded.py --show`).
+
+* *The five nonexistent articles every candidate "lost" on devbig without the
+  note were not lost.* r2k answered "tra i testi riportati non c'è l'art.
+  957 …, e non mi risulta che esista … verifica il numero": right under the
+  rubric, which accepts "non compare nei testi" and a suggestion to check the
+  reference. The judge failed it as implying the article might exist, while
+  passing the published model's vaguer "potrebbe non esistere". The
+  judge-free check, printed under every comparison, had them level (1:1).
+  For nonexistent articles the judge-free check is the one to read; the
+  exam's abstention pattern now knows the three-step phrasings.
+* *The judge is close to deterministic.* On identical answers asked twice it
+  changed its grade 0.6% of the time on devbig (2 of 341) and 3.3% on the
+  practical exam (2 of 60): about 3 questions of devbig, 5 of the practical
+  exam and 1 trap move on the judge alone. The +23 on the practical exam
+  holds; a one- or two-trap difference does not.
+* *Quotations cut short, learnt from our data.* Splitting at every full stop
+  cut "a norma dell'art. 2855" after "art."; quote_span then dropped the
+  stop. 400 of 16,116 quotations of openbook-v06 and 90 of 667 in the
+  premise answers ended that way, and r2h and r2k quote cut short in 19 and
+  16 of about 370 answers (the published model hardly quotes). Fixed in the
+  splitter, and GRPO now pays nothing for such an answer (r2l, jpn14).
+* *The first context gate failed on real questions.* 0.92 on its
+  development set, it stopped 31 of 36 traps, 94 of 472 devbig questions and
+  77 of 145 practical ones; with its fixed reply the traps fell from 16 to
+  2, with the note instead they were 17. Trained on short one-article
+  questions, it read a false premise or a case with several facts as
+  unanswerable. Version 2 adds those kinds with their article as
+  sufficient, caps the threshold at 3% of the sufficient questions gated,
+  and only adds the note.
+* *4B:* jpn13 (the fixed ruling reward) and jpn11 are level (devbig
+  439-445 / 446-448, practical 82-83): the 4B recipe has plateaued.
