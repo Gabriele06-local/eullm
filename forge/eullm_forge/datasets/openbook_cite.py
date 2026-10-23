@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import re
 
-from ..eval.norm_exam import CODE_LABELS
+from ..eval.norm_exam import CODE_LABELS, split_sentences
 from .openbook_gen import _article_number_pattern
 from .premise_gen import quote_span
 
@@ -62,7 +62,7 @@ def best_sentence(text: str, answer: str) -> str | None:
     """The sentence of the text sharing the most words with the answer, if any shares enough."""
     said = set(_WORD.findall(answer.lower()))
     best, shared = None, MIN_SHARED_WORDS - 1
-    for s in re.split(r"(?<=[.;:])\s+|\n+", text):
+    for _, s in split_sentences(text, marks=".;:"):
         flat = " ".join(s.split())
         # a heading is not a sentence, and a passage cut for length ends in […]
         if len(flat) < 40 or "[…]" in flat or re.match(r"(?i)^(?:art\.|articolo)\s*\d", flat):

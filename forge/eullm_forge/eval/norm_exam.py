@@ -257,13 +257,47 @@ def _deadline_keyword(n: int, unit: str) -> str:
     return "|".join(alts)
 
 
+# Abbreviations a statute is full of: no sentence ends after them. Splitting
+# at every full stop cut "a norma dell'art. 2855" after "art.", and the
+# quotations built from those sentences taught the model to quote articles
+# cut short (devbig, 2026-10-23, art. 2875 c.c.).
+_ABBREV = re.compile(
+    r"(?:^|[\s(«\"'’])(?:artt?|nn?|co|comma|lett|cfr|ss|segg|sez|sezz|cass|pag|par|cod|"
+    r"cpv|disp|att|all|ecc|es|cit|reg|dir|cost|civ|pen|proc|amm|trib|sent|ord|rv|"
+    r"[a-z]{1,2}(?:\.[a-z]{1,4})+|[a-z])\.$", re.IGNORECASE)
+_BREAK = re.compile(r"([.;:])\s+|\n+")
+
+
+def split_sentences(text: str, marks: str = ".;") -> list[tuple[int, str]]:
+    """``text``'s sentences with where each starts, never cut after an abbreviation.
+
+    A sentence ends at a full stop followed by a capital letter (or an
+    opening quote or bracket) and not after an abbreviation ("art.", "n.",
+    "c.c.", "d.lgs."), at any of the other ``marks`` (";", and ":" when
+    given), and at a line break.
+    """
+    out, start = [], 0
+    for m in _BREAK.finditer(text):
+        mark = m.group(1)
+        if mark == ".":
+            nxt = text[m.end():m.end() + 1]
+            if not (nxt[:1].isupper() or nxt in ("«", '"', "(", "[")) \
+                    or _ABBREV.search(text[max(0, m.start() - 12):m.start() + 1]):
+                continue
+        elif mark and mark not in marks:
+            continue
+        end = m.start() + (1 if mark else 0)
+        if text[start:end].strip():
+            out.append((start, text[start:end]))
+        start = m.end()
+    if text[start:].strip():
+        out.append((start, text[start:]))
+    return out
+
+
 def _sentences(flat: str) -> list[tuple[int, str]]:
     """The flattened text's sentences, each with where it starts."""
-    out, offset = [], 0
-    for sentence in re.split(r"(?<=[.;])\s+", flat):
-        out.append((offset, sentence))
-        offset += len(sentence) + 1  # the single space the split consumed
-    return out
+    return split_sentences(flat)
 
 
 def _sentence_with(text: str, n: int, unit: str) -> str:

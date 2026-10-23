@@ -64,6 +64,7 @@ from ..eval.norm_exam import (
     _sentences,
     all_deadlines,
     articles_from_records,
+    split_sentences,
 )
 from ..eval.retrieval import named_articles, named_code, open_book_prompt
 
@@ -448,11 +449,11 @@ def _repealed_sentence(article) -> str:
         r"|\babrogat[oaie]\s+(?:dalla\b|dal\b|dall['’]|con\b|ai sensi\b)",
         re.IGNORECASE,
     )
-    for s in re.split(r"(?<=[.;])\s+|\n+", article.text):
+    for _, s in split_sentences(article.text):
         if pattern.search(s):
             return s
     if article.heading.strip("()[] ").lower() in ("abrogato", "abrogata"):
-        return next((s for s in re.split(r"(?<=[.;])\s+|\n+", article.text)
+        return next((s for _, s in split_sentences(article.text)
                      if "abrogat" in s.lower()), "")
     return ""
 
