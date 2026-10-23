@@ -292,6 +292,15 @@ def main() -> int:
                          "RAG Enterprise does not, and on 2026-10-16 a model that answered every "
                          "absent article right with the note (0:0 against the published 8B) "
                          "lost 43 of them without it, inside RAG Enterprise")
+    ap.add_argument("--gate", type=Path,
+                    help="with --norms: a trained context gate (train_context_gate.py) decides "
+                         "first whether the retrieved texts can answer each question")
+    ap.add_argument("--gate-threshold", type=float,
+                    help="with --gate: gate below this probability (default: gate.json's)")
+    ap.add_argument("--gate-mode", choices=("answer", "note"), default="answer",
+                    help="with --gate, what a gated question gets: answer = a fixed reply "
+                         "saying the texts do not hold it and what is needed, the model not "
+                         "asked; note = a note in front of the texts, the model answering")
     ap.add_argument("--absent", action="store_true",
                     help="with --norms: take each item's own article out of the texts "
                          "(the abstention exam; see ABSTENTION above)")
@@ -334,6 +343,8 @@ def main() -> int:
         ap.error("--reranker reorders the fused list: give --embedder")
     if args.retrieval_cache and not args.embedder:
         ap.error("--retrieval-cache holds document embeddings: give --embedder")
+    if args.gate and not args.norms:
+        ap.error("--gate judges the retrieved texts: give --norms")
 
     from transformers import AutoTokenizer
 
@@ -356,12 +367,22 @@ def main() -> int:
     system = args.system_file.read_text(encoding="utf-8").strip() if args.system_file else None
     if system:
         print(f"[eval] system prompt: {args.system_file} ({len(system)} chars)", flush=True)
-    contexts, in_hand, prompts = {}, {}, []
+    gate = None
+    if args.gate:
+        from eullm_forge.eval.gate import GATE_NOTE, ContextGate
+        gate = ContextGate(args.gate, args.gate_threshold)
+        print(f"[eval] context gate {args.gate}, threshold {gate.threshold:.3f}, "
+              f"mode {args.gate_mode}", flush=True)
+    contexts, in_hand, prompts, gate_p = {}, {}, [], {}
     for it in items:
         content = it.question
         if index:
             found, note = retrieve(index, it, args.k, absent=args.absent,
                                    note=not args.no_note)
+            if gate:
+                gate_p[it.id] = gate.prob(it.question, found)
+                if gate_p[it.id] < gate.threshold and args.gate_mode == "note" and not note:
+                    note = GATE_NOTE
             contexts[it.id] = [norm_label(r) for r in found] + ([note] if note else [])
             in_hand[it.id] = articles_in_hand(index, found)
             content = open_book_prompt(it.question, found, note=note)
@@ -369,6 +390,10 @@ def main() -> int:
     # Retrieval is done: its models leave the GPU to the model that answers.
     if hasattr(index, "release"):
         index.release()
+    gated = {i for i, pr in gate_p.items() if pr < gate.threshold} if gate else set()
+    if gate:
+        gate.release()
+        print(f"[eval] context gate: {len(gated)}/{len(items)} questions gated", flush=True)
     if args.gguf and args.runtime == "eullm":
         from eullm_forge.eval.gguf import EullmServer, generate_answers_eullm
         log = Path(args.answers).with_suffix(".server.log") if args.answers else None
@@ -408,6 +433,9 @@ def main() -> int:
         split = [split_reasoning(text) for text, _ in results]
         reasonings = {it.id: r for it, (_, r, _) in zip(items, split)}
         results = [(a, e and closed) for (a, _, closed), (_, e) in zip(split, results)]
+    if gated and args.gate_mode == "answer":
+        from eullm_forge.eval.gate import GATE_ANSWER
+        results = [(GATE_ANSWER, True) if it.id in gated else r for it, r in zip(items, results)]
     answers = {it.id: text for it, (text, _) in zip(items, results)}
     ended = sum(e for _, e in results)
     if not args.quiet:
@@ -443,6 +471,8 @@ def main() -> int:
                                     "keyword_coverage": r["keyword_coverage"],
                                     "context": contexts.get(it.id),
                                     "abstained": abst[it.id],
+                                    **({"gate": round(gate_p[it.id], 4)}
+                                       if it.id in gate_p else {}),
                                     "unsourced_articles": unsourced[it.id],
                                     "absent": args.absent,
                                     **({"reasoning": reasonings[it.id]} if args.think else {})},

@@ -101,7 +101,8 @@ class Reranker:
               "\"yes\" or \"no\".<|im_end|>\n<|im_start|>user\n")
     SUFFIX = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
 
-    def __init__(self, model_id: str, *, batch_size: int = 8, max_length: int = 2048):
+    def __init__(self, model_id: str, *, batch_size: int = 8, max_length: int = 2048,
+                 task: str | None = None):
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -109,6 +110,7 @@ class Reranker:
         self.model_id = model_id
         self.batch_size = batch_size
         self.max_length = max_length
+        self.task = task or TASK
         self.tok = AutoTokenizer.from_pretrained(model_id, padding_side="left")
         cuda = torch.cuda.is_available()
         self.model = AutoModelForCausalLM.from_pretrained(
@@ -121,7 +123,7 @@ class Reranker:
 
     def scores(self, question: str, docs: list[str]) -> list[float]:
         torch = self.torch
-        pairs = [f"<Instruct>: {TASK}\n<Query>: {question}\n<Document>: {d}" for d in docs]
+        pairs = [f"<Instruct>: {self.task}\n<Query>: {question}\n<Document>: {d}" for d in docs]
         out: list[float] = []
         room = self.max_length - len(self.prefix) - len(self.suffix)
         for i in range(0, len(pairs), self.batch_size):
