@@ -67,12 +67,20 @@ def test_the_gate_is_trained_in_order_then_the_round_examined_through_it(tmp_pat
     assert calls[1][3].endswith("openbook-v05.jsonl")
     assert "afterok:100" in calls[1][1] and "afterok:101" in calls[2][1]
     exams = [c for c in calls[3:] if "sbatch_norm_exam" in c[1]]
-    # traps twice (fixed reply, note), devbig in two links, practical
-    assert [c[5] for c in exams] == ["TAG=hybnn-gate", "TAG=hybnn-gatenote", "TAG=hybnn-gate",
-                                     "TAG=hybnn-gate", "TAG=hyb-gate"]
-    assert all("--gate " in c[4] for c in exams)
+    # traps, devbig in two links, practical; a note to the model by default
+    assert [c[5] for c in exams] == ["TAG=hybnn-gate", "TAG=hybnn-gate", "TAG=hybnn-gate",
+                                     "TAG=hyb-gate"]
+    assert all("--gate " in c[4] and "--gate-mode note" in c[4] for c in exams)
     assert "afterok:102" in exams[0][1]
-    assert sum("sbatch_judge" in c[1] for c in calls) == 4
+    assert sum("sbatch_judge" in c[1] for c in calls) == 3
+
+
+def test_a_second_gate_gets_its_own_labels(tmp_path):
+    env, log = _setup(tmp_path)
+    r = _run({**env, "GATE_TAG": "gate2", "GATE_DIR": str(tmp_path / "gate2")}, "r2h")
+    assert r.returncode == 0, r.stderr + r.stdout
+    tags = {ln.split("|")[5] for ln in log.read_text().splitlines() if "norm_exam" in ln}
+    assert tags == {"TAG=hybnn-gate2", "TAG=hyb-gate2"}
 
 
 def test_nothing_is_queued_twice_or_without_its_inputs(tmp_path):
