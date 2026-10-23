@@ -452,3 +452,52 @@ What it says:
 Mistral Small 4 on the practical exam, graded without the "partial" grade
 (regrading under rubric v3 is queued): 55-60 correct, against 74-76 for the
 two teachers. Below them on both sets.
+
+## 10. 2026-10-23: rulings in the premises, and a gate in front of the model
+
+**Rulings attributed wrongly** (`premessa_sentenza`, `premessa_sentenza_vera`,
+premise5): a deadline attributed to a made-up Cassazione ruling, rightly or
+wrongly; the answer must say the ruling is not among the texts and check the
+deadline on the statute. The first reward missed right answers ("la sentenza
+Cass. civ. n. 4767/2025 non è tra i testi", cut at the full stops, and "non
+posso confermarne"); fixed and rescored without sampling again, the 8B passes
+the false attributions 0.16 of the time and the true ones 0.58, the 4B 0.13
+and 0.10. Its usual failures are real: it checks the statute or flags the
+ruling, rarely both. r2j trained on the faulty reward, r2k (from r2h too) on
+the fixed one; jpn11 and jpn12 compare the 4B with and without the premises.
+
+| Model | devbig with note | devbig without | Practical (correct + partial) | Traps (corr. / abst. / ans.) |
+|---|---|---|---|---|
+| published 8B | 437 | 440 | 60 + 21 | 14 (5 / 5 / 4) |
+| r2h | 443 | 435 | 83 + 2 | 16 (7 / 6 / 3) |
+| r2j, faulty ruling reward | **447** (+10, p=0.10) | 441 | 84 + 4 | 13 (7 / 3 / 3) |
+| r2k, fixed reward | 445 (+8) | 439 | 84 + 1 (29:5, p<0.001) | 15 (6 / 6 / 3) |
+| jpn9 (4B) | 441 | 447 | 82 + 1 | 7 |
+| jpn11 (4B, premises + practical) | 445 (+4 on jpn9) | 448 | 83 + 2 | 7 |
+| jpn12 (4B, practical only) | 434 (-7) | 446 | 80 + 1 | 7 |
+
+* The fixed reward gives back the abstentions r2j lost (3 to 6) at the
+  same practical score; the traps stay at 15-16 for every 8B round.
+* For the 4B the premises help (jpn11 against jpn12) on devbig and the
+  practical exam, not on the traps.
+* Every 8B candidate loses the same 5 nonexistent-article questions of
+  devbig without the note (0:5), wins none: the next thing to look at.
+* Mistral Small 4 regraded under rubric v3: 55 / 59 / 60 correct, 0-1
+  partial, the same as before; it stays below the teachers.
+
+**The context gate** (`eullm_forge.datasets.context_gate`, `eval.gate`,
+`submit_gate.sh`). The traps no model solves are mostly questions the texts
+in front of the model cannot answer. A small model before the legal one,
+Qwen3-Reranker-0.6B fine-tuned with its own instruction, reads the question
+and the three retrieved texts and says whether they hold what the answer
+needs. Its examples are labelled by construction: an open-book question
+with its article among the texts, the same question with it taken out,
+questions on nonexistent articles, and questions on matters the collection
+does not cover, written by the teacher on 25 matters (tax, traffic,
+pensions, immigration, insolvency, building, ...; matters the civil code
+covers in part are left out). Development articles and matters are never
+trained on. A gated question gets a fixed reply saying what is missing, or a
+note to the model (`legal_eval.py --gate-mode`); r2h is examined through it
+on the traps (both modes), devbig without the note and the practical exam,
+the last two being where a question gated wrongly would lose its answer.
+The traps' 20 of 36 stays the target.
