@@ -55,6 +55,11 @@ JUPITER, named by its Slurm job id.
 * Spending: 474.9 GPU-hours by JSC's count (9.5%); `jutil` dates the period
   from 01-10, so a uniform pace would be at 24%, 185 node-hours short; 112.7
   GPU-hours in the last 24 hours with one node busy. Two nodes kept busy.
+* The Qwen3.5 distillation on norms-v2 complete (§5.9): the 4B and the 9B
+  at step 15,625 of 15,625 and merged, at the end of the seventh link
+  (2431505); the three links added in the morning cancelled unstarted. The
+  final pair queued through the open-book recipe (job 2480052, graded by
+  2480053).
 
 **21-10-2026**
 * Job 2427647: JUPITER's part of the three sites' comparison (c13-sites,
@@ -650,6 +655,11 @@ optimiser steps, two-hour links.
   the 8B 0.740 against 0.751 for the 8B Base. Open book the article is in
   front of the model, so the exam measures reading it, which distillation
   on the law is not expected to change; its effect is the held-out loss.
+* Qwen3.5-35B-A3B-Base teaching Qwen3.5-4B-Base and 9B-Base side by side on
+  one node, unpacked (§5.6), one epoch of the 250,000 chunks (15,625 steps
+  each): seven links, 2431499-2431505, from 21-10 16:37 to 23-10 21:59 UTC,
+  six of 7 h 51 min and the last of 6 h 12 min, 53.3 node-hours, 213 GPU-hours
+  for the two students (deliverable 7).
 
 ### 5.10 A candidate teacher: Mistral Small 4 (from 19-10-2026)
 
