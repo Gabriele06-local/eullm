@@ -275,12 +275,29 @@ def _said(keyword: str, answer: str) -> bool:
     return keyword.replace("’", "'").lower() in answer.replace("’", "'").lower()
 
 
+# A quotation that stops on an abbreviation: «… a norma dell'art» lost the
+# article's number. The data generators cut sentences at every full stop until
+# 2026-10-23, and the rounds trained on them quoted that way in about one
+# answer in twenty (devbig, r2h and r2k).
+# Only abbreviations a number must follow: a sentence may well end on "c.c.".
+_CUT_QUOTE = re.compile(r"«[^»]{0,800}?\b(?:artt?|nn?|co|comma|lett|cpv|d\.\s?lgs|d\.p\.r|"
+                        r"d\.l|l)\.?\s*»", re.IGNORECASE)
+
+
+def quote_cut_short(answer: str) -> bool:
+    """Whether a quotation in the answer ends on an abbreviation, cut short."""
+    return bool(_CUT_QUOTE.search(answer))
+
+
 def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> float:
     """1.0 for a verifiably right answer, 0.0 otherwise.
 
     Raises ValueError for a kind it cannot check: a question that silently
-    scored 0 whatever the model said would only teach it noise.
+    scored 0 whatever the model said would only teach it noise. An answer
+    quoting a text cut short is not right, whatever else it says.
     """
+    if quote_cut_short(answer):
+        return 0.0
     if tipo == "premessa_termine":
         if not corrects(answer):
             return 0.0
@@ -354,5 +371,8 @@ def answer_reward(completions, tipo, keywords, **_) -> list[float | None]:
     as "this function does not score this completion": the judge reward
     does.
     """
-    return [None if t in JUDGED_TYPES else score_answer(_text(c), t, k)
+    # A judged answer quoting a text cut short (`quote_cut_short`) is taken
+    # down by one point, which cancels what the judge pays for it.
+    return [(-1.0 if quote_cut_short(_text(c)) else None) if t in JUDGED_TYPES
+            else score_answer(_text(c), t, k)
             for c, t, k in zip(completions, tipo, keywords)]
