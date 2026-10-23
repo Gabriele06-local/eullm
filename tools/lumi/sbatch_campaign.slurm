@@ -58,7 +58,11 @@ trap 'kill -TERM "$RUNNER" 2>/dev/null' TERM INT
 STATUS=0
 wait "$RUNNER" || STATUS=$?
 while kill -0 "$RUNNER" 2>/dev/null; do  # woken by the trap: wait for the runner itself
-    wait "$RUNNER" || STATUS=$?
+    # The first wait was interrupted by SIGTERM and returned 143; the runner
+    # then shut down cleanly. Assign unconditionally, or the stale 143 makes
+    # Slurm record every walltime end as FAILED.
+    wait "$RUNNER"
+    STATUS=$?
 done
 
 # The job's own summary, so that what it measured is read, not assembled:
