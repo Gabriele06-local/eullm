@@ -297,7 +297,7 @@ def main() -> int:
                          "first whether the retrieved texts can answer each question")
     ap.add_argument("--gate-threshold", type=float,
                     help="with --gate: gate below this probability (default: gate.json's)")
-    ap.add_argument("--gate-mode", choices=("answer", "note"), default="answer",
+    ap.add_argument("--gate-mode", choices=("answer", "note"), default="note",
                     help="with --gate, what a gated question gets: answer = a fixed reply "
                          "saying the texts do not hold it and what is needed, the model not "
                          "asked; note = a note in front of the texts, the model answering")

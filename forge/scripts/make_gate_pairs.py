@@ -10,9 +10,11 @@
         --embedder Qwen/Qwen3-Embedding-0.6B --reranker Qwen/Qwen3-Reranker-0.6B \\
         --out-train $WORK/eullm_runs/gate/train.jsonl --out-dev $WORK/eullm_runs/gate/dev.jsonl
 
-Each grounded open-book question gives two examples, its article in the
-texts and taken out; the false-premise questions on nonexistent articles and
-the off-topic questions give one each, all insufficient. The texts are
+Each question written from an article -- grounded open-book pairs, the
+practical exam's GRPO prompts (``--practical``), the false-premise prompts
+-- gives two examples, its article in the texts and taken out; the
+false-premise questions on nonexistent articles and the off-topic questions
+give one each, both insufficient. The texts are
 retrieved the way the released models retrieve them (``--embedder``,
 ``--reranker``), since that is what the gate will read.
 
@@ -34,7 +36,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from eullm_forge.datasets.context_gate import (  # noqa: E402
-    from_openbook,
+    from_article,
     from_question,
     openbook_article,
     question_of,
@@ -67,7 +69,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--openbook", nargs="+", type=Path, required=True,
                     help="open-book SFT pairs (openbook_grounded rows are used)")
     ap.add_argument("--premise", nargs="*", type=Path, default=[],
-                    help="false-premise GRPO prompts (the nonexistent-article ones are used)")
+                    help="false-premise GRPO prompts: with their article and without it, "
+                         "and the nonexistent-article ones as insufficient")
+    ap.add_argument("--practical", nargs="*", type=Path, default=[],
+                    help="practical-exam GRPO prompts (make_practical_prompts.py)")
+    ap.add_argument("--max-per-source", type=int, default=3000,
+                    help="premise and practical questions used at most, each")
     ap.add_argument("--offtopic", nargs="*", type=Path, default=[],
                     help="make_offtopic_questions.py output")
     ap.add_argument("--exclude-exam", nargs="*", type=Path, default=[])
@@ -95,22 +102,37 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
     skipped: Counter = Counter()
 
+    # (question, code, article, key, source) of every question written from an article
+    asked = []
     grounded = [p for p in read(args.openbook) if openbook_article(p)]
-    grounded = [p for p in grounded if openbook_article(p) not in exclude]
     rng.shuffle(grounded)
-    grounded = grounded[:args.max_openbook]
-    articles = sorted({openbook_article(p) for p in grounded})
+    for p in grounded[:args.max_openbook]:
+        asked.append((question_of(p["instruction"]), *openbook_article(p), str(p["key"]),
+                      "openbook"))
+    premise = read(args.premise)
+    for source, rows in (("premise", [r for r in premise if r.get("tipo") not in
+                                      (None, "premessa_inesistente")]),
+                         ("practical", read(args.practical))):
+        rows = [r for r in rows if r.get("code") and r.get("articolo")]
+        rng.shuffle(rows)
+        for r in rows[:args.max_per_source]:
+            asked.append((question_of(r["prompt"][-1]["content"]), r["code"],
+                          str(r["articolo"]), str(r["id"]), source))
+    asked = [a for a in asked if (a[1], a[2]) not in exclude]
+    articles = sorted({(a[1], a[2]) for a in asked})
     rng.shuffle(articles)
     dev_articles = set(articles[:int(round(len(articles) * args.dev_share))])
 
     train, dev = [], []
-    for p in grounded:
-        made = from_openbook(p, index, rng, k=args.k)
+    for question, code, number, key, source in asked:
+        made = from_article(question, code, number, index, rng, key, k=args.k)
         if not made:
-            skipped["openbook:article_not_in_index"] += 1
-        (dev if openbook_article(p) in dev_articles else train).extend(made)
+            skipped[f"{source}:article_not_in_index"] += 1
+        for ex in made:
+            ex["source"] = source
+        (dev if (code, number) in dev_articles else train).extend(made)
 
-    fake = [r for r in read(args.premise) if r.get("tipo") == "premessa_inesistente"]
+    fake = [r for r in premise if r.get("tipo") == "premessa_inesistente"]
     rng.shuffle(fake)
     for r in fake[:args.max_nonexistent]:
         ex = from_question(question_of(r["prompt"][-1]["content"]), index,
@@ -131,8 +153,11 @@ def main(argv: list[str] | None = None) -> int:
     write(args.out_dev, dev)
     for name, rows in (("train", train), ("dev", dev)):
         c = Counter(r["reason"] for r in rows)
+        src = Counter(r.get("source", "-") for r in rows if r["label"])
         print(f"[gate] {name}: {len(rows)} examples, "
-              + ", ".join(f"{k} {v}" for k, v in sorted(c.items())), flush=True)
+              + ", ".join(f"{k} {v}" for k, v in sorted(c.items()))
+              + "; sufficient ones from " + ", ".join(f"{k} {v}" for k, v in sorted(src.items())),
+              flush=True)
     print(f"[gate] {len(exclude)} exam articles left out; dev holds {len(dev_articles)} "
           f"articles and {len(dev_topics)} off-topic matters never trained on"
           + "".join(f"; {k} {v}" for k, v in sorted(skipped.items())), flush=True)

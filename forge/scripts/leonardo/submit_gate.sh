@@ -10,11 +10,13 @@
 #
 #   1. offtopic -> 2. pairs -> 3. train, one GPU each;
 #   4. after the training, ROUND's GGUF asked through the gate, graded like
-#      every other model: the LexIA traps without the note, gated questions
-#      answered by the fixed reply (tag hybnn-gate) and, apart, with a note
-#      to the model instead (hybnn-gatenote); devbig without the note and the
-#      practical exam through the gate (hybnn-gate, hyb-gate), the cost side:
-#      a question gated wrongly loses its answer there.
+#      every other model: the LexIA traps and devbig without the note
+#      (hybnn-TAG), the practical exam (hyb-TAG) -- the last two are the cost
+#      side, where a question gated wrongly loses its answer.
+#
+# Settable: GATE_DIR (default $WORK/eullm_runs/gate), GATE_TAG (the exams'
+# label suffix, default "gate"), GATE_MODE (legal_eval.py --gate-mode, default
+# note: the fixed reply took the traps from 16 to 2 on 2026-10-23).
 #
 # Idempotent: nothing is queued while an eullm-gate job is in the queue, and
 # each step keeps what is already written.
@@ -74,20 +76,18 @@ exam() {  # items out-dir graded-dir links tag legal_eval-options -> id of the j
     sub --dependency="$d" --export="ALL,JUDGE_DIR=$out,JUDGE_QUIET=1,JUDGE_GLOB=answers-$ROUND-q4-$tag.jsonl,JUDGE_ARGS=--rubric v3 --graded-dir $graded" \
         "$L/sbatch_judge.slurm"
 }
-GATE="--gate $GD/model"
+TAG="${GATE_TAG:-gate}"
+GATE="--gate $GD/model --gate-mode ${GATE_MODE:-note}"
 if [ -s "$E/lexia/lexia-trappole.jsonl" ]; then
-    j=$(exam "$E/lexia/lexia-trappole.jsonl" "$E/lexia/answers" "$E/lexia/graded" 1 hybnn-gate \
-        "--no-note $GATE --gate-mode answer") || exit 1
-    echo "[gate] traps through the gate, fixed reply: judge $j"
-    j=$(exam "$E/lexia/lexia-trappole.jsonl" "$E/lexia/answers" "$E/lexia/graded" 1 hybnn-gatenote \
-        "--no-note $GATE --gate-mode note") || exit 1
-    echo "[gate] traps through the gate, note to the model: judge $j"
+    j=$(exam "$E/lexia/lexia-trappole.jsonl" "$E/lexia/answers" "$E/lexia/graded" 1 "hybnn-$TAG" \
+        "--no-note $GATE") || exit 1
+    echo "[gate] traps through the gate: judge $j"
 fi
-j=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2 hybnn-gate \
-    "--no-note $GATE --gate-mode answer") || exit 1
+j=$(exam "$E/norm-exam-devbig.jsonl" "$E/devbig-answers" "$E/devbig-graded-v3" 2 "hybnn-$TAG" \
+    "--no-note $GATE") || exit 1
 echo "[gate] devbig without the note through the gate: judge $j"
 if [ -s "$E/practical-dev.jsonl" ]; then
-    j=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1 hyb-gate \
-        "$GATE --gate-mode answer") || exit 1
+    j=$(exam "$E/practical-dev.jsonl" "$E/practical-answers" "$E/practical-answers" 1 "hyb-$TAG" \
+        "$GATE") || exit 1
     echo "[gate] practical exam through the gate: judge $j"
 fi

@@ -10,8 +10,10 @@ provision the texts do not contain, a reference that cannot be checked.
 
 Every label is known by construction, never from a judge:
 
-* ``presente`` (sufficient): a grounded open-book question, written from an
-  article, with that article among its texts (put in if retrieval missed it);
+* ``presente`` (sufficient): a question written from an article, with that
+  article among its texts (put in if retrieval missed it): grounded open-book
+  questions, the practical exam's questions, and the false-premise questions
+  -- a premise is corrected from the article, so its texts are enough;
 * ``articolo_assente`` (insufficient): the same question with its article
   taken out of the texts -- the same question on both sides, so the gate
   learns to read the texts and not the wording;
@@ -80,14 +82,37 @@ def _is(index, record: dict, code: str, number: str) -> bool:
     return record.get("code") == code and number in index.articles_of(record)
 
 
+def _records_of(index, code: str, number: str) -> list[dict]:
+    """The records of an article, from a lookup built once per index."""
+    table = getattr(index, "_gate_by_article", None)
+    if table is None:
+        table = {}
+        for r in index.records:
+            for n in index.articles_of(r):
+                table.setdefault((r.get("code"), n), []).append(r)
+        index._gate_by_article = table
+    return table.get((code, number), [])
+
+
 def from_openbook(pair: dict, index, rng: random.Random, k: int = 3) -> list[dict]:
     """The pair's question with its article in the texts, and without it."""
     ref = openbook_article(pair)
     if ref is None:
         return []
-    code, number = ref
-    question = question_of(pair.get("instruction", ""))
-    mine = [r for r in index.records if _is(index, r, code, number)]
+    return from_article(question_of(pair.get("instruction", "")), *ref, index, rng,
+                        str(pair["key"]), k=k)
+
+
+def from_article(question: str, code: str, number: str, index, rng: random.Random, key: str,
+                 k: int = 3) -> list[dict]:
+    """A question written from an article: with the article in the texts, and without.
+
+    The version-1 gate was trained on open-book questions only, short and on
+    one article, and stopped 77 of 145 practical questions and 31 of 36 traps
+    (2026-10-23): questions with a false premise or several facts looked
+    unanswerable to it. Those kinds are made here the same way.
+    """
+    mine = _records_of(index, code, number)
     if not question or not mine:
         return []
     pool = index.search(question, k + 6)
@@ -96,7 +121,6 @@ def from_openbook(pair: dict, index, rng: random.Random, k: int = 3) -> list[dic
         found = found[:k - 1]
         found.insert(rng.randrange(len(found) + 1), mine[0])
     without = [r for r in pool if not _is(index, r, code, number)][:k]
-    key = str(pair["key"])
     return [example(question, found, "presente", key + "-gate-in"),
             example(question, without, "articolo_assente", key + "-gate-out")]
 

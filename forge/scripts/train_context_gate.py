@@ -62,6 +62,22 @@ def best_threshold(probs: list[float], labels: list[int]) -> tuple[float, float]
     return best
 
 
+def capped_threshold(probs: list[float], labels: list[int], threshold: float,
+                     max_false_gate: float) -> float:
+    """``threshold``, lowered until at most ``max_false_gate`` of the sufficient
+    examples fall below it.
+
+    A question gated wrongly loses an answer the model had; one let through
+    wrongly is still answered by a model trained to say what is missing. The
+    version-1 gate, chosen on balance alone, stopped half the practical exam.
+    """
+    good = sorted(p for p, y in zip(probs, labels) if y)
+    if not good:
+        return threshold
+    allowed = int(max_false_gate * len(good))
+    return min(threshold, good[allowed]) if allowed < len(good) else threshold
+
+
 def report(rows: list[dict], probs: list[float], threshold: float) -> dict:
     """Accuracy at the threshold, overall and per reason."""
     by = defaultdict(lambda: [0, 0])
@@ -86,6 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--max-length", type=int, default=3072)
+    ap.add_argument("--max-false-gate", type=float, default=0.03,
+                    help="at most this share of the sufficient development examples gated")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args(argv)
 
@@ -143,7 +161,9 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[gate] epoch {epoch} step {step}/{len(batches)} loss {loss.item():.4f} "
                       f"({time.time() - t0:.0f}s)", flush=True)
         probs = dev_probs()
-        threshold, balanced = best_threshold(probs, [r["label"] for r in dev_rows])
+        labels = [r["label"] for r in dev_rows]
+        threshold, balanced = best_threshold(probs, labels)
+        threshold = capped_threshold(probs, labels, threshold, args.max_false_gate)
         dev = report(dev_rows, probs, threshold)
         print(f"[gate] epoch {epoch}: dev balanced accuracy {balanced:.4f} at threshold "
               f"{threshold:.3f}; {json.dumps(dev['by_reason'])}", flush=True)

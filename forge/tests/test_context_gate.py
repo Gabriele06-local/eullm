@@ -162,3 +162,12 @@ def test_an_off_topic_question_is_labelled_insufficient_whatever_it_retrieves():
     ex = from_question("Chi paga le spese della domanda di rimborso IMU?", NormIndex(RECORDS),
                        "fuori_ambito", "k", k=2)
     assert ex["label"] == 0 and ex["document"].startswith("[1] ")
+
+
+def test_the_threshold_never_gates_more_than_its_share_of_sufficient_questions():
+    mod = load("train_context_gate")
+    probs = [0.01, 0.02, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95, 0.97, 0.99, 0.001, 0.003]
+    labels = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0]
+    t = mod.capped_threshold(probs, labels, 0.55, 0.1)   # 1 of 10 may be gated
+    assert t == 0.02
+    assert sum(1 for p, y in zip(probs, labels) if y and p < t) == 1

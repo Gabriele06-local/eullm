@@ -19,6 +19,8 @@
 #   GATE_DIR       outputs (default $WORK/eullm_runs/gate)
 #   GATE_OPENBOOK  open-book SFT pairs (pairs; default openbook-v04.jsonl)
 #   GATE_PREMISE   false-premise GRPO prompts (pairs; default premise5/grpo.jsonl)
+#   GATE_PRACTICAL practical-exam GRPO prompts (pairs; default
+#                  grpo/prompts-practical-abst-nn.jsonl, when it exists)
 #   GATE_TEACHER_GGUF  the teacher (offtopic; default the judge's Q8_0)
 #   GATE_REPO      checkout to run (default: the one this file was submitted from)
 #
@@ -78,8 +80,11 @@ pairs)
     done
     # shellcheck disable=SC2206
     EXCLUDE=($WORK/eval/norm-exam-*.jsonl $WORK/eval/practical-*.jsonl $WORK/eval/lexia/lexia-trappole.jsonl)
+    PR="${GATE_PRACTICAL:-$WORK/eullm_runs/grpo/prompts-practical-abst-nn.jsonl}"
+    PRACTICAL=()
+    [ -s "$PR" ] && PRACTICAL=(--practical "$PR")
     python "$S/make_gate_pairs.py" --norms "$WORK"/norms/legislazione_*.chunks.jsonl \
-        --openbook "$OB" --premise "$PM" --offtopic "$GD/offtopic.jsonl" \
+        --openbook "$OB" --premise "$PM" "${PRACTICAL[@]}" --offtopic "$GD/offtopic.jsonl" \
         --exclude-exam "${EXCLUDE[@]}" --embedder Qwen/Qwen3-Embedding-0.6B \
         --reranker Qwen/Qwen3-Reranker-0.6B --retrieval-cache "$WORK/eval/retrieval-cache" \
         --out-train "$GD/train.jsonl" --out-dev "$GD/dev.jsonl"
