@@ -63,6 +63,8 @@ ABSTAIN = re.compile(
     r"non posso (?:quindi )?(?:dar\w*|fornir\w*|rispondert?\w*)[^.]{0,40}"
     r"(?:certezza|sicur[oa])|"
     r"senza (?:il|i) test[oi] dell[ae] norm|"
+    r"non c['’]è l['’]\s*art|non mi risulta che (?:esista|esistano)|"
+    r"non posso (?:dirti|indicarti|indicare|riportare) (?:che )?(?:cosa|che cosa|il contenuto)|"
     r"no relevant information|non (?:ci sono|sono|risultano|emergono)[^.]{0,40}"
     r"informazioni rilevanti", re.IGNORECASE)
 _BRACKETS = re.compile(r"\[([^\[\]]{3,200})\]")
