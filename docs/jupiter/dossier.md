@@ -60,6 +60,11 @@ JUPITER, named by its Slurm job id.
   (2431505); the three links added in the morning cancelled unstarted. The
   final pair queued through the open-book recipe (job 2480052, graded by
   2480053).
+* The two students continued on the rest of norms-v2, the 142,538 training
+  chunks (~81M tokens) the 250,000 sample left out, the same 3,000 held out
+  (`build_norms_v2_rest.sh`): links 2480199-2480203 of 8 hours, about 30
+  hours for the 9B's 8,900 steps; whether the whole corpus moves the 9B
+  further than the sample did.
 
 **21-10-2026**
 * Job 2427647: JUPITER's part of the three sites' comparison (c13-sites,
