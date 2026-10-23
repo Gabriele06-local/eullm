@@ -43,6 +43,11 @@ ABSTAIN = re.compile(
     r"non posso (?:quindi )?(?:dar\w*|fornir\w*|rispondert?\w*)[^.]{0,40}"
     r"(?:certezza|sicur[oa])|"
     r"senza (?:il|i) test[oi] dell[ae] norm|"
+    # The three-step answers of the 2026-10 rounds: "tra i testi riportati non
+    # c'è l'art. 957 …, e non mi risulta che esista … non posso dirti che cosa
+    # prevede". None of it matched, so their abstentions went uncounted.
+    r"non c['’]è l['’]\s*art|non mi risulta che (?:esista|esistano)|"
+    r"non posso (?:dirti|indicarti|indicare|riportare) (?:che )?(?:cosa|che cosa|il contenuto)|"
     # "informazioni rilevanti" alone is also the phrase of a right answer
     # ("Le informazioni rilevanti sono contenute nell'art. 2043"): require
     # the negation.

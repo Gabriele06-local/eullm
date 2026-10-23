@@ -54,6 +54,10 @@ def test_a_right_answer_is_not_read_as_abstaining():
     "Non risulta nessuna norma che disciplini la materia.",
     "Nel brano riportato non compare la disposizione di cui si chiede.",
     "La raccolta non include l'articolo richiesto.",
+    # The three-step answers of the 2026-10 rounds (devbig, nonexistent articles).
+    "Verifica della premessa: tra i testi riportati non c'è l'art. 957 del codice di "
+    "procedura penale, e non mi risulta che esista: la domanda parte da un riferimento errato.",
+    "Risposta: non posso dirti che cosa prevede l'art. 400 della Costituzione.",
 ])
 def test_the_exam_reads_the_abstention_the_reward_already_pays(answer):
     assert abstained(answer), answer
