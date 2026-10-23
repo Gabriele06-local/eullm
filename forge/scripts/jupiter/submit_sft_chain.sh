@@ -33,6 +33,7 @@ EXAM="${FORGE_SFT_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
 ACCOUNT="${SBATCH_ACCOUNT:-e-aif-2026pg01-1434}"
 LOGS="$FORGE_RUN_DIR/logs"
 NAME="forge-sft-$TAG"
+JUDGE_NAME="forge-judge-$TAG"
 bad=0
 
 [ -s "$PAIRS" ] && echo "[ok] pairs $PAIRS ($(wc -l <"$PAIRS"))" || { echo "[!!] no pairs at $PAIRS"; bad=1; }
@@ -65,7 +66,7 @@ wait_for_slurm || exit 1
 # link hours, say); a running link stays, and the new links follow it.
 if [ "${FORGE_CHAIN_REPLACE:-0}" = 1 ] && [ "$bad" = 0 ]; then
     for l in $(squeue -h -u "$USER" -n "$NAME" -t PENDING -o %i); do
-        for j in $(squeue -h -u "$USER" -n forge-judge -t PENDING -o %i); do
+        for j in $(squeue -h -u "$USER" -n "$JUDGE_NAME,forge-judge" -t PENDING -o %i); do
             scontrol show job "$j" 2>/dev/null | grep -q "Dependency=.*:${l}\b" &&
                 scancel "$j" && echo "[ok] judge $j, waiting for $l, cancelled"
         done
@@ -90,16 +91,35 @@ for i in $(seq 1 "$LINKS"); do
     prev="${j%%;*}" jobs+=("$prev")
 done
 # A judge already waiting for this chain is moved behind the new last link,
-# not submitted twice.
+# not submitted twice. New judges carry the tag in their name; judges queued
+# by older versions are found through the job they depend on, including when
+# that job has already ended (the normal end of a chain).
 judge=""
-if [ -n "${QUEUED:-}" ]; then
+for j in $(squeue -h -u "$USER" -n "$JUDGE_NAME" -t PENDING -o %i 2>/dev/null); do
+    scontrol update JobId="$j" Dependency="afterany:$prev" && judge="$j" &&
+        echo "[ok] judge $j now waits for $prev"
+    break
+done
+if [ -z "$judge" ]; then
     for j in $(squeue -h -u "$USER" -n forge-judge -t PENDING -o %i 2>/dev/null); do
-        scontrol show job "$j" 2>/dev/null | grep -q "Dependency=.*:${QUEUED}\b" || continue
+        dep=$(scontrol show job "$j" 2>/dev/null |
+              sed -n 's/.*Dependency=[^:]*:\([0-9][0-9]*\).*/\1/p')
+        [ -n "$dep" ] || continue
+        if [ -n "${QUEUED:-}" ] && [ "$dep" = "$QUEUED" ]; then
+            :
+        else
+            depname=$(scontrol show job "$dep" 2>/dev/null |
+                      sed -n 's/.*JobName=\([^ ]*\).*/\1/p')
+            [ -n "$depname" ] || depname=$(sacct -n -X -j "$dep" -o JobName 2>/dev/null |
+                                          head -1 | tr -d ' ')
+            [ "$depname" = "$NAME" ] || continue
+        fi
         scontrol update JobId="$j" Dependency="afterany:$prev" && judge="$j" &&
             echo "[ok] judge $j now waits for $prev"
+        break
     done
 fi
-[ -n "$judge" ] || judge=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --dependency="afterany:$prev" \
+[ -n "$judge" ] || judge=$(cd "$REPO" && sbatch_retry --parsable --account "$ACCOUNT" --job-name "$JUDGE_NAME" --dependency="afterany:$prev" \
     --output="$LOGS/judge-%j.out" forge/scripts/jupiter/sbatch_judge.slurm) ||
     { echo "[!!] sbatch of the judge failed"; exit 1; }
 echo "[ok] $NAME: links ${jobs[*]}, then the judge ${judge%%;*}"
