@@ -244,11 +244,16 @@ def corrects_procedibility(answer: str, right: str) -> bool:
 
 
 # Saying that a ruling the question cites cannot be checked against the texts.
+# Not bounded by full stops: a ruling is cited with them ("la sentenza Cass. civ.
+# n. 4767/2025 non è tra i testi"), and the first version, stopping at the
+# first one, scored 0 every such right answer of the 8B (2026-10-23), as it
+# did "non posso confermarne il contenuto".
 _UNVERIFIED = re.compile(
-    r"sentenz[ae][^.]{0,80}?non (?:è|e'|compare|risulta|figura|c'è)[^.]{0,20}?"
+    r"sentenz[ae][^\n]{0,100}?non (?:è|e'|compare|risulta|figura|c'è|si trova)[^\n]{0,25}?"
     r"(?:tra|fra|nei|nel|negli)\b"
-    r"|non (?:c'è|compare|figura|è presente|e' presente|risulta)[^.]{0,30}?sentenz"
-    r"|non (?:posso|è possibile|e' possibile|riesco a) (?:verificare|confermare|controllare)"
+    r"|non (?:c'è|compare|figura|è presente|e' presente|risulta)[^\n]{0,40}?sentenz"
+    r"|non (?:posso|è possibile|e' possibile|riesco a) (?:verificar|confermar|controllar)"
+    r"(?:e|ne|la|lo)\b"
     r"|non (?:è|e') verificabil|non verificabil",
     re.IGNORECASE)
 # "va verificata sulla fonte" only says it should be checked, not that it

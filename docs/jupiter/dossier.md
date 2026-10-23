@@ -20,7 +20,7 @@ JUPITER, named by its Slurm job id.
 |---|---|
 | Awarded | 06-10-2026; first job on 14-10-2026 |
 | System | JUPITER Booster: 4× GH200 (H100 96 GB HBM3, 72-core Neoverse-V2 Grace) a node, whole nodes only |
-| Spent so far | 317.4 GPU-hours (6.3%) by 20-10-2026 in JSC's own count (`jutil user cpuquota`, 72 core-hours a GPU-hour), 4,682.6 left (`tools/jupiter/budget.sh` gives it, with each day's from Slurm's accounting); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
+| Spent so far | 474.9 GPU-hours (9.5%) by 23-10-2026 in JSC's own count (`jutil user cpuquota`, 72 core-hours a GPU-hour), 4,525.1 left (`tools/jupiter/budget.sh` gives it, with each day's from Slurm's accounting); planned to 15-12-2026, two months from activation (JuDoor shows 31-12-2026, kept as the margin): about 82 GPU-hours a day from 16-10, 20 node-hours, one node busy 85% of the time |
 | Codes | EULLM Engine (Rust, llama.cpp), EULLM Forge (Python: PyTorch 2.9.1 of the site, Transformers 5.19, PEFT 0.21) |
 | Data on JUPITER | Legislation (Normattiva, EUR-Lex) and public benchmarks; pseudonymised court decisions once JSC's data-protection addendum is signed, asked for on 15-10-2026 (§7) |
 
@@ -39,6 +39,22 @@ JUPITER, named by its Slurm job id.
 | 9 | Energy use and carbon footprint | — | GPU energy per job: generation, instruction tuning, distillation (§6) |
 
 ## 3. Log
+
+**23-10-2026**
+* The second node idle overnight: the submission script refused the
+  distillation checkpoints given as "base+adapter" as missing models, which
+  the job itself loads; fixed (`d51cee9`) and resubmitted in the morning.
+* Qwen3.5 halfway through its distillation on norms-v2, through the
+  open-book recipe (job 2466380, §5.8): the 9B distilled 189 of 217 with the
+  note and 187 without, against 182 and 179 for its Base, level with
+  Ministral-3-8B-Instruct; the 4B unchanged (186 and 177 against 187 and
+  178).
+* The Qwen3.5 chain at 8,500 (4B) and 9,100 (9B) of 15,625 steps after five
+  8-hour links, about 1,700 a link for the 4B: three more links (2466376,
+  2466377, 2466379), a link with nothing left ending in minutes.
+* Spending: 474.9 GPU-hours by JSC's count (9.5%); `jutil` dates the period
+  from 01-10, so a uniform pace would be at 24%, 185 node-hours short; 112.7
+  GPU-hours in the last 24 hours with one node busy. Two nodes kept busy.
 
 **21-10-2026**
 * Job 2427647: JUPITER's part of the three sites' comparison (c13-sites,
@@ -527,6 +543,28 @@ difference distillation has made on this exam. Whether it holds for
 Qwen3.5 is the same comparison on the 4B and the 9B, once their
 distillation on norms-v2 ends.
 
+**Qwen3.5 halfway (23-10-2026).** The same comparison on the Qwen3.5
+students of the norms-v2 chain at the checkpoints of 22-10 (4B at step
+8,500, 9B at 9,100, of the epoch's 15,625), each merged into its Base by the
+job and put through the same recipe (job 2466380, graded by 2466381),
+against the Base models of the recipe above:
+
+| model | open book | correct | without the note | correct |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B distilled on norms-v2, step 9,100 | **0.892** | **189** | **0.882** | **187** |
+| Qwen3.5-9B Base | 0.862 | 182 | 0.848 | 179 |
+| Qwen3.5-4B distilled on norms-v2, step 8,500 | 0.878 | 186 | 0.836 | 177 |
+| Qwen3.5-4B Base | 0.880 | 187 | 0.841 | 178 |
+
+Distillation moves the 9B by 7 questions with the note and 8 without it,
+the largest gain it has made on this exam, and the 9B ties
+Ministral-3-8B-Instruct, the best so far (189 and 187); the 4B stays where
+its Base is (1 question less in both). As with Qwen3, the larger student
+gains and the smaller one hardly does. The end of the epoch is examined the
+same way by a chain queued behind the distillation's last link
+(`FORGE_CHAIN_AFTER`), and the 9B at step 9,100 goes through the vertical
+(GGUF Q4_K_M, EULLM Engine) meanwhile.
+
 **The complete vertical (22-10-2026, deliverables 1 and 8).** The two best
 models of the recipe above, merged, made into what ships and examined as it
 ships (`sbatch_vertical.slurm`, jobs 2447162 and 2449393, graded by 2447164
@@ -741,6 +779,7 @@ figures below with the site's energy mix.
 | 20-10 | Dequantizing on loading left the fused experts in FP8 | converted once to BF16 on a login node (`dequantize_fp8.py`, `1059ee8`, `2a7c5fc`) |
 | 20-10 | The Hub client refused a snapshot without the consolidated files | the snapshot directory found in the cache (`a08780b`) |
 | 20-10 | GPU 0, also holding the retrieval models, out of memory at 48 questions a batch | 24 a batch, expandable CUDA segments (`6691261`) |
+| 22-10 | The chain's submission refused distillation checkpoints given as "base+adapter", which the job loads; the second node idle overnight | the check follows the job (`d51cee9`) |
 | 22-10 | llama.cpp's converter stopped on Ministral: it imports `sentencepiece` before looking for a tokenizer.model | `sentencepiece` 0.2.2 in the venv (`03821b8`) |
 | 20-10 | sbatch failed once with "Connection reset by peer" and the script reported the job submitted | `sites.sh` tries again and says when nothing was submitted (`7eca038`) |
 
@@ -780,10 +819,10 @@ low because JUPITER was down most of the day.
 
 ## 10. Next
 
-1. Whether distillation on the law helps under the open-book recipe: the
-   Qwen3 4B and 8B distilled on norms-v2 against their Base, then the
-   Qwen3.5 4B and 9B when their distillation ends (Leonardo's §6, item 3,
-   never run there).
+1. Whether distillation on the law helps under the open-book recipe: yes
+   for the larger students (Qwen3-8B +9 without the note, Qwen3.5-9B +7 and
+   +8 halfway), hardly for the 4B ones (§5.8). The Qwen3.5 pair at the end
+   of its epoch is queued behind the distillation.
 2. Reinforcement learning (GRPO) on the best of Leonardo's recipe,
    Ministral-3-8B-Instruct and Qwen3.5-4B (0.887 and 0.880, §5.8;
    deliverables 4, 6).

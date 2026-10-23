@@ -68,13 +68,24 @@ fn checksum_for(checksums: &str, asset: &str) -> Option<String> {
     })
 }
 
-/// Whether `asset` is a release ZIP in ROCm's own layout, which the update
-/// below cannot install: the Windows ROCm build keeps eullm.exe and the DLLs
-/// in `bin\`, with kernel folders under it, and its libraries' GPU code in
-/// `.kpack\` beside it, while the update replaces the files next to the
-/// running exe.
+/// Whether `asset` is a release ZIP in ROCm's own layout: the Windows ROCm
+/// build keeps eullm.exe and the DLLs in `bin\`, with rocBLAS's and
+/// hipBLASLt's kernel folders under it, and its libraries' GPU code in
+/// `.kpack\` beside it (each library opens `..\.kpack\` from its own DLL).
+/// The update then replaces the folder that holds `bin\`, not `bin\` alone.
 fn keeps_rocm_layout(asset: &str) -> bool {
     asset == "eullm-windows-x64-rocm.zip"
+}
+
+/// Where the release asset's binary is, inside what it unpacks to.
+fn new_exe_path(asset: &str, exe_name: &str) -> PathBuf {
+    if keeps_rocm_layout(asset) {
+        Path::new("bin").join("eullm.exe")
+    } else if asset.ends_with(".zip") {
+        PathBuf::from("eullm.exe")
+    } else {
+        PathBuf::from(exe_name)
+    }
 }
 
 /// A client that does not follow redirects, for reading where
@@ -143,15 +154,6 @@ pub async fn run(check_only: bool) -> Result<(), String> {
              rebuild from the {tag} tag."
         ));
     }
-    // Said before a download of a few hundred MB rather than after it.
-    if keeps_rocm_layout(RELEASE_ASSET) {
-        return Err(format!(
-            "{RELEASE_ASSET} keeps ROCm's own layout (eullm.exe in bin\\, its libraries' \
-             GPU code in .kpack\\ beside it), which `eullm update` cannot replace yet. \
-             Download it from https://github.com/{REPO}/releases/latest and extract it \
-             over the folder that holds bin\\."
-        ));
-    }
 
     let exe = std::env::current_exe()
         .and_then(|p| p.canonicalize())
@@ -163,15 +165,35 @@ pub async fn run(check_only: bool) -> Result<(), String> {
              which updates it itself."
         ));
     }
-    let dir = exe
+    let exe_dir = exe
         .parent()
-        .ok_or_else(|| format!("{shown_exe} has no parent directory"))?
-        .to_path_buf();
+        .ok_or_else(|| format!("{shown_exe} has no parent directory"))?;
     let exe_name = exe
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| format!("{shown_exe} has no file name"))?
         .to_string();
+    // The folder the update replaces, and the running binary inside it: the
+    // exe's own folder, or for ROCm's layout the one that holds `bin\`.
+    // Said before a download of a few hundred MB rather than after it.
+    let (dir, exe_path) = if keeps_rocm_layout(RELEASE_ASSET) {
+        let root = exe_dir
+            .file_name()
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin"))
+            .then(|| exe_dir.parent())
+            .flatten()
+            .ok_or_else(|| {
+                format!(
+                    "{RELEASE_ASSET} keeps eullm.exe in bin\\ with .kpack\\ beside it, but \
+                     {shown_exe} is not in a bin\\ folder. Download it from \
+                     https://github.com/{REPO}/releases/latest and extract it into a folder \
+                     of its own."
+                )
+            })?;
+        (root.to_path_buf(), Path::new("bin").join(&exe_name))
+    } else {
+        (exe_dir.to_path_buf(), PathBuf::from(&exe_name))
+    };
 
     // In the install directory, so every rename below stays on one volume,
     // and created first, so a directory this user cannot write to is found
@@ -189,7 +211,7 @@ pub async fn run(check_only: bool) -> Result<(), String> {
         )
     })?;
 
-    let result = install(&tag, &dir, &exe_name, &staging, latest_str).await;
+    let result = install(&tag, &dir, &exe_path, &staging, latest_str).await;
     let _ = std::fs::remove_dir_all(&staging);
     let leftovers = result?;
 
@@ -199,20 +221,21 @@ pub async fn run(check_only: bool) -> Result<(), String> {
     );
     if leftovers > 0 {
         println!(
-            "{leftovers} file(s) of the old version are still in use and stay there as *{OLD_SUFFIX}; \
-             the next update removes them."
+            "{leftovers} file(s) or folder(s) of the old version are still in use and stay \
+             there as *{OLD_SUFFIX}; the next update removes them."
         );
     }
     println!("A running `eullm serve` or `eullm run` keeps the old version until it is restarted.");
     Ok(())
 }
 
-/// Download, verify, unpack, test and put in place. Returns how many old
-/// files could not be deleted yet.
+/// Download, verify, unpack, test and put in place. `exe_path` is the
+/// running binary, relative to `dir`. Returns how many old files could not be
+/// deleted yet.
 async fn install(
     tag: &str,
     dir: &Path,
-    exe_name: &str,
+    exe_path: &Path,
     staging: &Path,
     version: &str,
 ) -> Result<usize, String> {
@@ -267,20 +290,23 @@ async fn install(
     let unpacked = staging.join("files");
     std::fs::create_dir_all(&unpacked)
         .map_err(|e| format!("could not create {}: {e}", display_path(&unpacked)))?;
-    let new_exe_name = if RELEASE_ASSET.ends_with(".zip") {
+    let exe_name = exe_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("eullm");
+    let new_exe = new_exe_path(RELEASE_ASSET, exe_name);
+    if RELEASE_ASSET.ends_with(".zip") {
         unzip(&download, &unpacked)?;
-        "eullm.exe"
     } else {
-        let target = unpacked.join(exe_name);
+        let target = unpacked.join(&new_exe);
         std::fs::rename(&download, &target)
             .map_err(|e| format!("could not move the download into place: {e}"))?;
         make_executable(&target)?;
-        exe_name
-    };
+    }
 
-    check_starts(&unpacked.join(new_exe_name), version)?;
+    check_starts(&unpacked.join(&new_exe), version)?;
 
-    let moves = planned_moves(&unpacked, new_exe_name, exe_name, dir)?;
+    let moves = planned_moves(&unpacked, &new_exe, exe_path, dir)?;
     remove_old_leftovers(&moves);
     swap(&moves)
 }
@@ -350,52 +376,83 @@ fn check_starts(new_exe: &Path, version: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One file of the new version and where it goes.
+/// One file or folder of the new version and where it goes. A folder is
+/// replaced whole (rocBLAS's kernels, `.kpack\`): kernels of the old version
+/// left beside the new ones would be read as theirs.
 #[derive(Debug, Clone, PartialEq)]
 struct Move {
     from: PathBuf,
     to: PathBuf,
+    dir: bool,
 }
 
-/// Every file at the top of `unpacked` goes into `dir` under its own name,
-/// except the new binary, which takes the running binary's name: someone
-/// who renamed it, or runs the bare `eullm-windows-x64.exe`, keeps the name
-/// they use.
+/// What `unpacked` holds goes into `dir` at the same place, except the new
+/// binary (`new_exe`, relative to `unpacked`), which takes the running
+/// binary's place (`exe_path`, relative to `dir`): someone who renamed it, or
+/// runs the bare `eullm-windows-x64.exe`, keeps the name they use. The
+/// folders on the way to the binary (`bin\`) are entered and their files
+/// replaced one by one, as the running exe and its DLLs can be renamed but
+/// not their folder; every other folder is replaced whole.
 fn planned_moves(
     unpacked: &Path,
-    new_exe_name: &str,
-    exe_name: &str,
+    new_exe: &Path,
+    exe_path: &Path,
     dir: &Path,
 ) -> Result<Vec<Move>, String> {
-    let entries = std::fs::read_dir(unpacked)
-        .map_err(|e| format!("could not read {}: {e}", display_path(unpacked)))?;
     let mut moves = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("could not read the unpacked files: {e}"))?;
-        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-            continue;
+    let mut pending = vec![PathBuf::new()];
+    while let Some(rel) = pending.pop() {
+        let here = unpacked.join(&rel);
+        let entries = std::fs::read_dir(&here)
+            .map_err(|e| format!("could not read {}: {e}", display_path(&here)))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("could not read the unpacked files: {e}"))?;
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let child = rel.join(entry.file_name());
+            if kind.is_dir() {
+                if new_exe.starts_with(&child) {
+                    pending.push(child);
+                } else {
+                    moves.push(Move {
+                        from: entry.path(),
+                        to: dir.join(&child),
+                        dir: true,
+                    });
+                }
+            } else if kind.is_file() {
+                let target = if child == new_exe {
+                    exe_path.to_path_buf()
+                } else {
+                    child
+                };
+                moves.push(Move {
+                    from: entry.path(),
+                    to: dir.join(target),
+                    dir: false,
+                });
+            }
         }
-        let name = entry.file_name();
-        let target = if name == new_exe_name {
-            exe_name.to_string()
-        } else {
-            name.to_string_lossy().into_owned()
-        };
-        moves.push(Move {
-            from: entry.path(),
-            to: dir.join(target),
-        });
     }
-    if !moves
-        .iter()
-        .any(|m| m.to.file_name().is_some_and(|n| n == exe_name))
-    {
+    let exe_target = dir.join(exe_path);
+    if !moves.iter().any(|m| !m.dir && m.to == exe_target) {
         return Err(format!(
-            "the download holds no {new_exe_name}. Nothing was changed."
+            "the download holds no {}. Nothing was changed.",
+            new_exe.display()
         ));
     }
     moves.sort_by(|a, b| a.to.cmp(&b.to));
     Ok(moves)
+}
+
+/// Delete a file, or a folder with everything in it.
+fn remove(path: &Path, dir: bool) -> std::io::Result<()> {
+    if dir {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
 }
 
 fn old_path(path: &Path) -> PathBuf {
@@ -404,14 +461,14 @@ fn old_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// The `*.old` files an earlier update could not delete because they were
-/// still in use. Only those of files this update replaces: nothing else in
-/// the directory is touched.
+/// The `*.old` files and folders an earlier update could not delete because
+/// they were still in use. Only those of what this update replaces: nothing
+/// else in the directory is touched.
 fn remove_old_leftovers(moves: &[Move]) {
     for m in moves {
         let old = old_path(&m.to);
         if old.exists() {
-            let _ = std::fs::remove_file(&old);
+            let _ = remove(&old, m.dir);
         }
     }
 }
@@ -421,41 +478,57 @@ fn remove_old_leftovers(moves: &[Move]) {
 /// left as it was. Returns how many old files could not be deleted afterwards
 /// (on Windows: the running exe and the DLLs it loaded).
 fn swap(moves: &[Move]) -> Result<usize, String> {
-    let mut set_aside: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let mut placed: Vec<PathBuf> = Vec::new();
+    let mut set_aside: Vec<(PathBuf, PathBuf, bool)> = Vec::new();
+    let mut placed: Vec<(PathBuf, bool)> = Vec::new();
+    let mut created: Vec<PathBuf> = Vec::new();
 
     let mut step = || -> Result<(), String> {
         for m in moves {
             if m.to.exists() {
                 let old = old_path(&m.to);
                 if old.exists() {
-                    std::fs::remove_file(&old)
+                    remove(&old, m.dir)
                         .map_err(|e| format!("{} is still in use ({e})", display_path(&old)))?;
                 }
-                std::fs::rename(&m.to, &old)
-                    .map_err(|e| format!("could not set {} aside: {e}", display_path(&m.to)))?;
-                set_aside.push((m.to.clone(), old));
+                std::fs::rename(&m.to, &old).map_err(|e| {
+                    // A folder cannot be renamed on Windows while a file in it
+                    // is open: a running server holds its GPU kernels.
+                    let hint = if m.dir {
+                        " (a running `eullm serve` or `eullm run` may hold files in it: stop it and update again)"
+                    } else {
+                        ""
+                    };
+                    format!("could not set {} aside: {e}{hint}", display_path(&m.to))
+                })?;
+                set_aside.push((m.to.clone(), old, m.dir));
+            } else if let Some(parent) = m.to.parent().filter(|p| !p.exists()) {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("could not create {}: {e}", display_path(parent)))?;
+                created.push(parent.to_path_buf());
             }
             std::fs::rename(&m.from, &m.to)
                 .map_err(|e| format!("could not put {} in place: {e}", display_path(&m.to)))?;
-            placed.push(m.to.clone());
+            placed.push((m.to.clone(), m.dir));
         }
         Ok(())
     };
 
     if let Err(e) = step() {
-        for path in placed.iter().rev() {
-            let _ = std::fs::remove_file(path);
+        for (path, dir) in placed.iter().rev() {
+            let _ = remove(path, *dir);
         }
-        for (original, old) in set_aside.iter().rev() {
+        for (original, old, _) in set_aside.iter().rev() {
             let _ = std::fs::rename(old, original);
+        }
+        for parent in created.iter().rev() {
+            let _ = std::fs::remove_dir(parent);
         }
         return Err(format!("{e}. The previous version was put back."));
     }
 
     Ok(set_aside
         .iter()
-        .filter(|(_, old)| std::fs::remove_file(old).is_err())
+        .filter(|(_, old, dir)| remove(old, *dir).is_err())
         .count())
 }
 
@@ -489,6 +562,22 @@ mod tests {
         ] {
             assert!(!keeps_rocm_layout(asset), "{asset}");
         }
+    }
+
+    #[test]
+    fn the_new_binary_is_found_where_each_asset_puts_it() {
+        assert_eq!(
+            new_exe_path("eullm-windows-x64-rocm.zip", "eullm.exe"),
+            Path::new("bin").join("eullm.exe")
+        );
+        assert_eq!(
+            new_exe_path("eullm-windows-x64-vulkan.zip", "eullm-vk.exe"),
+            PathBuf::from("eullm.exe")
+        );
+        assert_eq!(
+            new_exe_path("eullm-linux-x64", "eullm"),
+            PathBuf::from("eullm")
+        );
     }
 
     #[test]
@@ -575,7 +664,13 @@ mod tests {
         std::fs::create_dir_all(&unpacked).unwrap();
         std::fs::write(unpacked.join("eullm.exe"), b"new").unwrap();
         std::fs::write(unpacked.join("msvcp140.dll"), b"dll").unwrap();
-        let moves = planned_moves(&unpacked, "eullm.exe", "eullm-windows-x64.exe", &root).unwrap();
+        let moves = planned_moves(
+            &unpacked,
+            Path::new("eullm.exe"),
+            Path::new("eullm-windows-x64.exe"),
+            &root,
+        )
+        .unwrap();
         let targets: Vec<_> = moves
             .iter()
             .map(|m| m.to.file_name().unwrap().to_string_lossy().into_owned())
@@ -583,7 +678,8 @@ mod tests {
         assert_eq!(targets, ["eullm-windows-x64.exe", "msvcp140.dll"]);
         // A download without the binary is refused before anything moves.
         std::fs::remove_file(unpacked.join("eullm.exe")).unwrap();
-        assert!(planned_moves(&unpacked, "eullm.exe", "eullm.exe", &root).is_err());
+        let exe = Path::new("eullm.exe");
+        assert!(planned_moves(&unpacked, exe, exe, &root).is_err());
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -596,7 +692,8 @@ mod tests {
         std::fs::write(root.join("models.txt"), b"not ours").unwrap();
         std::fs::write(unpacked.join("eullm"), b"new binary").unwrap();
         std::fs::write(unpacked.join("libextra.so"), b"new lib").unwrap();
-        let moves = planned_moves(&unpacked, "eullm", "eullm", &root).unwrap();
+        let moves =
+            planned_moves(&unpacked, Path::new("eullm"), Path::new("eullm"), &root).unwrap();
         let leftovers = swap(&moves).unwrap();
         assert_eq!(std::fs::read(root.join("eullm")).unwrap(), b"new binary");
         assert_eq!(std::fs::read(root.join("libextra.so")).unwrap(), b"new lib");
@@ -621,10 +718,12 @@ mod tests {
             Move {
                 from: unpacked.join("a"),
                 to: root.join("a"),
+                dir: false,
             },
             Move {
                 from: unpacked.join("b"),
                 to: root.join("b"),
+                dir: false,
             },
         ];
         let err = swap(&moves).unwrap_err();
@@ -643,10 +742,118 @@ mod tests {
         let moves = vec![Move {
             from: root.join("new"),
             to: root.join("eullm"),
+            dir: false,
         }];
         remove_old_leftovers(&moves);
         assert!(!root.join("eullm.old").exists());
         assert!(root.join("notes.old").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The Windows ROCm ZIP as the release packs it: the exe and DLLs in
+    /// `bin\`, kernel folders under it, kernel packs in `.kpack\` beside it.
+    fn rocm_tree(at: &Path, tag: &[u8]) {
+        for sub in ["bin/rocblas/library", ".kpack"] {
+            std::fs::create_dir_all(at.join(sub)).unwrap();
+        }
+        std::fs::write(at.join("bin/eullm.exe"), tag).unwrap();
+        std::fs::write(at.join("bin/rocblas.dll"), tag).unwrap();
+        std::fs::write(at.join("bin/rocblas/library/k_gfx1100.dat"), tag).unwrap();
+        std::fs::write(at.join(".kpack/blas_lib_gfx1100.kpack"), tag).unwrap();
+        std::fs::write(at.join("README.txt"), tag).unwrap();
+    }
+
+    #[test]
+    fn the_rocm_layout_replaces_bins_files_and_every_other_folder_whole() {
+        let root = scratch("rocm-plan");
+        let unpacked = root.join("files");
+        rocm_tree(&unpacked, b"new");
+        let moves = planned_moves(
+            &unpacked,
+            &Path::new("bin").join("eullm.exe"),
+            &Path::new("bin").join("eullm.exe"),
+            &root,
+        )
+        .unwrap();
+        let mut plan: Vec<_> = moves
+            .iter()
+            .map(|m| {
+                let to =
+                    m.to.strip_prefix(&root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                (to, m.dir)
+            })
+            .collect();
+        plan.sort();
+        assert_eq!(
+            plan,
+            [
+                (".kpack".to_string(), true),
+                ("README.txt".to_string(), false),
+                ("bin/eullm.exe".to_string(), false),
+                ("bin/rocblas".to_string(), true),
+                ("bin/rocblas.dll".to_string(), false),
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_rocm_swap_leaves_no_kernel_of_the_old_version() {
+        let root = scratch("rocm-swap");
+        rocm_tree(&root, b"old");
+        // A kernel only the old version had, and a file of the user's.
+        std::fs::write(root.join("bin/rocblas/library/k_gfx906.dat"), b"old").unwrap();
+        std::fs::write(root.join("bin/models.txt"), b"mine").unwrap();
+        let unpacked = root.join(".eullm-update-x/files");
+        rocm_tree(&unpacked, b"new");
+        let exe = Path::new("bin").join("eullm.exe");
+        let moves = planned_moves(&unpacked, &exe, &exe, &root).unwrap();
+        let leftovers = swap(&moves).unwrap();
+        for f in [
+            "bin/eullm.exe",
+            "bin/rocblas.dll",
+            "bin/rocblas/library/k_gfx1100.dat",
+            ".kpack/blas_lib_gfx1100.kpack",
+            "README.txt",
+        ] {
+            assert_eq!(std::fs::read(root.join(f)).unwrap(), b"new", "{f}");
+        }
+        assert!(!root.join("bin/rocblas/library/k_gfx906.dat").exists());
+        assert_eq!(std::fs::read(root.join("bin/models.txt")).unwrap(), b"mine");
+        if cfg!(unix) {
+            assert_eq!(leftovers, 0);
+            assert!(!root.join("bin/rocblas.old").exists() && !root.join(".kpack.old").exists());
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_failed_rocm_swap_puts_the_old_folders_back() {
+        let root = scratch("rocm-rollback");
+        rocm_tree(&root, b"old");
+        let unpacked = root.join("files");
+        rocm_tree(&unpacked, b"new");
+        let exe = Path::new("bin").join("eullm.exe");
+        let mut moves = planned_moves(&unpacked, &exe, &exe, &root).unwrap();
+        // A last move whose new file is missing fails after the folders moved.
+        moves.push(Move {
+            from: unpacked.join("missing"),
+            to: root.join("zz-missing"),
+            dir: false,
+        });
+        let err = swap(&moves).unwrap_err();
+        assert!(err.contains("previous version was put back"), "{err}");
+        for f in [
+            "bin/eullm.exe",
+            "bin/rocblas/library/k_gfx1100.dat",
+            ".kpack/blas_lib_gfx1100.kpack",
+        ] {
+            assert_eq!(std::fs::read(root.join(f)).unwrap(), b"old", "{f}");
+        }
+        assert!(!root.join(".kpack.old").exists() && !root.join("bin/rocblas.old").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
