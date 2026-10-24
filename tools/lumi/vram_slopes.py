@@ -26,6 +26,9 @@ from datetime import datetime
 START = re.compile(r"^\[([^\]]+)\] start (\S+) on (\[[^\]]*\])")
 END = re.compile(r"^\[([^\]]+)\] (done|failed|todo|released|blocked)\s+(\S+) after ")
 GIB = 2**30
+# Points whose samples after the settle time span less than this are left out
+# of the report: too short for a slope.
+SHORT_H = 0.5
 
 
 def when(stamp: str) -> float:
@@ -147,15 +150,17 @@ def main(argv=None) -> int:
             print(f"== job {job}: missing {', '.join(missing)}")
             continue
         rows = report(points_of(out), samples_of(node), args.settle_s, args.dead_gib)
-        # A point done before its settle time has no line to draw: a load or
-        # throughput point of minutes. One line says how many, not eight
-        # rows of dashes each.
-        short = {r[0] for r in rows if r[3] is None and r[7] == "done"}
+        # A point done before its settle time has no line to draw, and one
+        # done within half an hour of it draws a slope out of minutes (a load
+        # read as 597 GiB an hour): load and throughput points. One line says
+        # how many, not a row per GCD of each. A death is always shown.
+        short = {r[0] for r in rows
+                 if r[7] == "done" and (r[3] is None or r[2] < SHORT_H)}
         rows = [r for r in rows if r[0] not in short]
         print(f"== job {job}: GiB used, after the first {args.settle_s:.0f} s of each point")
         if short:
-            print(f"  ({len(short)} points done within their first {args.settle_s:.0f} s "
-                  f"are left out)")
+            print(f"  ({len(short)} points done within their first {args.settle_s:.0f} s, "
+                  f"or {SHORT_H * 60:.0f} minutes after it, are left out)")
         if not rows:
             continue
         print(f"  {'point':34} {'dev':>3} {'hours':>5} {'first':>6} {'peak':>6} "
