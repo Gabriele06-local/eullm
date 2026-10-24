@@ -398,7 +398,16 @@ def request(url, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
         "eval_duration_ns": last.get("eval_duration") or 0,
         "prompt_eval_duration_ns": last.get("prompt_eval_duration") or 0,
         "load_duration_ns": last.get("load_duration") or 0,
+        # With --mtp, the drafts the head proposed and the model kept.
+        "draft_n": last.get("draft_n") or 0,
+        "draft_n_accepted": last.get("draft_n_accepted") or 0,
     }
+
+
+def accept_pct(drafts: int, kept: int):
+    """The share of MTP drafts the model kept, in percent; None without
+    drafts (no --mtp, or a runtime that does not report them)."""
+    return round(100 * kept / drafts, 1) if drafts else None
 
 
 def call(server, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
@@ -476,6 +485,8 @@ def openai_request(url, path, body, timeout=REQUEST_TIMEOUT_S) -> dict:
         "eval_duration_ns": int((timings.get("predicted_ms") or 0) * 1e6),
         "prompt_eval_duration_ns": int((timings.get("prompt_ms") or 0) * 1e6),
         "load_duration_ns": 0,
+        "draft_n": timings.get("draft_n") or 0,
+        "draft_n_accepted": timings.get("draft_n_accepted") or 0,
     }
 
 
@@ -675,6 +686,8 @@ def run_throughput(p: dict, servers: list, ctx: Context) -> tuple:
             # a measured prompt time (on main it is hard-coded to 0).
             "server_prefill_tok_s_mean": mean(srv_prefill),
             "server_decode_tok_s_mean": mean(srv_decode),
+            "draft_n": sum(g.get("draft_n", 0) for g in ok),
+            "draft_n_accepted": sum(g.get("draft_n_accepted", 0) for g in ok),
         })
         if not ok:
             raise PointError(f"every request failed in repeat {rep}: {errors[:3]}")
@@ -688,6 +701,8 @@ def run_throughput(p: dict, servers: list, ctx: Context) -> tuple:
             if len(agg) > 1 and statistics.mean(agg) else None
         ),
         "repeats": reps,
+        "draft_accept_pct": accept_pct(sum(r["draft_n"] for r in reps),
+                                       sum(r["draft_n_accepted"] for r in reps)),
     }
     return summary, (first_t, last_t)
 
@@ -741,6 +756,7 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
                 got = call(server, path, body)
                 rec.update(ok=True, ttft_ms=got["ttft_ms"], total_ms=got["total_ms"],
                            eval=got["eval_count"], prompt=got["prompt_eval_count"],
+                           drafts=got.get("draft_n", 0), kept=got.get("draft_n_accepted", 0),
                            sha=hashlib.sha1(got["text"].encode()).hexdigest()[:16])
                 if rec["pass"] == 0:
                     rec["text"] = got["text"]
@@ -864,6 +880,8 @@ def run_workload(p: dict, servers: list, ctx: Context, answers_path=None) -> tup
         "throughput_drift_pct": drift,
         "servers_died": died,
         "series": series,
+        "draft_accept_pct": accept_pct(sum(r.get("drafts", 0) for r in ok),
+                                       sum(r.get("kept", 0) for r in ok)),
     }, (start, end)
 
 

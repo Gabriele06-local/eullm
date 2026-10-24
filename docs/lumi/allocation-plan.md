@@ -387,6 +387,18 @@ without a flag at 1 and 16 requests: the 235B and the 480B should take the
 cache and gpt-oss-120b and DeepSeek-V3.1 the split, which the summary shows
 from the log (`job_summary.sh`), at the tokens/s `ram-*` measured each way.
 
+24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
+the prompt is read, not before, which is what the warning `ctx_dft
+pos_max=-1` on every request said) measured before and after: `c06`'s
+`mtp-ab`, Qwen3.5-9B and Qwen3.6-27B Q4_K_M, without `--mtp` and with 1, 2
+and 3, 100 gsm8k questions one at a time at temperature 0, planned once on
+`next25` (built 22-10, before it) and once on `next26` (after), one node for
+each, about half an hour. The runner records the drafts kept from now on
+(`draft_accept_pct`, `kept%` in the report); `c06` on `next21` measured
+tokens/s only and found MTP buying nothing on a GCD (above), which a head
+started on an empty context would explain too. If the share kept falls after
+the fix, the fix is looked at again.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it

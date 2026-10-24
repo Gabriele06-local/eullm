@@ -9,7 +9,10 @@
     "a user gets, and where fewer drafts are kept.",
     "GGUFs that keep the MTP layers: unsloth's *-MTP-GGUF repositories, Apache-2.0; sizes from the",
     "Hub API, 06-10-2026: 9B Q4_K_M 5.5 GiB, Q8_0 9.1; 27B Q4_K_M 15.9, Q8_0 27.1; 35B-A3B",
-    "UD-Q4_K_M 21.1, Q8_0 35.2 (~114 GiB in all)."
+    "UD-Q4_K_M 21.1, Q8_0 35.2 (~114 GiB in all).",
+    "mtp-ab: the share of drafts kept (kept%) and tokens/s, before and after 3d1c7a0 (the head",
+    "started after the prompt instead of before it): planned once with next25's engine, built",
+    "before it, and once with next26's, built after; 100 gsm8k questions, one request at a time."
   ],
   "pull": [
     "hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M",
@@ -27,6 +30,15 @@
      "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.5-9b-mtp-gguf-q8_0",
                         "qwen3.6-27b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q8_0",
                         "qwen3.6-35b-a3b-mtp-gguf-ud-q4_k_m", "qwen3.6-35b-a3b-mtp-gguf-q8_0"],
+              "extra_args": [["--fit-strict"],
+                             ["--fit-strict", "--mtp", "1"],
+                             ["--fit-strict", "--mtp", "2"],
+                             ["--fit-strict", "--mtp", "3"]]}},
+
+    {"name": "mtp-ab", "priority": 95, "est_s": 1500,
+     "set": {"kind": "workload", "sets": ["gsm8k"], "limit": 100, "concurrency": 1,
+             "max_tokens": 768, "think": false},
+     "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q4_k_m"],
               "extra_args": [["--fit-strict"],
                              ["--fit-strict", "--mtp", "1"],
                              ["--fit-strict", "--mtp", "2"],
