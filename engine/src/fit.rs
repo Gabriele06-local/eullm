@@ -1492,19 +1492,53 @@ pub enum MoeCache {
     Auto,
     /// This many MiB, or less when there is less room.
     Mib(u32),
+    /// No cache: the usual split decides, which is what `--moe-cache` did
+    /// not being given meant before it came on by itself.
+    Off,
 }
 
-/// Parse `--moe-cache`: `auto`, or a size in MiB above 0.
+/// Parse `--moe-cache`: `auto`, `off`, or a size in MiB above 0.
 pub fn parse_moe_cache(s: &str) -> Result<MoeCache, String> {
     if s.eq_ignore_ascii_case("auto") {
         return Ok(MoeCache::Auto);
     }
+    if s.eq_ignore_ascii_case("off") {
+        return Ok(MoeCache::Off);
+    }
     match s.parse::<u32>() {
         Ok(mib) if mib > 0 => Ok(MoeCache::Mib(mib)),
         _ => Err(format!(
-            "expected `auto` or a size in MiB above 0, got `{s}`"
+            "expected `auto`, `off` or a size in MiB above 0, got `{s}`"
         )),
     }
+}
+
+/// What `--moe-cache` comes to once the launch flags are in: the user's own
+/// word when there is one, and `auto` when there is none and nothing else
+/// says where the experts go.
+///
+/// The cache is on by itself for a MoE model whose experts do not fit, since
+/// the usual split (the experts of the first layers in RAM, computed on the
+/// CPU) writes less than half as fast: on an RTX 5070 Ti, Qwen3.6-35B-A3B
+/// UD-Q4_K_M wrote 55 tokens/s with the split and 133 with the cache, and
+/// read a prompt 25% faster. It stays off where the user placed the experts
+/// (`--cpu-moe`, `--n-cpu-moe`), where there is no sizing to place a cache
+/// (`--no-fit`), with `--mtp` (not measured to gain) and wherever the
+/// machine cannot run one, all without a word: only an asked-for cache says
+/// why it did not run. `plan_moe_cache` still returns nothing for a dense
+/// model or one whose experts all fit.
+pub fn effective_moe_cache(
+    asked: Option<MoeCache>,
+    fit: bool,
+    cpu_moe: bool,
+    n_cpu_moe: u32,
+    mtp: u32,
+) -> Option<MoeCache> {
+    if asked.is_some() {
+        return asked;
+    }
+    (fit && !cpu_moe && n_cpu_moe == 0 && mtp == 0 && moe_cache_support().is_ok())
+        .then_some(MoeCache::Auto)
 }
 
 /// Below this an automatic cache holds too few experts per layer to be worth
@@ -1675,6 +1709,9 @@ pub fn plan_moe_cache(
     auto_n_ubatch: bool,
     prefetch: MoePrefetch,
 ) -> Option<MoeCachePlan> {
+    if request == MoeCache::Off {
+        return None;
+    }
     let (Some((free_vram, _)), Some(info), Some(layout)) = (vram, info, layout) else {
         return None;
     };
@@ -1719,6 +1756,7 @@ pub fn plan_moe_cache(
         let room = (room as u64).min(in_ram);
         let (bytes, asked_bytes) = match request {
             MoeCache::Auto => (step_down(room), None),
+            MoeCache::Off => return None,
             MoeCache::Mib(mib) => {
                 let asked = u64::from(mib) * 1024 * 1024;
                 if asked <= room {
@@ -4069,9 +4107,31 @@ mod plan_offload_tests {
         assert_eq!(parse_moe_cache("auto"), Ok(MoeCache::Auto));
         assert_eq!(parse_moe_cache("AUTO"), Ok(MoeCache::Auto));
         assert_eq!(parse_moe_cache("6000"), Ok(MoeCache::Mib(6000)));
+        assert_eq!(parse_moe_cache("off"), Ok(MoeCache::Off));
+        assert_eq!(parse_moe_cache("OFF"), Ok(MoeCache::Off));
         for bad in ["0", "-1", "6GB", ""] {
             assert!(parse_moe_cache(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    /// The cache is on by itself only where nothing else says where the
+    /// experts go; what the user asked for is kept, `off` included.
+    #[test]
+    fn the_expert_cache_comes_on_by_itself_only_where_nothing_places_the_experts() {
+        for asked in [MoeCache::Auto, MoeCache::Off, MoeCache::Mib(4000)] {
+            // The user's word wins whatever the other flags are.
+            assert_eq!(effective_moe_cache(Some(asked), false, true, 7, 2), Some(asked));
+        }
+        // No sizing (`--no-fit`), experts placed by hand, or drafts: no cache.
+        assert_eq!(effective_moe_cache(None, false, false, 0, 0), None);
+        assert_eq!(effective_moe_cache(None, true, true, 0, 0), None);
+        assert_eq!(effective_moe_cache(None, true, false, 20, 0), None);
+        assert_eq!(effective_moe_cache(None, true, false, 0, 2), None);
+        // Otherwise `auto` where the machine can run one, none where it cannot.
+        assert_eq!(
+            effective_moe_cache(None, true, false, 0, 0),
+            moe_cache_support().ok().map(|()| MoeCache::Auto)
+        );
     }
 
     /// The cache gets the room the experts would have had on the GPU, and the
@@ -4103,6 +4163,9 @@ mod plan_offload_tests {
         assert!(auto.cpu_moe && auto.n_cpu_moe == 0 && auto.asked_bytes.is_none());
         assert_eq!(auto.bytes % (256 * MIB), 0);
         assert!(auto.bytes <= room && room - auto.bytes < 256 * MIB);
+
+        // `off` plans nothing, even though the experts do not fit.
+        assert_eq!(cache(MoeCache::Off, card, false, 0), None);
 
         // A size that fits is used as given, one that does not is cut to the room.
         let asked = cache(MoeCache::Mib(2000), card, false, 0).unwrap();
