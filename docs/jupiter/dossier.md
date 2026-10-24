@@ -66,6 +66,11 @@ JUPITER, named by its Slurm job id.
 * Our models on the private traps and practical exam, graded on JUPITER
   (§5.11): the distilled 9B first on the practical exam (66 of 145, +8 over
   its Base), last on the traps (3 of 36).
+* The false-premise round queued (`submit_premise_chain.sh`): Leonardo's
+  false-premise pairs generated here from the legislation (job 2488357),
+  the distilled Qwen3.5 4B and 9B tuned on them with the open-book pairs
+  (2488358, its exam judged by 2488359), then the traps and the practical
+  exam (2488360-2488363) and their judge (2488364).
 * The two students continued on the rest of norms-v2, the 142,538 training
   chunks (~81M tokens) the 250,000 sample left out, the same 3,000 held out
   (`build_norms_v2_rest.sh`): links 2480199-2480203 of 8 hours, about 30
