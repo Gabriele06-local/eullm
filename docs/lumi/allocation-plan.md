@@ -307,11 +307,15 @@ llama-server and Ollama, Qwen3-8B 543, 486 and 170; Qwen3-14B 358, 315 and
 6-25% ahead of llama-server (the MoE most) and 1.8 to 8 times Ollama, as on
 `next6` (533, 349, 191, 221). `--kv-unified` 0-5% either way.
 
-`c06`, one request at a time over 300 gsm8k questions: MTP buys nothing on a
-GCD. Qwen3.5-9B Q4_K_M 98.4 tokens/s without, 97.9-99.4 with `--mtp 1-3`;
-its Q8_0 80.9 and 79.9-80.5; Qwen3.6-27B Q4_K_M 37.8 and 37.4-38, Q8_0 28.7
-and 29; the same accuracy. On the RTX 5070 Ti it paid; on the MI250X a
-decode step is not the cost the drafts save.
+`c06`, one request at a time over 300 gsm8k questions: Qwen3.5-9B Q4_K_M
+98.4 tokens/s without `--mtp`, 97.9-99.4 with `--mtp 1-3`; its Q8_0 80.9 and
+79.9-80.5; Qwen3.6-27B Q4_K_M 37.8 and 37.4-38, Q8_0 28.7 and 29; accuracy
+within one or two questions of 300. Read at first as MTP buying nothing on a
+GCD; corrected 24-10-2026: no draft was made in any `c06` point of any
+round. These repositories ship a projector, `eullm pull` fetches it, and a
+model with a projector loads on the sequential engine, which does not draft,
+while the banner still says MTP is on. MTP has not been measured on the
+MI250X yet (below, `mtp-ab`).
 
 `c03`: Qwen3-32B split as tensor over two GCDs, one request, 50.3 tokens/s
 (43.3 on `next12`, 45.4 with RCCL on `next14`).
@@ -394,10 +398,25 @@ pos_max=-1` on every request said) measured before and after: `c06`'s
 and 3, 100 gsm8k questions one at a time at temperature 0, planned once on
 `next25` (built 22-10, before it) and once on `next26` (after), one node for
 each, about half an hour. The runner records the drafts kept from now on
-(`draft_accept_pct`, `kept%` in the report); `c06` on `next21` measured
-tokens/s only and found MTP buying nothing on a GCD (above), which a head
-started on an empty context would explain too. If the share kept falls after
+(`draft_accept_pct`, `kept%` in the report). If the share kept falls after
 the fix, the fix is looked at again.
+
+`next25`'s half (job 23137402) came back with no `kept%`: no draft in any of
+its eight points, `--mtp 3` included, and the same tokens/s and VRAM with and
+without it (9B 97.7 and 96.9-99.5, 27B 37.6 and 37.9-38.2). The cause is in
+the store, not in either engine: unsloth's MTP repositories ship
+`mmproj-*.gguf`, `eullm pull` fetches the projector with the weights (since
+29-09), and a model with a projector is loaded on the sequential engine,
+since the scheduler does not route images, and only the scheduler drafts.
+`--mtp` is then a flag that does nothing and says nothing. Every `c06` point
+of every round was such a point. `tools/lumi/text_only_model.sh` makes
+`<id>-text`, the same weights linked under another id with the manifest
+without the projector, and `c06`'s `text_only` has `campaign_setup.sh` make
+them; `mtp-ab` runs on those, on `next25` and `next26` again, in the jobs
+of each label already running. The `mtp-ab` points of `next26` on the
+models as pulled, which would have measured nothing, come off the queue.
+The engine has to say so too: `--mtp` on a model that will not draft is
+logged as on (the banner) and is not.
 
 The three jobs for this (23136196 for `ram-default`, 23137402 and 23137404
 for `mtp-ab`) waited on priority with the script's 48 hours for a few hours
