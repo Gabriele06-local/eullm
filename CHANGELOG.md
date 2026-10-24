@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Changed
+- **The expert cache is on by default only on a single CUDA GPU; on ROCm it runs when asked for.** 0.7.93 turned it on by itself wherever it could run, ROCm included, but LUMI's MI250X measured it behind the usual split at some points (gpt-oss-120b at 16 requests 110 against 184 tokens/s, DeepSeek-V3.1 at batch 4 and 16 3.2-3.7 against 4.1-5.3). On ROCm the 0.7.93 default is gone: `--moe-cache auto` or a size asks for the cache as before. `--moe-cache off` is now no cache at all on every machine, and no longer prints "running without the cache" where the machine could not have run one. `--fit-strict` does not turn the cache off and does not refuse a MoE model whose experts do not fit; the help and the guide now say so.
+
 ## 0.7.93 — 2026-10-24
 
 ### Performance

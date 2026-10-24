@@ -191,7 +191,10 @@ struct RuntimeOpts {
 
     /// With --fit, refuse to load (instead of offloading a partial split
     /// or falling back) when the model does not fully fit on the GPU. On
-    /// `serve`, a refused load surfaces as an error to the API caller.
+    /// `serve`, a refused load surfaces as an error to the API caller. A
+    /// MoE model is not refused: one whose experts do not fit loads with
+    /// them in RAM (the expert cache by default on CUDA, see --moe-cache,
+    /// or the usual split), as its own sizing decides first.
     #[arg(long)]
     fit_strict: bool,
 
@@ -274,14 +277,17 @@ struct RuntimeOpts {
     /// For MoE models whose experts do not all fit in VRAM: keep every
     /// expert in RAM and give the VRAM they would have taken to a cache of
     /// the ones the model uses most. `auto` sizes it from the VRAM left once
-    /// the rest of the model is placed (with --fit, on by default); a number
-    /// asks for that many MiB. On by itself (`auto`) with --fit, unless the
-    /// experts are placed with --cpu-moe or --n-cpu-moe or --mtp drafts;
-    /// `off` turns it off. It speeds up writing, not the reading of a
-    /// long prompt: on an RTX 5070 Ti, Qwen3.8-Flash-Next (IQ2_XS) wrote 49.4
-    /// tokens/s with an 8,000 MiB cache against 22.4 without, and read a
-    /// prompt 17% slower. One GPU only, CUDA or ROCm (ROCm not measured yet);
-    /// elsewhere the load says why and runs without it. Experimental: the cache is llama.cpp PR #29887, which
+    /// the rest of the model is placed (with --fit); a number asks for that
+    /// many MiB. On by default (`auto`) on a single CUDA GPU, unless you
+    /// pass --no-fit, place the experts with --cpu-moe or --n-cpu-moe, or
+    /// use --mtp; `off` turns it off. On ROCm it runs only when asked for
+    /// (`auto` or a size): LUMI's MI250X measured it behind the usual split
+    /// at some points. It always speeds up writing; reading a long prompt
+    /// depends on the model: on an RTX 5070 Ti, Qwen3.6-35B-A3B read 25%
+    /// faster (3,200-3,800 to 4,100-4,900 tokens/s) while Qwen3.8-Flash-Next
+    /// (IQ2_XS) wrote 49.4 tokens/s with an 8,000 MiB cache against 22.4
+    /// without and read a prompt 17% slower. One GPU only, CUDA or ROCm;
+    /// elsewhere an asked-for cache says why and runs without it. Experimental: the cache is llama.cpp PR #29887, which
     /// this build carries ahead of a llama.cpp release. Unless told
     /// otherwise, a load with a cache reads prompts 2048 tokens at a time
     /// (--n-ubatch) and reads the model into memory when the RAM can spare

@@ -1524,8 +1524,9 @@ pub fn parse_moe_cache(s: &str) -> Result<MoeCache, String> {
 /// read a prompt 25% faster. It stays off where the user placed the experts
 /// (`--cpu-moe`, `--n-cpu-moe`), where there is no sizing to place a cache
 /// (`--no-fit`), with `--mtp` (not measured to gain) and wherever the
-/// machine cannot run one, all without a word: only an asked-for cache says
-/// why it did not run. `plan_moe_cache` still returns nothing for a dense
+/// machine is not a single CUDA GPU (ROCm included, see
+/// [`effective_moe_cache_on`]), all without a word: only an asked-for cache
+/// says why it did not run. `plan_moe_cache` still returns nothing for a dense
 /// model or one whose experts all fit.
 pub fn effective_moe_cache(
     asked: Option<MoeCache>,
@@ -1534,11 +1535,35 @@ pub fn effective_moe_cache(
     n_cpu_moe: u32,
     mtp: u32,
 ) -> Option<MoeCache> {
-    if asked.is_some() {
-        return asked;
+    effective_moe_cache_on(asked, fit, cpu_moe, n_cpu_moe, mtp, &gpu_names())
+}
+
+/// [`effective_moe_cache`] for the GPUs ggml lists, by name.
+///
+/// `off` is no cache at all, so the caller neither sizes one nor says why it
+/// could not run one. By itself the cache comes on for a single CUDA GPU
+/// only: on ROCm, LUMI's MI250X measured it behind the usual split at some
+/// points (gpt-oss-120b at 16 requests 110 against 184 tokens/s, DeepSeek-V3.1
+/// at batch 4 and 16 3.2-3.7 against 4.1-5.3), so there it runs when asked
+/// for with `--moe-cache auto` or a size.
+pub fn effective_moe_cache_on(
+    asked: Option<MoeCache>,
+    fit: bool,
+    cpu_moe: bool,
+    n_cpu_moe: u32,
+    mtp: u32,
+    gpus: &[String],
+) -> Option<MoeCache> {
+    match asked {
+        Some(MoeCache::Off) => None,
+        Some(asked) => Some(asked),
+        None => (fit
+            && !cpu_moe
+            && n_cpu_moe == 0
+            && mtp == 0
+            && matches!(gpus, [name] if name.starts_with("CUDA")))
+        .then_some(MoeCache::Auto),
     }
-    (fit && !cpu_moe && n_cpu_moe == 0 && mtp == 0 && moe_cache_support().is_ok())
-        .then_some(MoeCache::Auto)
 }
 
 /// Below this an automatic cache holds too few experts per layer to be worth
@@ -1962,6 +1987,11 @@ pub fn read_in_whole_on_gpu(
 /// ggml's CUDA backend (see [`moe_cache_support_on`]). `Err` says why not,
 /// for the log.
 pub fn moe_cache_support() -> Result<(), String> {
+    moe_cache_support_on(&gpu_names())
+}
+
+/// The names ggml gives its GPUs (`CUDA0`, `ROCm0`, ...), in its order.
+fn gpu_names() -> Vec<String> {
     use llama_cpp_sys_2::{
         GGML_BACKEND_DEVICE_TYPE_GPU, ggml_backend_dev_count, ggml_backend_dev_get,
         ggml_backend_dev_name, ggml_backend_dev_type,
@@ -1986,7 +2016,7 @@ pub fn moe_cache_support() -> Result<(), String> {
             });
         }
     }
-    moe_cache_support_on(&gpus)
+    gpus
 }
 
 /// [`moe_cache_support`] for the GPUs ggml lists, by name. The cache
@@ -4115,23 +4145,37 @@ mod plan_offload_tests {
     }
 
     /// The cache is on by itself only where nothing else says where the
-    /// experts go; what the user asked for is kept, `off` included.
+    /// experts go, and on one CUDA GPU; what the user asked for is kept,
+    /// `off` aside, which is no cache at all.
     #[test]
     fn the_expert_cache_comes_on_by_itself_only_where_nothing_places_the_experts() {
-        for asked in [MoeCache::Auto, MoeCache::Off, MoeCache::Mib(4000)] {
-            // The user's word wins whatever the other flags are.
-            assert_eq!(effective_moe_cache(Some(asked), false, true, 7, 2), Some(asked));
+        let cuda = vec!["CUDA0".to_string()];
+        let on = |asked, fit, cpu_moe, n_cpu_moe, mtp, gpus: &[String]| {
+            effective_moe_cache_on(asked, fit, cpu_moe, n_cpu_moe, mtp, gpus)
+        };
+        for asked in [MoeCache::Auto, MoeCache::Mib(4000)] {
+            // The user's word wins whatever the other flags and the GPUs are.
+            assert_eq!(on(Some(asked), false, true, 7, 2, &[]), Some(asked));
+        }
+        // `off` plans nothing and says nothing, whatever the machine.
+        for gpus in [vec![], cuda.clone(), vec!["CUDA0".into(), "CUDA1".into()]] {
+            assert_eq!(on(Some(MoeCache::Off), true, false, 0, 0, &gpus), None);
         }
         // No sizing (`--no-fit`), experts placed by hand, or drafts: no cache.
-        assert_eq!(effective_moe_cache(None, false, false, 0, 0), None);
-        assert_eq!(effective_moe_cache(None, true, true, 0, 0), None);
-        assert_eq!(effective_moe_cache(None, true, false, 20, 0), None);
-        assert_eq!(effective_moe_cache(None, true, false, 0, 2), None);
-        // Otherwise `auto` where the machine can run one, none where it cannot.
+        assert_eq!(on(None, false, false, 0, 0, &cuda), None);
+        assert_eq!(on(None, true, true, 0, 0, &cuda), None);
+        assert_eq!(on(None, true, false, 20, 0, &cuda), None);
+        assert_eq!(on(None, true, false, 0, 2, &cuda), None);
+        // Otherwise `auto` on one CUDA GPU; not on ROCm (only when asked
+        // for), on two GPUs, on none or on another backend.
+        assert_eq!(on(None, true, false, 0, 0, &cuda), Some(MoeCache::Auto));
+        assert_eq!(on(None, true, false, 0, 0, &["ROCm0".to_string()]), None);
         assert_eq!(
-            effective_moe_cache(None, true, false, 0, 0),
-            moe_cache_support().ok().map(|()| MoeCache::Auto)
+            on(None, true, false, 0, 0, &["CUDA0".into(), "CUDA1".into()]),
+            None
         );
+        assert_eq!(on(None, true, false, 0, 0, &["Vulkan0".to_string()]), None);
+        assert_eq!(on(None, true, false, 0, 0, &[]), None);
     }
 
     /// The cache gets the room the experts would have had on the GPU, and the
