@@ -12,6 +12,8 @@
     campaign.py collect  --queue DIR [--out FILE.csv]  one row per measured point
     campaign.py compare  --queue DIR --round R | --job J   each configuration against
                                                        its last earlier measurement
+    campaign.py walltime --queue DIR [--engine-label L] [--nodes N]   the --time
+                                                       for jobs of that label
     campaign.py budget   [--start --end --budget-node-hours]   spend against the calendar
 
 `run` is the job's body. It packs points onto the node's devices — a pair of
@@ -740,6 +742,28 @@ def node_hours(points, node_devices=8) -> float:
     return total
 
 
+MAX_WALLTIME_S = 48 * 3600
+
+
+def walltime_s(points, nodes=1, node_devices=8) -> int:
+    """The time to ask Slurm for, for each of `nodes` jobs sharing `points`:
+    their node-hours spread over the nodes, the longest point again for the
+    one that starts last, half as much again and half an hour for loads and
+    estimates that run over, in whole hours, from one up to Slurm's 48. A job
+    that asked 48 hours for a few hours of work waited on priority while one
+    asking six started within the minute (24-10-2026): Slurm starts short jobs
+    in the gaps before the nodes it holds for others. 0 when there is nothing
+    to run."""
+    if not points:
+        return 0
+    longest = max(p["max_duration_s"] + LOAD_ALLOWANCE_S
+                  if p["kind"] == "workload" and p["max_duration_s"] else p.get("est_s", 900)
+                  for p in points)
+    need = node_hours(points, node_devices) * 3600 / max(nodes, 1) + longest
+    hours = -(-(need * 1.5 + 1800) // 3600)
+    return int(min(max(hours, 1) * 3600, MAX_WALLTIME_S))
+
+
 def installed_models(listing: str) -> set:
     """The models `eullm list` shows as installed: the first column of its
     table, the rows under the NAME header up to the first blank line, less
@@ -1079,6 +1103,20 @@ def cmd_collect(args):
     return 0
 
 
+def cmd_walltime(args):
+    """The --time for `nodes` jobs started with `engine_label` (none: the
+    unlabelled points), from the points waiting for them; nothing printed
+    and status 1 when there are none."""
+    label = args.engine_label or ""
+    points = [p for p in Queue(args.queue).todo() if point.can_run(p, label)]
+    seconds = walltime_s(points, args.nodes)
+    if not seconds:
+        print(f"no points waiting for label {label or '(none)'}", file=sys.stderr)
+        return 1
+    print(f"{seconds // 3600}:00:00")
+    return 0
+
+
 def cmd_compare(args):
     """What a round or a job measured against the last earlier measurement of
     each configuration: the before and after of an engine build."""
@@ -1306,6 +1344,10 @@ def main(argv=None):
                    help="only this campaign (repeatable), e.g. c06-mtp")
     p.add_argument("--job", action="append",
                    help="only what this Slurm job measured or failed (repeatable)")
+    p = with_queue(sub.add_parser("walltime"))
+    p.add_argument("--engine-label", default=os.environ.get("EULLM_ENGINE_LABEL", ""),
+                   help="the jobs' label (default: EULLM_ENGINE_LABEL)")
+    p.add_argument("--nodes", type=int, default=1, help="how many jobs share the points")
     p = with_queue(sub.add_parser("compare"))
     p.add_argument("--results")
     p.add_argument("--round", action="append",
@@ -1333,6 +1375,7 @@ def main(argv=None):
     commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,
                 "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock, "retry": cmd_retry,
                 "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
+                "walltime": cmd_walltime,
                 "budget": cmd_budget}
     if args.cmd not in commands:
         ap.print_help()

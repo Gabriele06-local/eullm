@@ -835,3 +835,17 @@ def test_a_job_is_compared_with_what_came_before_it_only():
     assert "1 compared, decode new/old 1.20" in text and "r1" in text
     assert report.compare(rows[:1], lambda r: r["job"] == "10").endswith(
         "nothing to compare: no configuration measured before")
+
+
+def test_a_job_asks_for_the_time_its_points_need_not_48_hours():
+    one_gcd = [dict(normalize({"model": f"m{i}", "kind": "workload", "sets": ["gsm8k"]}),
+                    est_s=1500) for i in range(8)]
+    alone = [dict(normalize({"model": f"m{i}", "exclusive": True}), est_s=1200) for i in range(8)]
+    assert campaign.walltime_s([]) == 0
+    # c06's mtp-ab: eight 25-minute points side by side on one node.
+    assert campaign.walltime_s(one_gcd) == 2 * 3600
+    # c10's ram-default: eight 20-minute points one after another.
+    assert campaign.walltime_s(alone) == 5 * 3600
+    # Shared by two jobs, each asks for less; never more than Slurm gives.
+    assert campaign.walltime_s(alone, nodes=2) == 3 * 3600
+    assert campaign.walltime_s(alone * 20) == campaign.MAX_WALLTIME_S

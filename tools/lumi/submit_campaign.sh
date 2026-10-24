@@ -11,6 +11,15 @@
 # another job) are counted and only the missing ones submitted, so the same
 # command can be run again, or after an earlier one, without doubling them.
 #
+# Each job asks for the time its label's waiting points need, spread over the
+# N chains (`campaign.py walltime`), not the 48 hours of
+# sbatch_campaign.slurm: a job asking 48 hours for a few hours of work waits
+# on priority, one asking a few starts in the gaps Slurm leaves before the
+# nodes it holds for others (24-10-2026, within the minute). The runner reads
+# the time it got and starts only the points that fit. --time among the
+# sbatch args overrides it; nothing is submitted when no point waits for the
+# label.
+#
 # Two nodes in parallel is the default because one is not enough any more:
 # with the first month of the window gone unused, spending the rest by
 # 12-03-2027 takes about 1.2 nodes around the clock, and queue waits come off
@@ -41,6 +50,17 @@ $CAMPAIGN status --queue "$CAMPAIGN_DIR" 2>/dev/null | head -3 || true
 # or only the unlabelled ones without one.
 echo "engine $EULLM_BIN, label ${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}"
 
+TIME=()
+case " $* " in
+    *" --time"* | *" -t "*) ;;
+    *)
+        WALL=$($CAMPAIGN walltime --queue "$CAMPAIGN_DIR" --nodes "$NODES" \
+            --engine-label "${EULLM_ENGINE_LABEL:-}") || { echo "nothing submitted"; exit 0; }
+        echo "time per job: $WALL (campaign.py walltime; --time overrides)"
+        TIME=(--time="$WALL")
+        ;;
+esac
+
 if [ "${TOP_UP:-0}" = 1 ]; then
     # A chain's later links wait on a dependency; its head runs or waits
     # for anything else (priority, resources).
@@ -58,7 +78,7 @@ for n in $(seq 1 "$NODES"); do
         [ -n "$prev" ] && dep=(--dependency=afterany:"$prev")
         jid=$(sbatch --parsable "${dep[@]}" \
             --output="$CAMPAIGN_DIR/logs/eullm-campaign-%j.out" \
-            --export=ALL "$@" "$EULLM_REPO/tools/lumi/sbatch_campaign.slurm")
+            --export=ALL "${TIME[@]}" "$@" "$EULLM_REPO/tools/lumi/sbatch_campaign.slurm")
         jid="${jid%%;*}"
         echo "chain $n, job $i/$LINKS: $jid${prev:+ (after $prev)}"
         prev="$jid"
