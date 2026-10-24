@@ -320,6 +320,19 @@ Failed, all known: `place-671b` (no tensor split for DeepSeek's
 architecture, gone from `c11`), `ram-480b`, `ram-671b` and two `ram-prompt`
 points with every expert on the CPU, stopped at their time limit.
 
+The whole round against the last earlier measurement of each configuration
+(`campaign.py compare --round r-next21`, new from 24-10-2026, in every job's
+summary since): 744 configurations, tokens/s new over old median 1.01
+(c01 1.00-1.02 a group, c02 0.99-1.08, c07 1.00-1.09, c10 1.03-1.23), none of
+the 72 groups compared below 0.95 at its median. Of the 27 configurations below 0.95
+the largest were Qwen3.6-35B-A3B's long-context points at one and four
+requests (0.42 and 0.73), and they were not slower: with an 8,000-token
+prompt and one request, decode 83-92 tokens/s, prefill 2,360-2,570 and the
+first token at 3.0-3.3 s in every round since 0.7.20, while their tokens/s went from 11.6 to
+32.1 from round to round with how many tokens the model wrote before it
+stopped. `compare` reads a throughput point by its decode speed first since
+then, tokens/s beside it.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it

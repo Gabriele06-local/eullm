@@ -188,10 +188,13 @@ metrics that fit its kind (tok/s, accuracy, decisions/s and latencies...)
 averaged over the results of a configuration, and how many points failed or
 did not fit. `campaign.py compare --round R` (or `--job J`) is the before and
 after of an engine build: each configuration the round measured against the
-last earlier round that measured it, its tokens/s (decisions/s for
-decisions) new over old, a line a group with the median, the range and the
-slowest configuration by name, and `[!!]` on a group whose median is below
-0.95. On LUMI every job's summary carries it (`tools/lumi/job_summary.sh`).
+last earlier round that measured it, new over old, a line a group with the
+median, the range and the slowest configuration by name, and `[!!]` on a
+group whose median is below 0.95. A throughput point is read by its decode
+speed first and its tokens/s beside it: with a long prompt its tokens/s is
+mostly how long the model's answers were. Workloads are read by tokens/s,
+decisions by decisions/s. On LUMI every job's summary carries it
+(`tools/lumi/job_summary.sh`).
 
 ## Tests
 
