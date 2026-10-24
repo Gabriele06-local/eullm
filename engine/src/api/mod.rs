@@ -494,7 +494,14 @@ impl AppState {
         // layout.
         let effective_ctx = override_ctx_size.unwrap_or(self.ctx_size);
         // The expert cache, where this machine can run one.
-        let moe_cache = self.moe_cache.and_then(|request| match crate::fit::moe_cache_support() {
+        let moe_cache = crate::fit::effective_moe_cache(
+            self.moe_cache,
+            self.fit,
+            self.cpu_moe,
+            self.n_cpu_moe,
+            self.mtp,
+        )
+        .and_then(|request| match crate::fit::moe_cache_support() {
             Ok(()) => Some(request),
             Err(why) => {
                 tracing::info!("--moe-cache: {why}; loading without the cache");

@@ -275,7 +275,9 @@ struct RuntimeOpts {
     /// expert in RAM and give the VRAM they would have taken to a cache of
     /// the ones the model uses most. `auto` sizes it from the VRAM left once
     /// the rest of the model is placed (with --fit, on by default); a number
-    /// asks for that many MiB. It speeds up writing, not the reading of a
+    /// asks for that many MiB. On by itself (`auto`) with --fit, unless the
+    /// experts are placed with --cpu-moe or --n-cpu-moe or --mtp drafts;
+    /// `off` turns it off. It speeds up writing, not the reading of a
     /// long prompt: on an RTX 5070 Ti, Qwen3.8-Flash-Next (IQ2_XS) wrote 49.4
     /// tokens/s with an 8,000 MiB cache against 22.4 without, and read a
     /// prompt 17% slower. One GPU only, CUDA or ROCm (ROCm not measured yet);
@@ -3124,7 +3126,8 @@ async fn cmd_run(
             // An expert cache, asked for and with room for one, places the
             // experts itself: all in RAM, the VRAM they leave to the cache.
             // Otherwise the usual MoE sizing below decides, as before.
-            let cache = moe_cache.and_then(|request| match fit::moe_cache_support() {
+            let cache = fit::effective_moe_cache(moe_cache, fit, cpu_moe, n_cpu_moe, mtp)
+                .and_then(|request| match fit::moe_cache_support() {
                 Ok(()) => fit::run_moe_cache(
                     &gguf_path,
                     ctx_size,
@@ -3300,6 +3303,7 @@ async fn cmd_run(
             // Without sizing, a size given in MiB is used as given and the
             // experts go where the user's own flags put them.
             match (request, fit::moe_cache_support()) {
+                (fit::MoeCache::Off, _) => {}
                 (fit::MoeCache::Mib(mib), Ok(())) => moe_cache_bytes = u64::from(mib) << 20,
                 (fit::MoeCache::Auto, Ok(())) => println!(
                     "[EULLM] --moe-cache auto needs --fit to size the cache; running without \

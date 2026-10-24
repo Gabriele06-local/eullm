@@ -3103,6 +3103,15 @@ fn prefill_sequence(
         chunk_start = chunk_end;
     }
 
+    // Told once the head has read the prompt: `begin` checks that it did, and
+    // run before the chunks it warned of a head that had read nothing on every
+    // request.
+    if let Some(mtp) = mtp
+        && let Err(e) = mtp.drafter.begin(tokens)
+    {
+        tracing::warn!("Seq {}: the MTP head could not start ({e})", seq.seq_id);
+    }
+
     Ok((n_tokens, tokens.len() as i32, effective_max_tokens))
 }
 
@@ -3199,9 +3208,6 @@ fn prefill_setup(
         let _ =
             mtp.draft_ctx
                 .clear_kv_cache_seq(Some(seq.seq_id as u32), Some(reuse_len as u32), None);
-        if let Err(e) = mtp.drafter.begin(tokens) {
-            tracing::warn!("Seq {}: the MTP head could not start ({e})", seq.seq_id);
-        }
     }
 
     Ok((n_tokens, effective_max_tokens))

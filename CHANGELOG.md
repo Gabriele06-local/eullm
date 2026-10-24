@@ -15,6 +15,9 @@ something changed, less so for understanding what it means.
 
 ## Unreleased
 
+### Performance
+- **A MoE model that does not fit the card writes more than twice as fast by default, because the expert cache is on without `--moe-cache`.** Until now a model like Qwen3.6-35B-A3B (22 GB of experts on a 16 GB card) was split by `--fit` with the experts of its first 20 layers computed on the CPU, and the cache needed `--moe-cache auto` to be asked for. On an RTX 5070 Ti, Qwen3.6-35B-A3B UD-Q4_K_M with no flag went from 54-58 to 115-132 tokens/s writing and from 3,200-3,800 to 4,100-4,900 reading a prompt (4,840, 19,900 and 38,700 tokens), at 14.8 GB of VRAM instead of 14.3. The cache stays off where you placed the experts yourself (`--cpu-moe`, `--n-cpu-moe`), with `--no-fit` and with `--mtp`, and where the machine cannot run one (more than one GPU, or no CUDA or ROCm), without a word; a dense model, or one whose experts all fit, is as before. `--moe-cache off` turns it off, and a size in MiB or `auto` still asks for it.
+
 ### Fixed
 - **The engine runs on tokio 1.54.1**, past RUSTSEC-2026-0386: tokio's `AsyncFd` let safe code register a file descriptor it did not own, which could end in a use-after-free when the descriptor was closed and its number reused. Neither EuLLM nor the HTTP libraries it uses create an `AsyncFd`, so no released binary was exposed; the update keeps a dependency audit of the binaries clean.
 
