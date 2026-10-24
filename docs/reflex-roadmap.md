@@ -447,11 +447,48 @@ smaller board.
   (`bench/reflexbench/qualify.py`, #626): calibration, noise between evaluation
   modes, accuracy on the domain's set, latency, and a pass or a fail.
   "Interchangeable" is earned by passing it, not by a configuration line.
-- [🆕 next] The first decision model of our own: the RAG gate, trained on
+- [🔧 now] The first decision model of our own: the RAG gate, trained on
   MVP 1's Italian set (`docs/forge.md`) and qualified with
   `qualify.py`. The set has run (MVP 1 above): the Jev-Style 2B is the bar,
   AUROC 0.90 and 16% of sufficient contexts stopped at four in five
   insufficient ones caught.
+  - [✅ measured] **Two gates were trained outside Reflex first, and what
+    they found changes how this one is qualified.** Forge built a "context
+    gate" on 23-24 October 2026 without going through Reflex
+    (`forge/eullm_forge/datasets/context_gate.py`, `eval/gate.py`,
+    `forge/scripts/train_context_gate.py`; `docs/legal-it-experiments.md`,
+    sections 10-11): Qwen3-Reranker-0.6B fine-tuned on yes/no, its examples
+    labelled by construction -- an open-book question with its article
+    among the retrieved texts and the same question with it taken out,
+    nonexistent articles, teacher-written questions on matters outside the
+    collection -- and examined in front of `legal-it-8b` (r2h) on the
+    statute exam, the practical exam and the LexIA traps.
+
+    | Gate | Development set | Practical questions stopped | Traps stopped | Traps right (16 without a gate) |
+    |---|---|---|---|---|
+    | 1: open-book questions only | balanced accuracy 0.92 | 77 / 145 | 31 / 36 | 2 with a fixed reply, 17 with a note |
+    | 2: + practical questions and false premises with their article; threshold capped at 3% of sufficient ones stopped | 0.93 | 27 / 145 | 33 / 36 | 16 with a note |
+
+  - **What follows for this item:**
+    - A gate that looks excellent on questions like MVP 1's Italian set
+      can stop half of the real ones. Long cases with several facts, and
+      questions built on a false premise whose article *is* in the texts,
+      read to it as unanswerable. MVP 1's set is one-hop questions by
+      topic, so it overstates any gate trained or fitted on it.
+    - `qualify.py`'s domain set for the RAG gate must hold practical
+      questions and false premises with their article present, and report
+      the share of those stopped, not only AUROC on the open-book cases.
+    - A fixed reply in place of the answer is not the action to take on a
+      "stop": it took the traps from 16 to 2, being wrong for every trap
+      that wanted a correction, and too generic for the abstentions. The
+      action that cost nothing was a note in front of the texts. Retrieve
+      more, or ask, as MVP 1 sets out, are still unmeasured.
+    - Forge has moved the out-of-scope abstention into the model itself
+      (GRPO prompts rewarded for abstaining, `make_offtopic_prompts.py`).
+      The gate's question becomes which of the remaining cases a small
+      model decides better than the legal model does; the next gate is
+      built here, in Reflex's format, served by `/v1/systemone` and passed
+      through `qualify.py`, not as a separate path in Forge.
 
 ## Beyond MVP 4  [🆕 next]
 
