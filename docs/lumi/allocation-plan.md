@@ -399,6 +399,15 @@ tokens/s only and found MTP buying nothing on a GCD (above), which a head
 started on an empty context would explain too. If the share kept falls after
 the fix, the fix is looked at again.
 
+The three jobs for this (23136196 for `ram-default`, 23137402 and 23137404
+for `mtp-ab`) waited on priority with the script's 48 hours for a few hours
+of work. Lowered to 6, 6 and 3 hours (`scontrol update JobId=J
+TimeLimit=6:00:00`, which a user may do to a waiting job of their own),
+23136196 started within the minute: Slurm fits short jobs into the gaps
+before the nodes it holds for others, and the runner reads the time it has
+from `squeue` and takes only the points that fit. A short round is
+submitted with its own time (`submit_campaign.sh 1 1 --time=3:00:00`).
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
