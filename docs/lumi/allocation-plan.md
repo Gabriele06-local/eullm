@@ -353,6 +353,26 @@ with the cache. One thing changes for `--fit-strict` everywhere: a MoE
 model that does not fit, which it refused, now loads with its experts in
 RAM.
 
+What the default is worth on a GCD, from `c10` in `r-next21` (the engine of
+21-10-2026, eviction 0009, one measurement a point), tokens/s with
+`--fit`'s own split, `--moe-cache auto` and `--cpu-moe`, by requests:
+
+| model (experts in RAM with the split) | 1 | 4-8 | 16-32 |
+|---|---|---|---|
+| gpt-oss-120b MXFP4 (about 5%) | 107 / 108 / 22 | | 184 / **110** / 52 at 16; 168 / 170 / 41 at 32 |
+| Qwen3-235B Q4_K_M (about 60%) | 6.9 / **21.8** / 4.6 | 13.2 / **31.5** / 6.8 at 8 | 15.9 / **25.2** / 9.3 at 32 |
+| Qwen3-Coder-480B Q4_K_M (about 80%) | 3.4 / **7.4** / 0.2 | 7.3 / 8.1 / 3.8 at 8 | 8.9 / 9.1 at 32 |
+| DeepSeek-V3.1 Q4_K_M (about 90%) | 3.4 / 3.4 | 4.1 / **3.2** at 4 | 5.3 / **3.7** at 16 |
+
+The cache wins where a large share of the experts stays out and it still
+holds a good part of them (the 235B 1.6 to 3.2 times, the 480B 2.2 times
+at one request); it loses where the model nearly fits, since the split
+already keeps nearly every expert on the GCD and the cache adds copies
+(gpt-oss-120b 0.60 at 16 requests), and where it holds a tenth of them or
+less, since the 64 cores compute the experts faster than the link copies
+them (DeepSeek-V3.1 0.70-0.78 at 4 and 16). On the RTX 5070 Ti, where the
+default was decided, Qwen3.6-35B-A3B has about half of its experts out.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
