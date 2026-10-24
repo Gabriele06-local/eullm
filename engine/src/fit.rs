@@ -1495,6 +1495,17 @@ pub enum MoeCache {
     /// No cache: the usual split decides, which is what `--moe-cache` did
     /// not being given meant before it came on by itself.
     Off,
+    /// No flag: `Auto` where the cache gains, the usual split elsewhere
+    /// (see [`MOE_CACHE_DEFAULT_OUT`]). Never parsed: what `--moe-cache` left
+    /// out comes to.
+    Default,
+}
+
+impl MoeCache {
+    /// Sized from the VRAM left, as `auto` is, asked for or not.
+    pub fn is_auto(self) -> bool {
+        matches!(self, MoeCache::Auto | MoeCache::Default)
+    }
 }
 
 /// Parse `--moe-cache`: `auto`, `off`, or a size in MiB above 0.
@@ -1524,10 +1535,12 @@ pub fn parse_moe_cache(s: &str) -> Result<MoeCache, String> {
 /// read a prompt 25% faster. It stays off where the user placed the experts
 /// (`--cpu-moe`, `--n-cpu-moe`), where there is no sizing to place a cache
 /// (`--no-fit`), with `--mtp` (not measured to gain) and wherever the
-/// machine is not a single CUDA GPU (ROCm included, see
-/// [`effective_moe_cache_on`]), all without a word: only an asked-for cache
-/// says why it did not run. `plan_moe_cache` still returns nothing for a dense
-/// model or one whose experts all fit.
+/// machine cannot run one, all without a word: only an asked-for cache says
+/// why it did not run. Where it comes on by itself it is
+/// [`MoeCache::Default`], which `plan_moe_cache` plans only where the share
+/// of the experts the usual split leaves in RAM says the cache gains
+/// ([`MOE_CACHE_DEFAULT_OUT`]), and never for a dense model or one whose
+/// experts all fit.
 pub fn effective_moe_cache(
     asked: Option<MoeCache>,
     fit: bool,
@@ -1541,11 +1554,13 @@ pub fn effective_moe_cache(
 /// [`effective_moe_cache`] for the GPUs ggml lists, by name.
 ///
 /// `off` is no cache at all, so the caller neither sizes one nor says why it
-/// could not run one. By itself the cache comes on for a single CUDA GPU
-/// only: on ROCm, LUMI's MI250X measured it behind the usual split at some
-/// points (gpt-oss-120b at 16 requests 110 against 184 tokens/s, DeepSeek-V3.1
-/// at batch 4 and 16 3.2-3.7 against 4.1-5.3), so there it runs when asked
-/// for with `--moe-cache auto` or a size.
+/// could not run one. By itself the cache comes on for one GPU of the CUDA
+/// backend, CUDA or ROCm, as [`MoeCache::Default`]: where LUMI's MI250X
+/// measured it behind the usual split (gpt-oss-120b at 16 requests, 110
+/// against 184 tokens/s; DeepSeek-V3.1 at 4 and 16, 3.2-3.7 against
+/// 4.1-5.3), the share of the experts left in RAM was outside the band the
+/// default keeps to, and where it was inside the cache won on the same GCD
+/// (Qwen3-235B 1.6 to 3.2 times).
 pub fn effective_moe_cache_on(
     asked: Option<MoeCache>,
     fit: bool,
@@ -1561,9 +1576,42 @@ pub fn effective_moe_cache_on(
             && !cpu_moe
             && n_cpu_moe == 0
             && mtp == 0
-            && matches!(gpus, [name] if name.starts_with("CUDA")))
-        .then_some(MoeCache::Auto),
+            && moe_cache_support_on(gpus).is_ok())
+        .then_some(MoeCache::Default),
     }
+}
+
+/// The share of a MoE model's expert bytes that the usual split leaves in RAM
+/// (the experts that do not fit once the rest of the model is placed),
+/// between which the cache comes on by itself ([`MoeCache::Default`]). With
+/// no flag placing the experts the cache gets the VRAM those that fit would
+/// have had, so it holds `1 - share` of them. Measured on one GCD of LUMI-G's
+/// MI250X (64 GB, a 64-core host; `c10` in round `r-next21`, 21-10-2026),
+/// tokens/s with the split and with the cache, at 1 / 4-8 / 16-32 requests:
+///
+/// * gpt-oss-120b MXFP4, about 5% in RAM: 107/108, -, 184/110 at 16 and
+///   168/170 at 32. The split already keeps nearly every expert on the GPU,
+///   and the cache adds copies.
+/// * Qwen3-235B Q4_K_M, about 60%: 6.9/21.8, 13.2/31.5, 15.9/25.2.
+/// * Qwen3-Coder-480B Q4_K_M, about 80%: 3.4/7.4, 7.3/8.1, 8.9/9.1.
+/// * DeepSeek-V3.1 Q4_K_M, about 90%: 3.4/3.4, 4.1/3.2 at 4, 5.3/3.7 at 16.
+///   A cache holding a tenth of the experts misses most of them, and the
+///   host's cores compute them faster than the link copies them.
+///
+/// On an RTX 5070 Ti, where the default was decided, Qwen3.6-35B-A3B has
+/// about half of its experts out (55 to 133 tokens/s with the cache). The
+/// bounds come from a host with 64 cores: on a desktop CPU the cache may
+/// gain nearer them, which is measured next. `--moe-cache auto` asks for the
+/// cache whatever the share.
+pub const MOE_CACHE_DEFAULT_OUT: (f64, f64) = (0.25, 0.85);
+
+/// The share of the experts' bytes that do not fit once the rest of the
+/// model is placed: what the usual split leaves in RAM, 0 to 1.
+pub fn moe_out_share(usable: f64, fixed_cost: f64, expert_bytes: u64) -> f64 {
+    if expert_bytes == 0 {
+        return 0.0;
+    }
+    ((fixed_cost + expert_bytes as f64 - usable) / expert_bytes as f64).clamp(0.0, 1.0)
 }
 
 /// Below this an automatic cache holds too few experts per layer to be worth
@@ -1758,6 +1806,27 @@ pub fn plan_moe_cache(
     if !cpu_moe && n_cpu_moe == 0 && fixed_cost + expert_bytes as f64 <= usable {
         return None;
     }
+    // Not asked for: on only where the cache gains.
+    if request == MoeCache::Default {
+        let out = moe_out_share(usable, fixed_cost, expert_bytes);
+        let (low, high) = MOE_CACHE_DEFAULT_OUT;
+        if !(low..=high).contains(&out) {
+            tracing::info!(
+                "MoE: {:.0}% of the experts do not fit in VRAM; --fit's split instead of the \
+                 expert cache, which comes on by itself between {:.0}% and {:.0}% \
+                 (--moe-cache auto asks for it)",
+                out * 100.0,
+                low * 100.0,
+                high * 100.0
+            );
+            return None;
+        }
+        tracing::info!(
+            "MoE: {:.0}% of the experts do not fit in VRAM; the expert cache is on by \
+             default (--moe-cache off turns it off)",
+            out * 100.0
+        );
+    }
     let kept_on_gpu: u64 = if cpu_moe || n_cpu_moe == 0 {
         0
     } else {
@@ -1780,7 +1849,7 @@ pub fn plan_moe_cache(
         }
         let room = (room as u64).min(in_ram);
         let (bytes, asked_bytes) = match request {
-            MoeCache::Auto => (step_down(room), None),
+            MoeCache::Auto | MoeCache::Default => (step_down(room), None),
             MoeCache::Off => return None,
             MoeCache::Mib(mib) => {
                 let asked = u64::from(mib) * 1024 * 1024;
@@ -1791,7 +1860,7 @@ pub fn plan_moe_cache(
                 }
             }
         };
-        if bytes == 0 || (request == MoeCache::Auto && bytes < MOE_CACHE_MIN_BYTES) {
+        if bytes == 0 || (request.is_auto() && bytes < MOE_CACHE_MIN_BYTES) {
             return None;
         }
         Some((bytes, asked_bytes))
@@ -1829,7 +1898,7 @@ pub fn plan_moe_cache(
         host_bytes: in_ram,
         n_ubatch,
         prefetch_bytes,
-        grow: (request == MoeCache::Auto).then_some(MoeCacheGrow {
+        grow: request.is_auto().then_some(MoeCacheGrow {
             keep_bytes: prefetch_bytes,
             max_bytes: in_ram,
         }),
@@ -4145,8 +4214,8 @@ mod plan_offload_tests {
     }
 
     /// The cache is on by itself only where nothing else says where the
-    /// experts go, and on one CUDA GPU; what the user asked for is kept,
-    /// `off` aside, which is no cache at all.
+    /// experts go, and on one GPU of the CUDA backend; what the user asked
+    /// for is kept, `off` aside, which is no cache at all.
     #[test]
     fn the_expert_cache_comes_on_by_itself_only_where_nothing_places_the_experts() {
         let cuda = vec!["CUDA0".to_string()];
@@ -4166,10 +4235,14 @@ mod plan_offload_tests {
         assert_eq!(on(None, true, true, 0, 0, &cuda), None);
         assert_eq!(on(None, true, false, 20, 0, &cuda), None);
         assert_eq!(on(None, true, false, 0, 2, &cuda), None);
-        // Otherwise `auto` on one CUDA GPU; not on ROCm (only when asked
-        // for), on two GPUs, on none or on another backend.
-        assert_eq!(on(None, true, false, 0, 0, &cuda), Some(MoeCache::Auto));
-        assert_eq!(on(None, true, false, 0, 0, &["ROCm0".to_string()]), None);
+        // Otherwise the default, which the planner keeps to where the cache
+        // gains, on one GPU of the CUDA backend, CUDA or ROCm; not on two
+        // GPUs, on none or on another backend.
+        assert_eq!(on(None, true, false, 0, 0, &cuda), Some(MoeCache::Default));
+        assert_eq!(
+            on(None, true, false, 0, 0, &["ROCm0".to_string()]),
+            Some(MoeCache::Default)
+        );
         assert_eq!(
             on(None, true, false, 0, 0, &["CUDA0".into(), "CUDA1".into()]),
             None
@@ -4251,6 +4324,64 @@ mod plan_offload_tests {
         assert_eq!(split.host_bytes, 40 * 400 * MIB);
         // Without `auto_n_ubatch` the plan keeps the caller's micro-batch.
         assert_eq!(auto.n_ubatch, None);
+    }
+
+    /// Not asked for, the cache is planned only where the share of the
+    /// experts the usual split leaves in RAM is in the band it gains in:
+    /// not for a model that nearly fits (gpt-oss-120b on a 64 GB GCD), not
+    /// where the cache would hold a tenth of them (DeepSeek-V3.1 there).
+    /// Asked for, it is planned whatever the share.
+    #[test]
+    fn the_default_expert_cache_keeps_to_the_band_it_gains_in() {
+        let (info, layout, _) = moe();
+        let expert_bytes: u64 = layout.expert_bytes_per_layer.iter().sum();
+        let cache = |request, free| {
+            plan_moe_cache(
+                request,
+                Some((free, 64 * GIB)),
+                Some(&info),
+                Some(&layout),
+                4096,
+                F16.0,
+                F16.1,
+                DEFAULT_VRAM_RESERVE_BYTES,
+                false,
+                0,
+                false,
+                MoePrefetch::default())
+        };
+        let share = |free| {
+            let (usable, fixed) =
+                moe_budget(free, &info, &layout, 4096, F16.0, F16.1, DEFAULT_VRAM_RESERVE_BYTES);
+            moe_out_share(usable, fixed, expert_bytes)
+        };
+        // The free VRAM that leaves about this share of the experts out.
+        let free_for = |out: f64| {
+            (1..=256u64)
+                .map(|i| i * 256 * MIB)
+                .min_by(|a, b| (share(*a) - out).abs().total_cmp(&(share(*b) - out).abs()))
+                .unwrap()
+        };
+        let (low, high) = MOE_CACHE_DEFAULT_OUT;
+        for (out, gains) in [(0.05, false), (0.5, true), (0.9, false)] {
+            let free = free_for(out);
+            assert!((share(free) - out).abs() < 0.03, "no free VRAM leaves {out} out");
+            assert_eq!(
+                cache(MoeCache::Default, free).is_some(),
+                gains,
+                "{out} of the experts out, band {low}-{high}"
+            );
+            // Asked for, the band does not apply.
+            assert!(cache(MoeCache::Auto, free).is_some(), "auto at {out}");
+        }
+        // In the band the default is `auto`, size and growth alike.
+        let free = free_for(0.5);
+        let (default, auto) = (cache(MoeCache::Default, free), cache(MoeCache::Auto, free));
+        assert_eq!(default, auto);
+        assert!(default.unwrap().grow.is_some());
+        // A model that fits has nothing to cache, by default or not.
+        assert_eq!(cache(MoeCache::Default, 60 * GIB), None);
+        assert_eq!(moe_out_share(10.0, 2.0, 0), 0.0);
     }
 
     /// Left to choose, a load with an expert cache reads prompts with the

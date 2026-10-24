@@ -586,14 +586,19 @@ UD-Q4_K_M (3,200-3,800 to 4,100-4,900 tokens/s at 4,840, 19,900 and 38,700
 tokens, with writing from 54-58 to 115-132). `--n-ubatch` is the setting for
 reading, and the two share the same VRAM.
 
-**On by default, on one CUDA GPU.** Without a flag a MoE model whose experts
-do not fit gets `--moe-cache auto`, since `--fit` is on unless you pass
-`--no-fit`. It stays off with `--no-fit`, `--cpu-moe`, `--n-cpu-moe`,
-`--mtp`, with more than one GPU, and on ROCm, where it runs only when asked
-for: on LUMI's MI250X it was behind the usual split at some points
-(gpt-oss-120b at 16 requests, 110 against 184 tokens/s; DeepSeek-V3.1 at
-batch 4 and 16, 3.2-3.7 against 4.1-5.3). `--moe-cache off` turns it off
-anywhere. `--fit-strict` does not turn it off, and does not refuse a MoE
+**On by default where it gains.** Without a flag a MoE model whose experts
+do not fit gets the cache when 25% to 85% of its experts are left out of
+VRAM, on one GPU, CUDA or ROCm, since `--fit` is on unless you pass
+`--no-fit`; the log says how many are out and which way the load went.
+Outside that band the usual split is faster: on one GCD of LUMI's MI250X a
+model that nearly fits lost with the cache (gpt-oss-120b, about 5% out, 110
+against 184 tokens/s at 16 requests), and so did one whose cache held a
+tenth of the experts (DeepSeek-V3.1, about 90% out, 3.2-3.7 against 4.1-5.3
+at 4 and 16), while in the band it won (Qwen3-235B, about 60% out, 1.6 to
+3.2 times; Qwen3.6-35B-A3B on a 16 GB card, about half out, 55 to 133). It
+stays off with `--no-fit`, `--cpu-moe`, `--n-cpu-moe`, `--mtp` and with more
+than one GPU. `--moe-cache auto` or a size asks for it whatever the share,
+`--moe-cache off` turns it off anywhere. `--fit-strict` does not turn it off, and does not refuse a MoE
 model whose experts do not fit: it loads with them in RAM.
 
 Combined with `--mtp` it was slower, not faster: on that model the head's
