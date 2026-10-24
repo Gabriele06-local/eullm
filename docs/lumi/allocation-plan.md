@@ -331,7 +331,9 @@ prompt and one request, decode 83-92 tokens/s, prefill 2,360-2,570 and the
 first token at 3.0-3.3 s in every round since 0.7.20, while their tokens/s went from 11.6 to
 32.1 from round to round with how many tokens the model wrote before it
 stopped. `compare` reads a throughput point by its decode speed first since
-then, tokens/s beside it.
+then, tokens/s beside it: read so, the round is 1.01 over the rounds before
+it at the median of its 744 configurations, 20 of them below 0.95 and no
+group.
 
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
