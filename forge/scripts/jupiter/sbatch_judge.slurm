@@ -23,6 +23,14 @@
 # model already graded is skipped, so a rerun grades only the new ones.
 # Whole node: 4 GPU-hours an hour; two hours at most, a judge of 30 answer
 # sets took 34 minutes.
+#
+# JUDGE_ANSWERS_DIR grades instead the answers-*.jsonl of one directory, the
+# teacher eval's (sbatch_teacher_eval.slurm): the LexIA traps and the
+# practical exam, until 24-10-2026 graded on Leonardo with this script and
+# this grader (their items carry their own rubric, which every --rubric
+# keeps). Those sets are private and their answers repeat the questions, so
+# the grades are written in that directory, readable by the user alone, and
+# the log keeps counts only.
 
 #SBATCH --job-name=forge-judge
 #SBATCH --partition=booster
@@ -38,6 +46,10 @@ RUNS="$FORGE_RUN_DIR"
 JUDGE="${FORGE_JUDGE_DIR:-$RUNS/judge}"
 GRADER="${FORGE_JUDGE_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 JOB="${SLURM_JOB_ID:-local}"
+if [ -n "${JUDGE_ANSWERS_DIR:-}" ]; then
+    JUDGE="$JUDGE_ANSWERS_DIR"
+    umask 077
+fi
 mkdir -p "$JUDGE/answers" "$JUDGE/graded-v3" "$RUNS/power"
 
 echo "=== Forge judge: job $JOB on $(hostname), $(date -Is) ==="
@@ -45,6 +57,7 @@ python -c "import sys; from transformers import AutoConfig; AutoConfig.from_pret
     { echo "[!!] $GRADER is not in the offline cache: prefetch_models.py on a login node"; exit 1; }
 
 # answers-<set>-<model>.jsonl: judge_answers.py takes the label from the name.
+[ -n "${JUDGE_ANSWERS_DIR:-}" ] ||
 for f in "$RUNS"/sft*/*/norm-exam-answers.jsonl "$RUNS"/sft*/*/norm-exam-open-answers.jsonl \
         "$RUNS"/sft*/*/norm-exam-open-nonote-answers.jsonl; do
     [ -s "$f" ] || continue
@@ -55,8 +68,12 @@ for f in "$RUNS"/sft*/*/norm-exam-answers.jsonl "$RUNS"/sft*/*/norm-exam-open-an
     esac
     ln -sf "$f" "$JUDGE/answers/answers-$set-$model.jsonl"
 done
-FILES=("$JUDGE"/answers/answers-*.jsonl)
-[ -e "${FILES[0]}" ] || { echo "[!!] no norm-exam-answers.jsonl under $RUNS/sft*/"; exit 1; }
+if [ -n "${JUDGE_ANSWERS_DIR:-}" ]; then
+    FILES=("$JUDGE"/answers-*.jsonl)
+else
+    FILES=("$JUDGE"/answers/answers-*.jsonl)
+fi
+[ -e "${FILES[0]}" ] || { echo "[!!] no answers to grade in $JUDGE"; exit 1; }
 echo "  ${#FILES[@]} answer sets, grader $GRADER, rubric v3, into $JUDGE/graded-v3"
 
 # shellcheck source=stage_model.sh
