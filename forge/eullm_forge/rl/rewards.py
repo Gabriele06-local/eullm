@@ -98,6 +98,11 @@ _ABSTAIN = re.compile(
     r"|non (?:risulta|risultano) (?:alcun[ao]?|nessun[ao]?)\s+(?:articol[oi]|norm[ae]"
     r"|disposizion[ei]|riferiment[oi]|testo)\b|non risulta nulla nei testi"
     r"|non (?:si )?trova(?:no)? (?:nei|tra i) testi"
+    # A matter the collection does not cover (make_offtopic_prompts.py): "i
+    # testi riportati non riguardano l'IMU", "la materia non rientra tra i
+    # testi a disposizione".
+    r"|test[io] (?:riportat|fornit|a mia disposizione|disponibil)\w*\s+non (?:riguarda|"
+    r"disciplina|tratta|regola)(?:no)?\b|non rientra(?:no)? (?:tra|nei|nella)"
     # How the false-premise answers (premise_gen) say it, and models with them:
     # the article "non c'è", and "non mi risulta che esista" -- scored nothing
     # until 2026-10-20, so the generator's own right answers were worth 0.

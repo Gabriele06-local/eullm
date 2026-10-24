@@ -171,3 +171,26 @@ def test_the_threshold_never_gates_more_than_its_share_of_sufficient_questions()
     t = mod.capped_threshold(probs, labels, 0.55, 0.1)   # 1 of 10 may be gated
     assert t == 0.02
     assert sum(1 for p, y in zip(probs, labels) if y and p < t) == 1
+
+
+def test_off_topic_prompts_are_rewarded_for_abstaining(tmp_path):
+    from eullm_forge.rl import score_answer
+    norms = tmp_path / "legislazione_cc.chunks.jsonl"
+    norms.write_text("".join(json.dumps(r) + "\n" for r in RECORDS))
+    off = tmp_path / "off.jsonl"
+    # texts that look close (a "domanda" and its expenses), on a matter not ours
+    off.write_text(json.dumps({"question": "Chi paga le spese della domanda di rimborso IMU?",
+                               "topic": "IMU", "id": "off-1"}) + "\n")
+    out = tmp_path / "prompts.jsonl"
+    assert load("make_offtopic_prompts").main(["--norms", str(norms), "--offtopic", str(off),
+                                               "-k", "2", "--out", str(out)]) == 0
+    [row] = [json.loads(line) for line in out.open()]
+    content = row["prompt"][0]["content"]
+    assert row["tipo"] == "assente" and content.startswith("Testi normativi di riferimento")
+    assert content.endswith("Domanda: Chi paga le spese della domanda di rimborso IMU?")
+    for right in ("I testi riportati non riguardano l'IMU, quindi non posso rispondere.",
+                  "Tra i testi a mia disposizione non trovo norme sull'IMU.",
+                  "La materia non rientra tra i testi che ho davanti."):
+        assert score_answer(right, "assente", []) == 1.0, right
+    assert score_answer("L'IMU si paga in due rate, entro 16 giorni dalla scadenza.",
+                        "assente", []) == 0.0
