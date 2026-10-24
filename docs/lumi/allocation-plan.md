@@ -285,6 +285,41 @@ can start, so they soak until `days-*` ends and `load-*` then has the node.
 Points of different widths for one label go to one job, or to jobs started
 apart.
 
+24-10-2026, the round `r-next21` read from its jobs' summaries (23029434,
+23029435, 23029436, 23029438, 23029440), the first on an engine without HIP
+graphs. **No server died in any soak.** `soak-one-gcd`, twelve hours at 32
+requests on one GCD, sixteen configurations (Mistral Small 24B, Qwen3-8B,
+14B, 32B, Qwen3.6-27B and 35B-A3B, with f16, q8_0 and q4_0 KV caches): every
+one to the end, VRAM flat, 41,061 to 329,770 requests each (Qwen3-32B f16
+172 tokens/s, q8_0 158, q4_0 144; Qwen3-8B 407-551; Qwen3.6-35B-A3B 306-314).
+`quant-soak`, twelve hours, ten configurations of Q8_0 and MoE models
+(gpt-oss-20b 403-428 tokens/s, Qwen3-30B-A3B 216-257, Qwen3-32B Q8_0 138):
+the soak where a server once failed 30,259,011 of 30,331,204 requests on
+NaN logits ran clean. `moe-soak`, 22.5 hours on a whole node: DeepSeek-V3.1
+25.1 tokens/s (29,938 requests), Qwen3-235B Q8_0 40.8 (49,925),
+Qwen3-Coder-480B 39.7 (28,721), Qwen3-235B Q4_K_M as two servers 97.1
+(102,770); VRAM flat on every GCD. Accuracy within the noise of the earlier
+rounds (gsm8k 0.91-0.96, arc-easy 0.97-0.99, arc-challenge 0.91-0.97).
+
+`c07` (16 clients, 400 gsm8k questions, tokens/s): EuLLM against
+llama-server and Ollama, Qwen3-8B 543, 486 and 170; Qwen3-14B 358, 315 and
+141; Qwen3-32B 188, 178 and 104; Qwen3.6-35B-A3B 237, 189 and 29.1. EuLLM is
+6-25% ahead of llama-server (the MoE most) and 1.8 to 8 times Ollama, as on
+`next6` (533, 349, 191, 221). `--kv-unified` 0-5% either way.
+
+`c06`, one request at a time over 300 gsm8k questions: MTP buys nothing on a
+GCD. Qwen3.5-9B Q4_K_M 98.4 tokens/s without, 97.9-99.4 with `--mtp 1-3`;
+its Q8_0 80.9 and 79.9-80.5; Qwen3.6-27B Q4_K_M 37.8 and 37.4-38, Q8_0 28.7
+and 29; the same accuracy. On the RTX 5070 Ti it paid; on the MI250X a
+decode step is not the cost the drafts save.
+
+`c03`: Qwen3-32B split as tensor over two GCDs, one request, 50.3 tokens/s
+(43.3 on `next12`, 45.4 with RCCL on `next14`).
+
+Failed, all known: `place-671b` (no tensor split for DeepSeek's
+architecture, gone from `c11`), `ram-480b`, `ram-671b` and two `ram-prompt`
+points with every expert on the CPU, stopped at their time limit.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
