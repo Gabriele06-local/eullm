@@ -534,3 +534,33 @@ The traps' 20 of 36 stays the target.
   and only adds the note.
 * *4B:* jpn13 (the fixed ruling reward) and jpn11 are level (devbig
   439-445 / 446-448, practical 82-83): the 4B recipe has plateaued.
+
+## 11. 2026-10-24: r2l, the second gate, and the abstention moved into the model
+
+| Model | devbig with note | devbig without | Practical | Quotations cut short | Traps |
+|---|---|---|---|---|---|
+| published 8B | 437 | 440 | 60 + 21 | 0 (it hardly quotes) | 14 |
+| r2k | 445 | 439 | 84 + 1 | 16 / 472 | 15 |
+| **r2l** (r2k + the cut-quotation penalty) | **449** (+12, p=0.050; lenient p=0.61) | 442 | **87 + 1** (30:3) | **8 / 472** | 14 |
+| jpn13 / jpn14 (4B) | 439 / - | 446 / - | 82 / 82 | 0 / 0 | 9 / 10 |
+
+* r2l is the best 8B on devbig and the practical exam; the penalty halved
+  the quotations cut short. The traps stay within the 14-16 band, which
+  the judge's own noise covers.
+* **The second gate** (false premises and practical questions with their
+  article as sufficient, threshold capped at 3% of the sufficient
+  development examples): dev balanced accuracy 0.93, threshold 0.014. It
+  now stops 27 of 145 practical questions (1:3 against no gate, not
+  significant) and 81 of 472 devbig ones, but still 33 of 36 traps, and with
+  its note the traps are 16, as without it. The traps are unlike anything it
+  was trained on, and it reads them all as unanswerable: it does not tell
+  them apart, so it is set aside.
+* The judge graded the same answer on a nonexistent article right in one
+  run and wrong in the other (arts. 1266, 1432, 1462 c.p.p.): on that kind
+  only the judge-free check is read.
+* **Next (r2m from r2l, jpn15 from jpn14):** the abstention on matters the
+  collection does not cover goes into the model. 400 of the teacher's
+  off-topic questions become GRPO prompts rewarded for abstaining
+  (`make_offtopic_prompts.py`), in the mix with premise6 (whole quotations,
+  offences by name, rulings) and the practical prompts, which keep the model
+  from abstaining where the texts answer.
