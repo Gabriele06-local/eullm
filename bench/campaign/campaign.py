@@ -976,7 +976,7 @@ COLUMNS = (
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
     "extra_args", "trial", "vram_start_mib_max", "dec_together", "dec_same_choices",
-    "dec_largest_shift", "dec_flipped", "env", "died", "stop_exit", "ended",
+    "dec_largest_shift", "dec_flipped", "env", "died", "stop_exit", "ended", "draft_accept_pct",
 )
 
 
@@ -1008,6 +1008,7 @@ def row_of(r: dict) -> dict:
         row.update(agg_tok_s_mean=t.get("aggregate_tok_s_mean"),
                    agg_tok_s_cv_pct=t.get("aggregate_tok_s_cv_pct"),
                    ttft_ms_p50=point.mean([rep.get("ttft_ms_p50") for rep in reps]),
+                   draft_accept_pct=t.get("draft_accept_pct"),
                    decode_tok_s=point.mean([rep.get("decode_tok_s_mean") for rep in reps]),
                    prefill_tok_s=point.mean([rep.get("prefill_tok_s_mean") for rep in reps]))
     w = r.get("workload")
@@ -1017,7 +1018,8 @@ def row_of(r: dict) -> dict:
                    accuracy=" ".join(f"{k}={v.get('accuracy')}"
                                      for k, v in sorted(w.get("accuracy", {}).items())),
                    consistency=(w.get("consistency") or {}).get("rate"),
-                   died=len(w.get("servers_died") or []))
+                   died=len(w.get("servers_died") or []),
+                   draft_accept_pct=w.get("draft_accept_pct"))
     ft = r.get("finetune")
     if ft:
         epochs = ft.get("per_epoch") or []

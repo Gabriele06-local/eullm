@@ -167,11 +167,14 @@ version, devices, cores, how many other points shared the node), load time
 
 - throughput: per repeat, aggregate tok/s over the batch wall clock, TTFT
   p50/p95, client-side prefill and decode rates, the server's own rates
-  when it reports them; mean, stdev and CV across repeats;
+  when it reports them; mean, stdev and CV across repeats; with `--mtp`, the
+  drafts the head wrote and those kept (`draft_n`, `draft_n_accepted`, as the
+  engine reports them in each final answer) and `draft_accept_pct`, the
+  share kept, `kept%` in the report;
 - workload: accuracy per set (first pass), answer consistency of later
   passes against the first, a per-interval series of tok/s, latency and HBM,
-  throughput drift from the first tenth to the last, and the graded answers
-  in `<point>.<job>.answers.jsonl`;
+  throughput drift from the first tenth to the last, `draft_accept_pct` as
+  above, and the graded answers in `<point>.<job>.answers.jsonl`;
 - finetune: `eullm finetune`'s own report, schema `eullm.finetune/1` — loss,
   perplexity and accuracy on the held-out tokens before training and after
   each epoch, training tokens per second, trainable parameters, the memory

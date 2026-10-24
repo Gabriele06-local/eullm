@@ -27,10 +27,12 @@ DEVICE = (("vram_start_mib_max", "vram0"), ("vram_peak_mib_max", "vram MiB"),
 METRICS = {
     "throughput": (("agg_tok_s_mean", "tok/s"), ("agg_tok_s_cv_pct", "cv%"),
                    ("decode_tok_s", "decode"), ("prefill_tok_s", "prefill"),
-                   ("ttft_ms_p50", "ttft ms"), ("load_wall_s", "load s")) + DEVICE,
+                   ("ttft_ms_p50", "ttft ms"), ("load_wall_s", "load s"),
+                   ("draft_accept_pct", "kept%")) + DEVICE,
     "workload": (("accuracy", "accuracy"), ("agg_tok_s_mean", "tok/s"),
                  ("consistency", "consist"), ("requests", "requests"),
-                 ("duration_s", "dur s"), ("died", "died")) + DEVICE,
+                 ("duration_s", "dur s"), ("died", "died"),
+                 ("draft_accept_pct", "kept%")) + DEVICE,
     "decision": (("dec_per_s", "dec/s"), ("dec_client_ms_p50", "p50 ms"),
                  ("dec_client_ms_p99", "p99 ms"), ("dec_wait_ms_p50", "wait ms"),
                  ("dec_decode_ms_p50", "decode ms"), ("dec_consistency", "consist"),
@@ -80,7 +82,9 @@ def table(rows, kind):
         common = set.intersection(*(set((r.get("env") or "").split()) for r in rows))
         rows = [r | {"env": " ".join(v for v in (r.get("env") or "").split()
                                      if v not in common)} for r in rows]
-    metrics = METRICS.get(kind, ())
+    # A metric no row of the group has (MTP drafts without --mtp) is no column.
+    metrics = [m for m in METRICS.get(kind, ())
+               if any(r.get(m[0]) not in (None, "") for r in rows)]
     by_config = defaultdict(list)
     for r in rows:
         by_config[tuple(r.get(p) for p in varying)].append(r)

@@ -62,6 +62,7 @@ def decision(body):
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     flavour = "eullm"
+    mtp = 0  # --mtp N: the answers report drafts, as the engine's do
 
     def log_message(self, *args):
         pass
@@ -141,10 +142,16 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(DELAY)
             send({"model": model, "message": {"content": piece}} if chat
                  else {"model": model, "response": piece, "done": False})
-        send({"model": model, "done": True, "eval_count": len(pieces),
-              "prompt_eval_count": len(prompt) // 4,
-              "eval_duration": int((time.time() - started) * 1e9),
-              "prompt_eval_duration": 0, "load_duration": 2000000})
+        last = {"model": model, "done": True, "eval_count": len(pieces),
+                "prompt_eval_count": len(prompt) // 4,
+                "eval_duration": int((time.time() - started) * 1e9),
+                "prompt_eval_duration": 0, "load_duration": 2000000}
+        if Handler.mtp:
+            # As the engine reports them under llama-server's names: here
+            # the head drafts `mtp` tokens every other step and half are kept.
+            last["draft_n"] = len(pieces) // 2 * Handler.mtp
+            last["draft_n_accepted"] = last["draft_n"] // 2
+        send(last)
         self.wfile.write(b"0\r\n\r\n")
         self.wfile.flush()
 
@@ -259,6 +266,7 @@ def main(argv):
         port = int(flag(argv, "--port"))
         ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
     if argv and argv[0] == "serve":
+        Handler.mtp = int(flag(argv, "--mtp", "0"))
         model = flag(argv, "--decision-model")
         if model and model.startswith("missing"):
             print(f"Error: decision model '{model}' not found.", file=sys.stderr)

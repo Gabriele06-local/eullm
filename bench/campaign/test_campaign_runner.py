@@ -764,3 +764,28 @@ def test_a_server_that_dies_during_a_workload_is_recorded(tmp_path, engine, monk
     healthy = point.run(p | {"id": "soak2"}, ctx)
     assert healthy["workload"]["servers_died"] == []
     assert healthy["server_exits"] and None not in healthy["server_exits"]
+
+
+def test_a_point_with_mtp_records_the_drafts_its_model_kept(tmp_path, engine):
+    """With --mtp the engine says in every answer how many drafts its head
+    proposed and the model kept (llama-server's draft_n and
+    draft_n_accepted); the point records the share, the before and after of
+    a change to the head is read from it, and a point without --mtp has
+    none."""
+    import point
+
+    p = normalize({"model": "qwen3-8b", "num_predict": 20, "repeats": 2,
+                   "extra_args": ["--mtp", "2"]})
+    p |= {"id": "mtp", "est_s": 0}
+    ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path))
+    got = point.run(p, ctx)
+    t = got["throughput"]
+    assert t["repeats"][0]["draft_n"] > 0
+    assert t["draft_accept_pct"] == 50.0
+    row = campaign.row_of({"params": p, "throughput": t, "kind": "throughput"})
+    assert row["draft_accept_pct"] == 50.0
+
+    plain = normalize({"model": "qwen3-8b", "num_predict": 20, "repeats": 1})
+    plain |= {"id": "plain", "est_s": 0}
+    ctx = point.Context(engine, "rocm", "none", ["0"], free_port_base(), str(tmp_path))
+    assert point.run(plain, ctx)["throughput"]["draft_accept_pct"] is None
