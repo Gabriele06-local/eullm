@@ -144,8 +144,9 @@ CONFIG = ("campaign", "group", "kind", "model", "runtime", "gcds", "replicas", "
           "batch", "ctx", "slot_ctx", "kv", "concurrency", "prompt_tokens", "decision_mode",
           "state_tokens", "questions", "extra_args", "env", "trial")
 # What a row is named by in the comparison, when it is not the group's only one.
-LABEL = ("model", "runtime", "gcds", "replicas", "batch", "concurrency", "kv",
-         "extra_args", "env")
+LABEL = ("model", "runtime", "gcds", "replicas", "batch", "concurrency", "slot_ctx",
+         "prompt_tokens", "kv", "decision_mode", "state_tokens", "questions", "extra_args",
+         "env")
 
 
 def _label(row, params=LABEL) -> str:
