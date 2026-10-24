@@ -761,10 +761,10 @@ def test_collect_keeps_a_single_repeat_latency_as_is():
     assert row["decode_tok_s"] is None and row["prefill_tok_s"] is None
 
 
-def _measured(group, model, round_, ended, tok_s, job="1", **kw):
+def _measured(group, model, round_, ended, decode, job="1", tok_s=None, **kw):
     return dict(campaign="c01", group=group, kind="throughput", outcome="measured",
                 model=model, batch="16", round=round_, ended=ended, job=job,
-                agg_tok_s_mean=str(tok_s), **kw)
+                decode_tok_s=str(decode), agg_tok_s_mean=str(tok_s or decode), **kw)
 
 
 def test_a_round_is_compared_with_the_last_earlier_measurement_of_each_configuration():
@@ -790,13 +790,35 @@ def test_a_round_is_compared_with_the_last_earlier_measurement_of_each_configura
     dense = next(line for line in lines if "c01 / dense" in line)
     # 1.10 and 0.70: the median, 0.90, is below 0.95
     assert dense.startswith("[!!] ")
-    assert "2 compared, new/old 0.90 (0.70-1.10)" in dense
+    assert "2 compared, decode new/old 0.90 (0.70-1.10), tok/s 0.90" in dense
     assert "slowest b 0.70 (200 -> 140, r-prev)" in dense
     assert "1 first measured" in dense
     moe = next(line for line in lines if "c01 / moe" in line)
-    assert not moe.startswith("[!!]") and "1 compared, new/old 1.02" in moe
+    assert not moe.startswith("[!!]") and "1 compared, decode new/old 1.02" in moe
     assert lines[-1].startswith("all: 3 configurations compared, new/old median 1.02 (0.70-1.10)")
     assert "1 below 0.95" in lines[-1]
+
+
+def test_a_throughput_point_is_read_by_its_decode_speed_first():
+    """With a long prompt a point's tokens/s is mostly how many tokens the
+    model wrote before stopping: Qwen3.6-35B-A3B's went from 32.1 to 13.6
+    between two rounds at the same decode speed. Decode decides, tokens/s
+    stands beside it, and a workload is still read by its tokens/s."""
+    import report
+
+    rows = [
+        _measured("long", "q", "r-prev", "2026-10-15T00:00:00", 92.2, tok_s=32.1),
+        _measured("long", "q", "r-new", "2026-10-21T00:00:00", 89.7, tok_s=13.6),
+        dict(campaign="c01", group="soak", kind="workload", outcome="measured", model="q",
+             round="r-prev", ended="2026-10-15T00:00:00", agg_tok_s_mean="100"),
+        dict(campaign="c01", group="soak", kind="workload", outcome="measured", model="q",
+             round="r-new", ended="2026-10-21T00:00:00", agg_tok_s_mean="102"),
+    ]
+    text = report.compare(rows, lambda r: r["round"] == "r-new")
+    long_ = next(line for line in text.splitlines() if "c01 / long" in line)
+    assert not long_.startswith("[!!]")
+    assert "decode new/old 0.97 (0.97-0.97), tok/s 0.42" in long_
+    assert "c01 / soak: 1 compared, tok/s new/old 1.02" in text
 
 
 def test_a_job_is_compared_with_what_came_before_it_only():
@@ -810,6 +832,6 @@ def test_a_job_is_compared_with_what_came_before_it_only():
         _measured("dense", "a", "r3", "2026-10-14T00:00:00", 90, job="30"),
     ]
     text = report.compare(rows, lambda r: r["job"] == "20")
-    assert "1 compared, new/old 1.20" in text and "r1" in text
+    assert "1 compared, decode new/old 1.20" in text and "r1" in text
     assert report.compare(rows[:1], lambda r: r["job"] == "10").endswith(
         "nothing to compare: no configuration measured before")

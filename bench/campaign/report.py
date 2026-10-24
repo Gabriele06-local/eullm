@@ -135,9 +135,16 @@ def report(rows, failed=None, campaigns=None) -> str:
 
 # ── a round against the ones before it ────────────────────────────────────
 
-# What a configuration is read by when it is compared across engine builds.
-HEADLINE = {"throughput": "agg_tok_s_mean", "workload": "agg_tok_s_mean",
-            "decision": "dec_per_s"}
+# What a configuration is read by when it is compared across engine builds,
+# the first that both measurements have deciding. A throughput point is read
+# by its decode speed first: its tokens/s over a request with a long prompt
+# is mostly how many tokens the model wrote before it stopped, which the
+# engine does not choose (Qwen3.6-35B-A3B with an 8,000-token prompt wrote
+# 11.6 to 32.1 tokens/s from round to round at the same 84-92 of decode and
+# a first token at 3.0-3.3 s).
+HEADLINE = {"throughput": (("decode_tok_s", "decode"), ("agg_tok_s_mean", "tok/s")),
+            "workload": (("agg_tok_s_mean", "tok/s"),),
+            "decision": (("dec_per_s", "dec/s"),)}
 # What makes two results the same configuration: what the point was planned
 # with, not the round, the job or the engine that measured it.
 CONFIG = ("campaign", "group", "kind", "model", "runtime", "gcds", "replicas", "mode",
@@ -166,26 +173,32 @@ def _median(xs):
     return (xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2) if n else None
 
 
+def _avg(rows, column):
+    nums = [n for n in (_number(r.get(column)) for r in rows) if n is not None]
+    return sum(nums) / len(nums) if nums else None
+
+
 def compare(rows, is_new, threshold=0.95) -> str:
     """Every configuration measured by the rows `is_new` picks against its
-    last earlier measurement: the mean of its headline metric (tokens/s, or
+    last earlier measurement: the mean of each of its headline metrics
+    (decode and tokens/s for throughput, tokens/s for workloads,
     decisions/s) in the new rows over the mean in the latest earlier round
     that measured it. One line a group: how many configurations, the median
-    ratio and its range, and the slowest one by name; a group whose median
-    is below `threshold` is marked. Configurations measured for the first
-    time are counted, not compared."""
+    ratio of the first metric and its range, the other metrics' medians, and
+    the slowest configuration by name; a group whose median is below
+    `threshold` is marked. Configurations measured for the first time are
+    counted, not compared."""
     new, old = defaultdict(list), defaultdict(list)
     for r in rows:
         if r.get("outcome") != "measured" or r.get("kind") not in HEADLINE:
             continue
-        if _number(r.get(HEADLINE[r["kind"]])) is None:
+        if all(_number(r.get(c)) is None for c, _ in HEADLINE[r["kind"]]):
             continue
         key = tuple(r.get(k) for k in CONFIG)
         (new if is_new(r) else old)[key].append(r)
     groups = defaultdict(list)
     first = defaultdict(int)
     for key, rs in new.items():
-        metric = HEADLINE[rs[0]["kind"]]
         latest = max((r.get("ended") or "" for r in rs), default="")
         before = [r for r in old.get(key, []) if not latest or (r.get("ended") or "") < latest]
         if not before:
@@ -193,25 +206,34 @@ def compare(rows, is_new, threshold=0.95) -> str:
             continue
         last_round = max(before, key=lambda r: r.get("ended") or "").get("round")
         ref = [r for r in before if r.get("round") == last_round]
-        now = sum(_number(r.get(metric)) for r in rs) / len(rs)
-        then = sum(_number(r.get(metric)) for r in ref) / len(ref)
-        if then > 0:
-            groups[(key[0], key[1])].append((now / then, now, then, last_round, rs[0]))
-    out, ratios = [], []
+        ratios = {}
+        for column, name in HEADLINE[rs[0]["kind"]]:
+            now, then = _avg(rs, column), _avg(ref, column)
+            if now is not None and then:
+                ratios[name] = (now / then, now, then)
+        if ratios:
+            groups[(key[0], key[1])].append((ratios, last_round, rs[0]))
+    out, primaries = [], []
     for g in sorted(set(groups) | set(first)):
         cs = groups.get(g, [])
         line = f"{g[0]} / {g[1]}: "
         if cs:
-            rs = [c[0] for c in cs]
-            ratios.extend(rs)
+            kind = cs[0][2].get("kind")
+            names = [n for _, n in HEADLINE[kind] if any(n in c[0] for c in cs)]
+            main = names[0]
+            main_cs = [c for c in cs if main in c[0]]
+            rs = [c[0][main][0] for c in main_cs]
+            primaries.extend(rs)
             med = _median(rs)
-            slow = min(cs, key=lambda c: c[0])
+            slow = min(main_cs, key=lambda c: c[0][main][0])
+            ratio, now, then = slow[0][main]
             # named by what varies among the group's configurations
-            varying = [p for p in LABEL if len({c[4].get(p) for c in cs}) > 1] or ["model"]
-            line += (f"{len(cs)} compared, new/old {med:.2f} ({min(rs):.2f}-{max(rs):.2f})"
-                     f"; slowest {_label(slow[4], varying)} {slow[0]:.2f}"
-                     f" ({slow[2]:.4g} -> {slow[1]:.4g}"
-                     f", {slow[3]})")
+            varying = [p for p in LABEL if len({c[2].get(p) for c in cs}) > 1] or ["model"]
+            line += f"{len(cs)} compared, {main} new/old {med:.2f} ({min(rs):.2f}-{max(rs):.2f})"
+            for other in names[1:]:
+                line += f", {other} {_median([c[0][other][0] for c in cs if other in c[0]]):.2f}"
+            line += (f"; slowest {_label(slow[2], varying)} {ratio:.2f}"
+                     f" ({then:.4g} -> {now:.4g}, {slow[1]})")
             if med < threshold:
                 line = "[!!] " + line
         else:
@@ -219,10 +241,11 @@ def compare(rows, is_new, threshold=0.95) -> str:
         if first.get(g):
             line += f"; {first[g]} first measured"
         out.append(line)
-    if ratios:
-        out.append(f"all: {len(ratios)} configurations compared, new/old median "
-                   f"{_median(ratios):.2f} ({min(ratios):.2f}-{max(ratios):.2f}), "
-                   f"{sum(r < threshold for r in ratios)} below {threshold}")
+    if primaries:
+        out.append(f"all: {len(primaries)} configurations compared, new/old median "
+                   f"{_median(primaries):.2f} ({min(primaries):.2f}-{max(primaries):.2f}) "
+                   f"by each group's first metric, {sum(r < threshold for r in primaries)} "
+                   f"below {threshold}")
     else:
         out.append("nothing to compare: no configuration measured before")
     return "\n".join(out)
