@@ -274,6 +274,18 @@ def test_a_full_disk_is_flagged(tmp_path, runs):
     assert "78% full" in out and "nothing wrong found" in out
 
 
+def test_a_full_scratch_is_flagged(tmp_path, runs):
+    """2026-10-24: the scratch full too, every merge of a round failing there."""
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[],
+                     disk_pct=94, extra_env={"EULLM_SCRATCH": str(scratch)})
+    assert "[!!] the scratch is 94% full" in out
+    out = run_status(tmp_path, queue=[("eullm-grpo", "RUNNING", "None")], ended=[],
+                     disk_pct=94, extra_env={"EULLM_SCRATCH": str(tmp_path / "none")})
+    assert "the scratch is" not in out
+
+
 def test_the_allocation_left_and_the_pace_to_use_it_are_shown(tmp_path, runs, monkeypatch):
     """2026-10-06: ~13,000 local hours on course to be lost, worked out by hand."""
     monkeypatch.setenv("EULLM_BUDGET_HOURS", "100")

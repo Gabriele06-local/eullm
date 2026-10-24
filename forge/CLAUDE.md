@@ -159,6 +159,8 @@ proposing a new request shape.
    with two downloads. Already on `$WORK`, they are moved with
    `move_to_scratch.sh`, which copies then swaps for a symlink and so stops
    no job. The scratch is purged: never put there what only we can produce.
+   It has a 1 TB quota of its own, full on 2026-10-24 with merged GRPO
+   rounds: check it too (`df -h`, never `cindata`, hours old).
    See the runbook's "Storage".
 7. **Every submission is idempotent and gated:** it checks the inputs exist
    and that the same chain is not already queued, and stops at the first

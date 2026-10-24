@@ -29,7 +29,23 @@ already examined (8-18 GB each) and their checkpoints. The split since then:
 |---|---|---|
 | `$WORK` | venv, corpora and rulings, prompts, checkpoints and adapters, GGUFs, exams, answers, grades, reports | only we can produce them, or they are personal data (the rulings) that stay where the data protection measures were set up |
 | `/leonardo_scratch/fast/AIFAC_P02_1147/grpo-merged/<round>` | a GRPO round's merged bf16 weights, behind the symlink `<round>/merged` (`submit_grpo_round.sh` puts them there) | a day's file: the case-law exam reads them, then nothing does, and the adapter and the start model make them again in minutes |
-| `/leonardo_scratch/fast/AIFAC_P02_1147/models` | base models downloaded from Hugging Face: the HF cache (`$HF_HOME/hub`: teachers, judges, embedder, reranker) and `$WORK/models/*` | they can be downloaded again at any time; the scratch is outside the 1 TB quota |
+| `/leonardo_scratch/fast/AIFAC_P02_1147/models` | base models downloaded from Hugging Face: the HF cache (`$HF_HOME/hub`: teachers, judges, embedder, reranker) and `$WORK/models/*` | they can be downloaded again at any time |
+
+**The fast scratch has a 1 TB quota of its own**, like `$WORK`. On
+24 October both were full at once: the scratch with the merged weights of
+33 GRPO rounds, `$WORK` with the GGUFs of every round and
+distillation step since September. The packaging of two rounds failed with
+`Disk quota exceeded`, the merge on the scratch first. Since then
+`submit_grpo_round.sh` removes, at each new round, the merged weights of the
+rounds already packaged, keeping the newest four (`GRPO_KEEP_MERGED`), the
+round's start and any round with a job queued; `status.sh` flags either
+filesystem at 90%.
+
+Read the space with `df -h $WORK /leonardo_scratch/fast/AIFAC_P02_1147`,
+not with `cindata`, whose figures are hours old (its `FRESH` column). And
+not right after deleting: Lustre frees the space of deleted files in the
+background, and on 24 October `df` still showed 391 MB free minutes after
+62 GB of checkpoints were removed, then 62 GB free.
 
 The fast scratch is **purged** when files go unused. Ours are read every day
 and the allocation ends on 2 November, but if a copy is ever purged the
