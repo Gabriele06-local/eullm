@@ -67,8 +67,10 @@
 # fast scratch (purged when unused); the adapter and the GGUF stay on $WORK.
 # The scratch has a 1 TB quota of its own, and on 2026-10-24 it was full with
 # 33 rounds' merged weights: so each new round removes those of the rounds
-# already packaged, except the newest GRPO_KEEP_MERGED (default 4), the
-# round's START and any round with a job still queued. A removed round is
+# already packaged, except the newest GRPO_KEEP_MERGED (default 6: with an
+# 8B and a 4B lane, the two new rounds, their starts and the two before, the
+# fallback if a new round turns out worse), the round's START and any round
+# with a job still queued. A removed round is
 # merged again from its adapter and its own start, if ever needed.
 
 set -uo pipefail
@@ -124,7 +126,7 @@ ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
 
 MERGED_ROOT="${GRPO_MERGED_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/grpo-merged}"
 prune_merged() {  # the merged weights of packaged rounds nothing needs any more
-    local keep="${GRPO_KEEP_MERGED:-4}" start queued d r n=0
+    local keep="${GRPO_KEEP_MERGED:-6}" start queued d r n=0
     start="$(readlink -f "$START" 2>/dev/null)"
     queued="$(squeue --me -h -o %j 2>/dev/null)"
     for d in $(ls -td "$MERGED_ROOT"/*/ 2>/dev/null); do
