@@ -37,7 +37,7 @@ already examined (8-18 GB each) and their checkpoints. The split since then:
 distillation step since September. The packaging of two rounds failed with
 `Disk quota exceeded`, the merge on the scratch first. Since then
 `submit_grpo_round.sh` removes, at each new round, the merged weights of the
-rounds already packaged, keeping the newest four (`GRPO_KEEP_MERGED`), the
+rounds already packaged, keeping the newest six (`GRPO_KEEP_MERGED`), the
 round's start and any round with a job queued; `status.sh` flags either
 filesystem at 90%.
 
