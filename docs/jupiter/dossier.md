@@ -71,6 +71,10 @@ JUPITER, named by its Slurm job id.
   the distilled Qwen3.5 4B and 9B tuned on them with the open-book pairs
   (2488358, its exam judged by 2488359), then the traps and the practical
   exam (2488360-2488363) and their judge (2488364).
+* The false-premise round (§5.11): the distilled 9B from 3 traps of 36 to
+  11 with the practical exam at 67 and the held-out one at 188/188, the
+  candidate so far; the vertical of the final pair, Q4_K_M costing the 9B
+  3 questions.
 * The two students continued on the rest of norms-v2, the 142,538 training
   chunks (~81M tokens) the 250,000 sample left out, the same 3,000 held out
   (`build_norms_v2_rest.sh`): links 2480199-2480203 of 8 hours, about 30
@@ -773,6 +777,38 @@ to 3 of 36, and no model of the open-book recipe reaches the published
 The recipe here teaches answering from the retrieved text, never refusing a
 premise; before this is concluded, answers are read both ways (a judge has
 failed right answers before, `forge/CLAUDE.md`).
+
+**The false-premise round (24-10-2026).** Leonardo's false-premise pairs
+(`make_premise_pairs.py`: a wrong deadline or penalty, an article that does
+not exist, a repealed one taken for one in force, answered by correcting the
+premise in three checked steps), 1,606 generated here from the legislation
+alone with the exam's, the practical exam's and the traps' articles left
+out (job 2488357), added to the open-book pairs; the distilled Qwen3.5 4B
+and 9B tuned on both (2488358, 3 h 17 min), then all three exams
+(`submit_premise_chain.sh`):
+
+| model | traps (36) | practical (145) | held-out, open book | without the note |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B distilled, + premises | **11** | **67** | 188 | **188** |
+| Qwen3.5-9B distilled | 3 | 66 | 188 | 187 |
+| Qwen3.5-4B distilled, + premises | 9 | 63 | 184 | 181 |
+| Qwen3.5-4B distilled | 8 | 62 | 189 | 183 |
+| Ministral-3-8B-Instruct, open-book recipe | 11 | 65 | 189 | 189 |
+| `legal-it-8b` published, on Leonardo | 14 | | | |
+
+The 9B goes from 3 traps to 11, level with Ministral, and loses nothing
+elsewhere: the best practical score so far and 188 of 217 with and without
+the note. The 4B gains one trap and loses 5 and 2 questions on the held-out
+exam. The distilled 9B with the premises is the candidate; the published
+8B's 14 traps came with reinforcement learning on top, which this round
+does not have.
+
+The final distilled pair through the vertical (GGUF Q4_K_M, job 2493893,
+graded by 2493894), against their bf16 scores of 188 and 187 (9B) and 189
+and 183 (4B): the 9B 185 and 184 through EULLM Engine, 184 and 184 through
+llama-server; the 4B 183 and 179, and 183 and 178. Quantization costs the
+9B 3 questions, within what the judge alone moves; the 4B up to 6, more
+than the Qwen3.5-4B before distillation lost (none).
 
 ## 6. Energy
 
