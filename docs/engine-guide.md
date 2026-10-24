@@ -580,8 +580,21 @@ large it came out. Measured on Qwen3.8-Flash-Next IQ2_XS with an RTX 5070 Ti
 
 The cache serves the decode steps (batches of up to 32 tokens). Reading a
 prompt still copies the experts to the card a pass at a time, all of them
-now rather than all but the last layers', so it is slower, by 17% there:
-`--n-ubatch` is the setting for that, and the two share the same VRAM.
+now rather than all but the last layers', so what it does to reading depends
+on the model: 17% slower there, and 25% faster on Qwen3.6-35B-A3B
+UD-Q4_K_M (3,200-3,800 to 4,100-4,900 tokens/s at 4,840, 19,900 and 38,700
+tokens, with writing from 54-58 to 115-132). `--n-ubatch` is the setting for
+reading, and the two share the same VRAM.
+
+**On by default, on one CUDA GPU.** Without a flag a MoE model whose experts
+do not fit gets `--moe-cache auto`, since `--fit` is on unless you pass
+`--no-fit`. It stays off with `--no-fit`, `--cpu-moe`, `--n-cpu-moe`,
+`--mtp`, with more than one GPU, and on ROCm, where it runs only when asked
+for: on LUMI's MI250X it was behind the usual split at some points
+(gpt-oss-120b at 16 requests, 110 against 184 tokens/s; DeepSeek-V3.1 at
+batch 4 and 16, 3.2-3.7 against 4.1-5.3). `--moe-cache off` turns it off
+anywhere. `--fit-strict` does not turn it off, and does not refuse a MoE
+model whose experts do not fit: it loads with them in RAM.
 
 Combined with `--mtp` it was slower, not faster: on that model the head's
 drafts were kept 52% of the time, and each check of 3 tokens reads up to 3
