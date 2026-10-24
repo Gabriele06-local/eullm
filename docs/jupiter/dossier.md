@@ -63,6 +63,9 @@ JUPITER, named by its Slurm job id.
 * The Qwen3.5 pair at the end of its epoch (§5.8): the 9B 188 and 187 of 217,
   as halfway, the 4B 189 and 183 (+2 and +5 over its Base); five models now
   within 189 open book, more than this exam separates.
+* Our models on the private traps and practical exam, graded on JUPITER
+  (§5.11): the distilled 9B first on the practical exam (66 of 145, +8 over
+  its Base), last on the traps (3 of 36).
 * The two students continued on the rest of norms-v2, the 142,538 training
   chunks (~81M tokens) the 250,000 sample left out, the same 3,000 held out
   (`build_norms_v2_rest.sh`): links 2480199-2480203 of 8 hours, about 30
@@ -735,6 +738,36 @@ practical questions), a real fault for a RAG model. On the practical exam,
 provisionally, 55-60 right of 145 against 60-61 for the published 8B.
 Mistral Small 4 is not a better teacher in any mode, and the teacher stays
 as it is: no more JUPITER time on it (`docs/legal-it-experiments.md`, §9).
+
+### 5.11 Our models on the traps and the practical exam (24-10-2026)
+
+The two private sets of §5.10, now asked of our own models in the same way
+(`sbatch_teacher_eval.slurm`, jobs 2486201-2486208, with Ministral's system
+prompt for Ministral) and graded on JUPITER by the same script and grader as
+Leonardo's (`sbatch_judge.slurm` with `JUDGE_ANSWERS_DIR`, jobs 2486113 and
+2486209). Mistral Small 4's answers of 20-10, graded again here, come out
+within one question of Leonardo's grades (traps 10, 10 and 13 of 36 against
+10, 11 and 12; practical 60, 55 and 60 of 145), so the two judges agree.
+Correct answers:
+
+| model | traps (36) | practical (145) | practical, score |
+|---|---:|---:|---:|
+| Qwen3.5-9B distilled, open-book recipe | 3 | **66** | **0.528** |
+| Qwen3.5-4B distilled, open-book recipe | 8 | 62 | 0.500 |
+| Qwen3.5-9B Base, open-book recipe | 6 | 58 | 0.459 |
+| Ministral-3-8B-Instruct, open-book recipe | 11 | 65 | 0.500 |
+| Mistral Small 4, direct (§5.10) | 10 | 60 | 0.417 |
+| Qwen3.6-27B, on Leonardo | 16 | | |
+| `legal-it-8b` published, on Leonardo | 14 | | |
+
+On the practical exam, harder than the held-out one, distillation moves the
+9B by 8 questions (58 to 66), ahead of every model asked, the 119B teacher
+candidate included. On the traps it does the opposite: the 9B falls from 6
+to 3 of 36, and no model of the open-book recipe reaches the published
+`legal-it-8b`, whose training on Leonardo included false premises to refuse.
+The recipe here teaches answering from the retrieved text, never refusing a
+premise; before this is concluded, answers are read both ways (a judge has
+failed right answers before, `forge/CLAUDE.md`).
 
 ## 6. Energy
 
