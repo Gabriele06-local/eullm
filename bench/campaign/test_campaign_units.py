@@ -389,7 +389,8 @@ def test_the_billed_table_says_when_it_runs_out(capsys):
 
 def test_shipped_campaigns_expand():
     """The specs in tools/lumi/campaigns are valid, and every model named in
-    one is either a catalog id or covered by the spec's own `pull` list."""
+    one is either a catalog id, covered by the spec's own `pull` list, or the
+    `-text` twin of one of those its `text_only` names (text_only_model.sh)."""
     import glob
     import json
 
@@ -406,6 +407,9 @@ def test_shipped_campaigns_expand():
         points = expand(spec)
         assert points, path
         pulled = {campaign.hf_ref_to_id(r) for r in spec.get("pull", [])}
+        twins = set(spec.get("text_only", []))
+        assert twins <= catalog | pulled, f"{path}: text_only names a model with no source"
+        pulled |= {m + "-text" for m in twins}
         served = {p["model"] for p in points if p["kind"] != "finetune"}
         unknown = served - catalog - pulled
         assert not unknown, f"{path}: models with no source: {sorted(unknown)}"

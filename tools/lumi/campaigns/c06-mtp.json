@@ -12,8 +12,14 @@
     "UD-Q4_K_M 21.1, Q8_0 35.2 (~114 GiB in all).",
     "mtp-ab: the share of drafts kept (kept%) and tokens/s, before and after 3d1c7a0 (the head",
     "started after the prompt instead of before it): planned once with next25's engine, built",
-    "before it, and once with next26's, built after; 100 gsm8k questions, one request at a time."
+    "before it, and once with next26's, built after; 100 gsm8k questions, one request at a time.",
+    "Its models are the -text twins of text_only (tools/lumi/text_only_model.sh, which",
+    "campaign_setup.sh runs): the same weights without the projector these repositories ship,",
+    "with which a model loads on the sequential engine",
+    "and --mtp drafts nothing. mtp-graded and mtp-throughput, on the models as pulled, measured",
+    "no draft in any round (24-10-2026)."
   ],
+  "text_only": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q4_k_m"],
   "pull": [
     "hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q4_K_M",
     "hf.co/unsloth/Qwen3.5-9B-MTP-GGUF:Q8_0",
@@ -38,7 +44,7 @@
     {"name": "mtp-ab", "priority": 95, "est_s": 1500,
      "set": {"kind": "workload", "sets": ["gsm8k"], "limit": 100, "concurrency": 1,
              "max_tokens": 768, "think": false},
-     "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m", "qwen3.6-27b-mtp-gguf-q4_k_m"],
+     "axes": {"model": ["qwen3.5-9b-mtp-gguf-q4_k_m-text", "qwen3.6-27b-mtp-gguf-q4_k_m-text"],
               "extra_args": [["--fit-strict"],
                              ["--fit-strict", "--mtp", "1"],
                              ["--fit-strict", "--mtp", "2"],
