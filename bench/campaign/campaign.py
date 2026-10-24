@@ -10,6 +10,8 @@
     campaign.py unblock  --queue DIR                   retry points blocked on a model
     campaign.py retry    --queue DIR [--group PREFIX]  failed points back, once fixed
     campaign.py collect  --queue DIR [--out FILE.csv]  one row per measured point
+    campaign.py compare  --queue DIR --round R | --job J   each configuration against
+                                                       its last earlier measurement
     campaign.py budget   [--start --end --budget-node-hours]   spend against the calendar
 
 `run` is the job's body. It packs points onto the node's devices — a pair of
@@ -974,7 +976,7 @@ COLUMNS = (
     "runtime", "decision_mode", "state_tokens", "questions", "dec_per_s", "dec_client_ms_p50",
     "dec_client_ms_p99", "dec_wait_ms_p50", "dec_decode_ms_p50", "dec_consistency",
     "extra_args", "trial", "vram_start_mib_max", "dec_together", "dec_same_choices",
-    "dec_largest_shift", "dec_flipped", "env", "died", "stop_exit",
+    "dec_largest_shift", "dec_flipped", "env", "died", "stop_exit", "ended",
 )
 
 
@@ -993,6 +995,7 @@ def row_of(r: dict) -> dict:
                extra_args=" ".join(p.get("extra_args", [])),
                env=" ".join(f"{k}={v}" for k, v in sorted((p.get("env") or {}).items())),
                stop_exit=" ".join(str(c) for c in r.get("server_exits") or []),
+               ended=r.get("ended"),
                vram_start_mib_max=max((r.get("vram_at_start_mib") or {}).values(),
                                       default=None))
     t = r.get("throughput")
@@ -1071,6 +1074,24 @@ def cmd_collect(args):
         w.writeheader()
         w.writerows(rows)
     print(f"{len(rows)} results → {out}")
+    return 0
+
+
+def cmd_compare(args):
+    """What a round or a job measured against the last earlier measurement of
+    each configuration: the before and after of an engine build."""
+    import report
+
+    results = args.results or os.path.join(args.queue, "results")
+    rounds, jobs = set(args.round or []), set(args.job or [])
+    if not rounds and not jobs:
+        print("name a --round or a --job", file=sys.stderr)
+        return 2
+    campaigns = set(args.campaign or [])
+    rows = [r for r in result_rows(results)
+            if not campaigns or r.get("campaign") in campaigns]
+    print(report.compare(rows, lambda r: r.get("round") in rounds
+                         or str(r.get("job")) in jobs, args.threshold))
     return 0
 
 
@@ -1283,6 +1304,15 @@ def main(argv=None):
                    help="only this campaign (repeatable), e.g. c06-mtp")
     p.add_argument("--job", action="append",
                    help="only what this Slurm job measured or failed (repeatable)")
+    p = with_queue(sub.add_parser("compare"))
+    p.add_argument("--results")
+    p.add_argument("--round", action="append",
+                   help="what this round measured (repeatable) against the rounds before")
+    p.add_argument("--job", action="append",
+                   help="what this Slurm job measured (repeatable) against the jobs before")
+    p.add_argument("--campaign", action="append", help="only this campaign (repeatable)")
+    p.add_argument("--threshold", type=float, default=0.95,
+                   help="a group whose median new/old ratio is below this is marked [!!]")
     p = with_queue(sub.add_parser("collect"))
     p.add_argument("--results")
     p.add_argument("--out")
@@ -1300,7 +1330,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
     commands = {"plan": cmd_plan, "pulls": cmd_pulls, "f32s": cmd_f32s, "prefetch": cmd_prefetch,
                 "run": cmd_run, "status": cmd_status, "unblock": cmd_unblock, "retry": cmd_retry,
-                "collect": cmd_collect, "report": cmd_report, "budget": cmd_budget}
+                "collect": cmd_collect, "report": cmd_report, "compare": cmd_compare,
+                "budget": cmd_budget}
     if args.cmd not in commands:
         ap.print_help()
         return 2
