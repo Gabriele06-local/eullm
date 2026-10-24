@@ -40,7 +40,13 @@ NAME="forge-sft-$TAG"
 JUDGE_NAME="forge-judge-$TAG"
 bad=0
 
-[ -s "$PAIRS" ] && echo "[ok] pairs $PAIRS ($(wc -l <"$PAIRS"))" || { echo "[!!] no pairs at $PAIRS"; bad=1; }
+# Several pair files, separated by spaces, are trained on together; with
+# FORGE_CHAIN_AFTER one still missing is accepted, the job before makes it.
+for f in $PAIRS; do
+    if [ -s "$f" ]; then echo "[ok] pairs $f ($(wc -l <"$f"))"
+    elif [ -n "${FORGE_CHAIN_AFTER:-}" ]; then echo "[..] pairs $f not there yet, made by the time job $FORGE_CHAIN_AFTER ends"
+    else echo "[!!] no pairs at $f"; bad=1; fi
+done
 [ -s "$EXAM" ] && echo "[ok] exam $EXAM ($(wc -l <"$EXAM") questions)" || { echo "[!!] no exam at $EXAM"; bad=1; }
 [ -z "${FORGE_SFT_SYSTEM_FILE:-}" ] || [ -s "$FORGE_SFT_SYSTEM_FILE" ] ||
     { echo "[!!] no system prompt at $FORGE_SFT_SYSTEM_FILE"; bad=1; }

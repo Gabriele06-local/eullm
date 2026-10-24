@@ -60,6 +60,10 @@ source "$EULLM_REPO/forge/scripts/jupiter/env.sh"
 RUNS="$FORGE_RUN_DIR"
 ARMS="${FORGE_SFT_ARMS:-d4b=$RUNS/norms-4b/checkpoints/qwen3_4b_norms_distilled/merged d8b=$RUNS/norms-8b/checkpoints/qwen3_8b_norms_distilled/merged b4b=Qwen/Qwen3-4B-Base b8b=Qwen/Qwen3-8B-Base}"
 PAIRS="${FORGE_SFT_PAIRS:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
+# Several files, separated by spaces, are trained on together (stage3_sft.py
+# --pairs): the open-book pairs with the false-premise ones, say.
+read -r -a PAIR_FILES <<<"$PAIRS"
+N_PAIRS=$(cat "${PAIR_FILES[@]}" 2>/dev/null | wc -l)
 REF="${FORGE_SFT_REFERENCE:-Qwen/Qwen3-4B-Instruct-2507}"
 # Training stops in time for the evaluations: 25 minutes before the job's
 # own limit in a two-hour link, an hour before it in a longer one
@@ -78,11 +82,13 @@ JOB="${SLURM_JOB_ID:-local}"
 mkdir -p "$SFT" "$RUNS/power"
 
 echo "=== Forge instruction tuning: job $JOB on $(hostname), $(date -Is) ==="
-echo "  pairs $PAIRS ($(wc -l <"$PAIRS" 2>/dev/null || echo 0) lines), training at most ${TRAIN_S}s a run, into $SFT"
+echo "  pairs $PAIRS ($N_PAIRS lines), training at most ${TRAIN_S}s a run, into $SFT"
 echo "  stage3_sft.py ${SFT_ARGS[*]:-(defaults)}${SYSTEM_FILE:+, system prompt $SYSTEM_FILE}${FORGE_SFT_NO_NOTE:+, open book also without the note}"
 if [ -s "$EXAM" ]; then echo "  held-out exam $EXAM ($(wc -l <"$EXAM") questions; totals only in the logs)"
 else echo "  no held-out exam at $EXAM: make_norm_exam.py on a login node; the ten seed questions only"; fi
-[ -s "$PAIRS" ] || { echo "[!!] no pairs at $PAIRS: sbatch_gen_instruct.slurm first"; exit 1; }
+for f in "${PAIR_FILES[@]}"; do
+    [ -s "$f" ] || { echo "[!!] no pairs at $f: sbatch_gen_instruct.slurm first"; exit 1; }
+done
 python -c "import transformers, peft; print('  imports: transformers', transformers.__version__, 'peft', peft.__version__)" ||
     { echo "[!!] the venv does not import on this node"; exit 1; }
 
@@ -153,9 +159,9 @@ PY
         has_default_system "$2" && extra+=(--default-system-file "$SYSTEM_FILE")
         t0=$(date +%s)
         timeout --signal=TERM "$TRAIN_S" python "$EULLM_REPO/forge/scripts/stage3_sft.py" \
-            --model "$model" --pairs "$PAIRS" --out "$out" "${extra[@]}"
+            --model "$model" --pairs "${PAIR_FILES[@]}" --out "$out" "${extra[@]}"
         rc=$?
-        echo "$name,$model,$(wc -l <"$PAIRS"),$(( $(date +%s) - t0 )),$rc,$JOB" >>"$SFT/times.csv"
+        echo "$name,$model,$N_PAIRS,$(( $(date +%s) - t0 )),$rc,$JOB" >>"$SFT/times.csv"
         [ -f "$out/adapter/adapter_config.json" ] || { echo "[!!] $name: no adapter (exit $rc)"; return 1; }
     fi
     if [ ! -f "$out/merged/config.json" ]; then
