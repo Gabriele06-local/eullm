@@ -64,8 +64,12 @@
 # The merged weights are a day's file: the case-law exam reads them, then
 # nothing does, and the adapter and START make them again in minutes. At
 # 8-18 GB a round they filled $WORK on 2026-10-17, so they are written to the
-# fast scratch (outside the 1 TB quota, purged when unused); the adapter and
-# the GGUF stay on $WORK.
+# fast scratch (purged when unused); the adapter and the GGUF stay on $WORK.
+# The scratch has a 1 TB quota of its own, and on 2026-10-24 it was full with
+# 33 rounds' merged weights: so each new round removes those of the rounds
+# already packaged, except the newest GRPO_KEEP_MERGED (default 4), the
+# round's START and any round with a job still queued. A removed round is
+# merged again from its adapter and its own start, if ever needed.
 
 set -uo pipefail
 
@@ -119,6 +123,21 @@ sub() {  # sbatch that prints the job id; fails (and says so) when sbatch does
 ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
 
 MERGED_ROOT="${GRPO_MERGED_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/grpo-merged}"
+prune_merged() {  # the merged weights of packaged rounds nothing needs any more
+    local keep="${GRPO_KEEP_MERGED:-4}" start queued d r n=0
+    start="$(readlink -f "$START" 2>/dev/null)"
+    queued="$(squeue --me -h -o %j 2>/dev/null)"
+    for d in $(ls -td "$MERGED_ROOT"/*/ 2>/dev/null); do
+        d="$(readlink -f "$d")" r="$(basename "$d")" n=$((n + 1))
+        [ "$n" -gt "$keep" ] && [ "$d" != "$start" ] && [ "$r" != "$NAME" ] || continue
+        [ -s "$G/$r/gguf/$r-q4_k_m.gguf" ] || continue
+        printf '%s\n' "$queued" | grep -q -- "-$r\$" && continue
+        rm -rf "$d"
+        [ -L "$G/$r/merged" ] && rm -f "$G/$r/merged"
+        echo "[round] merged weights of $r removed from the scratch (adapter and GGUF kept)"
+    done
+}
+[ -z "${PACKAGED:-}" ] && [ -d "$MERGED_ROOT" ] && prune_merged
 if [ -z "${PACKAGED:-}" ] && [ ! -e "$OUT/merged" ] && [ -d "$(dirname "$MERGED_ROOT")" ] &&
    mkdir -p "$MERGED_ROOT/$NAME" "$OUT"; then
     ln -s "$MERGED_ROOT/$NAME" "$OUT/merged" &&

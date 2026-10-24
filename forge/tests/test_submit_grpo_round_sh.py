@@ -22,7 +22,7 @@ def _exe(path: Path, body: str) -> None:
 
 
 def _setup(tmp_path: Path, queued: str = "", serial: int = 0,
-           packaging: str = "") -> tuple[dict, Path]:
+           packaging: str = "", jobs: str = "") -> tuple[dict, Path]:
     work = tmp_path / "work"
     (work / "eullm_runs" / "grpo").mkdir(parents=True)
     (work / "eullm_runs" / "grpo" / "prompts-judge.jsonl").write_text("{}\n")
@@ -53,6 +53,7 @@ echo "$n"
 case "$*" in
   *lrd_all_serial*) for i in $(seq 1 {serial}); do echo "$i"; done ;;
   *eullm-package-*) printf '%s' '{packaging}' ;;
+  *%j*) printf '%s' '{jobs}' ;;
   *) printf '%s' '{queued}' ;;
 esac
 """)
@@ -209,3 +210,26 @@ def test_the_trap_questions_are_examined_when_the_set_is_there(tmp_path):
     (Path(env["WORK"]) / "eullm_runs" / "grpo" / "jg-y").mkdir()
     _run(env, "jg-y", str(Path(env["WORK"]) / "start"), "3", "750")
     assert "lexia" not in log.read_text()
+
+
+def test_the_merged_weights_nothing_needs_are_removed_from_the_scratch(tmp_path):
+    # 2026-10-24: the scratch full with 33 rounds' merged weights, every merge failing
+    env, log = _setup(tmp_path, jobs="eullm-exam-c\neullm-judge\n")
+    grpo = Path(env["WORK"]) / "eullm_runs" / "grpo"
+    root = tmp_path / "scratch" / "grpo-merged"
+    for age, r in enumerate("fedcba"):            # a the oldest, f the newest
+        (root / r).mkdir(parents=True)
+        (root / r / "config.json").write_text("{}")
+        (grpo / r).mkdir()
+        (grpo / r / "merged").symlink_to(root / r)
+        if r != "a":                               # a is not packaged yet
+            (grpo / r / "gguf").mkdir()
+            (grpo / r / "gguf" / f"{r}-q4_k_m.gguf").write_text("gguf")
+        os.utime(root / r, (1_000_000 - age * 1000,) * 2)
+    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "2"},
+             "jg-x", str(grpo / "b" / "merged"), "1", "750")
+    assert r.returncode == 0, r.stderr + r.stdout
+    # e, f the newest; a not packaged; b the start; c still examined
+    assert sorted(p.name for p in root.iterdir()) == ["a", "b", "c", "e", "f", "jg-x"]
+    assert not (grpo / "d" / "merged").is_symlink() and (grpo / "d" / "gguf").is_dir()
+    assert "merged weights of d removed" in r.stdout

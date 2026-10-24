@@ -163,6 +163,17 @@ if [ -n "$pct" ]; then
         flag "\$WORK is ${pct}% full: free space before a job fails writing (du -sh \$WORK/*)"
     fi
 fi
+# The fast scratch has a 1 TB quota of its own: on 2026-10-24 it was full
+# with the merged weights of 33 GRPO rounds and every merge failed there.
+SCRATCH="${EULLM_SCRATCH:-/leonardo_scratch/fast/$(basename "${WORK:-/nonexistent}")}"
+spct=""
+[ -d "$SCRATCH" ] && spct="$(df -P "$SCRATCH" 2>/dev/null | awk 'NR == 2 {sub("%", "", $5); print $5}')"
+if [ -n "$spct" ]; then
+    echo "   scratch ${spct}% full"
+    if [ "$spct" -ge 90 ]; then
+        flag "the scratch is ${spct}% full: merges write there (du -sh $SCRATCH/*)"
+    fi
+fi
 # Base models live on the fast scratch behind symlinks (move_to_scratch.sh),
 # and the scratch is purged when unused. A symlink left pointing at nothing is
 # a model every job that needs it will fail to load -- compute nodes cannot
