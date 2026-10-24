@@ -22,6 +22,10 @@
 # (reasoning_effort "high", 4,000 new tokens by default); the reasoning is
 # kept apart in the answers file and only the answer is graded.
 #
+# EVAL_MODEL can also be one of our own models, a merged directory under
+# $FORGE_RUN_DIR (EVAL_LABEL names it), and EVAL_SYSTEM_FILE gives it the
+# system prompt it was trained with (Ministral's, in place of "Le Chat").
+#
 # Writes $FORGE_RUN_DIR/teacher-eval/answers-<set>-<label>[-think].jsonl and
 # a row in teacher-eval.csv; the log holds totals and times only, never a
 # question (--quiet). The question files may be private: they stay on the
@@ -104,13 +108,14 @@ SAMPLER=$!
 # with 48 questions at once it ran out of memory (jobs 2419008-2419009,
 # 20-10-2026). Fragmentation made it worse; batches of 24 fit.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-THINK_ARGS=()
-[ "$THINK" = 1 ] && THINK_ARGS=(--think)
+ASK_ARGS=()
+[ "$THINK" = 1 ] && ASK_ARGS=(--think)
+[ -z "${EVAL_SYSTEM_FILE:-}" ] || ASK_ARGS+=(--system-file "$EVAL_SYSTEM_FILE")
 t1=$(date +%s)
 # shellcheck disable=SC2086
 python "$EULLM_REPO/forge/scripts/legal_eval.py" "$WEIGHTS" --label "$SET-$TAG" \
     --items "$ITEMS" --norms $NORMS --embedder "$EMBEDDER" --reranker "$RERANKER" \
-    --retrieval-cache "$FORGE_RUN_DIR/retrieval-cache" --no-note "${THINK_ARGS[@]}" \
+    --retrieval-cache "$FORGE_RUN_DIR/retrieval-cache" --no-note "${ASK_ARGS[@]}" \
     --max-new-tokens "$MAX_NEW" --batch-size "$BATCH" \
     --answers "$ANSWERS" --csv "$OUT/teacher-eval.csv" --quiet
 RC=$?
