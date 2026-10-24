@@ -140,7 +140,7 @@ def report(rows, failed=None, campaigns=None) -> str:
 # by its decode speed first: its tokens/s over a request with a long prompt
 # is mostly how many tokens the model wrote before it stopped, which the
 # engine does not choose (Qwen3.6-35B-A3B with an 8,000-token prompt wrote
-# 11.6 to 32.1 tokens/s from round to round at the same 84-92 of decode and
+# 11.6 to 32.1 tokens/s from round to round at the same 83-92 of decode and
 # a first token at 3.0-3.3 s).
 HEADLINE = {"throughput": (("decode_tok_s", "decode"), ("agg_tok_s_mean", "tok/s")),
             "workload": (("agg_tok_s_mean", "tok/s"),),
