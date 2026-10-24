@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # What a campaign job measured, written to $CAMPAIGN_DIR/logs/summary-<job>.txt:
-# its points by group (`campaign.py report --job`, failures included), how
+# its points by group (`campaign.py report --job`, failures included), each
+# configuration against its last earlier measurement (`compare --job`), how
 # each point's VRAM moved while it ran (vram_slopes.py), and, for servers with
 # llama.cpp's log on, how long reading and copying their weights took (patch
 # 0012's load_all_data line, c11's load-* groups). sbatch_campaign.slurm
@@ -19,6 +20,9 @@ for JOB in "$@"; do
     {
         echo "=== what job $JOB measured ==="
         $CAMPAIGN report --queue "$CAMPAIGN_DIR" --job "$JOB"
+        echo
+        echo "=== against the last earlier measurement of each configuration ==="
+        $CAMPAIGN compare --queue "$CAMPAIGN_DIR" --job "$JOB"
         echo
         echo "=== VRAM of each point while it ran ==="
         "$PY" "$EULLM_REPO/tools/lumi/vram_slopes.py" --queue "$CAMPAIGN_DIR" "$JOB"

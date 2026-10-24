@@ -186,7 +186,12 @@ everything into `results/summary.csv`, and `campaign.py report [--campaign
 c06-mtp]` prints a table per group: the parameters the group varies, the
 metrics that fit its kind (tok/s, accuracy, decisions/s and latencies...)
 averaged over the results of a configuration, and how many points failed or
-did not fit.
+did not fit. `campaign.py compare --round R` (or `--job J`) is the before and
+after of an engine build: each configuration the round measured against the
+last earlier round that measured it, its tokens/s (decisions/s for
+decisions) new over old, a line a group with the median, the range and the
+slowest configuration by name, and `[!!]` on a group whose median is below
+0.95. On LUMI every job's summary carries it (`tools/lumi/job_summary.sh`).
 
 ## Tests
 

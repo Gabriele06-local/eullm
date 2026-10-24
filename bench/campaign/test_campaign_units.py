@@ -759,3 +759,57 @@ def test_collect_keeps_a_single_repeat_latency_as_is():
     row = campaign.row_of(r)
     assert row["ttft_ms_p50"] == 60.0
     assert row["decode_tok_s"] is None and row["prefill_tok_s"] is None
+
+
+def _measured(group, model, round_, ended, tok_s, job="1", **kw):
+    return dict(campaign="c01", group=group, kind="throughput", outcome="measured",
+                model=model, batch="16", round=round_, ended=ended, job=job,
+                agg_tok_s_mean=str(tok_s), **kw)
+
+
+def test_a_round_is_compared_with_the_last_earlier_measurement_of_each_configuration():
+    """The before and after of an engine build: each configuration of the new
+    round against the latest round that measured it before, not an older one,
+    named in a line a group, with the slowest configuration by name."""
+    import report
+
+    rows = [
+        _measured("dense", "a", "r-old", "2026-10-10T00:00:00", 50),
+        _measured("dense", "a", "r-prev", "2026-10-15T00:00:00", 100),
+        _measured("dense", "a", "r-new", "2026-10-21T00:00:00", 110),
+        _measured("dense", "a", "r-new", "2026-10-21T01:00:00", 110),
+        _measured("dense", "b", "r-prev", "2026-10-15T00:00:00", 200),
+        _measured("dense", "b", "r-new", "2026-10-21T00:00:00", 140),
+        _measured("dense", "c", "r-new", "2026-10-21T00:00:00", 70),
+        _measured("moe", "d", "r-prev", "2026-10-15T00:00:00", 40),
+        _measured("moe", "d", "r-new", "2026-10-21T00:00:00", 41),
+        dict(_measured("moe", "e", "r-new", "2026-10-21T00:00:00", 0), outcome="failed"),
+    ]
+    text = report.compare(rows, lambda r: r["round"] == "r-new")
+    lines = text.splitlines()
+    dense = next(line for line in lines if "c01 / dense" in line)
+    # 1.10 and 0.70: the median, 0.90, is below 0.95
+    assert dense.startswith("[!!] ")
+    assert "2 compared, new/old 0.90 (0.70-1.10)" in dense
+    assert "slowest b 0.70 (200 -> 140, r-prev)" in dense
+    assert "1 first measured" in dense
+    moe = next(line for line in lines if "c01 / moe" in line)
+    assert not moe.startswith("[!!]") and "1 compared, new/old 1.02" in moe
+    assert lines[-1].startswith("all: 3 configurations compared, new/old median 1.02 (0.70-1.10)")
+    assert "1 below 0.95" in lines[-1]
+
+
+def test_a_job_is_compared_with_what_came_before_it_only():
+    """A job's rows against measurements that ended before them: a later
+    round of the same configuration is not its 'before'."""
+    import report
+
+    rows = [
+        _measured("dense", "a", "r1", "2026-10-10T00:00:00", 100, job="10"),
+        _measured("dense", "a", "r2", "2026-10-12T00:00:00", 120, job="20"),
+        _measured("dense", "a", "r3", "2026-10-14T00:00:00", 90, job="30"),
+    ]
+    text = report.compare(rows, lambda r: r["job"] == "20")
+    assert "1 compared, new/old 1.20" in text and "r1" in text
+    assert report.compare(rows[:1], lambda r: r["job"] == "10").endswith(
+        "nothing to compare: no configuration measured before")
