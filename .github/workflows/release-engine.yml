@@ -2559,9 +2559,9 @@ jobs:
 
             LLM inference engine in Rust: one binary, any GGUF model, on CPU or GPU. Continuous batching, quantized KV cache, zero telemetry, and an AI Act-ready audit trail.
 
-            ### This release: `eullm update` for the Windows ROCm build
+            ### This release: a MoE model that does not fit the card writes twice as fast without any flag
 
-            **`eullm update` installs the Windows ROCm build.** It used to refuse `eullm-windows-x64-rocm.zip` and say to extract it by hand, because that ZIP keeps ROCm's own layout: `eullm.exe` and its DLLs in `bin\`, the GPU kernels in folders under it and in `.kpack\` beside it. The update now replaces the whole folder that holds `bin\`, and puts the previous version back if anything fails. 0.7.91 and earlier still refuse, since the update runs the installed version's code: extract this one by hand once, over the folder that holds `bin\`, and later versions update themselves. Nothing changes for the other downloads.
+            **The expert cache is on by default with `--fit`.** A model like Qwen3.6-35B-A3B (22 GB of experts on a 16 GB card) used to be split with the experts of its first layers computed on the CPU, and the cache needed `--moe-cache auto`. On an RTX 5070 Ti it now goes from 54-58 to 115-132 tokens/s writing and from 3,200-3,800 to 4,100-4,900 reading a prompt, at 14.8 GB of VRAM instead of 14.3. The cache stays off with `--cpu-moe`, `--n-cpu-moe`, `--no-fit`, `--mtp`, and where the machine cannot run one; `--moe-cache off` turns it off. `--mtp` also stops logging a false `ctx_dft pos_max=-1` warning on every request.
 
             ### Quick install
 

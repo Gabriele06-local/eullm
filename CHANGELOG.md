@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.93 — 2026-10-24
 
 ### Performance
 - **A MoE model that does not fit the card writes more than twice as fast by default, because the expert cache is on without `--moe-cache`.** Until now a model like Qwen3.6-35B-A3B (22 GB of experts on a 16 GB card) was split by `--fit` with the experts of its first 20 layers computed on the CPU, and the cache needed `--moe-cache auto` to be asked for. On an RTX 5070 Ti, Qwen3.6-35B-A3B UD-Q4_K_M with no flag went from 54-58 to 115-132 tokens/s writing and from 3,200-3,800 to 4,100-4,900 reading a prompt (4,840, 19,900 and 38,700 tokens), at 14.8 GB of VRAM instead of 14.3. The cache stays off where you placed the experts yourself (`--cpu-moe`, `--n-cpu-moe`), with `--no-fit` and with `--mtp`, and where the machine cannot run one (more than one GPU, or no CUDA or ROCm), without a word; a dense model, or one whose experts all fit, is as before. `--moe-cache off` turns it off, and a size in MiB or `auto` still asks for it.
