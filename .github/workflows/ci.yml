@@ -578,11 +578,20 @@ jobs:
       - name: Test
         run: python -m unittest discover -s adapters/reflex-mcp/tests -v
       - name: Audit dependencies
-        # Blocking, as in the forge job, and not `--strict` for the same
-        # reason: the package itself is not on PyPI, so it cannot be audited.
+        # Blocking, as in the forge job. What is audited is what the adapter
+        # installs (the build tooling included), frozen before pip-audit
+        # arrives: pip-audit runs from a venv of its own. Installed beside the
+        # adapter, its own dependencies were audited too, and on 24 October
+        # 2026 the Python 3.10 run failed on six advisories in filelock 4.1.0,
+        # which pip-audit pulls in through CacheControl and whose fix (4.2.1)
+        # needs Python 3.11; the adapter does not depend on filelock. The
+        # package itself is not on PyPI, so it is left out of the list.
         run: |
-          pip install pip-audit==2.10.1
-          pip-audit --desc
+          pip freeze --all --exclude eullm-reflex-mcp > "$RUNNER_TEMP/reflex-mcp-reqs.txt"
+          python -m venv "$RUNNER_TEMP/audit"
+          "$RUNNER_TEMP/audit/bin/pip" install pip-audit==2.10.1
+          "$RUNNER_TEMP/audit/bin/pip-audit" --desc --disable-pip --no-deps \
+            -r "$RUNNER_TEMP/reflex-mcp-reqs.txt"
 
   # ── Examples ─────────────────────────────────────────────────────────
   # The LangGraph graphs and the n8n workflow are what someone trying the
