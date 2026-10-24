@@ -43,6 +43,14 @@ PY
                 sed -E 's|^.* ([0-9]+ weights, .*waiting for a copy [0-9.]+ s).*$|\1|' |
                 while read -r line; do printf '%s (%s): %s\n' "$p" "$env" "$line"; done
         done)
+        # The expert cache's choice where no flag made it (0.7.94 and later).
+        MOE=$(grep -H "MoE: .* of the experts do not fit" "$CAMPAIGN_DIR/results/logs/$JOB"/*.log \
+                2>/dev/null | sed -E 's|^.*/([^/]+)\.server([0-9]+)\.log:.*MoE: |\1 server\2: |')
+        if [ -n "$MOE" ]; then
+            echo
+            echo "=== where each MoE server put its experts (no --moe-cache flag) ==="
+            echo "$MOE"
+        fi
         if [ -n "$LOADS" ]; then
             echo
             echo "=== how each server read and copied its weights (llama.cpp's load_all_data) ==="

@@ -193,7 +193,7 @@ struct RuntimeOpts {
     /// or falling back) when the model does not fully fit on the GPU. On
     /// `serve`, a refused load surfaces as an error to the API caller. A
     /// MoE model is not refused: one whose experts do not fit loads with
-    /// them in RAM (the expert cache by default on CUDA, see --moe-cache,
+    /// them in RAM (the expert cache by default where it gains, see --moe-cache,
     /// or the usual split), as its own sizing decides first.
     #[arg(long)]
     fit_strict: bool,
@@ -278,11 +278,13 @@ struct RuntimeOpts {
     /// expert in RAM and give the VRAM they would have taken to a cache of
     /// the ones the model uses most. `auto` sizes it from the VRAM left once
     /// the rest of the model is placed (with --fit); a number asks for that
-    /// many MiB. On by default (`auto`) on a single CUDA GPU, unless you
-    /// pass --no-fit, place the experts with --cpu-moe or --n-cpu-moe, or
-    /// use --mtp; `off` turns it off. On ROCm it runs only when asked for
-    /// (`auto` or a size): LUMI's MI250X measured it behind the usual split
-    /// at some points. It always speeds up writing; reading a long prompt
+    /// many MiB. On by default on one GPU, CUDA or ROCm, when 25% to 85% of
+    /// the experts do not fit (outside that, a model that nearly fits or one
+    /// whose cache would hold a tenth of them is faster with the usual
+    /// split; the log says which), unless you pass --no-fit, place the
+    /// experts with --cpu-moe or --n-cpu-moe, or use --mtp; `auto` or a size
+    /// asks for it whatever the share, `off` turns it off. It always speeds
+    /// up writing; reading a long prompt
     /// depends on the model: on an RTX 5070 Ti, Qwen3.6-35B-A3B read 25%
     /// faster (3,200-3,800 to 4,100-4,900 tokens/s) while Qwen3.8-Flash-Next
     /// (IQ2_XS) wrote 49.4 tokens/s with an 8,000 MiB cache against 22.4
@@ -3309,7 +3311,8 @@ async fn cmd_run(
             // Without sizing, a size given in MiB is used as given and the
             // experts go where the user's own flags put them.
             match (request, fit::moe_cache_support()) {
-                (fit::MoeCache::Off, _) => {}
+                // `Default` needs --fit, so it does not come this way.
+                (fit::MoeCache::Off | fit::MoeCache::Default, _) => {}
                 (fit::MoeCache::Mib(mib), Ok(())) => moe_cache_bytes = u64::from(mib) << 20,
                 (fit::MoeCache::Auto, Ok(())) => println!(
                     "[EULLM] --moe-cache auto needs --fit to size the cache; running without \

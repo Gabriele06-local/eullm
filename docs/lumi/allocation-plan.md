@@ -373,6 +373,20 @@ less, since the 64 cores compute the experts faster than the link copies
 them (DeepSeek-V3.1 0.70-0.78 at 4 and 16). On the RTX 5070 Ti, where the
 default was decided, Qwen3.6-35B-A3B has about half of its experts out.
 
+24-10-2026, what the engine does with it. A first answer (#1090) kept the
+default to one CUDA GPU and took it off ROCm. The cause of both losses is
+not the backend but where the model sits: the cache gains when a large share
+of the experts is out and it still holds a good part of them. So the default
+is now `MoeCache::Default`, `auto` only where 25% to 85% of the experts do
+not fit (`fit::MOE_CACHE_DEFAULT_OUT`, the share computed by the planner
+from the VRAM left and the experts' bytes), on one GPU of the CUDA backend,
+CUDA or ROCm; outside it `--fit`'s split, and the log says the share and the
+choice. `--moe-cache auto` or a size still asks for the cache whatever the
+share. `c10`'s `ram-default` (8 points, `next26`) loads the four models
+without a flag at 1 and 16 requests: the 235B and the 480B should take the
+cache and gpt-oss-120b and DeepSeek-V3.1 the split, which the summary shows
+from the log (`job_summary.sh`), at the tokens/s `ram-*` measured each way.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
