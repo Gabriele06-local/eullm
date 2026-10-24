@@ -60,6 +60,9 @@ JUPITER, named by its Slurm job id.
   (2431505); the three links added in the morning cancelled unstarted. The
   final pair queued through the open-book recipe (job 2480052, graded by
   2480053).
+* The Qwen3.5 pair at the end of its epoch (§5.8): the 9B 188 and 187 of 217,
+  as halfway, the 4B 189 and 183 (+2 and +5 over its Base); five models now
+  within 189 open book, more than this exam separates.
 * The two students continued on the rest of norms-v2, the 142,538 training
   chunks (~81M tokens) the 250,000 sample left out, the same 3,000 held out
   (`build_norms_v2_rest.sh`): links 2480199-2480203 of 8 hours, about 30
@@ -570,10 +573,30 @@ Distillation moves the 9B by 7 questions with the note and 8 without it,
 the largest gain it has made on this exam, and the 9B ties
 Ministral-3-8B-Instruct, the best so far (189 and 187); the 4B stays where
 its Base is (1 question less in both). As with Qwen3, the larger student
-gains and the smaller one hardly does. The end of the epoch is examined the
-same way by a chain queued behind the distillation's last link
-(`FORGE_CHAIN_AFTER`), and the 9B at step 9,100 goes through the vertical
-(GGUF Q4_K_M, EULLM Engine) meanwhile.
+gains and the smaller one hardly does.
+
+**Qwen3.5 at the end of the epoch (24-10-2026).** The same recipe on the two
+students at step 15,625, merged by the distillation itself (job 2480052,
+graded by 2480053):
+
+| model | open book | correct | without the note | correct |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B distilled, whole epoch | 0.882 | 188 | 0.878 | 187 |
+| Qwen3.5-9B distilled, step 9,100 | 0.892 | 189 | 0.882 | 187 |
+| Qwen3.5-9B Base | 0.862 | 182 | 0.848 | 179 |
+| Qwen3.5-4B distilled, whole epoch | **0.892** | **189** | **0.864** | **183** |
+| Qwen3.5-4B distilled, step 8,500 | 0.878 | 186 | 0.836 | 177 |
+| Qwen3.5-4B Base | 0.880 | 187 | 0.841 | 178 |
+| Ministral-3-8B-Instruct | 0.887 | 189 | 0.887 | 189 |
+
+The 9B keeps the gain it had halfway (+6 and +8 over its Base) and adds
+nothing in the second half; the 4B, level with its Base halfway, ends 2 and
+5 questions ahead. The held-out loss kept falling over the second half (the
+9B from 0.814 at step 6,000 to 0.786 at 9,500 and on), so the students go on
+learning the law while the exam stays where it was: five models are now
+within 189 of 217 open book, and the differences between them, 1 to 3
+questions, are less than this exam separates. Whatever more distillation
+adds, this exam no longer measures it.
 
 **The complete vertical (22-10-2026, deliverables 1 and 8).** The two best
 models of the recipe above, merged, made into what ships and examined as it
