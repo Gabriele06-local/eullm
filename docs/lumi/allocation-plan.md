@@ -405,8 +405,13 @@ of work. Lowered to 6, 6 and 3 hours (`scontrol update JobId=J
 TimeLimit=6:00:00`, which a user may do to a waiting job of their own),
 23136196 started within the minute: Slurm fits short jobs into the gaps
 before the nodes it holds for others, and the runner reads the time it has
-from `squeue` and takes only the points that fit. A short round is
-submitted with its own time (`submit_campaign.sh 1 1 --time=3:00:00`).
+from `squeue` and takes only the points that fit. The 48 hours were
+`sbatch_campaign.slurm`'s, set for the long chains that drained the first
+rounds and kept for every submission after, short rounds too. Since this
+day `submit_campaign.sh` asks for the time the label's waiting points need,
+spread over the chains, plus the longest point, half as much again and half
+an hour, in whole hours up to 48 (`campaign.py walltime`): 2 hours for
+`mtp-ab`, 5 for `ram-default`, 48 for a full round or the two-day soaks.
 
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
