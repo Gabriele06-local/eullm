@@ -335,6 +335,24 @@ then, tokens/s beside it: read so, the round is 1.01 over the rounds before
 it at the median of its 744 configurations, 20 of them below 0.95 and no
 group.
 
+24-10-2026, 0.7.93 turns the MoE expert cache on by itself: with `--fit`
+(on unless `--no-fit`, `--fit-strict` included), no `--cpu-moe`,
+`--n-cpu-moe` or `--mtp`, and one GPU of the CUDA backend visible, a MoE
+model whose experts do not fit gets `--moe-cache auto`; `--moe-cache off`
+turns it off. What it changes on LUMI-G, read from the specs: a point
+sees only its own GCDs, so every point on two or more GCDs is untouched
+(the cache refuses more than one GPU), and of the one-GCD MoE points every
+model but `c10`'s fits a GCD (Qwen3.6-35B-A3B, Qwen3-30B-A3B, gpt-oss-20b),
+where the cache plans nothing. Only `c10`'s points without a flag move:
+they measured `--fit`'s own split beside the cache and `--cpu-moe`, and on
+0.7.93 they would measure the cache twice. They ask for `--moe-cache off`
+from now on (new configurations to `compare`, against `[]` until 0.7.92).
+The RAM is not a new question there: `c10`'s points are alone on the node,
+and DeepSeek-V3.1's 367 GiB of experts were already pinned in a 480 GB job
+with the cache. One thing changes for `--fit-strict` everywhere: a MoE
+model that does not fit, which it refused, now loads with its experts in
+RAM.
+
 Unused budget is the outcome that has to be explained afterwards; used budget
 explains itself if every hour left a measurement behind. That is the design
 rule for everything below: the node is never idle, and nothing runs on it
