@@ -39,7 +39,7 @@ def points_of(out_path: str) -> dict:
     """{point id: {"devices": [...], "start": t, "end": t or None, "state": ...}}
     from the job's output."""
     points = {}
-    with open(out_path, errors="replace") as f:
+    with open(out_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             m = START.match(line)
             if m:
@@ -55,7 +55,7 @@ def points_of(out_path: str) -> dict:
 def samples_of(node_path: str) -> list:
     """[(t, {device: bytes used})] from the node's samples."""
     out = []
-    with open(node_path, errors="replace") as f:
+    with open(node_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 r = json.loads(line)
@@ -123,7 +123,7 @@ def job_output(queue: str, job: str) -> str:
     if os.path.exists(first):
         return first
     for path in sorted(glob.glob(os.path.join(logs, f"*-{job}.out"))):
-        with open(path, errors="replace") as f:
+        with open(path, encoding="utf-8", errors="replace") as f:
             if any(START.match(line) for line in f):
                 return path
     return first
