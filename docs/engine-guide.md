@@ -811,6 +811,25 @@ What it needs:
   and the others its MTP drafter supports. Qwen3.8-Flash-Next (`qwen4exp`)
   has its head in a file of its own: see `--mtp-model` below.
 
+Measured on one GCD of LUMI-G's MI250X (ROCm), 100 GSM8K questions one at a
+time at temperature 0, the models from unsloth's MTP repositories loaded
+text only; tokens per second writing, and the share of drafts kept:
+
+| Setting | Qwen3.5-9B Q4_K_M | Qwen3.6-27B Q4_K_M |
+| --- | ---: | ---: |
+| no drafts | 98.9 | 38.3 |
+| `--mtp 1` | 136 (+38%), 92.7% kept | 55.8 (+46%), 94.3% kept |
+| `--mtp 2` | 150 (+52%), 87.9% kept | 63.1 (+65%), 89.4% kept |
+| `--mtp 3` | 125 (+26%), 81.0% kept | 55.5 (+45%), 84.8% kept |
+
+`--mtp 2` is the best on both, as on the RTX 5070 Ti below. The answers
+graded the same to within two questions of the hundred either way: a token
+checked among several drafts is computed along another path than a token
+alone, so where greedy decoding is near a tie the pick can turn. The head
+has been started after the prompt is read since 0.7.93, not before it: the
+same models on the engine before that change kept the same share of drafts
+to 0.3 points at every setting, at tokens/s within 2%.
+
 ### A head in a file of its own (`--mtp-model FILE`)
 
 A GGUF whose converter dropped the MTP layers can still draft, if the head
