@@ -218,7 +218,7 @@ def _parse_args() -> DistillConfig:
 
     cfg_dict: dict = {}
     if raw.config:
-        with open(raw.config) as f:
+        with open(raw.config, encoding="utf-8") as f:
             cfg_dict = yaml.safe_load(f) or {}
     for f in DistillConfig.__dataclass_fields__.values():
         v = getattr(raw, f.name)
