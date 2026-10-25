@@ -122,11 +122,12 @@ def convert(src: Path, dst: Path, part_bytes: int = 5 * 10**9) -> dict:
     flush()
 
     (dst / "model.safetensors.index.json").write_text(json.dumps(
-        {"metadata": {"total_size": stats["bytes"]}, "weight_map": new_map}, indent=2))
+        {"metadata": {"total_size": stats["bytes"]}, "weight_map": new_map}, indent=2),
+        encoding="utf-8")
     config = json.loads((src / "config.json").read_text(encoding="utf-8"))
     config.pop("quantization_config", None)
     config["dtype"] = "bfloat16"
-    (dst / "config.json").write_text(json.dumps(config, indent=2))
+    (dst / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
     for f in src.iterdir():
         if f.is_file() and not f.name.endswith(".safetensors") and f.name not in (
                 "config.json", "model.safetensors.index.json"):
