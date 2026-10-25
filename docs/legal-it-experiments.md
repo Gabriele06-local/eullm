@@ -564,3 +564,68 @@ The traps' 20 of 36 stays the target.
   (`make_offtopic_prompts.py`), in the mix with premise6 (whole quotations,
   offences by name, rulings) and the practical prompts, which keep the model
   from abstaining where the texts answer.
+
+## 12. 2026-10-24/25: the abstention reward taught one sentence, and a lost start model
+
+| Model | devbig with note | devbig without | Practical | Quotations cut short | Traps (corrected of 18) |
+|---|---|---|---|---|---|
+| **r2l** | **449** | 442 | **87** | 8 / 472 | **14** (6) |
+| r2m (r2l + off-topic prompts) | 447 (5:7) | 442 (9:9) | 85 | 5 / 472 | 10 (3) |
+| r2n (r2m, again) | 442 | 437 | 87 | - | 7 (4) |
+| **jpn14** | - | - | 82 | 0 | **10** (2) |
+| jpn15 (jpn14 + off-topic prompts) | 452 (5:5) | 428 (10:13) | 82 | 0 | 8 (2) |
+| jpn16 (jpn15, again) | 452 | 412 (+42 partial) | 84 | - | 8 (2) |
+
+**What the answers said** (`compare_graded.py --show`):
+
+* **The three off-topic traps** are still failed by r2m, though it now
+  abstains on all three. Their references name the matter and place it
+  outside what the service covers; a bare "non trovo la disposizione" is
+  graded wrong. Abstaining was never what was asked.
+* **r2m lost five traps to r2l and won one.** On the nonexistent articles
+  r2l wrote "non c'è l'art. …, e non mi risulta che esista: la domanda parte
+  da un riferimento errato"; r2m wrote "non trovo l'art. …: potrebbe non
+  esistere, oppure il riferimento potrebbe essere errato", which leaves the
+  false premise standing, and the judge is right to fail it. It also
+  abstained once where the article was among the texts.
+* **The cause is ours.** `premessa_inesistente` was scored as any abstention,
+  so nothing told the generic refusal the off-topic prompts rewarded from
+  the premise correction, and the refusal spread. A grader checked in one
+  direction only, again (see forge/CLAUDE.md). Fixed: a nonexistent premise
+  is right only when the answer denies the article exists (`denies_existence`;
+  "potrebbe non esistere" is not a denial).
+* **jpn16's 16 lost points without the note are mostly the judge.** The
+  judge-free line is level (1:1), lenient 2:4 (p=0.69); on art. 1182 c.p.
+  jpn16 and jpn15 wrote the same answer word for word and the judge gave one
+  "partial" and the other "correct". A small real loss: jpn16 sometimes no
+  longer says the article may not exist.
+* **premise6 is spent for the 8B:** r2m answers only 21 of its questions
+  both right and wrong, so r2n trained almost only on practical and
+  off-topic prompts.
+
+**Decision.** The off-topic line is closed: r2m, r2n, jpn15 and jpn16 lose
+traps and gain nothing elsewhere. The best models stay r2l and jpn14. Two
+pairs of rounds start from them:
+
+* **r2o / jpn17:** premise6 sampled again under the fixed reward (the
+  hedged answers now score 0, so the questions are informative again), plus
+  the practical prompts, no off-topic ones;
+* **r2p / jpn18:** the same plus the off-topic prompts graded by the judge
+  (`make_offtopic_prompts.py --kind fuori_ambito`): name the matter and say
+  what would be needed, not only that the texts lack it.
+
+**A lost start model.** The scratch cleanup of `submit_grpo_round.sh` kept
+only the START of the round being submitted, so the 4B round removed r2l,
+the START of the 8B round queued a minute before, and the merged weights of
+its ancestors had gone the day before. Nothing was lost but time: each
+adapter records the model it was trained on, and `remerge_round.py` walks
+back to the first one on disk (the published 8B, through the r2b SFT whose
+adapter lives in `premise/sft-r2b-steps`) and merges forward. The cleanup now
+keeps the START of every round not yet packaged (`NAME/start`) and leaves
+the symlink where the weights were.
+
+**Open question:** the outside test's off-topic traps assume a service
+limited to criminal law, while ours covers the civil code too: two of the
+three matters are in our collection. Whether the exam should state the
+service's scope in a system prompt, as a deployment would, is for the user
+to decide.
