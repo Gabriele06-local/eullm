@@ -97,7 +97,7 @@ class LlamaServer:
             raise FileNotFoundError(f"no GGUF at {self.gguf}")
         self.port = _free_port()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_path.open("w")
+        log = self.log_path.open("w", encoding="utf-8")
         env = None
         if self.devices is not None:
             env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.devices}
@@ -228,7 +228,7 @@ class EullmServer:
             raise FileNotFoundError(f"no GGUF at {self.gguf}")
         self.port = _free_port()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        log = self.log_path.open("w")
+        log = self.log_path.open("w", encoding="utf-8")
         env = None
         if self.devices is not None:
             env = {**os.environ, "CUDA_VISIBLE_DEVICES": self.devices}
