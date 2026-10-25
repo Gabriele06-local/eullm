@@ -194,3 +194,34 @@ def test_off_topic_prompts_are_rewarded_for_abstaining(tmp_path):
         assert score_answer(right, "assente", []) == 1.0, right
     assert score_answer("L'IMU si paga in due rate, entro 16 giorni dalla scadenza.",
                         "assente", []) == 0.0
+
+
+def test_off_topic_prompts_can_ask_the_judge_for_the_matter_and_what_is_needed(tmp_path):
+    from eullm_forge.rl import JUDGED_TYPES, answer_reward
+    mod = load("make_offtopic_prompts")
+    norms = tmp_path / "legislazione_cc.chunks.jsonl"
+    norms.write_text("".join(json.dumps(r) + "\n" for r in RECORDS))
+    off = tmp_path / "off.jsonl"
+    off.write_text(json.dumps({"question": "Chi paga le spese della domanda di rimborso IMU?",
+                               "topic": "IMU, TARI e altri tributi locali", "id": "off-1"}) + "\n")
+    first = tmp_path / "prompts.jsonl"
+    assert mod.main(["--norms", str(norms), "--offtopic", str(off), "-k", "2",
+                     "--out", str(first)]) == 0
+    # the rows already built, rewritten: same texts, judged
+    out = tmp_path / "judged.jsonl"
+    assert mod.main(["--norms", str(norms), "--from-prompts", str(first),
+                     "--kind", "fuori_ambito", "--out", str(out)]) == 0
+    [old] = [json.loads(line) for line in first.open()]
+    [row] = [json.loads(line) for line in out.open()]
+    assert row["prompt"] == old["prompt"] and row["tipo"] == "fuori_ambito" in JUDGED_TYPES
+    assert row["question"] == "Chi paga le spese della domanda di rimborso IMU?"
+    assert "IMU, TARI" in row["reference"] and "IMU, TARI" in row["rubric"]
+    assert "partial" in row["rubric"]
+    # the verifiable reward leaves it to the judge
+    assert answer_reward(["Non trovo la disposizione."], tipo=["fuori_ambito"],
+                         keywords=[[]]) == [None]
+    # straight from the questions, too
+    direct = tmp_path / "direct.jsonl"
+    assert mod.main(["--norms", str(norms), "--offtopic", str(off), "-k", "2",
+                     "--kind", "fuori_ambito", "--out", str(direct)]) == 0
+    assert json.loads(direct.read_text())["tipo"] == "fuori_ambito"
