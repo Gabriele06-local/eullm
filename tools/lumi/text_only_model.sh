@@ -26,13 +26,16 @@ store, src_id = sys.argv[1:]
 dst_id = src_id + "-text"
 src, dst = os.path.join(store, src_id), os.path.join(store, dst_id)
 try:
-    with open(os.path.join(src, "manifest.json")) as f:
+    with open(os.path.join(src, "manifest.json"), encoding="utf-8") as f:
         manifest = json.load(f)
 except OSError:
     sys.exit(f"{src_id}: no manifest in {src} (pull it first)")
 if not manifest.get("gguf_file"):
     sys.exit(f"{src_id}: its manifest names no GGUF")
 os.makedirs(dst, exist_ok=True)
+for _stale in os.listdir(dst):
+    if _stale.lower().startswith("mmproj") and _stale.endswith(".gguf"):
+        os.remove(os.path.join(dst, _stale))
 linked = []
 for name in sorted(os.listdir(src)):
     # The weights, every shard of them; not the projector nor anything else.
@@ -49,7 +52,7 @@ manifest.pop("mmproj_file", None)
 manifest["id"] = dst_id
 manifest["name"] = f"{manifest.get('name') or src_id} (text only)"
 tmp = os.path.join(dst, "manifest.json.tmp")
-with open(tmp, "w") as f:
+with open(tmp, "w", encoding="utf-8") as f:
     json.dump(manifest, f, indent=2)
 os.replace(tmp, os.path.join(dst, "manifest.json"))
 print(f"{dst_id}: {', '.join(linked)} from {src_id}, no projector")
