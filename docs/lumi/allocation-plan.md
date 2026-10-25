@@ -391,6 +391,23 @@ without a flag at 1 and 16 requests: the 235B and the 480B should take the
 cache and gpt-oss-120b and DeepSeek-V3.1 the split, which the summary shows
 from the log (`job_summary.sh`), at the tokens/s `ram-*` measured each way.
 
+25-10-2026, `ram-default` read (jobs 23136196 and 23137404, `next26`, no
+flag): the band took the faster way at every one of the eight points.
+
+| model | experts out (1 / 16 requests) | way | tokens/s at 1 / 16 | `r-next21`: split, cache |
+|---|---|---|---|---|
+| gpt-oss-120b MXFP4 | none (fits) / 2% | split | 105 / 184 | 107, 108 at 1; 184, 110 at 16 |
+| Qwen3-235B Q4_K_M | 55% / 64% | cache | 20.9 / 25.4 | 6.9, 21.8 at 1; 15.9, 25.2 at 32 |
+| Qwen3-Coder-480B Q4_K_M | 79% / 85% | cache | 7.3 / 8.7 | 3.4, 7.4 at 1; 8.9, 9.1 at 32 |
+| DeepSeek-V3.1 Q4_K_M | 86% / 88% | split | 3.4 / 5.5 | 3.4, 3.4 at 1; 5.3, 3.7 at 16 |
+
+The upper bound falls between the 480B at 16 requests (85%, cache) and
+DeepSeek-V3.1 at one (86%, split), which is where the two ways meet: the
+480B wrote 8.9 tokens/s split and 9.1 with the cache at 32 requests,
+DeepSeek-V3.1 3.4 each way at one. A share on the wrong side of 85% by a
+point or two costs almost nothing; past it the cache loses (DeepSeek-V3.1
+3.7 against 5.3 at 16). `MOE_CACHE_DEFAULT_OUT` stays (0.25, 0.85).
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
