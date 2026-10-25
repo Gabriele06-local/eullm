@@ -62,7 +62,7 @@ def convert(src: Path, dst: Path, part_bytes: int = 5 * 10**9) -> dict:
     from safetensors.torch import save_file
 
     index_path = src / "model.safetensors.index.json"
-    index = json.loads(index_path.read_text())
+    index = json.loads(index_path.read_text(encoding="utf-8"))
     weight_map: dict[str, str] = index["weight_map"]
     names = set(weight_map)
     dst.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,7 @@ def convert(src: Path, dst: Path, part_bytes: int = 5 * 10**9) -> dict:
 
     (dst / "model.safetensors.index.json").write_text(json.dumps(
         {"metadata": {"total_size": stats["bytes"]}, "weight_map": new_map}, indent=2))
-    config = json.loads((src / "config.json").read_text())
+    config = json.loads((src / "config.json").read_text(encoding="utf-8"))
     config.pop("quantization_config", None)
     config["dtype"] = "bfloat16"
     (dst / "config.json").write_text(json.dumps(config, indent=2))
