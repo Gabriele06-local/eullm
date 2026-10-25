@@ -26,6 +26,10 @@
 # $FORGE_RUN_DIR (EVAL_LABEL names it), and EVAL_SYSTEM_FILE gives it the
 # system prompt it was trained with (Ministral's, in place of "Le Chat").
 #
+# EVAL_SETS asks several sets in one job, "name=file ..." in place of
+# EVAL_SET and EVAL_ITEMS: the model is staged once and asked each in turn
+# (the GRPO rounds' five sets, submit_grpo_round.sh).
+#
 # Writes $FORGE_RUN_DIR/teacher-eval/answers-<set>-<label>[-think].jsonl and
 # a row in teacher-eval.csv; the log holds totals and times only, never a
 # question (--quiet). The question files may be private: they stay on the
@@ -45,8 +49,11 @@ EULLM_REPO="${EULLM_REPO:-$SLURM_SUBMIT_DIR}"
 source "$EULLM_REPO/forge/scripts/jupiter/env.sh"
 MODEL="${EVAL_MODEL:-mistralai/Mistral-Small-4-119B-2603}"
 LABEL="${EVAL_LABEL:-mistral-small-4}"
-ITEMS="${EVAL_ITEMS:?EVAL_ITEMS: the question set (JSONL)}"
-SET="${EVAL_SET:?EVAL_SET: a short name for the set, for the file names}"
+if [ -n "${EVAL_SETS:-}" ]; then
+    read -r -a SETS <<<"$EVAL_SETS"
+else
+    SETS=("${EVAL_SET:?EVAL_SET: a short name for the set, for the file names}=${EVAL_ITEMS:?EVAL_ITEMS: the question set (JSONL)}")
+fi
 THINK="${EVAL_THINK:-0}"
 MAX_NEW="${EVAL_MAX_NEW:-$([ "$THINK" = 1 ] && echo 4000 || echo 400)}"
 BATCH="${EVAL_BATCH:-16}"
@@ -62,10 +69,12 @@ mkdir -p "$OUT" "$FORGE_RUN_DIR/power" "$FORGE_RUN_DIR/retrieval-cache"
 umask 077
 chmod 700 "$OUT" && { setfacl -b "$OUT" 2>/dev/null || true; }
 TAG="$LABEL$([ "$THINK" = 1 ] && echo -think)"
-ANSWERS="$OUT/answers-$SET-$TAG.jsonl"
 
 echo "=== teacher eval: job $JOB on $(hostname), $(date -Is) ==="
-echo "  $MODEL as $TAG on $SET ($(wc -l <"$ITEMS") questions), think=$THINK, max new $MAX_NEW, batch $BATCH"
+for s in "${SETS[@]}"; do
+    [ -s "${s#*=}" ] || { echo "[!!] no question set at ${s#*=}"; exit 1; }
+    echo "  $MODEL as $TAG on ${s%%=*} ($(wc -l <"${s#*=}") questions), think=$THINK, max new $MAX_NEW, batch $BATCH"
+done
 echo "  open book, no note: $(wc -w <<<"$NORMS") norm files, $EMBEDDER + $RERANKER"
 python -c "import transformers; print('  transformers', transformers.__version__)"
 for m in "$MODEL" "$EMBEDDER" "$RERANKER"; do
@@ -111,19 +120,25 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 ASK_ARGS=()
 [ "$THINK" = 1 ] && ASK_ARGS=(--think)
 [ -z "${EVAL_SYSTEM_FILE:-}" ] || ASK_ARGS+=(--system-file "$EVAL_SYSTEM_FILE")
-t1=$(date +%s)
-# shellcheck disable=SC2086
-python "$EULLM_REPO/forge/scripts/legal_eval.py" "$WEIGHTS" --label "$SET-$TAG" \
-    --items "$ITEMS" --norms $NORMS --embedder "$EMBEDDER" --reranker "$RERANKER" \
-    --retrieval-cache "$FORGE_RUN_DIR/retrieval-cache" --no-note "${ASK_ARGS[@]}" \
-    --max-new-tokens "$MAX_NEW" --batch-size "$BATCH" \
-    --answers "$ANSWERS" --csv "$OUT/teacher-eval.csv" --quiet
-RC=$?
-echo "  legal_eval: exit $RC, $(( $(date +%s) - t1 )) s (model load, retrieval and generation)"
+RC=0
+for s in "${SETS[@]}"; do
+    SET="${s%%=*}" ITEMS="${s#*=}"
+    ANSWERS="$OUT/answers-$SET-$TAG.jsonl"
+    t1=$(date +%s)
+    # shellcheck disable=SC2086
+    python "$EULLM_REPO/forge/scripts/legal_eval.py" "$WEIGHTS" --label "$SET-$TAG" \
+        --items "$ITEMS" --norms $NORMS --embedder "$EMBEDDER" --reranker "$RERANKER" \
+        --retrieval-cache "$FORGE_RUN_DIR/retrieval-cache" --no-note "${ASK_ARGS[@]}" \
+        --max-new-tokens "$MAX_NEW" --batch-size "$BATCH" \
+        --answers "$ANSWERS" --csv "$OUT/teacher-eval.csv" --quiet
+    rc=$?
+    [ "$rc" = 0 ] || RC=$rc
+    echo "  legal_eval on $SET: exit $rc, $(( $(date +%s) - t1 )) s (model load, retrieval and generation)"
+    [ -s "$ANSWERS" ] && echo "  answers: $(wc -l <"$ANSWERS") in $ANSWERS"
+done
 
 kill "$SAMPLER" 2>/dev/null
 wait "$SAMPLER" 2>/dev/null
-[ -s "$ANSWERS" ] && echo "  answers: $(wc -l <"$ANSWERS") in $ANSWERS"
 python "$EULLM_REPO/forge/scripts/jupiter/energy.py" "$POWER" --interval 5
 echo "=== done $(date -Is) (exit $RC) ==="
 exit "$RC"
