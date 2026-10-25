@@ -815,6 +815,33 @@ The candidate, the distilled 9B with the premises, through the same vertical
 186 and 187 through llama-server, against 188 and 188 in bf16. As it would
 ship, Q4_K_M served by EULLM Engine, it keeps its score.
 
+**A larger trap test (25-10-2026).** The 36 LexIA traps are too few to
+steer by (the judge alone moves one or two) and must stay a test. 390
+questions of the same kinds were drawn from the legislation on articles no
+exam and no premise pair trained on uses (`make_trap_test.py`): a wrong
+deadline, penalty or procedibility, an article that does not exist (207),
+a repealed one, a ruling cited for a deadline, each with true twins that
+must not be refused. Correct answers, by the judge (of 390):
+
+| model | judge | judge-free check |
+|---|---:|---:|
+| Qwen3.5-4B distilled, + premises | 383 | 99.5% |
+| Qwen3.5-9B distilled, + premises | 381 | 99.5% |
+| Ministral-3-8B-Instruct | 284 | 27.4% |
+| Qwen3.5-9B distilled | 241 | 29.0% |
+| Qwen3.5-9B Base | 206 | 30.0% |
+
+The judge-free check (`score_trap_test.py`, the GRPO rewards' check) knows
+only the phrasings of the three-step format the premise pairs teach, and
+fails right answers written otherwise: between formats the judge decides.
+The models trained on the premises pass 98% and refuse almost no true
+premise, but the test asks in the very templates they were trained on,
+while LexIA, written by people, stays at 11 of 36: it measures the
+templates. The same test rewritten by a teacher in three styles (a case
+told by a client, a short colloquial question, a professional taking the
+fact for granted; `paraphrase_trap_test.py`), every number of the question
+kept, is the next measure.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so

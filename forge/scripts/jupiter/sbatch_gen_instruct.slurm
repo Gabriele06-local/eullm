@@ -16,6 +16,9 @@
 #         --output="$PROJECT/$USER/forge/runs/logs/gen-instruct-%j.out" \
 #         forge/scripts/jupiter/sbatch_gen_instruct.slurm
 #
+# FORGE_GEN_KIND=paraphrase rewrites the trap test as people ask
+# (paraphrase_trap_test.py, $FORGE_DATA_DIR/eval/trap-test-para.jsonl).
+#
 # FORGE_GEN_KIND=openbook writes the other kind instead, the task the exam
 # and the product ask (generate_openbook_pairs.py): a question, the articles
 # retrieval finds for it, and the answer from them, citing the article; and
@@ -51,6 +54,12 @@ EXAM="${FORGE_GEN_EXAM:-$FORGE_DATA_DIR/eval/norm-exam.jsonl}"
 PER_ARTICLE="${FORGE_GEN_PER_ARTICLE:-2}"
 if [ "$KIND" = openbook ]; then
     OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/openbook/pairs.jsonl}"
+elif [ "$KIND" = paraphrase ]; then
+    # The trap test rewritten as people ask (paraphrase_trap_test.py), one
+    # pass, once: an existing file is kept, so every model meets the same.
+    TRAPS="${FORGE_GEN_TRAPS:-$FORGE_DATA_DIR/eval/trap-test.jsonl}"
+    OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/eval/trap-test-para.jsonl}"
+    SEEDS=0
 else
     OUT="${FORGE_GEN_OUT:-$FORGE_DATA_DIR/norms-instruct/pairs.jsonl}"
 fi
@@ -65,7 +74,11 @@ export EULLM_AUDIT_DIR="$LOGS/audit"
 
 echo "=== instruction pairs with EULLM Engine: job $JOB on $(hostname), $(date -Is) ==="
 echo "  engine $("$EULLM_BIN" --version 2>&1 | head -1) ($EULLM_BIN)"
-if [ "$KIND" = openbook ]; then
+if [ "$KIND" = paraphrase ]; then
+    echo "  the trap test $TRAPS rewritten in three styles -> $OUT"
+    [ -s "$TRAPS" ] || { echo "[!!] no trap test at $TRAPS: sbatch_trap_test.slurm first"; exit 1; }
+    [ -s "$OUT" ] && { echo "[ok] $OUT holds $(wc -l <"$OUT") questions, kept"; exit 0; }
+elif [ "$KIND" = openbook ]; then
     echo "  open book: $(wc -w <<<"$NORMS") norm files, exam $EXAM left out -> $OUT, up to $LIMIT pairs a seed ($PER_ARTICLE questions an article, seeds $SEEDS), stop after $STOP_MIN min"
     [ -n "$NORMS" ] || { echo "[!!] no norm files"; exit 1; }
     [ -s "$EXAM" ] || { echo "[!!] no exam at $EXAM: its articles must be left out"; exit 1; }
@@ -126,7 +139,10 @@ for seed in $SEEDS; do
     left=$(( STOP_MIN - ($(date +%s) - start) / 60 ))
     [ "$left" -ge 3 ] || { echo "  no time left for seed $seed"; break; }
     echo "--- seed $seed, at most $left min"
-    if [ "$KIND" = openbook ]; then
+    if [ "$KIND" = paraphrase ]; then
+        python "$EULLM_REPO/forge/scripts/paraphrase_trap_test.py" "$TRAPS" \
+            --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" --out "$OUT" || RC=$?
+    elif [ "$KIND" = openbook ]; then
         # shellcheck disable=SC2086
         python "$EULLM_REPO/forge/scripts/generate_openbook_pairs.py" \
             --backend eullm --servers "$(IFS=,; echo "${URLS[*]}")" --model "$MODEL" \
