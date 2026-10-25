@@ -425,6 +425,17 @@ those of a GCD are not all the job's, and records what shared it; the share
 of drafts kept at temperature 0 does not depend on it, and tokens/s are read
 against the point without `--mtp` of the same job.
 
+25-10-2026, the engine side of it (`next27`): with `--mtp` on one slot, a
+projector found for the model (in the store or beside the weights) gives way,
+the model loads text only and drafts, and one log line says so; a projector
+passed with `--mmproj` stays and the line says `--mtp` does nothing for it.
+The banners show MTP only where the load drafts. `c06` whole on `next27`
+(`r-next27`, 56 points: `mtp-graded` and `mtp-throughput` on the models as
+pulled, which should now draft, and `mtp-ab` on the twins, which should
+match `next26`), on `small-g`: two jobs of four GCDs, the time from
+`campaign.py walltime --gcds 4`. It is the first measurement of MTP on the
+MI250X, objective (5).
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
