@@ -126,7 +126,7 @@ def _write_calibration(biases: dict[str, float]) -> Path:
     """Write a viterbi_calibration.json with the given biases and return path."""
     path = Path(tempfile.mkstemp(prefix="opf_calib_", suffix=".json")[1])
     payload = {"operating_points": {"default": {"biases": dict(biases)}}}
-    path.write_text(json.dumps(payload, indent=2))
+    path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return path
 
 
