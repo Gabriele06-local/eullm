@@ -61,13 +61,13 @@ def main(argv: list[str] | None = None) -> int:
         items[it["id"]] = it["metadata"]
     rows = []
     for path in args.answers:
-        if path.name.endswith(".graded.jsonl"):
+        if path.name.endswith(".graded.jsonl") or not path.is_file():
             continue
         by_kind = score_file(path, items)
         if by_kind:
             rows.append((label_of(path), by_kind))
     if not rows:
-        print("[trap-test] no answers on the trap test")
+        print("[trap-test] no answers on the trap test yet: the models are still being asked")
         return 1
     kinds = sorted({k for _, bk in rows for k in bk})
     short = {k: k.replace("premessa_", "") for k in kinds}
