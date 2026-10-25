@@ -853,3 +853,5 @@ def test_a_job_asks_for_the_time_its_points_need_not_48_hours():
     # Shared by two jobs, each asks for less; never more than Slurm gives.
     assert campaign.walltime_s(alone, nodes=2) == 3 * 3600
     assert campaign.walltime_s(alone * 20) == campaign.MAX_WALLTIME_S
+    # Four GCDs of small-g take the one-GCD points in two waves.
+    assert campaign.walltime_s(one_gcd, node_devices=4) == 3 * 3600

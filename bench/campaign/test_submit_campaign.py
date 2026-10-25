@@ -75,3 +75,12 @@ def test_a_time_given_to_sbatch_is_kept(lumi):
 def test_nothing_is_submitted_for_a_label_with_nothing_waiting(lumi):
     out, calls = lumi("1", "1", EULLM_ENGINE_LABEL="next99")
     assert "nothing submitted" in out and calls == []
+
+
+def test_a_job_with_fewer_gcds_asks_for_longer(lumi):
+    # Eight 25-minute points on four GCDs of small-g run in two waves.
+    out, calls = lumi("1", "1", "--partition=small-g", "--gpus-per-node=4")
+    assert "time per job: 3:00:00" in out
+    assert len(calls) == 1 and "--time=3:00:00" in calls[0].split()
+    _, calls = lumi("1", "1", "--gpus-per-node", "2")
+    assert "--time=4:00:00" in calls[-1].split()
