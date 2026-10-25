@@ -69,7 +69,9 @@ PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
 # "pratica": the practical questions of eval.practical, as GRPO prompts
 # (make_practical_prompts.py), have no verifiable answer either.
-JUDGED_TYPES = frozenset({"contenuto", "pratica"})
+# "fuori_ambito": a matter the texts do not cover, where the answer must name
+# the matter and what would be needed (make_offtopic_prompts.py --kind).
+JUDGED_TYPES = frozenset({"contenuto", "pratica", "fuori_ambito"})
 
 #: How many different deadlines a right answer may name: the one asked, and
 #: one more for the article that also mentions, say, a notice period.
