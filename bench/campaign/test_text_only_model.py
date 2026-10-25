@@ -39,10 +39,14 @@ def test_the_twin_has_the_weights_and_no_projector(tmp_path):
         "id": "qwen3.5-9b-mtp-gguf-q4_k_m", "name": "Qwen3.5 9B MTP", "status": "ready",
         "gguf_file": "Qwen3.5-9B-Q4_K_M.gguf", "mmproj_file": "mmproj-F16.gguf",
         "hf_repo": "unsloth/Qwen3.5-9B-MTP-GGUF"}))
+    twin = store / "qwen3.5-9b-mtp-gguf-q4_k_m-text"
+    # A projector left in the twin's directory goes: the engine would find it
+    # there, manifest or not (#1118).
+    twin.mkdir()
+    (twin / "mmproj-F16.gguf").write_bytes(b"GGUF projector")
     for _ in range(2):  # a second run leaves the twin as it is
         p = run(store, "qwen3.5-9b-mtp-gguf-q4_k_m")
         assert p.returncode == 0, p.stdout + p.stderr
-    twin = store / "qwen3.5-9b-mtp-gguf-q4_k_m-text"
     assert sorted(os.listdir(twin)) == ["Qwen3.5-9B-Q4_K_M.gguf", "manifest.json"]
     assert (twin / "Qwen3.5-9B-Q4_K_M.gguf").read_bytes() == b"GGUF weights"
     assert os.path.samefile(twin / "Qwen3.5-9B-Q4_K_M.gguf", src / "Qwen3.5-9B-Q4_K_M.gguf")
