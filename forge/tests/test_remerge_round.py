@@ -66,7 +66,8 @@ def test_a_dry_run_only_prints_the_chain(tmp_path, capsys):
     _round(grpo, scratch, "b", a, present=False)
     assert load().main([str(grpo / "b"), "--dry-run"],
                        merge=lambda *_: (_ for _ in ()).throw(AssertionError)) == 0
-    assert "a -> b" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert out.index("  a  (") < out.index("  b  (")
 
 
 def test_a_start_recorded_by_its_scratch_path_is_followed_too(tmp_path):
@@ -77,4 +78,28 @@ def test_a_start_recorded_by_its_scratch_path_is_followed_too(tmp_path):
     _round(grpo, scratch, "a", base, present=False)
     _round(grpo, scratch, "b", scratch / "a", present=False)   # the resolved path
     start, rounds = load().chain_of(grpo / "b")
-    assert start == base and [r.name for r in rounds] == ["a", "b"]
+    assert start == base and [r for r, _ in rounds] == ["a", "b"]
+
+
+def test_an_sft_round_s_adapter_is_found_in_its_directory_or_given(tmp_path):
+    # r2b-steps-8b, the short SFT at the root of the r2 line, has no NAME/adapter
+    grpo, scratch = tmp_path / "grpo", tmp_path / "scratch"
+    base = tmp_path / "published"
+    base.mkdir()
+    (base / "config.json").write_text("{}")
+    sft = grpo / "root" / "sft" / "final"
+    sft.mkdir(parents=True)
+    (sft / "adapter_config.json").write_text(json.dumps({"base_model_name_or_path": str(base)}))
+    (grpo / "root" / "sft" / "checkpoint-100").mkdir()
+    (grpo / "root" / "sft" / "checkpoint-100" / "adapter_config.json").write_text("{}")
+    (grpo / "root" / "merged").symlink_to(scratch / "root")
+    _round(grpo, scratch, "top", grpo / "root" / "merged", present=False)
+    mod = load()
+    start, rounds = mod.chain_of(grpo / "top")
+    assert start == base and rounds == [("root", sft), ("top", grpo / "top" / "adapter")]
+    # elsewhere: given by name
+    other = tmp_path / "elsewhere" / "lora"
+    other.mkdir(parents=True)
+    (other / "adapter_config.json").write_text(json.dumps({"base_model_name_or_path": str(base)}))
+    start, rounds = mod.chain_of(grpo / "top", {"root": other})
+    assert rounds[0] == ("root", other)
