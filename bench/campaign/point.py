@@ -186,7 +186,8 @@ def model_files(p: dict) -> list:
     if not path:
         return []
     d = os.path.dirname(path)
-    return sorted(os.path.join(d, n) for n in os.listdir(d) if n.endswith(".gguf"))
+    return sorted(os.path.join(d, n) for n in os.listdir(d)
+                  if n.endswith(".gguf") and "mmproj" not in n.lower())
 
 
 def evict(paths) -> int:
