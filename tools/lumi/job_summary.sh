@@ -35,7 +35,7 @@ for JOB in "$@"; do
             env=$("$PY" - "$CAMPAIGN_DIR" "$p.$JOB.json" <<'PY'
 import glob, json, os, sys
 paths = glob.glob(os.path.join(sys.argv[1], "results", "*", sys.argv[2]))
-env = json.load(open(paths[0]))["params"].get("env") or {} if paths else {}
+env = json.load(open(paths[0], encoding="utf-8"))["params"].get("env") or {} if paths else {}
 print(" ".join(f"{k}={v}" for k, v in sorted(env.items()) if k != "RUST_LOG") or "-")
 PY
 )
