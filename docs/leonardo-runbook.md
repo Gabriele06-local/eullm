@@ -38,8 +38,14 @@ distillation step since September. The packaging of two rounds failed with
 `Disk quota exceeded`, the merge on the scratch first. Since then
 `submit_grpo_round.sh` removes, at each new round, the merged weights of the
 rounds already packaged, keeping the newest six (`GRPO_KEEP_MERGED`), the
-round's start and any round with a job queued; `status.sh` flags either
-filesystem at 90%.
+start of the round and of every round not packaged yet (`NAME/start`), and
+any round with a job queued; `status.sh` flags either filesystem at 90%.
+The first version kept only the start of the round being submitted, and on
+25 October the 4B round submitted second removed r2l, the start of the 8B
+round submitted a minute before. A round whose weights are gone is merged
+again where its symlink points, with its ancestors if they are gone too
+(`python forge/scripts/remerge_round.py $WORK/eullm_runs/grpo/<round>`, on
+the serial partition; `--dry-run` prints the chain).
 
 Read the space with `df -h $WORK /leonardo_scratch/fast/AIFAC_P02_1147`,
 not with `cindata`, whose figures are hours old (its `FRESH` column). And

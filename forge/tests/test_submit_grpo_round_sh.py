@@ -231,5 +231,32 @@ def test_the_merged_weights_nothing_needs_are_removed_from_the_scratch(tmp_path)
     assert r.returncode == 0, r.stderr + r.stdout
     # e, f the newest; a not packaged; b the start; c still examined
     assert sorted(p.name for p in root.iterdir()) == ["a", "b", "c", "e", "f", "jg-x"]
-    assert not (grpo / "d" / "merged").is_symlink() and (grpo / "d" / "gguf").is_dir()
+    # the symlink stays, where remerge_round.py writes the weights back
+    assert (grpo / "d" / "merged").is_symlink() and (grpo / "d" / "gguf").is_dir()
     assert "merged weights of d removed" in r.stdout
+    assert (grpo / "jg-x" / "start").read_text().strip() == str(grpo / "b" / "merged")
+
+
+def test_the_start_of_a_round_not_packaged_yet_is_kept(tmp_path):
+    # 2026-10-25: the 4B round submitted second removed r2l, the START of the
+    # 8B round submitted a minute before
+    env, log = _setup(tmp_path)
+    grpo = Path(env["WORK"]) / "eullm_runs" / "grpo"
+    root = tmp_path / "scratch" / "grpo-merged"
+    for age, r in enumerate("dcba"):
+        (root / r).mkdir(parents=True)
+        (root / r / "config.json").write_text("{}")
+        (grpo / r / "gguf").mkdir(parents=True)
+        (grpo / r / "gguf" / f"{r}-q4_k_m.gguf").write_text("gguf")
+        (grpo / r / "merged").symlink_to(root / r)
+        os.utime(root / r, (1_000_000 - age * 1000,) * 2)
+    (grpo / "r8b").mkdir()                          # queued, not packaged yet, from a
+    (grpo / "r8b" / "start").write_text(f"{grpo / 'a' / 'merged'}\n")
+    (grpo / "old").mkdir()                          # packaged: its start may go
+    (grpo / "old" / "start").write_text(f"{grpo / 'b' / 'merged'}\n")
+    (grpo / "old" / "gguf").mkdir()
+    (grpo / "old" / "gguf" / "old-q4_k_m.gguf").write_text("gguf")
+    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "1"},
+             "jg-x", str(grpo / "d" / "merged"), "1", "750")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert sorted(p.name for p in root.iterdir()) == ["a", "d", "jg-x"]
