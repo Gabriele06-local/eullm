@@ -364,7 +364,7 @@ def prepare_dataset(
         import json
         info_path = dataset_dir / "dataset_info.json"
         if info_path.exists():
-            info = json.loads(info_path.read_text())
+            info = json.loads(info_path.read_text(encoding="utf-8"))
             console.print(f"[bold green]Done![/bold green] Dataset ready at: {result}")
             console.print()
             table = Table(title=f"Dataset: {profile}")
