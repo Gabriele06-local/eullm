@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import posixpath
 import signal
 import statistics
 import subprocess
@@ -895,10 +896,10 @@ FT_NOT_RUNNABLE = ("is not an F32 model", "neither a .gguf file",
 def finetune_command(p: dict, ctx: Context, output: str, report: str) -> list:
     model = p["model"]
     if not os.path.isabs(model):
-        model = os.path.join(ctx.f32_dir or "", model)
+        model = posixpath.join(ctx.f32_dir or "", model)
     data = p["data"]
     if not os.path.isabs(data):
-        data = os.path.join(ctx.sets_dir or "", data)
+        data = posixpath.join(ctx.sets_dir or "", data)
     cmd = [
         ctx.engine, "finetune", model,
         "--data", data,
