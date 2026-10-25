@@ -135,7 +135,7 @@ def main(argv: list[str] | None = None) -> int:
     done_marker = args.out.with_name(args.out.name + ".done")
 
     def mark_done() -> None:
-        done_marker.write_text(f"done {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        done_marker.write_text(f"done {time.strftime('%Y-%m-%d %H:%M:%S')}\n", encoding="utf-8")
     if args.dry_run:
         if todo:
             print("--- one teacher prompt ---\n" + build_messages(todo[0])[1]["content"][:1200])
