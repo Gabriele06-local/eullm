@@ -34,8 +34,9 @@ pub struct ModelBanner {
     pub cpu_moe: bool,
     pub n_cpu_moe: u32,
     pub rs_seq: u32,
-    /// `--mtp`: drafts per step asked for (whether the model can is the
-    /// scheduler's to say).
+    /// `--mtp`: drafts per step asked for, 0 where the load does not draft
+    /// (more than one slot, or the sequential engine of a model with a
+    /// projector); whether the model can is the scheduler's to say.
     pub mtp: u32,
     /// `--mtp-p-min`: the head's confidence below which it stops drafting.
     pub mtp_p_min: f32,

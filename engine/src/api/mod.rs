@@ -446,19 +446,35 @@ impl AppState {
         // resort, and it is logged loudly because pairing a projector with
         // weights it was not trained on produces confident nonsense rather
         // than an error.
-        let mmproj_path = self
+        let found = self
             .store
             .mmproj_path(&normalized)
-            .or_else(|| crate::models::store::mmproj_beside(&gguf_path))
-            .or_else(|| {
-                self.fallback_mmproj.clone().inspect(|p| {
-                    tracing::warn!(
-                        "no projector of its own for {}; using --mmproj {}",
-                        crate::audit::sanitize_for_log(&normalized),
-                        p.display()
-                    );
-                })
-            });
+            .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
+        let named = found.is_none() && self.fallback_mmproj.is_some();
+        let mmproj_path = found.or_else(|| {
+            self.fallback_mmproj.clone().inspect(|p| {
+                tracing::warn!(
+                    "no projector of its own for {}; using --mmproj {}",
+                    crate::audit::sanitize_for_log(&normalized),
+                    p.display()
+                );
+            })
+        });
+        // `--mtp` drafts on the scheduler's one slot only, which a projector
+        // rules out: see `projector_with_mtp`.
+        let (mmproj_path, mtp_note) = crate::models::store::projector_with_mtp(
+            mmproj_path,
+            named,
+            self.mtp > 0 && override_batch_size.unwrap_or(self.batch_size) == 1,
+            &crate::audit::sanitize_for_log(&normalized),
+        );
+        if let Some(note) = mtp_note {
+            if mmproj_path.is_some() {
+                tracing::warn!("{note}");
+            } else {
+                tracing::info!("{note}");
+            }
+        }
         if let Some(ref p) = mmproj_path {
             tracing::info!("Multimodal model detected — mmproj: {}", p.display());
         }
@@ -920,7 +936,8 @@ impl AppState {
                 cpu_moe: self.cpu_moe,
                 n_cpu_moe: self.n_cpu_moe,
                 rs_seq: self.rs_seq,
-                mtp: self.mtp,
+                // Drafts on the scheduler's one slot only.
+                mtp: if batch_size == 1 { self.mtp } else { 0 },
                 mtp_p_min: self.mtp_p_min,
                 mtp_model: self.mtp_model.clone(),
                 moe_cache_bytes,
