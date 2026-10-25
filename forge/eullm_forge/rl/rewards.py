@@ -15,7 +15,9 @@ And three built on a false premise (`eullm_forge.datasets.premise_gen`):
 * ``premessa_termine``: the question states a wrong deadline; the answer
   must say the premise is wrong and state the right one.
 * ``premessa_inesistente``: the question takes for granted an article that
-  is not there, with no note saying so; checked as ``inesistente``.
+  is not there, with no note saying so; the answer must say it is not among
+  the texts and that it does not exist (`denies_existence`), not only that
+  it was not found.
 * ``premessa_abrogato``: the question treats a repealed article as in force;
   the answer must say it was repealed.
 * ``premessa_pena``: the question states a wrong maximum penalty; the answer
@@ -270,6 +272,24 @@ _DENIES = re.compile(r"\berrat[ao]\b|\binesatt[ao]\b"
                      r"|in realtà|^\W*no\b", re.IGNORECASE)
 
 
+# Saying the article itself does not exist, not only that the texts lack it.
+# Any abstention scored 1.0 on a nonexistent premise until 2026-10-25, and the
+# off-topic prompts of r2m taught one for everything ("non trovo la
+# disposizione ... riguardano altro"; "potrebbe non esistere, oppure il
+# riferimento potrebbe essere errato"): on the outside traps the 8B went from
+# 6 premises corrected to 3, each answer judged as accepting the premise.
+# "Potrebbe non esistere" only allows it, so it is not a denial.
+_NOT_EXISTING = re.compile(
+    r"(?<!potrebbe )(?<!potrebbero )\bnon (?:mi )?(?:risulta che )?esist|inesistent"
+    r"|\b(?:riferimento|premessa) (?:(?:è|e') )?errat",
+    re.IGNORECASE)
+
+
+def denies_existence(answer: str) -> bool:
+    """Whether the answer says the article it was asked about does not exist."""
+    return bool(_NOT_EXISTING.search(answer))
+
+
 def unverified_ruling(answer: str) -> bool:
     """Whether the answer says the ruling it was asked about cannot be checked."""
     return bool(_UNVERIFIED.search(answer.replace("’", "'")))
@@ -355,6 +375,9 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
         # A keyword that is not a deadline in this shape: fall back to the
         # coverage test rather than invent a number to check it against.
         return 1.0 if keyword_coverage(answer, keywords) == 1.0 else 0.0
+    if tipo == "premessa_inesistente":
+        return 1.0 if (abstains(answer) and denies_existence(answer)
+                       and not mentioned_deadlines(answer)) else 0.0
     if tipo in ABSTAIN_TYPES:
         return 1.0 if abstains(answer) and not mentioned_deadlines(answer) else 0.0
     raise ValueError(f"no verifiable reward for questions of type {tipo!r}")
