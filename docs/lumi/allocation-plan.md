@@ -11,6 +11,10 @@
 > 23.0%** (`lumi-allocations`, 21-10-2026) — `tools/lumi/status.sh` prints it
 > on every call, beside `campaign.py budget`'s recount from `sacct`. Spent by
 > need since 21-10-2026, not by the straight line: [Calendar](#calendar).
+> `tools/lumi/nodi.sh` (alias `nodi`) is the short form: node-hours of each
+> of the last 7 days, the average a day, what is left and what a day must
+> spend to use it by 09-03-2027, the plan's end, three days before the
+> allocation's.
 
 ## The number that governs everything
 

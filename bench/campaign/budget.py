@@ -105,6 +105,17 @@ def spent_between(jobs: list, since: dt.datetime, now: dt.datetime) -> float:
     return total
 
 
+def per_day(jobs: list, first: dt.date, now: dt.datetime) -> dict:
+    """GPU-hours billed on each day from `first` to today: each job's rate over
+    the part of its run that fell on that day, a running job's up to now."""
+    days, d = {}, first
+    while d <= now.date():
+        start = dt.datetime.combine(d, dt.time())
+        days[d] = spent_between(jobs, start, min(start + dt.timedelta(days=1), now))
+        d += dt.timedelta(days=1)
+    return days
+
+
 ALLOCATIONS_GPU = re.compile(r"([\d.]+)\s*/\s*([\d.]+)\s*\(\s*[\d.]+%\)\s*gpu/hours", re.I)
 ALLOCATIONS_UPDATED = re.compile(r"Data updated:\s*(\S.*?)\s*$", re.M)
 
