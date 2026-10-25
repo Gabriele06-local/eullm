@@ -188,7 +188,7 @@ def run_pipeline(config: PipelineConfig) -> Path:
         current_model_path = merge_identity_adapter(
             base_for_identity,
             adapter_path,
-            output_path=str(output_dir / "identity-merged"),
+            output_path=output_dir.as_posix() + "/identity-merged",
         )
         logger.info("  Merged identity model: %s", current_model_path)
     else:
@@ -210,7 +210,7 @@ def run_pipeline(config: PipelineConfig) -> Path:
     logger.info("[5/5] GGUF export...")
     final_name = f"eullm-{_slugify_model_name(config.identity.identity_name or 'model')}"
     config.export.model_path = current_model_path
-    config.export.output_path = str(output_dir / f"{final_name}.gguf")
+    config.export.output_path = output_dir.as_posix() + f"/{final_name}.gguf"
     gguf_path = export_gguf(config.export)
     logger.info("  GGUF model saved to: %s", gguf_path)
 
