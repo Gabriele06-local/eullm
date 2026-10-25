@@ -76,7 +76,7 @@ def load_profile(profile_name: str) -> PipelineConfig:
             f"Checked: {profile_path}"
         )
 
-    with open(profile_path) as f:
+    with open(profile_path, encoding="utf-8") as f:
         data: dict[str, Any] = yaml.safe_load(f)
 
     config = PipelineConfig(
