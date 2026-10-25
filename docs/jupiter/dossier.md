@@ -40,6 +40,16 @@ JUPITER, named by its Slurm job id.
 
 ## 3. Log
 
+**25-10-2026**
+* GRPO ported from Leonardo, to start from the distilled 9B with the
+  false premises (§5.11): `submit_grpo_round.sh` runs a smoke test, the
+  training links, the merge, five sets asked open book and their judge, in
+  one submission. The policy trains on three GPUs and the judge, EULLM
+  Engine serving Qwen3-30B-A3B-Instruct-2507, grades on the fourth; TRL
+  1.16.0 is kept out of the venv (`setup_grpo_libs.sh`). The prompts are
+  Leonardo's, without the articles of the tests drawn here
+  (`filter_grpo_prompts.py`).
+
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
   distillation checkpoints given as "base+adapter" as missing models, which
@@ -861,6 +871,30 @@ good part, of kinds the generated premises never ask (a principle
 attributed to a ruling, a question outside the corpus, an article that
 retrieval cannot find), as Leonardo found.
 
+**GRPO on JUPITER (prepared 25-10-2026).** On Leonardo the best 8B, r2l,
+came from the same false premises followed by GRPO on practical questions
+and on premises: 87 of 145 on the practical exam against 60 for the
+published model, and 14 LexIA traps. The same recipe is ported here for
+the distilled Qwen3.5-9B with the premises (`submit_grpo_round.sh`):
+
+* `grpo_train.py` unchanged; LoRA rank 32, eight answers a prompt, learning
+  rate 1e-5, as in Leonardo's rounds.
+* One node: the policy on GPUs 0-2, one process each. The judge is on
+  GPU 3. It grades the practical questions against their article with
+  rubric v3, and is Qwen3-30B-A3B-Instruct-2507 Q8_0 served by EULLM
+  Engine. Leonardo served the same judge with llama-server. The verifiable
+  rewards grade the premises.
+* The prompts are Leonardo's. They leave out Leonardo's exams but not the
+  trap test drawn here, so `filter_grpo_prompts.py` drops every prompt on
+  an article of that test, the private sets or the held-out exam, as
+  `make_trap_test.py` does.
+* Before the training, a smoke test of three steps on 48 prompts. The
+  training waits for it to succeed.
+* The round ends with five sets asked open book without the note: the
+  trap test, its rewrites, the LexIA traps, the practical exam and the
+  held-out exam. The model it starts from is asked the sets it has no
+  answers for, and the judge then grades both models.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
@@ -986,9 +1020,9 @@ low because JUPITER was down most of the day.
    for the larger students (Qwen3-8B +9 without the note, Qwen3.5-9B +7 and
    +8 halfway), hardly for the 4B ones (§5.8). The Qwen3.5 pair at the end
    of its epoch is queued behind the distillation.
-2. Reinforcement learning (GRPO) on the best of Leonardo's recipe,
-   Ministral-3-8B-Instruct and Qwen3.5-4B (0.887 and 0.880, §5.8;
-   deliverables 4, 6).
+2. Reinforcement learning (GRPO), Leonardo's r2l recipe, on the distilled
+   Qwen3.5-9B with the false premises (§5.11; deliverables 4, 6): ported on
+   25-10, to run once Leonardo's prompts are copied here.
 3. One complete vertical unattended, timed: the best Qwen3.5-4B, merged, to
    GGUF Q4_K_M, served by EULLM Engine on GH200 and examined through it
    (deliverables 1, 8).
