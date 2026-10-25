@@ -269,6 +269,45 @@ pub fn mmproj_beside(gguf: &Path) -> Option<PathBuf> {
     None
 }
 
+/// What `--mtp` makes of a model's projector, and the line that says so.
+///
+/// Only the scheduler's single slot drafts, and a model with a projector is
+/// loaded on the sequential engine, since the scheduler does not route
+/// images. So `--mtp` on such a model did nothing and said nothing, the
+/// banner reading "MTP drafts" all the same: unsloth's Qwen3.5 and Qwen3.6
+/// MTP repositories ship `mmproj-*.gguf`, a pull fetches it with the
+/// weights, and LUMI-G measured no draft on them in any round (24-10-2026).
+///
+/// `drafts` is whether this load would draft without the projector (`--mtp`
+/// on one slot). A projector found for the model, in the store or beside its
+/// weights, then gives way to the drafts asked for; one `named` with
+/// `--mmproj` stays, and the line says `--mtp` drafts nothing for the model.
+pub fn projector_with_mtp(
+    projector: Option<PathBuf>,
+    named: bool,
+    drafts: bool,
+    model: &str,
+) -> (Option<PathBuf>, Option<String>) {
+    match projector {
+        Some(p) if drafts && !named => {
+            let line = format!(
+                "--mtp: {model} loads without its projector ({}) so that the MTP head can draft; \
+                 it takes no images this way (without --mtp it loads with them)",
+                p.display()
+            );
+            (None, Some(line))
+        }
+        Some(p) if drafts => (
+            Some(p),
+            Some(format!(
+                "--mtp: {model} loads with --mmproj on the sequential engine, which does not \
+                 draft: --mtp does nothing for it"
+            )),
+        ),
+        other => (other, None),
+    }
+}
+
 /// Write a file so a reader never sees it half-written.
 ///
 /// `fs::write` truncates first and writes after, so a process that dies in
@@ -916,6 +955,36 @@ mod addressable_id_tests {
             assert!(store.is_present(id), "{id} is listed but cannot be run");
         }
         let _ = fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod projector_with_mtp_tests {
+    use super::*;
+
+    #[test]
+    fn a_found_projector_gives_way_to_the_drafts_asked_for() {
+        let p = PathBuf::from("/m/qwen3.5-9b/mmproj-F16.gguf");
+        let (kept, line) = projector_with_mtp(Some(p.clone()), false, true, "qwen3.5-9b");
+        assert_eq!(kept, None);
+        let line = line.expect("said");
+        assert!(
+            line.contains("qwen3.5-9b loads without its projector"),
+            "{line}"
+        );
+        assert!(line.contains("mmproj-F16.gguf"), "{line}");
+
+        // Named with --mmproj, it stays, and the line says --mtp is idle.
+        let (kept, line) = projector_with_mtp(Some(p.clone()), true, true, "qwen3.5-9b");
+        assert_eq!(kept, Some(p.clone()));
+        assert!(line.expect("said").contains("--mtp does nothing for it"));
+
+        // Without drafts to make room for, nothing changes and nothing is said.
+        assert_eq!(
+            projector_with_mtp(Some(p.clone()), false, false, "m"),
+            (Some(p), None)
+        );
+        assert_eq!(projector_with_mtp(None, false, true, "m"), (None, None));
     }
 }
 

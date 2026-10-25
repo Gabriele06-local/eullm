@@ -799,6 +799,14 @@ What it needs:
   is off.
 - **One request at a time**, `--batch-size 1`, the default. With more slots
   `--mtp` is off, and the log says so.
+- **No projector.** A model with one (a vision repo's `mmproj-*.gguf`) is
+  served by the sequential engine, which does not draft. unsloth's MTP
+  repositories ship one and a pull fetches it, so with `--mtp` a projector
+  found for the model gives way: it loads text only, and one log line says
+  so. Without `--mtp` it loads with its projector and reads images. A
+  projector passed with `--mmproj` stays, and the line says `--mtp` does
+  nothing for that model. Until this was fixed `--mtp` did nothing on these
+  models without saying so: on LUMI-G they wrote no draft at all.
 - An architecture llama.cpp drafts for: Qwen3.5/3.6 (`qwen35`, `qwen35moe`)
   and the others its MTP drafter supports. Qwen3.8-Flash-Next (`qwen4exp`)
   has its head in a file of its own: see `--mtp-model` below.

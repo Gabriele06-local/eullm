@@ -3049,6 +3049,17 @@ async fn cmd_run(
             .or_else(|| store.mmproj_path(&model_name))
             .or_else(|| store.mmproj_path(model))
             .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
+        // `--mtp` drafts on the scheduler's one slot only, which a projector
+        // rules out: see `projector_with_mtp`.
+        let (mmproj_for_config, mtp_note) = crate::models::store::projector_with_mtp(
+            mmproj_for_config,
+            mmproj.is_some(),
+            mtp > 0 && batch_size == 1,
+            &model_name,
+        );
+        if let Some(note) = mtp_note {
+            println!("{note}");
+        }
         let mmproj_bytes = fit::mmproj_footprint_bytes(mmproj_for_config.as_deref());
         let mut mmproj_placement = fit::MmprojPlacement::from_flag(mmproj_offload);
 
@@ -3517,7 +3528,8 @@ async fn cmd_run(
             cpu_moe,
             n_cpu_moe,
             rs_seq,
-            mtp,
+            // Drafts on the scheduler's one slot only.
+            mtp: if batch_size == 1 { mtp } else { 0 },
             mtp_p_min,
             mtp_model: mtp_model.clone(),
             moe_cache_bytes,

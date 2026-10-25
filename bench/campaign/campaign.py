@@ -12,7 +12,7 @@
     campaign.py collect  --queue DIR [--out FILE.csv]  one row per measured point
     campaign.py compare  --queue DIR --round R | --job J   each configuration against
                                                        its last earlier measurement
-    campaign.py walltime --queue DIR [--engine-label L] [--nodes N]   the --time
+    campaign.py walltime --queue DIR [--engine-label L] [--nodes N] [--gcds G]   the --time
                                                        for jobs of that label
     campaign.py budget   [--start --end --budget-node-hours]   spend against the calendar
 
@@ -1109,7 +1109,7 @@ def cmd_walltime(args):
     and status 1 when there are none."""
     label = args.engine_label or ""
     points = [p for p in Queue(args.queue).todo() if point.can_run(p, label)]
-    seconds = walltime_s(points, args.nodes)
+    seconds = walltime_s(points, args.nodes, args.gcds)
     if not seconds:
         print(f"no points waiting for label {label or '(none)'}", file=sys.stderr)
         return 1
@@ -1348,6 +1348,8 @@ def main(argv=None):
     p.add_argument("--engine-label", default=os.environ.get("EULLM_ENGINE_LABEL", ""),
                    help="the jobs' label (default: EULLM_ENGINE_LABEL)")
     p.add_argument("--nodes", type=int, default=1, help="how many jobs share the points")
+    p.add_argument("--gcds", type=int, default=8,
+                   help="devices a job has: 8 for a standard-g node, fewer on small-g")
     p = with_queue(sub.add_parser("compare"))
     p.add_argument("--results")
     p.add_argument("--round", action="append",

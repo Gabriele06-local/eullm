@@ -50,11 +50,20 @@ $CAMPAIGN status --queue "$CAMPAIGN_DIR" 2>/dev/null | head -3 || true
 # or only the unlabelled ones without one.
 echo "engine $EULLM_BIN, label ${EULLM_ENGINE_LABEL:-(none: unlabelled points only)}"
 
+# The devices each job asks for: a whole node's 8 unless --gpus-per-node says
+# fewer (small-g, for points of one GCD).
+GCDS=8
+PREV=""
+for a in "$@"; do
+    case "$a" in --gpus-per-node=*) GCDS="${a#*=}" ;; esac
+    [ "$PREV" = "--gpus-per-node" ] && GCDS="$a"
+    PREV="$a"
+done
 TIME=()
 case " $* " in
     *" --time"* | *" -t "*) ;;
     *)
-        WALL=$($CAMPAIGN walltime --queue "$CAMPAIGN_DIR" --nodes "$NODES" \
+        WALL=$($CAMPAIGN walltime --queue "$CAMPAIGN_DIR" --nodes "$NODES" --gcds "$GCDS" \
             --engine-label "${EULLM_ENGINE_LABEL:-}") || { echo "nothing submitted"; exit 0; }
         echo "time per job: $WALL (campaign.py walltime; --time overrides)"
         TIME=(--time="$WALL")
