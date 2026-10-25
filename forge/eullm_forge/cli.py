@@ -169,7 +169,7 @@ def profiles() -> None:
     table.add_column("Target VRAM", justify="right")
 
     for yaml_file in sorted(profiles_dir.glob("*.yaml")):
-        with open(yaml_file) as f:
+        with open(yaml_file, encoding="utf-8") as f:
             data = yaml.safe_load(f)
         table.add_row(
             data.get("name", yaml_file.stem),
