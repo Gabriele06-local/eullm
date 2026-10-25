@@ -810,6 +810,11 @@ llama-server; the 4B 183 and 179, and 183 and 178. Quantization costs the
 9B 3 questions, within what the judge alone moves; the 4B up to 6, more
 than the Qwen3.5-4B before distillation lost (none).
 
+The candidate, the distilled 9B with the premises, through the same vertical
+(job 2496202, graded by 2496203): 191 and 187 of 217 through EULLM Engine,
+186 and 187 through llama-server, against 188 and 188 in bf16. As it would
+ship, Q4_K_M served by EULLM Engine, it keeps its score.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
