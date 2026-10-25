@@ -573,7 +573,7 @@ def fine_tune_identity(config: IdentityConfig) -> str:
 
     # Generate or load training data
     if config.dataset_path and Path(config.dataset_path).exists():
-        with open(config.dataset_path) as f:
+        with open(config.dataset_path, encoding="utf-8") as f:
             examples = json.load(f)
         logger.info("Loaded %d identity examples from %s", len(examples), config.dataset_path)
     else:
