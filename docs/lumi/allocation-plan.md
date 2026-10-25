@@ -311,7 +311,8 @@ llama-server and Ollama, Qwen3-8B 543, 486 and 170; Qwen3-14B 358, 315 and
 6-25% ahead of llama-server (the MoE most) and 1.8 to 8 times Ollama, as on
 `next6` (533, 349, 191, 221). `--kv-unified` 0-5% either way.
 
-`c06`, one request at a time over 300 gsm8k questions: Qwen3.5-9B Q4_K_M
+`c06` (see 25-10-2026 below for MTP measured with drafts), one request at a
+time over 300 gsm8k questions: Qwen3.5-9B Q4_K_M
 98.4 tokens/s without `--mtp`, 97.9-99.4 with `--mtp 1-3`; its Q8_0 80.9 and
 79.9-80.5; Qwen3.6-27B Q4_K_M 37.8 and 37.4-38, Q8_0 28.7 and 29; accuracy
 within one or two questions of 300. Read at first as MTP buying nothing on a
@@ -457,6 +458,31 @@ A week at four times the allocation's own rate (88 node-hours a day against
 would let us reach. What keeps the queue moving is a steady one to two
 nodes, the work spread over the weeks rather than in bursts of four nodes;
 the requests for more hours still go in when the forecast says so.
+
+25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
+the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
+`standard-g`, about ten minutes each; the two `small-g` copies were
+cancelled). 100 gsm8k questions one at a time, temperature 0, tokens/s
+`next25` / `next26`, drafts kept:
+
+| setting | Qwen3.5-9B Q4_K_M | kept | Qwen3.6-27B Q4_K_M | kept |
+|---|---|---|---|---|
+| no `--mtp` | 98.9 / 97.7 | | 38.3 / 38.1 | |
+| `--mtp 1` | 136 / 133 | 92.7% / 92.7% | 55.8 / 56.2 | 94.3% / 94.3% |
+| `--mtp 2` | 150 / 147 | 87.9% / 87.9% | 63.1 / 63.4 | 89.4% / 89.4% |
+| `--mtp 3` | 125 / 124 | 81.0% / 80.7% | 55.5 / 55.4 | 84.8% / 84.8% |
+
+3d1c7a0, the head started after the prompt instead of before it, changes
+nothing measurable: the share kept is the same to 0.3 points at all six
+settings, tokens/s within 2% (the advice from the Leonardo chat answered:
+acceptance 81-94% before and after, the same). And MTP pays on the MI250X:
+`--mtp 2` is the best on both, +52% on the 9B and +65% on the 27B, as on the
+RTX 5070 Ti; `--mtp 3` drafts more than the model keeps. Accuracy moved by
+one or two questions of the hundred either way (9B 0.98 without, 0.96-0.99
+with; 27B 0.94-0.95), the numeric spread of a token checked among several.
+The draft context costs 0.7-0.8 GB on the 9B and 1.0-1.3 GB on the 27B.
+`c06` on `next27` measures the six models as pulled, which now draft, and
+at the default sampling temperature.
 
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
