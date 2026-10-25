@@ -85,7 +85,7 @@ def main() -> int:
     if args.csv:
         path = Path(args.csv)
         new_file = not path.exists()
-        with path.open("a", newline="") as f:
+        with path.open("a", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             if new_file:
                 w.writerow(["timestamp", "label", "model", "ended", "asked", "tokens"])
