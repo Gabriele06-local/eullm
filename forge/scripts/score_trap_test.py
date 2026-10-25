@@ -12,6 +12,11 @@ in all, the false premises and their true twins apart (a model that refuses
 everything passes the first and fails the second). The judge grades the same
 answers (sbatch_judge.slurm); where the two disagree, the answers are read
 before either decides. Counts only.
+
+The check knows the phrasings of the three checked steps the premise pairs
+teach: on 24-10-2026 it gave 27-30% to models not trained on them where the
+judge gave 53-73%, and 99.5% where the judge gave 98% to models trained on
+them. Between models that answer in different formats, the judge decides.
 """
 
 from __future__ import annotations

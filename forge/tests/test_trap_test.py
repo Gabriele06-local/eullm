@@ -85,3 +85,51 @@ def test_answers_are_graded_by_kind_and_a_model_that_refuses_everything_fails_th
             if ln.startswith("trap-test-")}
     assert rows["trap-test-right"][1] == "100.0%"
     assert rows["trap-test-doubt"][3] == "0.0%"     # every true premise refused
+
+
+def test_rewrites_keep_every_number_and_correct_nothing():
+    mod = _load("paraphrase_trap_test")
+    q = "Mi confermi che l'art. 640 c.p. punisce il fatto con la reclusione da 2 a 8 anni?"
+    assert mod.faithful(q, "Un mio cliente rischia per l'art. 640 c.p. da 2 a 8 anni: è così?")
+    assert not mod.faithful(q, "L'art. 640 c.p. prevede da due a otto anni?")      # a number lost
+    assert not mod.faithful(q, "L'art. 640 c.p. da 2 a 8 anni? In realtà sono meno.")  # answered
+    assert mod.clean("«Domanda riscritta: L'art. 2 è così?»") == "L'art. 2 è così?"
+
+
+def test_the_rewritten_test_is_graded_as_the_original(tmp_path, monkeypatch, capsys):
+    norms = _norms(tmp_path)
+    items = tmp_path / "trap-test.jsonl"
+    assert _load("make_trap_test").main(["--norms", str(norms), "--per-code", "10",
+                                         "--out", str(items)]) == 0
+    para_mod = _load("paraphrase_trap_test")          # puts forge/scripts on the path
+    import generate_instructions
+
+    class Teacher:                     # rewrites in the teacher's way: the question, reworded
+        def __init__(self, *a, **k):
+            pass
+
+        def generate(self, convs):
+            out = []
+            for c in convs:
+                q = c[0]["content"].rsplit("Domanda: ", 1)[1]
+                out.append("Domanda riscritta: Scusi, una cosa: " + q[0].lower() + q[1:])
+            return out, 7 * len(convs)
+
+    monkeypatch.setattr(generate_instructions, "EullmGenerator", Teacher)
+    para = tmp_path / "trap-test-para.jsonl"
+    assert para_mod.main([str(items), "--servers", "http://x",
+                                               "--out", str(para)]) == 0
+    rewritten = load_eval_set(para)
+    originals = {json.loads(ln)["id"]: json.loads(ln) for ln in items.read_text().splitlines()}
+    assert len(rewritten) == 3 * len(originals)
+    for it in rewritten:
+        src = originals[it.metadata["paraphrase_of"]]
+        assert it.question.startswith("Scusi") and it.reference == src["reference"]
+        assert it.metadata["tipo"] == src["metadata"]["tipo"]
+    assert "Scusi" not in capsys.readouterr().out
+    # The same answers grade the same on the rewritten test.
+    right = tmp_path / "answers-trap-test-para-right.jsonl"
+    right.write_text("".join(json.dumps({"id": it.id, "answer": it.reference}) + "\n"
+                             for it in rewritten))
+    assert _load("score_trap_test").main([str(para), str(right)]) == 0
+    assert "100.0%" in capsys.readouterr().out
