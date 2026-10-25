@@ -484,6 +484,26 @@ The draft context costs 0.7-0.8 GB on the 9B and 1.0-1.3 GB on the 27B.
 `c06` on `next27` measures the six models as pulled, which now draft, and
 at the default sampling temperature.
 
+`c11`'s `load-*` on `next25` (job 23137402, one cold load a point, all eight
+GCDs, layer split in the same job): seconds to load with 16 threads reading
+each weight (the default since `next25`), 32 and 64, and by layer; reading
+in brackets.
+
+| model | 16 | 32 | 64 | layer |
+|---|---|---|---|---|
+| gpt-oss-120b MXFP4 (58 GiB) | 38.6 (32.5) | 43.4 (37.1) | 41.5 (35.0) | 48.6 |
+| Qwen3-235B Q4_K_M (132 GiB) | 92.7 (79.0) | 103 (88.7) | 102 (88.2) | 120 |
+| Qwen3-Coder-480B Q4_K_M (270 GiB) | 131 (104.5) | 115 (89.6) | 113 (87.5) | 163 |
+
+16 threads stay the default: more are 7-12% slower on the two smaller
+models and 12-14% faster only on the 480B, one load each. A tensor load is
+now faster than one by layer for all three, by a fifth (20-23% with 16
+threads), where `next21` took 3 to 5 times as long; copying stays 8-27 s.
+Split as tensor, the same servers also wrote more than by layer:
+gpt-oss-120b 1,570 tokens/s against 1,312, the 235B 390 against 222, the
+480B 270 against 101 (decode 14.1 against 10.8, 6.5 against 3.6, 4.4
+against 1.6), one measurement each.
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
