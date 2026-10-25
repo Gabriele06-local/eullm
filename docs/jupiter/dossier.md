@@ -49,6 +49,18 @@ JUPITER, named by its Slurm job id.
   1.16.0 is kept out of the venv (`setup_grpo_libs.sh`). The prompts are
   Leonardo's, without the articles of the tests drawn here
   (`filter_grpo_prompts.py`).
+* Round g9-r1 queued from the distilled 9B with the premises: of the
+  2,816 prompts of Leonardo's r2o, 2,184 kept (1,659 graded by the judge:
+  1,144 on what an article provides, 515 practical; 525 by the verifiable
+  rewards, 175 of them false premises); 228 dropped as on an article of
+  our tests, 404 as repeated. Smoke test 2515386, links 2515387-2515388,
+  the five sets 2515389, the start model on the held-out exam 2515390,
+  judge 2515391.
+* The false-premise round on the students continued on the rest of
+  norms-v2 (q35r), the same 1,606 premise pairs and 14,209 open-book pairs
+  as dqp, so only the distillation differs: tuning 2515537 (the held-out
+  exam judged by 2515538), the LexIA traps and the practical exam
+  2515539-2515542, their judge 2515543.
 
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
