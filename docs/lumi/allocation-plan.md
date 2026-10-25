@@ -7,8 +7,8 @@
 > Leonardo AI-Factory allocation, whose arithmetic this one repeats:
 > [`../leonardo-allocation-plan.md`](../leonardo-allocation-plan.md).
 >
-> Updated 21-10-2026. Billed: **4,135 of 18,000 GPU-hours, 1,034 node-h,
-> 23.0%** (`lumi-allocations`, 21-10-2026) — `tools/lumi/status.sh` prints it
+> Updated 25-10-2026. Billed: **5,704 of 18,000 GPU-hours, 1,426 node-h,
+> 31.7%** (`lumi-allocations`, 25-10-2026, the same as `sacct`'s recount) — `tools/lumi/status.sh` prints it
 > on every call, beside `campaign.py budget`'s recount from `sacct`. Spent by
 > need since 21-10-2026, not by the straight line: [Calendar](#calendar).
 > `tools/lumi/nodi.sh` (alias `nodi`) is the short form: node-hours of each
@@ -726,6 +726,16 @@ the spend stands and on which day it runs out at the last 24 hours' rate
 | Jan | 31 | ~800 | ~3,200 | load path | a round; `c04` multi-node |
 | Feb | ~15 | ~516 | ~2,064 | release candidate | what is left: about mid-February at this pace |
 | **total** | | 3,466 | 13,865 | | |
+
+25-10-2026 (`nodi.sh`): 619.5 node-hours in the last 7 days, 88.5 a day,
+the week of the whole `r-next21` round on four nodes and the two-day soaks;
+392 of them since 21-10, most of the ~450 forecast for 21-31 October. 32.7 a
+day since 12-09. Left 3,074 node-hours: 22.7 a day to 09-03-2027 (the plan's
+end), about one node around the clock. At last week's rate they run out on
+29-11-2026; at the forecast's 27-29 a day for November to January, about
+mid-February. Today nothing ran: the `standard-g` queue held 362 jobs of
+higher priority than ours, so for now the queue, not the budget, sets the
+spend.
 
 At that pace the allocation ends around mid-February, a month early, and
 the final round, the data for Zenodo and the Final Report's measurements
