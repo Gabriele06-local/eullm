@@ -829,7 +829,7 @@ def merge_identity_adapter(
     from peft import PeftModel
     from transformers import AutoTokenizer
 
-    parent = os.path.dirname(adapter_path.rstrip("/\\"))
+    parent = os.path.dirname(os.fspath(adapter_path).rstrip("/\\"))
     out = output_path or posixpath.join(parent, "identity-merged")
 
     logger.info("Merging LoRA adapter into base weights")
