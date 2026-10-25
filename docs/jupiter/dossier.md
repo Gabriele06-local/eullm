@@ -56,6 +56,11 @@ JUPITER, named by its Slurm job id.
   our tests, 404 as repeated. Smoke test 2515386, links 2515387-2515388,
   the five sets 2515389, the start model on the held-out exam 2515390,
   judge 2515391.
+* The false-premise round on the students continued on the rest of
+  norms-v2 (q35r), the same 1,606 premise pairs and 14,209 open-book pairs
+  as dqp, so only the distillation differs: tuning 2515537 (the held-out
+  exam judged by 2515538), the LexIA traps and the practical exam
+  2515539-2515542, their judge 2515543.
 
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
