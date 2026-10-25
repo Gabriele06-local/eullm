@@ -23,7 +23,7 @@ def energy(path: Path, interval: float) -> tuple[dict, float, int]:
     """(Wh per GPU, mean utilisation %, seconds covered) of one CSV."""
     wh = defaultdict(float)
     util, n, per_gpu = 0.0, 0, defaultdict(int)
-    with open(path, newline="") as f:
+    with open(path, newline="", encoding="utf-8") as f:
         for row in csv.reader(f):
             try:
                 gpu, watts, use = row[1].strip(), float(row[2]), float(row[3])
