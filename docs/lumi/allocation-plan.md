@@ -408,6 +408,19 @@ DeepSeek-V3.1 3.4 each way at one. A share on the wrong side of 85% by a
 point or two costs almost nothing; past it the cache loses (DeepSeek-V3.1
 3.7 against 5.3 at 16). `MOE_CACHE_DEFAULT_OUT` stays (0.25, 0.85).
 
+25-10-2026, morning: the two 2-hour `mtp-ab` jobs on the text-only twins
+(23140145 for `next25`, 23140146 for `next26`) waited the whole night on
+priority, with no start time estimated and 362 jobs of higher priority
+ahead on `standard-g` (ours 453: 201 of fair share, 52 of age). Points of one
+GCD do not need a whole node: the same two jobs went to `small-g` too, four
+GCDs each (`submit_campaign.sh 1 1 --partition=small-g --gpus-per-node=4
+--cpus-per-task=28 --mem=200G`, which bills 2 GPU-hours an hour against a
+node's 4), and whichever starts first measures the points while the other
+finds nothing and ends. On a shared node the runner binds no cores where
+those of a GCD are not all the job's, and records what shared it; the share
+of drafts kept at temperature 0 does not depend on it, and tokens/s are read
+against the point without `--mtp` of the same job.
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
