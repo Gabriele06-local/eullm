@@ -842,6 +842,25 @@ told by a client, a short colloquial question, a professional taking the
 fact for granted; `paraphrase_trap_test.py`), every number of the question
 kept, is the next measure.
 
+Rewritten (job 2512957, 1,050 of 1,170 rewrites kept, every number of the
+question in place) and asked of the same five models (2512959-2512964,
+judge 2512966):
+
+| model | templated (of 390) | rewritten (of 1,050) |
+|---|---:|---:|
+| Qwen3.5-9B distilled, + premises | 97.7% | **91.9%** |
+| Qwen3.5-4B distilled, + premises | 98.2% | 91.0% |
+| Ministral-3-8B-Instruct | 72.8% | 62.5% |
+| Qwen3.5-9B distilled | 61.8% | 52.2% |
+| Qwen3.5-9B Base | 52.8% | 45.9% |
+
+Other words cost every model 6 to 10 points, and the models trained on the
+premises keep their lead of about 40 over the same model without them. So
+the phrasing does not explain the 11 of 36 on LexIA: its traps are, in
+good part, of kinds the generated premises never ask (a principle
+attributed to a ruling, a question outside the corpus, an article that
+retrieval cannot find), as Leonardo found.
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so
