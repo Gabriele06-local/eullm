@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import posixpath
 import re
 import struct
 from dataclasses import dataclass, field
@@ -828,7 +829,8 @@ def merge_identity_adapter(
     from peft import PeftModel
     from transformers import AutoTokenizer
 
-    out = output_path or str(Path(adapter_path).parent / "identity-merged")
+    parent = os.path.dirname(os.fspath(adapter_path).rstrip("/\\"))
+    out = output_path or posixpath.join(parent, "identity-merged")
 
     logger.info("Merging LoRA adapter into base weights")
     logger.info("  Base:    %s", base_model_path)
