@@ -15,6 +15,11 @@ Written on 2026-10-25, when the scratch cleanup of submit_grpo_round.sh
 removed the merged weights of r2l, the best 8B, whose ancestors had been
 removed the day before: eleven rounds to merge again, nothing lost but time.
 ``--dry-run`` prints the chain without merging.
+
+A round that is not GRPO's, such as the short SFT at the root of the r2 line
+(r2b-steps-8b), may keep its adapter elsewhere: in its directory under
+another name it is found (the one adapter_config.json outside checkpoints),
+otherwise it is given with ``--adapter NAME=PATH``.
 """
 
 from __future__ import annotations
@@ -34,22 +39,38 @@ def _present(model: Path) -> bool:
     return (model / "config.json").is_file()
 
 
-def chain_of(round_dir: Path, max_depth: int = 50) -> tuple[Path, list[Path]]:
-    """The first start still on disk, and the rounds to merge from it, oldest first."""
-    rounds: list[Path] = []
+def adapter_of(round_dir: Path, given: dict[str, Path]) -> Path:
+    """The adapter a round was trained into: given, NAME/adapter, or the one in its directory."""
+    if round_dir.name in given:
+        return given[round_dir.name]
+    if (round_dir / "adapter" / "adapter_config.json").is_file():
+        return round_dir / "adapter"
+    found = sorted(p.parent for p in round_dir.glob("**/adapter_config.json")
+                   if not any(part.startswith("checkpoint-") for part in p.parts))
+    if len(found) == 1:
+        return found[0]
+    raise SystemExit(f"[remerge] {round_dir.name}: " + (
+        f"{len(found)} adapters ({', '.join(map(str, found))})" if found else "no adapter")
+        + f"; give it with --adapter {round_dir.name}=PATH")
+
+
+def chain_of(round_dir: Path, given: dict[str, Path] | None = None,
+             max_depth: int = 50) -> tuple[Path, list[tuple[str, Path]]]:
+    """The first start still on disk, and (round, adapter) to merge from it, oldest first."""
+    given = given or {}
+    rounds: list[tuple[str, Path]] = []
     cur = round_dir
     for _ in range(max_depth):
-        cfg = cur / "adapter" / "adapter_config.json"
-        if not cfg.is_file():
-            raise SystemExit(f"[remerge] no adapter at {cfg.parent}: the chain cannot go on")
-        rounds.append(cur)
-        base = Path(json.loads(cfg.read_text(encoding="utf-8"))["base_model_name_or_path"])
+        adapter = adapter_of(cur, given)
+        rounds.append((cur.name, adapter))
+        cfg = json.loads((adapter / "adapter_config.json").read_text(encoding="utf-8"))
+        base = Path(cfg["base_model_name_or_path"])
         if _present(base):
             return base, rounds[::-1]
         # NAME/merged, or the scratch directory it pointed to (.../grpo-merged/NAME)
         if base.name == "merged":
             cur = base.parent
-        elif (round_dir.parent / base.name / "adapter").is_dir():
+        elif (round_dir.parent / base.name).is_dir():
             cur = round_dir.parent / base.name
         else:
             raise SystemExit(f"[remerge] {cur.name} started from {base}, which is gone and is "
@@ -67,26 +88,31 @@ def main(argv: list[str] | None = None,
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("round", type=Path, help="the round's directory ($WORK/eullm_runs/grpo/NAME)")
+    ap.add_argument("--adapter", action="append", default=[], metavar="NAME=PATH",
+                    help="the adapter of a round that keeps it outside NAME/adapter")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args(argv)
+    given = {k: Path(v) for k, _, v in (a.partition("=") for a in args.adapter)}
 
     target = args.round / "merged"
     if _present(target):
         print(f"[remerge] {target} is there: nothing to do")
         return 0
-    start, rounds = chain_of(args.round)
-    print(f"[remerge] from {start}: " + " -> ".join(r.name for r in rounds), flush=True)
+    start, rounds = chain_of(args.round, given)
+    print(f"[remerge] from {start}:", flush=True)
+    for name, adapter in rounds:
+        print(f"[remerge]   {name}  ({adapter})", flush=True)
     if args.dry_run:
         return 0
     # Through the symlink: the weights go back where they were (the scratch).
     final = Path(os.readlink(target)) if target.is_symlink() else target
     final.mkdir(parents=True, exist_ok=True)
     previous = None
-    for i, rnd in enumerate(rounds):
+    for i, (name, adapter) in enumerate(rounds):
         last = i == len(rounds) - 1
-        out = final if last else final.parent / f".remerge-{rnd.name}"
-        print(f"[remerge] {i + 1}/{len(rounds)} {rnd.name}", flush=True)
-        merge(str(start), str(rnd / "adapter"), str(out))
+        out = final if last else final.parent / f".remerge-{name}"
+        print(f"[remerge] {i + 1}/{len(rounds)} {name}", flush=True)
+        merge(str(start), str(adapter), str(out))
         if previous is not None:
             shutil.rmtree(previous, ignore_errors=True)
         previous, start = (None if last else out), out
