@@ -69,9 +69,14 @@
 # 33 rounds' merged weights: so each new round removes those of the rounds
 # already packaged, except the newest GRPO_KEEP_MERGED (default 6: with an
 # 8B and a 4B lane, the two new rounds, their starts and the two before, the
-# fallback if a new round turns out worse), the round's START and any round
-# with a job still queued. A removed round is
-# merged again from its adapter and its own start, if ever needed.
+# fallback if a new round turns out worse), the START of this round and of
+# every round not packaged yet (each round writes its START to NAME/start),
+# and any round with a job still queued. Only this round's START was kept at
+# first, and on 2026-10-25 the 4B round submitted second removed the merged
+# weights of r2l, the START of the 8B round submitted a minute before. The
+# symlink NAME/merged stays, pointing where the weights were: a round removed
+# is merged again there, with its ancestors if they are gone too, by
+# forge/scripts/remerge_round.py.
 
 set -uo pipefail
 
@@ -126,20 +131,28 @@ ENVSH="source $REPO/forge/scripts/leonardo/env.sh"
 
 MERGED_ROOT="${GRPO_MERGED_ROOT:-/leonardo_scratch/fast/$(basename "$WORK")/grpo-merged}"
 prune_merged() {  # the merged weights of packaged rounds nothing needs any more
-    local keep="${GRPO_KEEP_MERGED:-6}" start queued d r n=0
-    start="$(readlink -f "$START" 2>/dev/null)"
+    local keep="${GRPO_KEEP_MERGED:-6}" starts queued d r f n=0
+    # the START of this round and of every round still on its way to a GGUF
+    starts="$(readlink -f "$START" 2>/dev/null)"
+    for f in "$G"/*/start; do
+        [ -f "$f" ] || continue
+        r="$(basename "$(dirname "$f")")"
+        [ -s "$G/$r/gguf/$r-q4_k_m.gguf" ] && continue
+        starts="$starts"$'\n'"$(readlink -f "$(cat "$f")" 2>/dev/null)"
+    done
     queued="$(squeue --me -h -o %j 2>/dev/null)"
     for d in $(ls -td "$MERGED_ROOT"/*/ 2>/dev/null); do
         d="$(readlink -f "$d")" r="$(basename "$d")" n=$((n + 1))
-        [ "$n" -gt "$keep" ] && [ "$d" != "$start" ] && [ "$r" != "$NAME" ] || continue
+        [ "$n" -gt "$keep" ] && [ "$r" != "$NAME" ] || continue
+        printf '%s\n' "$starts" | grep -qxF -- "$d" && continue
         [ -s "$G/$r/gguf/$r-q4_k_m.gguf" ] || continue
         printf '%s\n' "$queued" | grep -q -- "-$r\$" && continue
         rm -rf "$d"
-        [ -L "$G/$r/merged" ] && rm -f "$G/$r/merged"
         echo "[round] merged weights of $r removed from the scratch (adapter and GGUF kept)"
     done
 }
 [ -z "${PACKAGED:-}" ] && [ -d "$MERGED_ROOT" ] && prune_merged
+[ -z "${PACKAGED:-}" ] && mkdir -p "$OUT" && printf '%s\n' "$START" > "$OUT/start"
 if [ -z "${PACKAGED:-}" ] && [ ! -e "$OUT/merged" ] && [ -d "$(dirname "$MERGED_ROOT")" ] &&
    mkdir -p "$MERGED_ROOT/$NAME" "$OUT"; then
     ln -s "$MERGED_ROOT/$NAME" "$OUT/merged" &&
