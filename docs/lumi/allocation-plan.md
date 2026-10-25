@@ -504,6 +504,28 @@ gpt-oss-120b 1,570 tokens/s against 1,312, the 235B 390 against 222, the
 480B 270 against 101 (decode 14.1 against 10.8, 6.5 against 3.6, 4.4
 against 1.6), one measurement each.
 
+`c12`'s `days-*` and `fill-models` on `next25` (jobs 23088874 and
+23088875), 32 requests on one GCD each: **no server died in any of the
+sixteen points, and the VRAM stayed flat in all of them (0.00 GiB an
+hour).** Eight soaks of 45.9 hours, the configurations that died within
+hours with HIP graphs: Qwen3-32B Q4_K_M four times (158-173 tokens/s,
+427,000-468,000 requests each), its Q8_0 (138, 371,138), Qwen3-30B-A3B Q8_0
+(229, 697,103), Qwen3.6-35B-A3B (313, 191,679), Qwen3-14B Q8_0 as control
+(268, 816,795). Eight more of 35 hours on the GCDs they left free:
+Qwen3-4B, 8B and its Q8_0, 14B, Qwen3-30B-A3B Q4_K_M, Qwen3.6-27B, Mistral
+Small 24B, gpt-oss-20b (146-711 tokens/s). About nine million requests in
+all, accuracy as on short points (gsm8k 0.91-0.96). ROCm without HIP graphs
+is settled.
+
+The share of answers written word for word the same when a question comes
+back in a later pass is 0.75-0.89 for Qwen3 and Mistral and far lower for
+Qwen3.6-35B-A3B (0.23), gpt-oss-20b (0.35) and Qwen3.6-27B (0.49). It
+follows the length of the answers (tokens/s times hours over requests):
+about 55-70 tokens for the first, 190-270 for the others. With 32 requests
+the batch around an answer differs from pass to pass and so do the sums by
+the last bits; the longer an answer, the likelier it turns somewhere. The
+accuracy does not move with it.
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
