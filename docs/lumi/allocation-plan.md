@@ -436,6 +436,28 @@ match `next26`), on `small-g`: two jobs of four GCDs, the time from
 `campaign.py walltime --gcds 4`. It is the first measurement of MTP on the
 MI250X, objective (5).
 
+25-10-2026, why nothing started all day, with 47 `small-g` and 58
+`standard-g` nodes idle and no maintenance coming (the reservations hold
+single broken nodes and two `small-g` nodes for another project): our six
+jobs, two hours to nine, `small-g` and `standard-g`, all waited on priority
+with no start time, which means the backfill scheduler did not reach them.
+Their priority is 453 of a possible ~3,600 (`sprio -w`: age 500, fair share
+1,000, job size 1,000, partition 1,000, QOS 100): 52 of age, 201 of fair
+share, 200 of partition, 0 of job size (one node of 2,728). The fair share
+is the cause: the project's share of the machine is 0.000199
+(`sshare -A project_465003366`), its decayed use 0.000434, 2.2 times as
+much, from the week of 88 node-hours a day; the factor is 0.20, where a
+project that has used nothing gets up to 1. Age adds about 70 a day, the
+full 500 after about a week, and the use decays away by itself.
+
+What it means for the pace: spending by need is bounded by the fair share.
+A week at four times the allocation's own rate (88 node-hours a day against
+22-23) is paid back in days when nothing starts, so the run-out date
+`nodi.sh` prints at last week's rate (29-11-2026) is not one the scheduler
+would let us reach. What keeps the queue moving is a steady one to two
+nodes, the work spread over the weeks rather than in bursts of four nodes;
+the requests for more hours still go in when the forecast says so.
+
 24-10-2026, the MTP half of 0.7.93 (3d1c7a0: the draft head is started after
 the prompt is read, not before, which is what the warning `ctx_dft
 pos_max=-1` on every request said) measured before and after: `c06`'s
