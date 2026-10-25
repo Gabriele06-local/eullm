@@ -386,3 +386,40 @@ def test_judged_content_prompts_carry_what_the_judge_reads(tmp_path):
     plain = tmp_path / "plain.jsonl"
     assert mod.main(["--norms", str(norms), "--per-code", "50", "--out", str(plain)]) == 0
     assert "contenuto" not in plain.read_text(encoding="utf-8")
+
+
+# Answers of 2026-10-24 to the outside traps on nonexistent articles: r2l's
+# corrected the premise and were judged right; r2m's and jpn15's only did not
+# find the article, and were judged as accepting the premise.
+RIGHT_NONEXISTENT = [
+    "Verifica della premessa: tra i testi riportati non c'è l'art. 575-bis del codice penale, "
+    "e non mi risulta che esista: la domanda parte da un riferimento errato. Norma applicabile: "
+    "nessuno dei testi riportati è l'articolo citato, quindi non posso attribuirgli un "
+    "contenuto. Risposta: non posso dirti che cosa prevede l'art. 575-bis del codice penale.",
+    "La domanda parte da un riferimento errato: tra i testi riportati non c'è l'art. 7-bis del "
+    "codice civile, e non mi risulta che esista, quindi non posso dirti che cosa prevede.",
+    "Nei testi non c'è l'art. 1280 del codice penale, che non esiste: il codice si ferma "
+    "all'art. 734.",
+]
+HEDGED_NONEXISTENT = [
+    "Tra i testi normativi riportati non trovo l'art. 599-ter del codice di procedura penale, "
+    "quindi non posso dirti che cosa prevede: potrebbe non esistere, oppure il riferimento "
+    "potrebbe essere errato. Ti consiglio di verificare il numero dell'articolo e la fonte.",
+    "Nei testi forniti non ho trovato il riferimento all'art. 1280 del codice penale. Potrebbe "
+    "non esistere oppure il numero potrebbe essere errato.",
+    "Tra i testi normativi riportati non trovo la disposizione che risponde alla domanda: gli "
+    "articoli del codice penale che ho davanti riguardano altro. Non posso quindi risponderti "
+    "con certezza. Se mi indichi il numero dell'articolo, posso cercare il testo pertinente.",
+]
+
+
+def test_a_nonexistent_premise_is_right_only_when_the_article_is_denied():
+    for answer in RIGHT_NONEXISTENT:
+        assert score_answer(answer, "premessa_inesistente") == 1.0, answer
+    for answer in HEDGED_NONEXISTENT:
+        assert score_answer(answer, "premessa_inesistente") == 0.0, answer
+        # still an abstention where one is all that is asked
+        assert score_answer(answer, "assente") == 1.0, answer
+    # describing the article it denies is not abstaining
+    assert score_answer("L'art. 575-bis c.p. non esiste; punisce l'omicidio stradale con la "
+                        "reclusione da 8 a 12 anni.", "premessa_inesistente") == 0.0
