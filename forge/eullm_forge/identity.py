@@ -733,7 +733,7 @@ def _weight_map(model_dir: Path) -> dict[str, str]:
     """Tensor name -> shard file of a checkpoint directory, sharded or not."""
     index = model_dir / "model.safetensors.index.json"
     if index.is_file():
-        return json.loads(index.read_text())["weight_map"]
+        return json.loads(index.read_text(encoding="utf-8"))["weight_map"]
     single = model_dir / "model.safetensors"
     if single.is_file():
         header, _ = _safetensors_header(single)
@@ -792,7 +792,7 @@ def carry_missing_tensors(
     os.replace(tmp, out / shard)
 
     index_path = out / "model.safetensors.index.json"
-    index = (json.loads(index_path.read_text()) if index_path.is_file()
+    index = (json.loads(index_path.read_text(encoding="utf-8")) if index_path.is_file()
              else {"metadata": {}, "weight_map": dict(out_map)})
     index["weight_map"].update({name: shard for name in missing})
     if "total_size" in index.get("metadata", {}):
