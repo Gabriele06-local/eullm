@@ -66,7 +66,7 @@ fi
 # the store alone, no network, so with SKIP_PULLS too (text_only_model.sh).
 mapfile -t TEXT_ONLY < <("$PY" -c 'import json, sys
 for f in sys.argv[1:]:
-    print("\n".join(json.load(open(f)).get("text_only", [])))' "${SPECS[@]}" | grep .)
+    print("\n".join(json.load(open(f, encoding="utf-8")).get("text_only", [])))' "${SPECS[@]}" | grep .)
 if [ ${#TEXT_ONLY[@]} -gt 0 ]; then
     echo
     echo "=== text-only twins (the weights without their projector) ==="
