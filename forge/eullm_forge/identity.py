@@ -797,7 +797,7 @@ def carry_missing_tensors(
     index["weight_map"].update({name: shard for name in missing})
     if "total_size" in index.get("metadata", {}):
         index["metadata"]["total_size"] += offset
-    index_path.write_text(json.dumps(index, indent=2) + "\n")
+    index_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
     logger.info("  Carried %d tensors (%s) from %s", len(missing), ", ".join(prefixes), src)
     return missing
 
