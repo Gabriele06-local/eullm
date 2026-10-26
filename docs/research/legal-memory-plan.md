@@ -41,15 +41,28 @@ holds, that an article does not exist or a term is wrong.
 
 | | Hypothesis | Measured by | Yes if |
 |---|---|---|---|
-| H1 | Knowledge-augmented continued pretraining makes a 4B recall the law closed book | closed-book suite (below) | ≥ +25 points over the same 4B before, no loss on the open-book exams |
+| H1 | Knowledge-augmented continued pretraining makes the model recall the law closed book | closed-book suite (below) | ≥ +25 points over r2l before, no loss on the open-book exams |
 | H2 | A memory module adds recall at equal active parameters | H1's run with and without the module, same data and tokens | ≥ +10 points closed book |
 | H3 | The memory can be updated alone | a simulated reform of 50 articles, only the memory retrained | new text recalled ≥ 80%, old recall within 2 points |
 | H4 | The model learns when to look the law up | GRPO with a lookup tool, existing rewards | traps of 33 and practical exam above the best open-book model |
 
 ## Architecture
 
-**Backbone:** Qwen3.5-4B (Apache 2.0), the 4B line's base. An 8B
-(Ministral) only if H1/H2 hold and the budget allows.
+**Backbone: our best model, r2l** (the 8B line, legal-it-8b after the r2
+SFT and GRPO rounds: devbig 449, practical 87, traps 14 of 33 on 10-26).
+The held-out exam of 10-26 confirms it or puts r2q, its equal on every exam,
+in its place. jpn17 (Qwen3.5-4B) is the second line, for a laptop without a
+GPU worth the name.
+
+Starting from a post-trained model has one danger we have measured: a long
+training on top of a model GRPO shaped undoes the GRPO (the Cassazione SFT
+of 10-20, section 8). Two answers, and they are part of what is compared:
+
+* **with the module, the backbone stays frozen**: the knowledge goes into
+  the memory and r2l's reading, citing and premise skills cannot be lost;
+* **without it (E1), the backbone trains through LoRA with a replay** of the
+  post-training data (open book, premises, practical) in every batch, and
+  the open-book exams decide whether a short GRPO round has to follow.
 
 **Legal memory module** (H2), in the line of the hashed n-gram embeddings
 of Qwen3.8-Flash-Next and DeepSeek Engram and of Gemma 3n's per-layer
@@ -60,8 +73,8 @@ embeddings:
   concatenated, projected and added to the residual stream through a gate
   initialised at zero, so training starts from the unchanged model;
 * the lookup positions are known before the forward pass, so the table lives
-  in host RAM and is prefetched: on a laptop the 4B sits on the GPU and the
-  memory in RAM;
+  in host RAM and is prefetched: on a laptop the model sits on the GPU (the
+  8B in Q4 is about 5 GB) and the memory in RAM;
 * trained with a sparse optimiser; the backbone frozen or LoRA;
 * **a separate, versioned file** (`lex-memory-YYYY-MM`): an update retrains
   the memory on the changed articles plus a replay sample, not the model (H3).
@@ -94,9 +107,11 @@ our exams and of the outside test, the Consiglio di Stato 2025-26, a
 temporal slice of the Cassazione, and the articles of H3's reform.
 
 **Size** is measured first (E0): tokens per source, raw and augmented. As a
-bound, continued pretraining costs about 6 × parameters × tokens: for a 4B,
-10 B tokens are ~2.4e20 FLOPs, of the order of 250-300 GPU-hours on GH200,
-50 B tokens about 1,300.
+bound, training costs about 6 × parameters × tokens: for the 8B, 10 B tokens
+are ~5e20 FLOPs, of the order of 500-600 GPU-hours on GH200, 50 B tokens
+about 2,700. With the backbone frozen (the module's arm) the backward pass
+through it is still paid, so the saving is smaller than it looks; it is the
+memory, not the compute, that the frozen backbone protects.
 
 ## Evaluation, built before any training
 
@@ -122,12 +137,12 @@ outside test of 33) so that knowing does not cost reading.
 | | What | Where | Cost (GPU-h, order) |
 |---|---|---|---|
 | E0 | Closed-book suite built; current models measured on it; corpus sizes | Leonardo / JUPITER | < 20 |
-| E1 | 4B continued pretraining on the augmented corpus, no module (H1), at 2 and 10 B tokens | JUPITER | 60 + 300 |
-| E2 | E1 with the memory module, three sizes (H2) | JUPITER | 3 × 300 |
+| E1 | r2l, continued pretraining on the augmented corpus through LoRA with replay, no module (H1), at 2 and 10 B tokens | JUPITER | 120 + 600 |
+| E2 | E1 with the memory module and the backbone frozen, three sizes (H2) | JUPITER | 3 × 600 |
 | E3 | Simulated reform: memory retrained alone (H3) | JUPITER | < 50 |
 | E4 | The lookup operator in the engine, speed on GPU and CPU | LUMI | bench hours |
 | E5 | Lookup tool learnt with GRPO on the winner (H4) | JUPITER | 200-400 |
-| E6 | Scale the winner: full corpus, 4B (and 8B if MareNostrum) | JUPITER / MN5 | 1,000+ |
+| E6 | Scale the winner: full corpus, the 8B, and the 4B line if the budget or MareNostrum allows | JUPITER / MN5 | 2,000+ |
 
 E1 at 2 B tokens is the first go/no-go, within two weeks: if knowledge-
 augmented pretraining does not move closed-book recall at that scale, the
