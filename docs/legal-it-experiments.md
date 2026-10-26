@@ -629,3 +629,40 @@ limited to criminal law, while ours covers the civil code too: two of the
 three matters are in our collection. Whether the exam should state the
 service's scope in a system prompt, as a deployment would, is for the user
 to decide.
+
+**10-26, the four rounds of the night** (devbig without the note against the
+round each started from):
+
+| Model | devbig with note | without note | Practical | Traps (corrected/abstained/answered) |
+|---|---|---|---|---|
+| r2l | 449 | 442 | 87 | 14 (6/5/3) |
+| r2o (fixed reward) | 448 (2:3) | 439 (4:7) | 83 (3:7, p=0.34) | 13 (6/5/2) |
+| r2p (+ off-topic, judged) | 446 (6:9) | 437 (6:11) | 87 | 11 (6/4/1) |
+| jpn14 | - | - | 82 | 10 (2/6/2) |
+| **jpn17** (fixed reward) | 453 (+1) | **+19** (25:6, p=0.001; judge-free 0:1) | 83 | 9 (2/5/2) |
+| jpn18 (+ off-topic, judged) | 453 (+1) | +13 (20:7) | 80 | 8 (1/5/2) |
+
+* The fixed reward did what it was for: the 8B corrects 6 premises again
+  (r2m 3), and premise6 is informative again (101 questions answered both
+  ways by r2l, against 21 for r2m).
+* **jpn17 is the new 4B.** Its gain without the note is on nonexistent
+  articles (22:1): jpn14 wrote "non posso rispondere alla domanda basandomi
+  sui documenti disponibili" (partial) or invented an article beside the one
+  asked (wrong); jpn17 writes that the article was not found and may not
+  exist. The judge-free line is level because both abstain; the difference
+  is what the abstention says. Its four losses are content omissions and one
+  bare refusal, each a single question.
+* **r2o is r2l's equal, not better.** On the practical exam each wins
+  questions the other loses (mediation, consumer withdrawal and l. 241/1990
+  for r2o; probative copies, a minor's representation and concussion for
+  r2l), errors of reading with no common shape. r2l stays the 8B.
+* **The judged off-topic prompts did not reach the traps.** r2p answers the
+  three off-topic traps in the three-step format, says the texts are not
+  pertinent, and does not name the matter; on one it states that a civil
+  code article in force was repealed. jpn18 gave the same bare refusal to
+  all three and was graded right on two and wrong on the third: on these
+  three questions the judge is a coin, and they are no signal to decide on.
+* **Queued from here:** premise7 (new false premises, seed 7, test articles
+  excluded), sampled by r2l and jpn17; r2q from r2l (premise7 x5, premise6
+  x2, practical) and jpn19 from jpn17 (premise7 x5, practical), no off-topic
+  prompts.
