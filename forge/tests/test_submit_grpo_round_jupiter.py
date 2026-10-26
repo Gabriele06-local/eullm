@@ -114,3 +114,13 @@ def test_the_round_is_queued_in_order_and_once(tmp_path):
     p = _run(env, runs)
     assert p.returncode == 0 and "already queued" in p.stdout
     assert len(log.read_text().splitlines()) == 6
+
+
+def test_start_is_asked_only_the_sets_named(tmp_path):
+    env, runs, log, _ = _setup(tmp_path)
+    env["GRPO_START_SETS"] = "norm-exam"
+    p = _run(env, runs)
+    assert p.returncode == 0, p.stdout + p.stderr
+    start_ev = log.read_text().splitlines()[4]
+    assert "MODEL=" + str(runs / "start-model") in start_ev
+    assert "SETS=norm-exam=" in start_ev and "practical-dev=" not in start_ev
