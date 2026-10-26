@@ -54,8 +54,10 @@ python examples/decision-desk/desk.py      # in another terminal
 The decision and embedding models load at startup and stay resident; the desk
 loads Gemma 4 as soon as it starts, so the first email does not wait for it.
 The three dots at the top of the page turn green when each model is loaded.
-On a server without a screen, add `--no-browser` and forward the port with
-`ssh -L 8770:127.0.0.1:8770 you@server`.
+On a server without a screen, forward the port with
+`ssh -L 8770:127.0.0.1:8770 you@server` and open the page on your computer:
+`start.sh` then opens no browser and prints that command; `desk.py` by hand
+needs `--no-browser`.
 
 ## Measure before you show it
 
