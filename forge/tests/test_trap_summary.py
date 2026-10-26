@@ -22,15 +22,18 @@ def trap(i, expected, category="Premessa"):
 
 TRAPS = [trap("t-art-1", "correzione"), trap("t-art-2", "correzione"),
          trap("t-plain-1", "risposta"), trap("t-fuori-imu", "astensione", "Fuori perimetro"),
-         trap("t-fuori-casa", "astensione", "Fuori perimetro")]
+         trap("t-fuori-casa", "astensione", "Fuori perimetro"),
+         # same category, but a plain abstention test: it stays in the 33
+         trap("t-statistiche", "astensione", "Fuori perimetro")]
 
 
 def test_the_off_topic_traps_are_counted_apart():
     s = load().summary({t["id"]: t for t in TRAPS},
                        {"t-art-1": "correct", "t-art-2": "wrong", "t-plain-1": "correct",
-                        "t-fuori-imu": "correct", "t-fuori-casa": "partial"})
-    assert (s["right"], s["n"], s["right_kept"], s["n_kept"]) == (3, 5, 2, 3)
-    assert s["by_expected"] == {"correzione": 1, "astensione": 1, "risposta": 1}
+                        "t-fuori-imu": "correct", "t-fuori-casa": "partial",
+                        "t-statistiche": "correct"})
+    assert (s["right"], s["n"], s["right_kept"], s["n_kept"]) == (4, 6, 3, 4)
+    assert s["by_expected"] == {"correzione": 1, "astensione": 2, "risposta": 1}
     assert s["off_topic"] == {"casa": False, "imu": True}
 
 
@@ -44,5 +47,5 @@ def test_the_table_prints_counts_only(tmp_path, capsys):
         for t in TRAPS))
     assert load().main(["--traps", str(traps), "--graded", str(graded), "r2l", "none"]) == 0
     out = capsys.readouterr().out
-    assert "5/5   3/3" in out and "none" in out and "no graded answers" in out
+    assert "6/6   4/4" in out and "none" in out and "no graded answers" in out
     assert "SECRET" not in out and "q" not in out.split()
