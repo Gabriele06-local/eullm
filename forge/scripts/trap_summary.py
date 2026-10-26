@@ -26,9 +26,10 @@ EXPECTED = ("correzione", "astensione", "risposta")
 
 
 def off_topic(trap: dict) -> bool:
-    """One of the off-topic traps, by category or by id."""
-    return (trap.get("category", "").lower().startswith("fuori")
-            or "-fuori-" in trap.get("id", ""))
+    """One of the three off-topic traps, by id. Not by category: "Fuori
+    perimetro" holds two more (data the archive does not have), plain
+    abstention tests the models pass, and counting by it left 31."""
+    return "-fuori-" in trap.get("id", "")
 
 
 def summary(traps: dict[str, dict], grades: dict[str, str]) -> dict:
