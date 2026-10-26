@@ -151,7 +151,12 @@ prune_merged() {  # the merged weights of packaged rounds nothing needs any more
         echo "[round] merged weights of $r removed from the scratch (adapter and GGUF kept)"
     done
 }
-[ -z "${PACKAGED:-}" ] && [ -d "$MERGED_ROOT" ] && prune_merged
+# Only when the scratch is filling up: on 2026-10-26, at 68%, the cleanup
+# removed jpn14's weights from under a held-out exam whose jobs carry no
+# round's name. Below GRPO_PRUNE_AT percent (default 80) nothing is removed.
+used=$(df -P "$MERGED_ROOT" 2>/dev/null | awk 'NR == 2 {sub("%", "", $5); print $5}')
+[ -z "${PACKAGED:-}" ] && [ -d "$MERGED_ROOT" ] && [ "${used:-100}" -ge "${GRPO_PRUNE_AT:-80}" ] &&
+    prune_merged
 [ -z "${PACKAGED:-}" ] && mkdir -p "$OUT" && printf '%s\n' "$START" > "$OUT/start"
 if [ -z "${PACKAGED:-}" ] && [ ! -e "$OUT/merged" ] && [ -d "$(dirname "$MERGED_ROOT")" ] &&
    mkdir -p "$MERGED_ROOT/$NAME" "$OUT"; then
