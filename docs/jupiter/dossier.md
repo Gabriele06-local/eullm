@@ -68,7 +68,20 @@ JUPITER, named by its Slurm job id.
   practical exam rose from 67 to 79 of 145 and the held-out exam from 189
   to 198 of 217. The trap tests stayed level, and LexIA moved from 11 to 9.
 * The rest of norms-v2 under the false premises (dqr): the 9B 13 LexIA
-  traps against 11, the 4B 11 against 9, the practical exam level.
+  traps against 11, the 4B 11 against 9, the practical exam level. But on
+  the held-out exam the 9B fell from 188 to 168 open book without the note
+  (judge 2515538), and from 189 to 166 asked as the product asks. The 4B
+  is at 178-179. The continued distillation costs the held-out exam about
+  20 questions.
+* GRPO round g9r-r1, from the dqr 9B, same recipe as g9-r1: the held-out
+  exam from 166 back to 198 (37:5, p<0.001 strict and lenient, the only
+  difference shown of these rounds; judge-free 17:3), LexIA 15 against
+  13 (2:0), the practical exam 70 against 67 (8:5), the trap tests level.
+  GRPO repairs what the continued distillation cost on the held-out exam,
+  and both rounds end at 198.
+* Queued for the night: g9-r2 and g9r-r2, second rounds on each line,
+  six prompts a step, 400 steps over the whole prompt set in another
+  order (2533859-2533863, 2534077-2534087).
 
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
