@@ -479,6 +479,18 @@ node-hours a day that ends the allocation on 09-03-2027 with nothing left
 over. The next one is on the release that carries the expert-cache band
 and the `--mtp` fix, once `c06` on `next27` has run.
 
+26-10-2026, evening: the fair share was not the whole reason. The two
+`small-g` jobs of `c06` on `next27`, waiting 29 hours with 9 hours asked,
+started within minutes of being lowered to 5 (`scontrol update JobId=J
+TimeLimit=5:00:00`), as 23136196 had on 24-10 from 48 hours to 6. With
+priority this low the jobs ahead hold the nodes they will start on; what is
+left are gaps of some hours before those starts, and a job fits one only if
+the time it asks for does. Asking for more time than the work needs keeps a
+job waiting at any priority. The 9 hours came from the specs' estimates
+(an hour for each of `c06`'s 300-question points, which took 16-60 minutes);
+`campaign.py walltime` now times each point by the longest an earlier run of
+the same configuration took, the estimate only for one never run.
+
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
 `standard-g`, about ten minutes each; the two `small-g` copies were
