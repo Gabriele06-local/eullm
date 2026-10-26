@@ -943,6 +943,14 @@ answers into complete ones (21 to 16 partials on the practical exam, 9 to
 The second round, g9r-r1 (from the 9B that the rest of norms-v2 had
 helped on LexIA; jobs 2529733-2529738), uses the same prompts.
 
+The training log says why the gain is thin. A step had three prompts of
+eight answers each. In most steps two of the three groups, or all three,
+had every answer graded the same (zero-std 0.67-1.00), and the mean
+reward stayed between 0.6 and 1.0. Only about a third of the groups
+taught anything. The 300 steps also saw 900 prompts, 41% of the 2,184.
+The next round therefore takes six prompts a step (`--grad-accum 2`, the
+same memory) and another order of the prompts (`--seed`).
+
 ## 6. Energy
 
 Slurm keeps no energy for jobs on JUPITER Booster (`ConsumedEnergy` empty), so

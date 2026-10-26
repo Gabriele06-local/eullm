@@ -73,6 +73,9 @@ def main(argv: list[str] | None = None) -> int:
                     "grades the judged questions (e.g. http://127.0.0.1:8080)")
     ap.add_argument("--judge-parallel", type=int, default=8,
                     help="grading requests sent to the judge at once")
+    ap.add_argument("--seed", type=int, default=42,
+                    help="order of the prompts: a round continuing another on the same "
+                         "prompts takes another seed, or it sees the same ones first")
     ap.add_argument("--limit", type=int, default=0,
                     help="use only the first N prompts (smoke tests)")
     args = ap.parse_args(argv)
@@ -135,6 +138,7 @@ def main(argv: list[str] | None = None) -> int:
         save_steps=args.save_steps,
         save_total_limit=3,
         report_to="none",
+        seed=args.seed,
         use_cpu=not cuda,
     )
     peft_config = LoraConfig(r=args.rank, lora_alpha=2 * args.rank, lora_dropout=0.0,
