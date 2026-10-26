@@ -666,3 +666,10 @@ round each started from):
   excluded), sampled by r2l and jpn17; r2q from r2l (premise7 x5, premise6
   x2, practical) and jpn19 from jpn17 (premise7 x5, practical), no off-topic
   prompts.
+
+**The traps counted of 33 too** (from 10-26, decided with the user): beside
+the official 36, which still decides a promotion, the count without the
+three off-topic traps, whose judge is a coin and whose references assume a
+service limited to criminal law (`forge/scripts/trap_summary.py`, counts
+only). Of 33: r2l 14, r2o 13, r2p 11, r2m 10; jpn14 9, jpn17 8, jpn15 7,
+jpn18 6. The 4B's off-topic "wins" were the coin.
