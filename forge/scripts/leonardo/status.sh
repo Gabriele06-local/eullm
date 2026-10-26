@@ -88,6 +88,10 @@ while IFS='|' read -r id name state elapsed; do
                 # eullm-opd-prompts builds the OPD prompts file and trains
                 # nothing: a few minutes is all it ever takes.
                 eullm-opd-prompts) ;;
+                # eullm-package-NAME: a GRPO round's merge and GGUF, one job
+                # and no chain; a 4B is packaged in nine minutes (jpn17,
+                # 2026-10-25), and a failed one ends FAILED, flagged above.
+                eullm-package-*) ;;
                 # eullm-s3-*: stage-3 chains submitted under a name of their
                 # own (-J), one per experiment.
                 eullm-p*|eullm-stage3|eullm-s3-*|eullm-gen-*|eullm-grpo*|eullm-opd*)
