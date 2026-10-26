@@ -62,6 +62,14 @@ JUPITER, named by its Slurm job id.
   exam judged by 2515538), the LexIA traps and the practical exam
   2515539-2515542, their judge 2515543.
 
+**26-10-2026**
+* GRPO round g9-r1 (§5.11): 300 steps in 1 h 59 min of one node
+  (2515387; about 24 s a step, the judge on EULLM Engine included). The
+  practical exam rose from 67 to 79 of 145 and the held-out exam from 189
+  to 198 of 217. The trap tests stayed level, and LexIA moved from 11 to 9.
+* The rest of norms-v2 under the false premises (dqr): the 9B 13 LexIA
+  traps against 11, the 4B 11 against 9, the practical exam level.
+
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
   distillation checkpoints given as "base+adapter" as missing models, which
@@ -906,6 +914,21 @@ the distilled Qwen3.5-9B with the premises (`submit_grpo_round.sh`):
   trap test, its rewrites, the LexIA traps, the practical exam and the
   held-out exam. The model it starts from is asked the sets it has no
   answers for, and the judge then grades both models.
+
+First round, g9-r1 (26-10-2026), on 2,184 of r2o's prompts, 300 steps in
+two hours. Judge's grades, correct + partial:
+
+| set | dqp 9B (start) | g9-r1 |
+|---|---:|---:|
+| practical exam (145) | 67 + 21 | **79 + 16** |
+| held-out exam, open book, no note (217) | 189 + 9 | **198 + 3** |
+| LexIA traps (36) | 11 | 9 |
+| trap test (390) | 381 | 384 |
+| trap test rewritten (1,050) | 965 | 964 |
+
+GRPO gave here what it gave on Leonardo: the practical exam up by 12
+questions, as r2h-r2l rose there, and the traps level. The paired test
+of each difference, and the answers behind it, come before any promotion.
 
 ## 6. Energy
 

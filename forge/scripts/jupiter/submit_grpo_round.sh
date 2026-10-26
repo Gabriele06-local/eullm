@@ -34,6 +34,9 @@
 #   GRPO_LINK_H      hours a link (default 6)
 #   GRPO_SMOKE=0     no smoke test
 #   GRPO_START_LABEL START's label in the teacher eval (default dqp-d-q9b)
+#   GRPO_START_SETS  the sets START may be asked (default all five; those it
+#                    has answers for are skipped): narrower when some are
+#                    being asked of it by a job already queued
 #
 # Idempotent: a round with jobs in the queue, or merged already, is not
 # submitted again; the prompts once written are kept.
@@ -119,6 +122,7 @@ ids=":$ev"
 echo "[ok] $NAME asked the five sets: job $ev"
 missing=""
 for s in $SETS; do
+    case " ${GRPO_START_SETS:-${s%%=*}} " in *" ${s%%=*} "*) ;; *) continue ;; esac
     [ -s "$R/teacher-eval/answers-${s%%=*}-$START_LABEL.jsonl" ] || missing="$missing $s"
 done
 if [ -n "$missing" ]; then
