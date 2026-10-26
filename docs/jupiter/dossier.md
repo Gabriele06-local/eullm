@@ -926,9 +926,22 @@ two hours. Judge's grades, correct + partial:
 | trap test (390) | 381 | 384 |
 | trap test rewritten (1,050) | 965 | 964 |
 
-GRPO gave here what it gave on Leonardo: the practical exam up by 12
-questions, as r2h-r2l rose there, and the traps level. The paired test
-of each difference, and the answers behind it, come before any promotion.
+Paired (`compare_graded.py`, questions only g9-r1 got right : only the
+start did):
+
+* Practical exam: 17:5, p=0.017 strict. Counting "partial" as right it is
+  12:5, p=0.14.
+* Held-out exam: 12:3, p=0.035 strict; 6:3, p=0.51 lenient. The judge-free
+  check is 3:1.
+* LexIA: 0:2, p=0.50.
+* Trap test: 3:0. Its rewritten version: 13:14.
+
+By the rule we keep, a difference is real only if it holds both strict and
+lenient, so none is shown yet. What GRPO did is mostly turn partial
+answers into complete ones (21 to 16 partials on the practical exam, 9 to
+3 on the held-out exam). On Leonardo r2h's gain was 29:6 strict, p<0.001.
+The second round, g9r-r1 (from the 9B that the rest of norms-v2 had
+helped on LexIA; jobs 2529733-2529738), uses the same prompts.
 
 ## 6. Energy
 
