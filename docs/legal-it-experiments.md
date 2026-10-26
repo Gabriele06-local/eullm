@@ -673,3 +673,26 @@ three off-topic traps, whose judge is a coin and whose references assume a
 service limited to criminal law (`forge/scripts/trap_summary.py`, counts
 only). Of 33: r2l 14, r2o 13, r2p 11, r2m 10; jpn14 9, jpn17 8, jpn15 7,
 jpn18 6. The 4B's off-topic "wins" were the coin.
+
+**10-26 evening, r2q and jpn19 (premise7):**
+
+| Model | devbig with note | without | Practical | Traps of 36 / of 33 (corrected/abstained/answered) |
+|---|---|---|---|---|
+| r2l | 449 | 442 | 87 | 14 / 14 (6/5/3) |
+| r2q (r2l + premise7) | 445 (3:7, p=0.34) | 438 (4:8, p=0.39) | 86 (2:3) | 16 / 15 (7/5/3) |
+| jpn17 | 453 | 450 | 83 | 9 / 8 (2/5/2) |
+| jpn19 (jpn17 + premise7) | 452 (5:6) | 453 (7:4) | 79 (5:9, p=0.42) | 10 / 8 (2/7/1) |
+
+* r2q's +2 on the traps is mostly the judge: of its three wins, two are the
+  same answer r2l gave, graded the other way (the maintenance question and
+  art. 625-bis c.p.p.). One win is real (a ruling not among the texts, which
+  r2q says it cannot confirm and r2l discussed anyway), and so is its one
+  loss: it declines to define "recidiva reiterata" with art. 99 c.p. among
+  the texts. r2q is r2l's equal; jpn19 is jpn17's.
+* **Both lines are on a plateau** with generated premises: every difference
+  of the last four 8B rounds is inside the noise of every exam. The loss that
+  recurs is the one section 9 found: a plain question answered by the texts
+  and declined (r2q on "recidiva reiterata", r2m likewise).
+* The large trap test built on JUPITER (`make_trap_test.py`) does not
+  separate these models: it is drawn by the same generator they trained on,
+  and its judge-free check gives 99.5% to models trained on it.
