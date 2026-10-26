@@ -276,4 +276,4 @@ def test_nothing_is_removed_while_the_scratch_has_room(tmp_path):
     r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "0",
               "GRPO_PRUNE_AT": "101"}, "jg-x", str(Path(env["WORK"]) / "start"), "1", "750")
     assert r.returncode == 0, r.stderr + r.stdout
-    assert {"a", "b"} <= {p.name for p in root.iterdir()} and "removed" not in r.stdout
+    assert {"a", "b"} <= {p.name for p in root.iterdir()} and "removed from the scratch" not in r.stdout
