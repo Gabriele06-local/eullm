@@ -213,9 +213,11 @@ def test_jobs_that_are_short_on_purpose_are_not_stalled_links(tmp_path, runs):
     out = run_status(tmp_path, queue=[],
                      ended=[("61", "eullm-probe", "COMPLETED", "00:00:21"),
                             ("62", "eullm-p3-gguf", "COMPLETED", "00:04:30"),
-                            ("63", "eullm-p2-8b", "COMPLETED", "00:00:21")])
+                            ("63", "eullm-p2-8b", "COMPLETED", "00:00:21"),
+                            ("64", "eullm-package-jpn17-q35-4b", "COMPLETED", "00:09:15")])
     assert "eullm-probe ended COMPLETED" not in out, out
     assert "eullm-p3-gguf ended COMPLETED" not in out, out
+    assert "eullm-package-jpn17-q35-4b ended" not in out, out
     assert "63 eullm-p2-8b ended COMPLETED after only 00:00:21" in out
     assert "[!!] 1 thing(s) above need a look" in out, out
 
