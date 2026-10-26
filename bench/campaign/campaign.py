@@ -1103,12 +1103,51 @@ def cmd_collect(args):
     return 0
 
 
+# What differs between two plannings of one configuration, and so is left
+# out when a waiting point looks for how long the same one took before.
+PLANNING = PARAM_SKIP + ("round", "engine_label", "duration_s", "runner")
+
+
+def config_key(campaign, group, params: dict) -> str:
+    return json.dumps([campaign, group, {k: v for k, v in params.items()
+                                         if k not in PLANNING}], sort_keys=True)
+
+
+def measured_s(results: str) -> dict:
+    """{config_key: seconds} the longest a configuration has taken, load
+    included (`elapsed_s`), over every result kept under `results`."""
+    took = {}
+    for path in glob.glob(os.path.join(results, "*", "*.json")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                r = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if r.get("schema") != SCHEMA or not r.get("elapsed_s"):
+            continue
+        key = config_key(r.get("campaign"), r.get("group"), r.get("params") or {})
+        took[key] = max(took.get(key, 0), float(r["elapsed_s"]))
+    return took
+
+
 def cmd_walltime(args):
     """The --time for `nodes` jobs started with `engine_label` (none: the
-    unlabelled points), from the points waiting for them; nothing printed
-    and status 1 when there are none."""
+    unlabelled points), from the points waiting for them: each takes as long
+    as the same configuration took the longest time it ran, or its estimate
+    when it never did (`est_s` errs long: c06's 300-question points are
+    estimated at an hour and took 16-60 minutes). Nothing printed and status
+    1 when there are none."""
     label = args.engine_label or ""
     points = [p for p in Queue(args.queue).todo() if point.can_run(p, label)]
+    took = measured_s(args.results or os.path.join(args.queue, "results"))
+    known = 0
+    for i, p in enumerate(points):
+        s = took.get(config_key(p.get("campaign"), p.get("group"), p))
+        if s:
+            points[i], known = dict(p, est_s=s), known + 1
+    if points:
+        print(f"{known} of {len(points)} points timed from an earlier run of theirs, "
+              f"the rest from their estimates", file=sys.stderr)
     seconds = walltime_s(points, args.nodes, args.gcds)
     if not seconds:
         print(f"no points waiting for label {label or '(none)'}", file=sys.stderr)
@@ -1345,6 +1384,7 @@ def main(argv=None):
     p.add_argument("--job", action="append",
                    help="only what this Slurm job measured or failed (repeatable)")
     p = with_queue(sub.add_parser("walltime"))
+    p.add_argument("--results")
     p.add_argument("--engine-label", default=os.environ.get("EULLM_ENGINE_LABEL", ""),
                    help="the jobs' label (default: EULLM_ENGINE_LABEL)")
     p.add_argument("--nodes", type=int, default=1, help="how many jobs share the points")

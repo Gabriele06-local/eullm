@@ -855,3 +855,33 @@ def test_a_job_asks_for_the_time_its_points_need_not_48_hours():
     assert campaign.walltime_s(alone * 20) == campaign.MAX_WALLTIME_S
     # Four GCDs of small-g take the one-GCD points in two waves.
     assert campaign.walltime_s(one_gcd, node_devices=4) == 3 * 3600
+
+
+def test_a_job_is_timed_from_how_long_its_points_took_before(tmp_path, capsys):
+    import json
+
+    from fsqueue import Queue
+
+    spec = {"campaign": "c-time", "defaults": {"gcds": 1},
+            "groups": [{"name": "g", "priority": 5, "est_s": 3600,
+                        "set": {"kind": "workload", "sets": ["gsm8k"], "limit": 300},
+                        "axes": {"model": [f"m{i}" for i in range(8)]}}]}
+    queue = str(tmp_path / "q")
+    q = Queue(queue)
+    for p in expand(spec, "r-new"):
+        q.add(p)
+    # Estimated at an hour each, eight side by side: 4 hours asked.
+    assert campaign.main(["walltime", "--queue", queue]) == 0
+    assert capsys.readouterr().out.strip() == "4:00:00"
+    # The same configurations took ten minutes in an earlier round.
+    os.makedirs(os.path.join(queue, "results", "c-time"))
+    for p in expand(spec, "r-old"):
+        params = {k: v for k, v in p.items() if k not in campaign.PARAM_SKIP}
+        with open(os.path.join(queue, "results", "c-time", f"{p['id']}.1.json"), "w") as f:
+            json.dump({"schema": campaign.SCHEMA, "campaign": "c-time", "group": "g",
+                       "params": dict(params, engine_label="old", duration_s=0),
+                       "elapsed_s": 600}, f)
+    assert campaign.main(["walltime", "--queue", queue]) == 0
+    out = capsys.readouterr()
+    assert out.out.strip() == "1:00:00"
+    assert "8 of 8 points timed from an earlier run" in out.err
