@@ -226,7 +226,8 @@ def test_the_merged_weights_nothing_needs_are_removed_from_the_scratch(tmp_path)
             (grpo / r / "gguf").mkdir()
             (grpo / r / "gguf" / f"{r}-q4_k_m.gguf").write_text("gguf")
         os.utime(root / r, (1_000_000 - age * 1000,) * 2)
-    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "2"},
+    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "2",
+              "GRPO_PRUNE_AT": "0"},
              "jg-x", str(grpo / "b" / "merged"), "1", "750")
     assert r.returncode == 0, r.stderr + r.stdout
     # e, f the newest; a not packaged; b the start; c still examined
@@ -256,7 +257,23 @@ def test_the_start_of_a_round_not_packaged_yet_is_kept(tmp_path):
     (grpo / "old" / "start").write_text(f"{grpo / 'b' / 'merged'}\n")
     (grpo / "old" / "gguf").mkdir()
     (grpo / "old" / "gguf" / "old-q4_k_m.gguf").write_text("gguf")
-    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "1"},
+    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "1",
+              "GRPO_PRUNE_AT": "0"},
              "jg-x", str(grpo / "d" / "merged"), "1", "750")
     assert r.returncode == 0, r.stderr + r.stdout
     assert sorted(p.name for p in root.iterdir()) == ["a", "d", "jg-x"]
+
+
+def test_nothing_is_removed_while_the_scratch_has_room(tmp_path):
+    # 2026-10-26: at 68% the cleanup removed weights a held-out exam was reading
+    env, log = _setup(tmp_path)
+    grpo = Path(env["WORK"]) / "eullm_runs" / "grpo"
+    root = tmp_path / "scratch" / "grpo-merged"
+    for r in "ab":
+        (root / r).mkdir(parents=True)
+        (grpo / r / "gguf").mkdir(parents=True)
+        (grpo / r / "gguf" / f"{r}-q4_k_m.gguf").write_text("gguf")
+    r = _run({**env, "GRPO_MERGED_ROOT": str(root), "GRPO_KEEP_MERGED": "0",
+              "GRPO_PRUNE_AT": "101"}, "jg-x", str(Path(env["WORK"]) / "start"), "1", "750")
+    assert r.returncode == 0, r.stderr + r.stdout
+    assert {"a", "b"} <= {p.name for p in root.iterdir()} and "removed from the scratch" not in r.stdout
