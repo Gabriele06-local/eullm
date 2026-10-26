@@ -459,6 +459,26 @@ would let us reach. What keeps the queue moving is a steady one to two
 nodes, the work spread over the weeks rather than in bursts of four nodes;
 the requests for more hours still go in when the forecast says so.
 
+26-10-2026, the queue cleared of what no job would run: 59 points set aside
+in `$CAMPAIGN_DIR/dropped/2026-10-26/` (moved, not deleted). The 40 `rccl-*`
+of the label `rccl` (RCCL measured on `next14` in `r-split-rccl` and
+`r-split-rccl2`, linked into every LUMI build since 16-10-2026, so `c03`'s
+own groups measure tensor with it), `soak-node` on `next3`, `next15` and
+unlabelled and `moe-soak` on `next4` (passed by `soak-node` on `next21` and
+the two-day soaks on `next25`), `ram-671b` and `ram-prompt` on `next11` (all
+experts on the CPU, stopped at their time limit every time), and `mtp-ab`
+on `next27` (the twins measured twice already). Left: `c06`'s
+`mtp-graded` and `mtp-throughput` on `next27`, 48 points, in the two
+`small-g` jobs waiting.
+
+The pace from here: one chain of one node at a time, with `small-g` for the
+points of one GCD, always something of ours waiting, instead of four nodes
+for days. A full round on an engine that touches inference is about 400
+node-hours; at one or two nodes it runs 10-15 days, which is the 23-30
+node-hours a day that ends the allocation on 09-03-2027 with nothing left
+over. The next one is on the release that carries the expert-cache band
+and the `--mtp` fix, once `c06` on `next27` has run.
+
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
 `standard-g`, about ten minutes each; the two `small-g` copies were
