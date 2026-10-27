@@ -37,7 +37,7 @@ BY_SUBJECT = {s["subject"]: s for s in desk.SAMPLES}
 
 def fake_answers(state):
     """What a decision model that is always right would answer."""
-    sample = BY_SUBJECT.get(state["subject"])
+    sample = BY_SUBJECT.get(state["subject"]) if isinstance(state, dict) else None
     expect = sample["expect"] if sample else {"team": "billing", "action": "reply"}
     team = expect["team"] or "billing"
     teams = {t: 0.02 for t in desk.TEAMS}
@@ -206,6 +206,7 @@ def options(url, audit_file=None, **over):
         threshold=0.5,
         quarantine=0.7,
         min_team=0.4,
+        legal=0.3,
         passages=3,
         max_chars=4000,
         max_tokens=320,
@@ -326,6 +327,22 @@ class WhatIsNotDrafted(WithFake):
                 self.assertEqual(stage(events, "rule")["action"], action)
                 self.assertFalse(self.fake.posted("/v1/chat/completions"))
 
+    def test_a_letter_that_may_be_legal_goes_to_a_person_even_when_legal_is_second(
+        self,
+    ):
+        # As the Jev-Style 2B answered the lawyer's notice: shipping 0.49, legal 0.45.
+        answers = fake_answers({"subject": sample("it-legal")["subject"]})
+        teams = {t: 0.0 for t in desk.TEAMS}
+        teams.update(shipping=0.49, legal=0.45, returns=0.06)
+        answers["team"].update(choice="shipping", probabilities=teams)
+        verdict = desk.policy(answers, [], options("http://x"))
+        self.assertEqual((verdict["action"], verdict["team"]), ("person", "legal"))
+        self.assertIn("legal 0.45", verdict["rule"])
+        teams.update(shipping=0.80, legal=0.14)
+        self.assertEqual(
+            desk.policy(answers, [], options("http://x"))["action"], "reply"
+        )
+
     def test_a_team_the_model_is_unsure_of_goes_to_a_person(self):
         answers = fake_answers({"subject": sample("de-billing")["subject"]})
         answers["team"]["probabilities"]["billing"] = 0.3
@@ -365,6 +382,32 @@ class Audit(WithFake):
     def test_no_audit_file_means_no_audit_lines(self):
         audit = stage(self.run_sample("de-billing", audit_file=None), "audit")
         self.assertEqual(audit, {"stage": "audit", "file": None, "lines": []})
+
+
+class WarmUp(WithFake):
+    def test_the_named_decision_model_and_the_chat_model_load_before_the_first_email(
+        self,
+    ):
+        d = desk.Desk(
+            options(
+                self.fake.url, decision_model="jev-style-2b-decision-v3-gguf-q4_k_m"
+            )
+        )
+        d.warm_up()
+        self.assertEqual(
+            (d.warmup["index"], d.warmup["decision"], d.warmup["chat"]),
+            ("ready", "ready", "ready"),
+        )
+        (decision,) = self.fake.posted("/v1/systemone")
+        self.assertEqual(decision["model"], "jev-style-2b-decision-v3-gguf-q4_k_m")
+        (chat,) = self.fake.posted("/v1/chat/completions")
+        self.assertEqual(chat["max_tokens"], 1)
+
+    def test_without_a_named_decision_model_the_loaded_one_is_left_alone(self):
+        d = desk.Desk(options(self.fake.url))
+        d.warm_up()
+        self.assertEqual(d.warmup["decision"], "waiting")
+        self.assertFalse(self.fake.posted("/v1/systemone"))
 
 
 class Check(WithFake):

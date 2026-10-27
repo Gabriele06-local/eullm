@@ -282,10 +282,11 @@ function modelState(key, m, warm) {
   dot.className = "dot";
   if (!status || status.error) { dot.classList.add("bad"); state.textContent = "server not reachable"; return; }
   if (m.loaded) { dot.classList.add("ok"); state.textContent = key === "chat" ? "loaded" : "loaded, resident"; return; }
-  if (key === "decision") { dot.classList.add("bad"); state.textContent = "start eullm serve with --decision-model"; return; }
-  if (key === "chat" && warm.chat === "failed") { dot.classList.add("bad"); state.textContent = warm.error || "failed to load"; return; }
+  // No decision model named and none loaded: the server has to be given one.
+  if (key === "decision" && !m.name) { dot.classList.add("bad"); state.textContent = "start eullm serve with --decision-model"; return; }
+  if (warm[key] === "failed") { dot.classList.add("bad"); state.textContent = warm.error || "failed to load"; return; }
   dot.classList.add("wait");
-  state.textContent = key === "chat" ? "loading…" : "loads on the first email";
+  state.textContent = warm[key] === "loading" ? "loading…" : "loads on the first email";
 }
 
 async function refreshStatus() {
@@ -305,7 +306,7 @@ async function refreshStatus() {
       `phishing ≥ ${r.quarantine}            → quarantine, nothing generated\n` +
       `spam ≥ ${r.quarantine}                → spam, nothing generated\n` +
       `health ≥ ${r.threshold}               → a person (GDPR art. 9)\n` +
-      `team = legal                → a person\n` +
+      `P(legal) ≥ ${r.legal}             → a person\n` +
       `P(team) < ${r.min_team}              → a person\n` +
       `otherwise                   → the chat model drafts the reply\n` +
       `urgent ≥ ${r.threshold} or mood ≥ angry  → high priority\n` +
