@@ -1,6 +1,6 @@
 # decision-desk — three local models at work, on one page
 
-Customer emails for a fictional e-bike shop arrive in five languages, and the
+Customer emails for a fictional e-bike shop arrive in six languages, and the
 page shows every one going through four steps, as they happen:
 
 | Step | Model | What you see |
@@ -82,6 +82,45 @@ to a lawyer. Every other email had its team at 0.89 or more, so legal at 0.11
 or less. Hence `--legal` (0.3): from that probability of the legal team a
 person answers, whichever team is first. The check run again with it: 12 of 12,
 team and action, at a median 49 ms.
+
+## A video of it
+
+`desk_video.py` runs the inbox through your server, keeps every step of every
+email with the moment it happened, and renders it with the same page, frame by
+frame, in a headless browser. Three files come out, ready to post:
+
+| File | Size | For |
+|---|---|---|
+| `desk-wide.mp4` | 1920×1080 | X, LinkedIn, YouTube |
+| `desk-tall.mp4` | 1080×1920 | Instagram Reels, X vertical |
+| `desk-readme.mp4` | 1280×720, about 1 MB | a README on GitHub |
+
+```bash
+pip install playwright
+python -m playwright install chromium
+sudo apt install ffmpeg          # or your system's own package
+python examples/decision-desk/desk_video.py \
+    --decision-model jev-style-2b-decision-v3-gguf-q4_k_m \
+    --hardware "RTX 5070 Ti" \
+    --caption "Jev-Style 2B decides · Gemma 4 E4B writes · Qwen3-Embedding finds"
+```
+
+With a plain `eullm serve` running, the script loads the three models before
+the first email, so no load is filmed. Everything on screen is the run as it
+happened: the passages, the probabilities, the rule, every token of every draft
+at the moment it was written. Only the pause after each email is chosen, for
+reading (`--hold`, 2.5 s): the twelve emails make a video of about 40 seconds.
+The wide video shows the whole page; the tall one leaves out the inbox and the
+audit trail and keeps clear of the top 200 and bottom 380 pixels and the right
+edge, where Instagram lays its own text and buttons over a Reel.
+
+The run is saved as `desk-run.json`: `--from desk-run.json` renders it again,
+with another `--hold`, `--caption` or `--layouts`, without the models. ffmpeg is
+run as a program of its own, the one installed on your system; nothing of it
+becomes part of EuLLM. To show the README video on GitHub, drag
+`desk-readme.mp4` into the comment box of any issue or pull request, copy the
+`https://github.com/user-attachments/assets/…` link GitHub puts there, and
+paste the link alone on a line of the README.
 
 ## Make it yours
 

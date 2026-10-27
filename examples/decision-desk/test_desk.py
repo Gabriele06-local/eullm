@@ -28,9 +28,16 @@ from pathlib import Path
 from types import SimpleNamespace
 
 HERE = Path(__file__).resolve().parent
-SPEC = importlib.util.spec_from_file_location("desk", HERE / "desk.py")
-desk = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(desk)
+
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, HERE / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+desk = load("desk")
 
 BY_SUBJECT = {s["subject"]: s for s in desk.SAMPLES}
 
@@ -498,6 +505,37 @@ class NoServer(unittest.TestCase):
             last = json.loads(r.read().splitlines()[-1])
         self.assertEqual(last["stage"], "error")
         self.assertIn("eullm serve", last["message"])
+
+
+class VideoTimeline(unittest.TestCase):
+    """desk_video.py's clock; the rendering itself needs a browser and
+    ffmpeg, which CI does not have."""
+
+    def test_each_email_starts_a_hold_after_the_one_before_ended(self):
+        video = load("desk_video")
+        emails = [
+            {
+                "index": 0,
+                "events": [
+                    {"dt": 0.0, "event": {"stage": "start"}},
+                    {"dt": 1.2, "event": {"stage": "done"}},
+                ],
+            },
+            {
+                "index": 1,
+                "events": [
+                    {"dt": 0.0, "event": {"stage": "start"}},
+                    {"dt": 0.3, "event": {"stage": "done"}},
+                ],
+            },
+        ]
+        steps, seconds = video.timeline(emails, 2.5)
+        intro = video.INTRO
+        self.assertEqual(
+            [(s["index"], s["t"]) for s in steps],
+            [(0, intro), (0, intro + 1.2), (1, intro + 3.7), (1, intro + 4.0)],
+        )
+        self.assertAlmostEqual(seconds, intro + 4.0 + video.OUTRO)
 
 
 class StartScript(unittest.TestCase):

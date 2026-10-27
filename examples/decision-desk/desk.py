@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Decision Desk: three local models on one EuLLM server, at work on a page.
 
-Customer emails for a fictional e-bike shop arrive in five languages, and
+Customer emails for a fictional e-bike shop arrive in six languages, and
 every one goes through four steps that the page draws as they happen:
 
   1. **Find** — an embedding model (Qwen3-Embedding 0.6B) ranks the shop's
@@ -1010,8 +1010,9 @@ def check(desk):
     return right_action == n and right_team == n
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+def add_desk_options(parser):
+    """The options of the desk itself — server, models, rules — which
+    `desk_video.py` takes too."""
     parser.add_argument(
         "--url", default="http://localhost:11434", help="EuLLM server URL"
     )
@@ -1033,10 +1034,6 @@ def main():
     parser.add_argument(
         "--chat-model", default="gemma-4-e4b", help="chat model (default: gemma-4-e4b)"
     )
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="address the page is served on"
-    )
-    parser.add_argument("--port", type=int, default=8770)
     parser.add_argument(
         "--threshold",
         type=float,
@@ -1081,6 +1078,26 @@ def main():
     parser.add_argument(
         "--timeout", type=float, default=180.0, help="per-request timeout, seconds"
     )
+    return parser
+
+
+def resolve(args):
+    """`args` with the audit file filled in: EuLLM's own, when the server
+    runs on this machine."""
+    if args.audit_file is None:
+        local = urllib.parse.urlparse(args.url).hostname in LOCAL_HOSTS
+        args.audit_file = default_audit_file() if local else None
+    return args
+
+
+def main():
+    parser = add_desk_options(
+        argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    )
+    parser.add_argument(
+        "--host", default="127.0.0.1", help="address the page is served on"
+    )
+    parser.add_argument("--port", type=int, default=8770)
     parser.add_argument(
         "--no-browser", action="store_true", help="do not open a browser window"
     )
@@ -1089,10 +1106,7 @@ def main():
         action="store_true",
         help="decide the built-in emails without the page and say how many went right",
     )
-    args = parser.parse_args()
-    if args.audit_file is None:
-        local = urllib.parse.urlparse(args.url).hostname in LOCAL_HOSTS
-        args.audit_file = default_audit_file() if local else None
+    args = resolve(parser.parse_args())
 
     desk = Desk(args)
     if args.check:
