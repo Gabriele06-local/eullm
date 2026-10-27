@@ -171,3 +171,13 @@ A failed test blocks the release of that model, not the research.
   is part of the goal, not an option.
 * Teacher-written paraphrases can be wrong: those of rules are checked by
   program against the article (numbers, terms) before they enter training.
+
+## Results
+
+**E0, 2026-10-27** (details in `legal-it-experiments.md`, section 13). Closed
+book, 716 items: published 8B 7% right, r2l 30%, r2q 31%, jpn17 3%; number
+from heading 0-5%, heading from number 2-8%, terms 0-18%, penalties 0-17%;
+360-489 answers wrong and sure. r2l's and r2q's lead is a reflex ("it does
+not exist" said to real and made-up alike: r2q recognises 0% of the real
+articles), not knowledge. The models read; they do not know. That is the
+gap E1 and E2 measure against.
