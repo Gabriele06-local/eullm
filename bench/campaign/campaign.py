@@ -731,15 +731,19 @@ def missing_f32(queue, specs) -> list:
             if not os.path.exists(os.path.join(queue, "f32", f))]
 
 
-def node_hours(points, node_devices=8) -> float:
+def point_seconds(p, cap=None) -> float:
+    """How long a point holds its devices at most: its estimate, or its
+    maximum duration plus loading; no more than `cap`, the time a job gives
+    a point that stretches to what it is given."""
+    seconds = (p["max_duration_s"] + LOAD_ALLOWANCE_S
+               if p["kind"] == "workload" and p["max_duration_s"] else p.get("est_s", 900))
+    return min(seconds, cap) if cap else seconds
+
+
+def node_hours(points, node_devices=8, cap=None) -> float:
     """What the points cost at most: each holds its devices for its estimate,
     or for its maximum duration plus loading."""
-    total = 0.0
-    for p in points:
-        seconds = (p["max_duration_s"] + LOAD_ALLOWANCE_S
-                   if p["kind"] == "workload" and p["max_duration_s"] else p.get("est_s", 900))
-        total += width(p) * seconds / 3600 / node_devices
-    return total
+    return sum(width(p) * point_seconds(p, cap) / 3600 / node_devices for p in points)
 
 
 MAX_WALLTIME_S = 48 * 3600
@@ -756,12 +760,28 @@ def walltime_s(points, nodes=1, node_devices=8) -> int:
     to run."""
     if not points:
         return 0
-    longest = max(p["max_duration_s"] + LOAD_ALLOWANCE_S
-                  if p["kind"] == "workload" and p["max_duration_s"] else p.get("est_s", 900)
-                  for p in points)
+    longest = max(point_seconds(p) for p in points)
     need = node_hours(points, node_devices) * 3600 / max(nodes, 1) + longest
     hours = -(-(need * 1.5 + 1800) // 3600)
     return int(min(max(hours, 1) * 3600, MAX_WALLTIME_S))
+
+
+def chain_plan(points, nodes=1, node_devices=8, max_hours=8) -> tuple:
+    """(seconds per job, jobs per chain) for `nodes` chains sharing `points`
+    in jobs of `max_hours` at most. A round of hundreds of node-hours asked as
+    48-hour jobs waits for days; jobs of a few hours start in the gaps (5
+    hours started within minutes where 9 waited 29 hours, 26-10-2026), one
+    after the other in a chain. A point that stretches to the time it is
+    given counts for a job's time at most; a quarter more jobs than the work
+    needs cover loads and estimates that run over, and one that starts with
+    nothing left ends at once. (0, 0) when there is nothing to run."""
+    whole = walltime_s(points, nodes, node_devices)
+    if not whole or whole <= max_hours * 3600:
+        return whole, (1 if whole else 0)
+    usable = max_hours * 3600 - 1800
+    need = (node_hours(points, node_devices, usable) * 3600 / max(nodes, 1)
+            + max(point_seconds(p, usable) for p in points))
+    return max_hours * 3600, int(-(-(need * 1.25) // usable))
 
 
 def installed_models(listing: str) -> set:
@@ -1148,11 +1168,14 @@ def cmd_walltime(args):
     if points:
         print(f"{known} of {len(points)} points timed from an earlier run of theirs, "
               f"the rest from their estimates", file=sys.stderr)
-    seconds = walltime_s(points, args.nodes, args.gcds)
+    if args.max_hours:
+        seconds, links = chain_plan(points, args.nodes, args.gcds, args.max_hours)
+    else:
+        seconds, links = walltime_s(points, args.nodes, args.gcds), None
     if not seconds:
         print(f"no points waiting for label {label or '(none)'}", file=sys.stderr)
         return 1
-    print(f"{seconds // 3600}:00:00")
+    print(f"{seconds // 3600}:00:00" + (f" {links}" if links else ""))
     return 0
 
 
@@ -1390,6 +1413,9 @@ def main(argv=None):
     p.add_argument("--nodes", type=int, default=1, help="how many jobs share the points")
     p.add_argument("--gcds", type=int, default=8,
                    help="devices a job has: 8 for a standard-g node, fewer on small-g")
+    p.add_argument("--max-hours", type=int,
+                   help="jobs of at most this long, in chains: prints the time and how "
+                        "many jobs each chain needs")
     p = with_queue(sub.add_parser("compare"))
     p.add_argument("--results")
     p.add_argument("--round", action="append",

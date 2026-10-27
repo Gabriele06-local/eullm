@@ -885,3 +885,19 @@ def test_a_job_is_timed_from_how_long_its_points_took_before(tmp_path, capsys):
     out = capsys.readouterr()
     assert out.out.strip() == "1:00:00"
     assert "8 of 8 points timed from an earlier run" in out.err
+
+
+def test_a_long_round_goes_as_chains_of_short_jobs():
+    alone = [dict(normalize({"model": f"m{i}", "exclusive": True}), est_s=3600)
+             for i in range(40)]
+    # 40 node-hours over two chains: 8-hour jobs, four in each.
+    assert campaign.chain_plan(alone, nodes=2, max_hours=8) == (8 * 3600, 4)
+    # Work that fits one short job stays one job, asked for what it needs.
+    assert campaign.chain_plan(alone[:2], max_hours=8) == (5 * 3600, 1)
+    assert campaign.chain_plan([], max_hours=8) == (0, 0)
+    # A soak that stretches to a day counts for a job's time, not the day:
+    # three 8-hour jobs (one for it, the rest margin that ends at once), not nine.
+    soak = dict(normalize({"model": "s", "kind": "workload", "sets": ["gsm8k"],
+                           "exclusive": True, "min_duration_s": 7200,
+                           "max_duration_s": 86400}))
+    assert campaign.chain_plan([soak], max_hours=8) == (8 * 3600, 3)

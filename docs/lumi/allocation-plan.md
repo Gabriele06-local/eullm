@@ -521,6 +521,18 @@ the first token of the 9B and the 35B-A3B came in about 65 ms that way and
 23-28 ms on the scheduler with `--mtp`, a difference of the engine and not
 of the drafts.
 
+27-10-2026, the round on the release 0.7.94 (`r-v0794`, label `v0794`, the
+binary built from the tag): `c01`-`c03`, `c06`-`c11` and `c13`, 835 points,
+about 400 node-hours by the estimates and fewer by what the same
+configurations took on `next21`. Not on four nodes at once: two chains on
+`standard-g` of jobs of at most 8 hours, as many as the work needs
+(`submit_campaign.sh 2`, `campaign.py walltime --max-hours 8`), each job
+asking for the time its share takes by the earlier measurements. At one to
+two nodes it runs about two weeks, the 23-30 node-hours a day the
+allocation's pace asks for. `c03`'s `rccl-*` groups go with it: they were
+labelled `rccl` in the spec for jobs of an RCCL build, and every LUMI build
+has RCCL since 16-10-2026.
+
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
 `standard-g`, about ten minutes each; the two `small-g` copies were
