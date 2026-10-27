@@ -306,7 +306,7 @@ async function refreshStatus() {
       `phishing ≥ ${r.quarantine}            → quarantine, nothing generated\n` +
       `spam ≥ ${r.quarantine}                → spam, nothing generated\n` +
       `health ≥ ${r.threshold}               → a person (GDPR art. 9)\n` +
-      `team = legal                → a person\n` +
+      `P(legal) ≥ ${r.legal}             → a person\n` +
       `P(team) < ${r.min_team}              → a person\n` +
       `otherwise                   → the chat model drafts the reply\n` +
       `urgent ≥ ${r.threshold} or mood ≥ angry  → high priority\n` +

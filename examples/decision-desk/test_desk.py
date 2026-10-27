@@ -206,6 +206,7 @@ def options(url, audit_file=None, **over):
         threshold=0.5,
         quarantine=0.7,
         min_team=0.4,
+        legal=0.3,
         passages=3,
         max_chars=4000,
         max_tokens=320,
@@ -325,6 +326,22 @@ class WhatIsNotDrafted(WithFake):
                 events = self.run_sample(sid)
                 self.assertEqual(stage(events, "rule")["action"], action)
                 self.assertFalse(self.fake.posted("/v1/chat/completions"))
+
+    def test_a_letter_that_may_be_legal_goes_to_a_person_even_when_legal_is_second(
+        self,
+    ):
+        # As the Jev-Style 2B answered the lawyer's notice: shipping 0.49, legal 0.45.
+        answers = fake_answers({"subject": sample("it-legal")["subject"]})
+        teams = {t: 0.0 for t in desk.TEAMS}
+        teams.update(shipping=0.49, legal=0.45, returns=0.06)
+        answers["team"].update(choice="shipping", probabilities=teams)
+        verdict = desk.policy(answers, [], options("http://x"))
+        self.assertEqual((verdict["action"], verdict["team"]), ("person", "legal"))
+        self.assertIn("legal 0.45", verdict["rule"])
+        teams.update(shipping=0.80, legal=0.14)
+        self.assertEqual(
+            desk.policy(answers, [], options("http://x"))["action"], "reply"
+        )
 
     def test_a_team_the_model_is_unsure_of_goes_to_a_person(self):
         answers = fake_answers({"subject": sample("de-billing")["subject"]})

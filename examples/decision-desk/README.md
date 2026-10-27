@@ -75,6 +75,13 @@ French, Spanish, Dutch and English, and the thresholds (`--quarantine`,
 and change the samples, the questions or the thresholds where it fails. The
 rules are in `policy()`, a dozen lines of plain code.
 
+The first run on a real GPU (Jev-Style 2B, 27 October 2026) put 11 of 12
+where they belong, at a median 49 ms a decision. The twelfth was the lawyer's
+notice to deliver a bike: shipping 0.49, legal 0.45, and Gemma drafted a reply
+to a lawyer. Every other email had its team at 0.89 or more, so legal at 0.11
+or less. Hence `--legal` (0.3): from that probability of the legal team a
+person answers, whichever team is first.
+
 ## Make it yours
 
 Everything the demo knows is at the top of `desk.py`: `TEAMS` (the teams and

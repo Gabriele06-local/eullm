@@ -511,6 +511,7 @@ def policy(answers, found, args):
     the priority, the flags, and the rule that decided, in words."""
     team = answers["team"]["choice"]
     p_team = float(answers["team"]["probabilities"][team])
+    p_legal = float(answers["team"]["probabilities"].get("legal", 0.0))
     kind = answers["kind"]["probabilities"]
     urgent = float(answers["urgent"]["noul"]) >= args.threshold
     angry = float(answers["mood"]["score"]) >= 1.5
@@ -527,8 +528,13 @@ def policy(answers, found, args):
         action, rule = "spam", f"spam {kind['spam']:.2f} ≥ {args.quarantine}"
     elif health:
         action, rule = "person", "health data (GDPR art. 9): a person answers"
-    elif team == "legal":
-        action, rule = "person", "legal matters: a person answers"
+    elif team == "legal" or p_legal >= args.legal:
+        # Legal is a second choice the model can hold just under the first
+        # without being wrong: on the Jev-Style 2B the lawyer's notice to
+        # deliver a bike came out shipping 0.49, legal 0.45. A letter that
+        # may be legal is not one to draft a reply to.
+        team = "legal"
+        action, rule = "person", f"legal {p_legal:.2f} ≥ {args.legal}: a person answers"
     elif p_team < args.min_team:
         action, rule = "person", f"unsure of the team: {p_team:.2f} < {args.min_team}"
     else:
@@ -739,6 +745,7 @@ class Desk:
                 "quarantine": self.args.quarantine,
                 "threshold": self.args.threshold,
                 "min_team": self.args.min_team,
+                "legal": self.args.legal,
             },
             "warmup": dict(self.warmup),
             "audit_file": self.args.audit_file
@@ -1047,6 +1054,13 @@ def main():
         type=float,
         default=0.4,
         help="below this probability for the chosen team, a person answers (default 0.4)",
+    )
+    parser.add_argument(
+        "--legal",
+        type=float,
+        default=0.3,
+        help="from this probability of the legal team, a person answers, "
+        "whichever team is first (default 0.3)",
     )
     parser.add_argument(
         "--passages", type=int, default=3, help="passages found per email"
