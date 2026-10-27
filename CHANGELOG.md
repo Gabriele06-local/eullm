@@ -13,6 +13,14 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## 0.7.95 — 2026-10-27
+
+### Added
+- **`eullm import` registers models whose files are already in the models folder.** A GGUF copied in by hand, or a folder of models moved without their `manifest.json`, ran by name but did not appear in `eullm list` or `/api/tags`, so a client such as Open WebUI did not offer it, and the only way to get a manifest was to download the model again. `eullm import` writes the missing manifests of every model in the folder, or `eullm import NAME` of one; a `.gguf` lying directly in the folder is first moved into a directory of its own, and a split model counts as one model. Nothing is downloaded or copied, and models that already have a manifest are left as they are. `eullm list` now also names the loose `.gguf` files it does not list.
+
+### Fixed
+- **`EULLM_MODELS_DIR` and `EULLM_AUDIT_DIR` are read from `.env` too.** They were read only from the environment, although the quick-start guide listed them among the `.env` settings, so a line `EULLM_MODELS_DIR=/data/models` in `.env` was ignored and the models stayed in `~/.eullm/models`, with nothing saying so. The environment still wins over the file. `eullm list` and the server's startup log say where each folder was set.
+
 ## 0.7.94 — 2026-10-27
 
 ### Fixed

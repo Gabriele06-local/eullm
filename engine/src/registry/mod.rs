@@ -508,7 +508,7 @@ impl ShardSet {
 
 /// Decompose `…/Model-Q4_K_XL-00002-of-00004.gguf` into its stem, index and
 /// total. `None` for anything that is not a split shard.
-fn parse_shard(name: &str) -> Option<(&str, u32, u32)> {
+pub(crate) fn parse_shard(name: &str) -> Option<(&str, u32, u32)> {
     let base = name.get(..name.len().checked_sub(5)?)?;
     if !name[name.len() - 5..].eq_ignore_ascii_case(".gguf") {
         return None;

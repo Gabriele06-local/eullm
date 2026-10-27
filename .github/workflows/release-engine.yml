@@ -2559,11 +2559,11 @@ jobs:
 
             LLM inference engine in Rust: one binary, any GGUF model, on CPU or GPU. Continuous batching, quantized KV cache, zero telemetry, and an AI Act-ready audit trail.
 
-            ### This release: `--mtp` drafts on Qwen3.5 and Qwen3.6, up to twice as fast writing
+            ### This release: models in any folder, set in `.env`, and `eullm import`
 
-            **`--mtp` now drafts on models that come with a projector.** unsloth's Qwen3.5 and Qwen3.6 MTP repositories ship a vision projector, which a pull fetches with the weights, and a model with one was loaded on the engine that does not draft: `--mtp` did nothing on them, while the banner said it did. With `--mtp` the projector now gives way (the model takes no images that way, and one log line says so) and the head drafts. On one GCD of LUMI's AMD MI250X, six of those models write 29-49% faster with `--mtp 1` at the default sampling, and 56-106% faster with `--mtp 2` or `3` at temperature 0.
+            **`EULLM_MODELS_DIR` works from `.env`.** It was read only from the environment, although the guide listed it among the `.env` settings, so a line there was ignored and models stayed in `~/.eullm/models`. Now the environment is read first and `.env` second, and `eullm list` and the startup log say which folder is in use and where it was set. The same goes for `EULLM_AUDIT_DIR`.
 
-            **The expert cache comes on by itself only where it gains.** 0.7.93's default is kept to MoE models with 25% to 85% of their experts out of VRAM, on CUDA and ROCm alike; outside that band the usual split, which was faster there, and the log says the share and the choice. `/v1/systemone` also loads a Jev-Style model a request names instead of refusing it.
+            **`eullm import` registers models already in that folder.** GGUFs copied in by hand, or a folder moved without its manifests, ran by name but did not appear in `eullm list` or `/api/tags`. `eullm import` writes the missing manifests of every model in the folder, or `eullm import NAME` of one; a `.gguf` lying loose in the folder gets a directory of its own, and a split model counts as one. Nothing is downloaded or copied.
 
             ### Quick install
 

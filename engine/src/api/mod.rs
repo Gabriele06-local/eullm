@@ -19,7 +19,7 @@
 mod auth;
 mod decision_policy;
 mod decision_traces;
-mod ip_allowlist;
+pub(crate) mod ip_allowlist;
 mod origin;
 #[cfg(test)]
 mod real_model_tests;
@@ -3086,7 +3086,11 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Model store: {}  [source: {source}]", root.display());
     }
     match audit.check_writable() {
-        Ok(()) => tracing::info!("Audit trail: {}", audit.log_path().display()),
+        Ok(()) => tracing::info!(
+            "Audit trail: {}  [source: {}]",
+            audit.log_path().display(),
+            crate::audit::AuditLogger::source()
+        ),
         // Explicitly configured destination that doesn't work → refuse to
         // start. Someone who set EULLM_AUDIT_DIR (or mounted a volume at it)
         // asked for the trail; serving without one silently is the failure
