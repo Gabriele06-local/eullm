@@ -491,6 +491,36 @@ job waiting at any priority. The 9 hours came from the specs' estimates
 `campaign.py walltime` now times each point by the longest an earlier run of
 the same configuration took, the estimate only for one never run.
 
+27-10-2026, `c06` whole on `next27` (jobs 23153303 and 23153304, `small-g`,
+four GCDs each, all 48 points overnight): MTP on the MI250X, the six models
+as pulled, which now load text only with `--mtp` and draft (their VRAM is
+the twins', 6,776 MiB for the 9B at `--mtp 1`). Tokens/s and drafts kept,
+`mtp-graded` (300 gsm8k questions, temperature 0) / `mtp-throughput` (the
+Leonardo prompt at the default sampling, three repeats):
+
+| model | none | `--mtp 1` | `--mtp 2` | `--mtp 3` |
+|---|---|---|---|---|
+| Qwen3.5-9B Q4_K_M | 96.4 / 95.7 | 133 (93%) / 124 (80%) | 150 (87%) / 118 (57%) | 124 (81%) / 92.9 (46%) |
+| Qwen3.5-9B Q8_0 | 80.1 / 78.8 | 105 (93%) / 103 (78%) | 127 (87%) / 111 (64%) | 134 (81%) / 115 (61%) |
+| Qwen3.6-27B Q4_K_M | 37.5 / 36.1 | 55.8 (95%) / 52.4 (80%) | 61.0 (90%) / 53.2 (65%) | 55.3 (85%) / 45.5 (62%) |
+| Qwen3.6-27B Q8_0 | 28.7 / 28.8 | 42.8 (95%) / 43.0 (89%) | 53.2 (90%) / 47.4 (74%) | 59.0 (86%) / 42.4 (49%) |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 91.3 / 91.0 | 123 (94%) / 118 (75%) | 150 (89%) / 133 (71%) | 121 (83%) / 107 (68%) |
+| Qwen3.6-35B-A3B Q8_0 | 96.0 / 96.8 | 131 (94%) / 132 (89%) | 150 (89%) / 131 (67%) | 128 (83%) / 98.0 (51%) |
+
+`--mtp 1` gains everywhere, 29-49% at the default sampling; `--mtp 2` is the
+best at temperature 0 (+56-85%), and the Q8_0 models, dearer per token, take
+a third draft (27B Q8_0 +106%, 9B Q8_0 +67%). At the default sampling fewer
+drafts are kept and `--mtp 2` varies more between repeats (cv 4-18%). The
+`r-next21` reading of `c06`, MTP buying nothing on a GCD, measured no draft
+at all: it is objective (5)'s first result. Accuracy: within one or two
+points of the 300 questions either way, except Qwen3.6-35B-A3B UD-Q4_K_M,
+5-7 questions lower with each of the three settings (0.9467 without,
+0.923-0.93 with); one run each, watched in the next round. Without `--mtp`
+these models still load with their projector, on the sequential engine:
+the first token of the 9B and the 35B-A3B came in about 65 ms that way and
+23-28 ms on the scheduler with `--mtp`, a difference of the engine and not
+of the drafts.
+
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
 `standard-g`, about ten minutes each; the two `small-g` copies were
