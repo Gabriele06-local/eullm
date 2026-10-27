@@ -811,24 +811,42 @@ What it needs:
   and the others its MTP drafter supports. Qwen3.8-Flash-Next (`qwen4exp`)
   has its head in a file of its own: see `--mtp-model` below.
 
-Measured on one GCD of LUMI-G's MI250X (ROCm), 100 GSM8K questions one at a
-time at temperature 0, the models from unsloth's MTP repositories loaded
-text only; tokens per second writing, and the share of drafts kept:
+Measured on one GCD of LUMI-G's MI250X (ROCm), one request at a time, the
+models as a pull of unsloth's MTP repositories stores them; tokens per
+second writing, and in brackets the share of drafts kept. At temperature 0,
+300 GSM8K questions:
 
-| Setting | Qwen3.5-9B Q4_K_M | Qwen3.6-27B Q4_K_M |
-| --- | ---: | ---: |
-| no drafts | 98.9 | 38.3 |
-| `--mtp 1` | 136 (+38%), 92.7% kept | 55.8 (+46%), 94.3% kept |
-| `--mtp 2` | 150 (+52%), 87.9% kept | 63.1 (+65%), 89.4% kept |
-| `--mtp 3` | 125 (+26%), 81.0% kept | 55.5 (+45%), 84.8% kept |
+| Model | no drafts | `--mtp 1` | `--mtp 2` | `--mtp 3` |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-9B Q4_K_M | 96.4 | 133 (93%) | **150** (87%) | 124 (81%) |
+| Qwen3.5-9B Q8_0 | 80.1 | 105 (93%) | 127 (87%) | **134** (81%) |
+| Qwen3.6-27B Q4_K_M | 37.5 | 55.8 (95%) | **61.0** (90%) | 55.3 (85%) |
+| Qwen3.6-27B Q8_0 | 28.7 | 42.8 (95%) | 53.2 (90%) | **59.0** (86%) |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 91.3 | 123 (94%) | **150** (89%) | 121 (83%) |
+| Qwen3.6-35B-A3B Q8_0 | 96.0 | 131 (94%) | **150** (89%) | 128 (83%) |
 
-`--mtp 2` is the best on both, as on the RTX 5070 Ti below. The answers
-graded the same to within two questions of the hundred either way: a token
-checked among several drafts is computed along another path than a token
-alone, so where greedy decoding is near a tie the pick can turn. The head
-has been started after the prompt is read since 0.7.93, not before it: the
-same models on the engine before that change kept the same share of drafts
-to 0.3 points at every setting, at tokens/s within 2%.
+At the engine's default sampling, one prompt written three times:
+
+| Model | no drafts | `--mtp 1` | `--mtp 2` | `--mtp 3` |
+| --- | ---: | ---: | ---: | ---: |
+| Qwen3.5-9B Q4_K_M | 95.7 | **124** (80%) | 118 (57%) | 92.9 (46%) |
+| Qwen3.5-9B Q8_0 | 78.8 | 103 (78%) | 111 (64%) | **115** (61%) |
+| Qwen3.6-27B Q4_K_M | 36.1 | 52.4 (80%) | **53.2** (65%) | 45.5 (62%) |
+| Qwen3.6-27B Q8_0 | 28.8 | 43.0 (89%) | **47.4** (74%) | 42.4 (49%) |
+| Qwen3.6-35B-A3B UD-Q4_K_M | 91.0 | 118 (75%) | **133** (71%) | 107 (68%) |
+| Qwen3.6-35B-A3B Q8_0 | 96.8 | **132** (89%) | 131 (67%) | 98.0 (51%) |
+
+`--mtp 1` gains on every model at every temperature, 29-49% at the default
+sampling. `--mtp 2` is the best at temperature 0, by 56-85%, and as often as
+not at the default sampling, where fewer drafts are kept and the speed
+varies more from one writing to the next. A model that costs more per token
+(Q8_0) can take a third draft. The answers graded the same to within one or
+two points of the 300 questions either way: a token checked among several
+drafts is computed along another path than a token alone, so where greedy
+decoding is near a tie the pick can turn. The head has been started after
+the prompt is read since 0.7.93, not before it: on the engine before that
+change the same models kept the same share of drafts to 0.3 points at every
+setting.
 
 ### A head in a file of its own (`--mtp-model FILE`)
 
