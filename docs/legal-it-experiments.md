@@ -696,3 +696,66 @@ jpn18 6. The 4B's off-topic "wins" were the coin.
 * The large trap test built on JUPITER (`make_trap_test.py`) does not
   separate these models: it is drawn by the same generator they trained on,
   and its judge-free check gives 99.5% to models trained on it.
+
+## 13. 2026-10-27: the held-out exam, what the models know with no text, and the outside platform
+
+**The held-out exam** (233 items, asked once; totals only, as its rules
+want):
+
+| Model | with note | without | judge-free (deadlines, absent articles) |
+|---|---|---|---|
+| published 8B | 168 | 169 | 121 / 120 |
+| **r2l** | **173** (+5, p=0.44) | **174** (+5, p=0.41) | 114 / 115 |
+| r2q | 173 (+5) | 167 (−2) | 113 / 112 |
+| jpn14 | 176 | 174 | 120 / 121 |
+| **jpn17** | **178** (+2) | **178** (+4) | 121 / 122 |
+
+r2l is the 8B to build on and jpn17 the 4B; the statute gain of the GRPO
+rounds over the published 8B is small on the held-out exam (+5, not
+significant), their real gain stays the practical exam (60 → 87). The 4B
+equals the 8B on statutes. The judge-free column goes the other way from
+the judge on deadlines (r2l 4:11 against the published model, the judge
+6:3): the longer answers name more deadlines than the check allows, to be
+read on devbig, where answers may be read. r2r and jpn20 (the questions by
+concept name, only 308 of them) moved nothing, and the GRPO rounds on
+Leonardo end here.
+
+**Closed book** (`make_closed_book.py`, 716 items, scored by program):
+
+| Model | right | sure-wrong | real article recognised | made-up denied | number ← heading | heading ← number | terms | penalties |
+|---|---|---|---|---|---|---|---|---|
+| jpn14 | 4% | 430 | 10% | 0% | 0% | 3% | 0% | 0% |
+| jpn17 | 3% | 489 | 8% | 0% | 0% | 2% | 0% | 0% |
+| published 8B | 7% | 373 | 4% | 7% | 5% | 8% | 18% | 8% |
+| r2l | 30% | 360 | 7% | 59% | 3% | 5% | 13% | 17% |
+| r2q | 31% | 401 | 0% | 91% | 2% | 7% | 9% | 17% |
+
+With no text the models know almost nothing of the law, and say otherwise
+with confidence. r2l's and r2q's 30% is mostly a reflex the premise rounds
+taught: r2q denies 91% of the made-up articles and recognises none of the
+real ones. Procedibility (r2l 88%) is inflated because the articles that
+state it are mostly "a querela"; the scorer now prints that baseline and
+how often a real article is denied. This is the starting point of the
+legal-memory plan (`docs/research/legal-memory-plan.md`, E0).
+
+**Five questions put to the outside platform and to our two models**
+(same retrieval as the product, no note):
+
+| Question | outside platform | r2l | jpn17 |
+|---|---|---|---|
+| art. 640-septies c.p. | corrected, answered on 640-ter | corrected, stopped | "may not exist" |
+| art. 599-quater c.p.p. | corrected, answered on 599-bis | corrected, stopped | "not found" |
+| art. 625-bis for an error of law | (not asked) | right | right |
+| abuse of office, fact of 2024 | abolitio criminis, acquittal | "repealed", no consequence drawn | same |
+| appeal term across August | 4 September (suspension) | confirms 4 August | "may not exist" |
+
+The platform answered all four, each in four to seven minutes and about
+one dollar, through some 30 calls to frontier models over a complete
+archive. Two gaps of ours can be taught: after correcting a premise our
+models stop ("se mi indichi l'argomento…"), which our own gold answers
+taught; and they lack the law outside their texts (art. 2 c.p.'s
+consequence, the August suspension of l. 742/1969, not in the index).
+The first is now a premise kind of its own (`premessa_numero`: an offence
+named with a number that does not exist; the answer corrects it, names the
+article that provides for it and answers from it, and the reward pays only
+all three); the second is the memory plan and the wider index.

@@ -64,7 +64,7 @@ DEADLINE_TYPES = frozenset({"termine", "termine_argomento"})
 ABSTAIN_TYPES = frozenset({"inesistente", "assente", "premessa_inesistente"})
 PREMISE_TYPES = frozenset({"premessa_termine", "premessa_inesistente", "premessa_abrogato",
                            "premessa_pena", "premessa_procedibilita", "premessa_vera",
-                           "premessa_sentenza", "premessa_sentenza_vera"})
+                           "premessa_sentenza", "premessa_sentenza_vera", "premessa_numero"})
 # Kinds no program can check: what an article provides is graded by a judge
 # model (`eullm_forge.rl.judge_reward`), and `answer_reward` leaves them to it.
 # "pratica": the practical questions of eval.practical, as GRPO prompts
@@ -377,6 +377,17 @@ def score_answer(answer: str, tipo: str, keywords: list[str] | None = None) -> f
         # A keyword that is not a deadline in this shape: fall back to the
         # coverage test rather than invent a number to check it against.
         return 1.0 if keyword_coverage(answer, keywords) == 1.0 else 0.0
+    if tipo == "premessa_numero":
+        # Deny the number asked, name the article that provides for the
+        # offence, give its maximum: correct, point, answer.
+        if not keywords or not denies_existence(answer):
+            return 0.0
+        number = re.escape(keywords[0]).replace(r"\-", r"[\s-]?")
+        if not re.search(rf"\bart(?:icolo|\.)?\s*{number}\b", answer, re.IGNORECASE):
+            return 0.0
+        wanted = [_keyword_deadline(kw) for kw in keywords[1:]]
+        named = mentioned_deadlines(answer)
+        return 1.0 if wanted and all(w in named for w in wanted) and len(named) <= 4 else 0.0
     if tipo == "premessa_inesistente":
         return 1.0 if (abstains(answer) and denies_existence(answer)
                        and not mentioned_deadlines(answer)) else 0.0
