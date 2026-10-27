@@ -83,6 +83,25 @@ JUPITER, named by its Slurm job id.
   six prompts a step, 400 steps over the whole prompt set in another
   order (2533859-2533863, 2534077-2534087).
 
+**27-10-2026**
+* Second rounds. g9r-r2 is the candidate: LexIA 14, held-out exam 200,
+  practical exam 81 + 16, trap test 384, rewritten 973. g9-r2 has
+  12 / 200 / 77 + 20 / 384 / 964. Paired against dqp-d-q9b:
+  - practical exam 21:7, p=0.013 strict, p=0.093 lenient;
+  - held-out exam 14:3, p=0.013 strict, p=0.23 lenient;
+  - LexIA 5:2;
+  - rewritten trap test 16:8.
+  The gain is significant strict and not lenient, on every set alike.
+* The answers behind the practical exam, five each way. The wins are real:
+  the second article the answer needs, cited and applied, where the start
+  model cited one and was graded partial or wrong. Three of the five
+  losses cite the wrong article, the neighbouring number or the same
+  number of another code among the retrieved texts. The share of such
+  answers before and after GRPO is measured next.
+* The 4B's first round, g4-r1, from dqp-d-q4b with the second rounds'
+  settings (2541382-2541387). The vertical of g9-r2 and g9r-r2, GGUF
+  Q4_K_M through EULLM Engine (2541390, judge 2541391).
+
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
   distillation checkpoints given as "base+adapter" as missing models, which
