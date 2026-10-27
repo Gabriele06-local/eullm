@@ -18,7 +18,7 @@ export EULLM_BIN=$PWD/eullm-rocm          # the gfx90a release binary
 
 tmux new -s setup
 bash tools/lumi/campaign_setup.sh         # login node: models, F32 models, sets, plan
-bash tools/lumi/submit_campaign.sh 2 3    # two nodes, three jobs each
+bash tools/lumi/submit_campaign.sh 2      # two chains of jobs of up to 8 hours
 bash tools/lumi/status.sh                 # spend vs calendar, jobs, queue
 ```
 
@@ -32,8 +32,11 @@ A job takes points from the queue for as long as it runs, with the binary
 it was submitted with. It asks Slurm for the time the waiting points of its
 label need, spread over the chains (`campaign.py walltime`), up to 48 hours:
 a job asking 48 hours for a few hours of work waits on priority, one asking
-a few starts in the gaps the scheduler leaves. `--time` given to
-`submit_campaign.sh` overrides it. To queue a round for a new build
+a few starts in the gaps the scheduler leaves. Each point counts for as
+long as the same configuration took the last time it ran, its estimate if
+it never did. A round of hundreds of node-hours goes as chains of jobs of
+at most `MAX_JOB_HOURS` (8), as many as it needs (`submit_campaign.sh N
+auto`, the default). `--time` given to `submit_campaign.sh` overrides it. To queue a round for a new build
 while jobs of the old one are still running, give the round an engine
 label and submit the new build's jobs with the same label:
 

@@ -3,8 +3,14 @@
 # starting when the previous one in its chain ends (afterany), all of them
 # draining the same queue.
 #
-#   bash tools/lumi/submit_campaign.sh [nodes=2] [jobs-per-chain=3] [sbatch args...]
+#   bash tools/lumi/submit_campaign.sh [nodes=2] [jobs-per-chain=auto] [sbatch args...]
 #   TOP_UP=1 bash tools/lumi/submit_campaign.sh 4 2
+#
+# jobs-per-chain `auto`: as many jobs of at most MAX_JOB_HOURS (8) as the
+# label's waiting points need, spread over the chains (`campaign.py walltime
+# --max-hours`). A round of hundreds of node-hours goes as chains of short
+# jobs, each starting in a gap, rather than jobs of two days that wait for
+# one (26-10-2026: 5 hours started within minutes where 9 waited 29 hours).
 #
 # TOP_UP=1 makes N the number of chains to have, not to add: the chains
 # already in the queue (a campaign job running, or waiting for anything but
@@ -20,11 +26,9 @@
 # sbatch args overrides it; nothing is submitted when no point waits for the
 # label.
 #
-# Two nodes in parallel is the default because one is not enough any more:
-# with the first month of the window gone unused, spending the rest by
-# 12-03-2027 takes about 1.2 nodes around the clock, and queue waits come off
-# that. Each chain of three 48-hour jobs covers six days; re-run this (or
-# status.sh says so) before the chains run out.
+# Two chains is the default: the allocation's pace to 09-03-2027 is about a
+# node around the clock (`nodi.sh`), and queue waits between a chain's jobs
+# come off that.
 #
 # Before the first submission, on a login node:
 #   bash tools/lumi/campaign_setup.sh      # models, workload sets, the queue
@@ -32,7 +36,8 @@
 set -euo pipefail
 
 NODES="${1:-2}"
-LINKS="${2:-3}"
+LINKS="${2:-auto}"
+MAX_JOB_HOURS="${MAX_JOB_HOURS:-8}"
 shift $(( $# > 2 ? 2 : $# ))
 
 # shellcheck source-path=SCRIPTDIR source=campaign_env.sh
@@ -61,11 +66,14 @@ for a in "$@"; do
 done
 TIME=()
 case " $* " in
-    *" --time"* | *" -t "*) ;;
+    *" --time"* | *" -t "*)
+        [ "$LINKS" = auto ] && LINKS=1 ;;
     *)
-        WALL=$($CAMPAIGN walltime --queue "$CAMPAIGN_DIR" --nodes "$NODES" --gcds "$GCDS" \
-            --engine-label "${EULLM_ENGINE_LABEL:-}") || { echo "nothing submitted"; exit 0; }
-        echo "time per job: $WALL (campaign.py walltime; --time overrides)"
+        read -r WALL NEED < <($CAMPAIGN walltime --queue "$CAMPAIGN_DIR" --nodes "$NODES" \
+            --gcds "$GCDS" --max-hours "$MAX_JOB_HOURS" --engine-label "${EULLM_ENGINE_LABEL:-}") ||
+            { echo "nothing submitted"; exit 0; }
+        [ "$LINKS" = auto ] && LINKS="$NEED"
+        echo "time per job: $WALL, jobs per chain: $LINKS (campaign.py walltime; --time overrides)"
         TIME=(--time="$WALL")
         ;;
 esac
