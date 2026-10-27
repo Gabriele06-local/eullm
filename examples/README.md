@@ -27,14 +27,15 @@ curl -fsSL https://raw.githubusercontent.com/eullm/eullm/main/examples/decision-
 ```
 
 One command installs EuLLM if it is missing, pulls three models and opens a
-page where customer emails in five languages go through four steps, drawn as
+page where customer emails in six languages go through four steps, drawn as
 they happen: Qwen3-Embedding finds the shop's policies closest to the email,
 the Jev-Style 2B answers five questions about it as probabilities, plain code
 decides what happens, and Gemma 4 E4B drafts the reply in the customer's
 language, only when the rule says so: phishing, spam, health data and legal
 letters cost no generation at all. The audit lines of each email are shown
 below it. `desk.py --check` measures the decisions on the built-in emails
-first. See [`decision-desk/README.md`](decision-desk/README.md).
+first, and `desk_video.py` turns a run into videos to post (X, Instagram,
+a README). See [`decision-desk/README.md`](decision-desk/README.md).
 
 ### `decision-snake/` — a model plays Snake
 

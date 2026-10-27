@@ -143,6 +143,139 @@
   @keyframes blink { 50% { opacity: 0; } }
   @keyframes glow { 50% { box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.25), 0 0 18px rgba(148, 163, 184, 0.12); } }
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  /* ?video=wide (1920x1080) and ?video=tall (1080x1920): the page as
+     desk_video.py draws it, frame by frame, from a recorded run. Nothing
+     moves on its own and nothing is clicked: every panel has its place on
+     one screen, and the type is the size a video is watched at. */
+  .v-only { display: none; }
+  body.video { overflow: hidden; }
+  body.video *, body.video *::after { animation: none !important; transition: none !important; }
+  body.video .v-only { display: revert; }
+  body.video .models, body.video aside .row, body.video .compose, body.video details,
+  body.video footer, body.video .error, body.video #inbox-count, body.video #audit-file { display: none !important; }
+  body.video main, body.video aside, body.video section:not(.stats), body.video .steps { display: contents; }
+  body.video .panel + .panel { margin-top: 0; }
+  body.video .panel, body.video .step { overflow: hidden; min-height: 0; }
+  body.video .brand { color: var(--muted); font-weight: 600; }
+  body.video .draft.writing::after { content: "▍"; }
+  /* The draft keeps its newest lines in view while it is written. */
+  body.video .step[data-s=write] { display: flex; flex-direction: column; }
+  body.video #write { flex: 1; min-height: 0; display: flex; flex-direction: column; justify-content: flex-end; overflow: hidden; }
+  body.video #write > * { flex: none; }
+  body.video #write:has(.saved) { justify-content: flex-start; }
+
+  body.video.wide { font-size: 19px; }
+  body.video.wide .wrap {
+    max-width: none; width: 1920px; height: 1080px; padding: 28px 40px;
+    display: grid; gap: 14px 18px;
+    grid-template-columns: 420px minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto minmax(0, 1fr) auto auto;
+    grid-template-areas:
+      "head  head  head"
+      "stats stats stats"
+      "inbox email decide"
+      "inbox find  decide"
+      "inbox rule  write"
+      "inbox audit write";
+  }
+  body.video.wide header { grid-area: head; }
+  body.video.wide header > div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 22px; }
+  body.video.wide h1 { font-size: 36px; }
+  body.video.wide .sub { margin: 0; font-size: 20px; }
+  body.video.wide .local { font-size: 17px; padding: 5px 16px; }
+  body.video.wide .head-right { display: flex; gap: 18px; align-items: center; }
+  body.video.wide .brand { font-size: 17px; }
+  body.video.wide .stats { grid-area: stats; margin: 0; gap: 14px; }
+  body.video.wide .stat { padding: 8px 12px; }
+  body.video.wide .stat .v { font-size: 40px; }
+  body.video.wide .stat .k { font-size: 14px; }
+  body.video.wide aside > .panel { grid-area: inbox; }
+  body.video.wide #email-panel { grid-area: email; }
+  body.video.wide .step[data-s=find] { grid-area: find; }
+  body.video.wide .step[data-s=decide] { grid-area: decide; }
+  body.video.wide .step[data-s=rule] { grid-area: rule; }
+  body.video.wide .step[data-s=write] { grid-area: write; }
+  body.video.wide .audit { grid-area: audit; }
+  body.video.wide h2 { font-size: 15px; margin-bottom: 8px; }
+  body.video.wide .inbox { gap: 5px; margin-top: 0; }
+  body.video.wide .mail { padding: 5px 10px; grid-template-columns: 38px minmax(0, 1fr) auto; }
+  body.video.wide .mail .subj { font-size: 17px; }
+  body.video.wide .mail .who { font-size: 14px; }
+  body.video.wide .mail .lang { font-size: 13px; }
+  body.video.wide .badge { font-size: 13px; }
+  body.video.wide .email-head { font-size: 17px; }
+  body.video.wide .email-body { font-size: 18px; margin-top: 8px; padding: 8px 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  body.video.wide .step { padding: 12px 16px; }
+  body.video.wide .step h3 { font-size: 16px; margin-bottom: 6px; }
+  body.video.wide .step h3 .t { font-size: 15px; }
+  body.video.wide .passage { padding: 4px 0; }
+  body.video.wide .passage .top { font-size: 16px; grid-template-columns: 28px minmax(0, 1fr) 50px; }
+  body.video.wide .passage .txt { font-size: 14px; margin-left: 36px; -webkit-line-clamp: 1; }
+  body.video.wide .num { font-size: 15px; }
+  body.video.wide .q { padding: 3px 0; }
+  body.video.wide .q .label { font-size: 14px; margin-bottom: 1px; }
+  body.video.wide .opt { font-size: 16px; grid-template-columns: 150px minmax(0, 1fr) 48px; line-height: 1.35; }
+  body.video.wide .bar { height: 9px; }
+  body.video.wide .verdict .big { font-size: 34px; }
+  body.video.wide .why { font-size: 18px; }
+  body.video.wide .chip { font-size: 15px; }
+  body.video.wide .draft { font-size: 17px; line-height: 1.45; }
+  body.video.wide .saved { font-size: 19px; }
+  body.video.wide .saved b { font-size: 34px; }
+  body.video.wide .meta { font-size: 14px; }
+  body.video.wide .audit pre { font-size: 12.5px; padding: 8px 10px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 4; overflow: hidden; }
+
+  /* A Reel: Instagram lays its own text and buttons over the top ~200 px,
+     the bottom ~380 px and the lower right edge. The email and its four
+     steps stay between them; the inbox and the audit trail are left out. */
+  body.video.tall { font-size: 26px; }
+  body.video.tall .wrap {
+    max-width: none; width: 1080px; height: 1920px; padding: 190px 40px 380px;
+    display: grid; gap: 14px; grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto auto auto auto auto minmax(0, 1fr);
+    grid-template-areas: "head" "stats" "email" "find" "decide" "rule" "write";
+  }
+  body.video.tall header { grid-area: head; display: block; }
+  body.video.tall h1 { font-size: 44px; }
+  body.video.tall .sub { font-size: 24px; margin: 4px 0 8px; }
+  body.video.tall .head-right { display: flex; gap: 16px; align-items: center; }
+  body.video.tall .local { font-size: 20px; }
+  body.video.tall .brand { font-size: 20px; }
+  body.video.tall .stats { grid-area: stats; margin: 0; gap: 10px; }
+  body.video.tall .stat { padding: 8px 4px; }
+  body.video.tall .stat .v { font-size: 36px; }
+  body.video.tall .stat .k { font-size: 13px; letter-spacing: 0.2px; }
+  body.video.tall aside, body.video.tall .audit { display: none !important; }
+  body.video.tall #email-panel { grid-area: email; }
+  body.video.tall .step[data-s=find] { grid-area: find; }
+  body.video.tall .step[data-s=decide] { grid-area: decide; }
+  body.video.tall .step[data-s=rule] { grid-area: rule; margin-right: 90px; }
+  body.video.tall .step[data-s=write] { grid-area: write; margin-right: 90px; }
+  body.video.tall .step { min-height: 0; padding: 12px 18px; }
+  body.video.tall h2 { font-size: 18px; margin-bottom: 6px; }
+  body.video.tall .step h3 { font-size: 20px; margin-bottom: 6px; }
+  body.video.tall .step h3 .t { font-size: 18px; }
+  body.video.tall .email-head { font-size: 22px; }
+  body.video.tall .email-body { font-size: 23px; margin-top: 6px; padding: 8px 12px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  body.video.tall .passage { padding: 2px 0; border: none; }
+  body.video.tall .passage .top { font-size: 21px; grid-template-columns: 36px minmax(0, 1fr) 60px; }
+  body.video.tall .passage .txt, body.video.tall .passage .bar { display: none; }
+  body.video.tall .q { display: grid; grid-template-columns: 40% minmax(0, 1fr); align-items: center; gap: 12px; padding: 4px 0; }
+  body.video.tall .q + .q { border: none; }
+  body.video.tall .q .label { font-size: 19px; margin: 0; }
+  body.video.tall .opt:not(.chosen) { display: none; }
+  body.video.tall .opt { font-size: 21px; grid-template-columns: 170px minmax(0, 1fr) 62px; }
+  body.video.tall .bar { height: 12px; }
+  body.video.tall .verdict .big { font-size: 38px; }
+  body.video.tall .why { font-size: 21px; margin-top: 4px; }
+  body.video.tall .chips { margin-top: 6px; }
+  body.video.tall .chip { font-size: 18px; }
+  body.video.tall .num { font-size: 19px; }
+  body.video.tall .draft { font-size: 22px; line-height: 1.4; }
+  body.video.tall .saved { font-size: 24px; }
+  body.video.tall .saved b { font-size: 40px; }
+  body.video.tall .meta { font-size: 18px; }
 </style>
 </head>
 <body>
@@ -152,7 +285,10 @@
       <h1>EuLLM <span>Decision Desk</span></h1>
       <p class="sub" id="tagline">Three local models on one server: one finds, one decides, one writes — and writes only when it should.</p>
     </div>
-    <span class="local">● all local · nothing leaves this machine</span>
+    <div class="head-right">
+      <span class="brand v-only">github.com/eullm/eullm</span>
+      <span class="local" id="local">● all local · nothing leaves this machine</span>
+    </div>
   </header>
 
   <section class="models" aria-label="Models">
@@ -190,7 +326,7 @@
 
     <section>
       <div class="panel" id="email-panel">
-        <h2><span>The email</span><span id="total-ms"></span></h2>
+        <h2><span>The email<span class="v-only" id="v-progress"></span></span><span id="total-ms"></span></h2>
         <div id="email"><p class="empty">Pick an email from the inbox, or press “Run the inbox”.</p></div>
         <div class="error" id="error"></div>
       </div>
@@ -227,6 +363,9 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
+// "wide" or "tall" when desk_video.py draws the page; null in a browser.
+const VIDEO = ["wide", "tall"].includes(new URLSearchParams(location.search).get("video"))
+  ? new URLSearchParams(location.search).get("video") : null;
 
 // A DOM element from a tag, attributes and children; text is always text.
 function h(tag, attrs, ...children) {
@@ -257,7 +396,10 @@ let controller = null;
 
 function bar(p, cls) {
   const i = h("i");
-  requestAnimationFrame(() => { i.style.width = pct(Math.max(0, Math.min(1, p))); });
+  const width = pct(Math.max(0, Math.min(1, p)));
+  // A video frame is drawn at once; in a browser the bar grows into place.
+  if (VIDEO) i.style.width = width;
+  else requestAnimationFrame(() => { i.style.width = width; });
   return h("div", { class: "bar" + (cls ? " " + cls : "") }, i);
 }
 
@@ -296,6 +438,12 @@ async function refreshStatus() {
   } catch (e) {
     status = { error: "the desk is not running", models: { embedding: {}, decision: {}, chat: {} }, warmup: {} };
   }
+  showStatus();
+  const ready = status.models && status.models.decision.loaded && status.models.chat.loaded && status.models.embedding.loaded;
+  setTimeout(refreshStatus, ready ? 15000 : 2000);
+}
+
+function showStatus() {
   for (const key of ["embedding", "decision", "chat"]) modelState(key, status.models[key] || {}, status.warmup || {});
   $("server").textContent = status.error ? status.error : `EuLLM ${status.server} at ${status.url}`;
   if (status.samples && !samples.length) {
@@ -314,8 +462,6 @@ async function refreshStatus() {
     drawInbox();
   }
   $("audit-file").textContent = status.audit_file || "";
-  const ready = status.models && status.models.decision.loaded && status.models.chat.loaded && status.models.embedding.loaded;
-  setTimeout(refreshStatus, ready ? 15000 : 2000);
 }
 
 function drawInbox(current) {
@@ -428,13 +574,24 @@ const handlers = {
 let currentIndex = null;
 const current = () => samples[currentIndex];
 
-async function handle(index) {
+function begin(index) {
   running = true;
   currentIndex = index;
-  const s = samples[index];
-  s.busy = true;
+  samples[index].busy = true;
   drawInbox(index);
   resetSteps();
+  if (VIDEO) $("v-progress").textContent = ` · ${index + 1} of ${samples.length}`;
+}
+
+function finish(index) {
+  samples[index].busy = false;
+  running = false;
+  drawInbox(index);
+}
+
+async function handle(index) {
+  begin(index);
+  const s = samples[index];
   const request = s.custom ? { email: { from: s.from, subject: s.subject, body: s.body } } : { sample: s.id };
   controller = new AbortController();
   let failed = false;
@@ -461,9 +618,7 @@ async function handle(index) {
   } catch (e) {
     if (e.name !== "AbortError") { handlers.error({ message: String(e.message || e) }); failed = true; }
   } finally {
-    s.busy = false;
-    running = false;
-    drawInbox(index);
+    finish(index);
   }
   return !failed;
 }
@@ -502,7 +657,36 @@ $("compose").addEventListener("submit", (ev) => {
   handle(0);
 });
 
-refreshStatus();
+// What desk_video.py drives: a recorded run, played on the video's clock.
+// `load` takes the status the desk had and every step of every email, each
+// with the second of the video it happens at; `at(t)` applies every step up
+// to second `t` and says whether anything changed on screen.
+window.deskReplay = {
+  steps: [],
+  next: 0,
+  load(run) {
+    status = run.status;
+    showStatus();
+    if (run.caption) $("tagline").textContent = run.caption;
+    if (run.hardware) $("local").textContent = `● all local · ${run.hardware}`;
+    this.steps = run.timeline;
+    this.next = 0;
+  },
+  at(t) {
+    let changed = false;
+    while (this.next < this.steps.length && this.steps[this.next].t <= t) {
+      const { index, event } = this.steps[this.next++];
+      if (event.stage === "start") begin(index);
+      (handlers[event.stage] || (() => {}))(event);
+      if (event.stage === "done") finish(index);
+      changed = true;
+    }
+    return changed;
+  },
+};
+
+if (VIDEO) document.body.classList.add("video", VIDEO);
+else refreshStatus();
 </script>
 </body>
 </html>
