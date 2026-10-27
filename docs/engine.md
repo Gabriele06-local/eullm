@@ -1138,9 +1138,11 @@ eullm serve --decision-model qwen3-1.7b --decision-ctx 16384
 ```
 
 The `model` field may name any model the server can load (it then loads into
-the decision slot). Left out, or set to a System One model name such as
-`jev-latest`, it means the decision model already loaded — so a Jev client
-works unchanged. With no decision model loaded the request is refused with a
+the decision slot). Left out, or set to a System One model name — `jev`,
+`jev-latest`, or a release such as `jev-1.13.0` — it means the decision model
+already loaded, so a Jev client works unchanged. A Jev-Style model pulled into
+the store, such as `jev-style-2b-decision-v3-gguf-q4_k_m`, is a model like any
+other, and is loaded when a request names it. With no decision model loaded the request is refused with a
 400 `model_not_loaded` saying so.
 
 Every decision is written to the audit trail with `request_type:
