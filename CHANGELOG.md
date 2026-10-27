@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.7.94 — 2026-10-27
 
 ### Fixed
 - **`/v1/systemone` loads a Jev-Style model a request names.** Every model name starting with "jev" was taken for a System One client's alias (`jev-latest`, `jev-1.13.0`), which means the decision model already loaded, so a request naming `jev-style-2b-decision-v3-gguf-q4_k_m` to a server started without `--decision-model` was refused with `model_not_loaded` instead of loading it. Only `jev`, `jev-latest` and `jev-` followed by a release number are the alias now.
