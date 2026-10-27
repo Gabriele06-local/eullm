@@ -782,6 +782,24 @@ enum Commands {
     },
     /// List locally available models
     List,
+    /// Register models whose files are already in the model store
+    ///
+    /// Writes the missing manifest.json of each model in the store
+    /// (EULLM_MODELS_DIR, or ~/.eullm/models) that has none, so it shows in
+    /// `eullm list` and `/api/tags`: GGUFs copied in by hand, or a store moved
+    /// without its manifests. A .gguf directly in the store folder is moved
+    /// into a directory of its own first; nothing is copied or downloaded.
+    /// Models that already have a manifest are left as they are.
+    ///
+    /// Examples:
+    ///   eullm import                  (every model in the store)
+    ///   eullm import qwen3-8b         (the directory qwen3-8b/)
+    ///   eullm import Model-Q4_K_M.gguf  (a file in the store folder)
+    Import {
+        /// A model directory or .gguf file in the store, by name or path;
+        /// the store folder itself, or nothing, for all of them
+        target: Option<String>,
+    },
     /// Show model information
     Show {
         /// Model name
@@ -1246,6 +1264,7 @@ async fn main() {
             .await;
         }
         Commands::List => cmd_list(&store),
+        Commands::Import { target } => cmd_import(&store, target.as_deref()),
         Commands::Show { model } => cmd_show(&store, &model),
         Commands::Rm { model, force } => cmd_rm(&store, &model, force),
         Commands::Serve { ui, opts } => {
@@ -1612,23 +1631,7 @@ fn url_to_model_id(url: &str) -> (String, String) {
         .to_string();
 
     let stem = filename.strip_suffix(".gguf").unwrap_or(&filename);
-    let id: String = stem
-        .to_lowercase()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    let id = id.trim_matches('-').to_string();
-    let id = if id.is_empty() {
-        "model".to_string()
-    } else {
-        id
-    };
+    let id = models::store::model_id_for(stem);
 
     // Ensure the stored filename ends in .gguf so gguf_path() finds it.
     let filename = if filename.to_lowercase().ends_with(".gguf") {
@@ -2052,9 +2055,116 @@ fn print_unlisted(store: &ModelStore) {
         println!("  {name:<24} {reason}");
     }
     println!(
-        "\n  Repair with `eullm pull <name>` (re-downloads and rewrites the manifest),\n           or run the file directly: `eullm run <path-to-the-.gguf>`."
+        "\n  Register them with `eullm import` (writes the manifest, downloads nothing),\n           or `eullm pull <name>` (re-downloads and rewrites the manifest)."
     );
 }
+/// Report `.gguf` files sitting directly in the store folder: no command lists
+/// them as models until `eullm import` gives each a directory.
+fn print_loose(store: &ModelStore) {
+    let loose = store.loose_ggufs();
+    if loose.is_empty() {
+        return;
+    }
+    println!("\nIn the store folder but not registered as models:");
+    for name in &loose {
+        println!("  {name}");
+    }
+    println!("\n  Register them with `eullm import`.");
+}
+
+/// `eullm import`: write the manifests of models already in the store.
+///
+/// `target` may be a path, as long as it is the store folder or something
+/// directly in it: the store reads only its own folder, so a model elsewhere
+/// would be registered and then not found. That case is refused with what to
+/// do instead, rather than copying gigabytes the user did not ask to copy.
+fn cmd_import(store: &ModelStore, target: Option<&str>) {
+    use models::store::Imported;
+    use std::path::Path;
+    let (root, source) = store.root_with_source();
+    println!("Model store: {} [{source}]\n", root.display());
+
+    let name = match target {
+        None => None,
+        // A name in the store first, so a folder of the same name in the
+        // working directory does not stand in for it.
+        Some(t) if models::store::is_safe_filename(t) && root.join(t).exists() => {
+            Some(t.to_string())
+        }
+        Some(t) if Path::new(t).exists() => {
+            let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            let path = canonical(Path::new(t));
+            let root = canonical(root);
+            if path == root {
+                None
+            } else if path.parent() == Some(root.as_path())
+                && let Some(file) = path.file_name().and_then(|n| n.to_str())
+            {
+                Some(file.to_string())
+            } else {
+                eprintln!(
+                    "Error: {t} is not in the model store ({}).\n  \
+                     Point EULLM_MODELS_DIR at the folder that holds it (in the environment \
+                     or in .env), or move it into the store, then run `eullm import` again.",
+                    root.display()
+                );
+                std::process::exit(1);
+            }
+        }
+        Some(t) => Some(t.to_string()),
+    };
+
+    let results = store.import(name.as_deref());
+    if results.is_empty() {
+        println!("Nothing to import: no model files in the store.");
+        return;
+    }
+    let mut registered = Vec::new();
+    let mut skipped = 0;
+    for r in &results {
+        match r {
+            Imported::Registered {
+                id,
+                gguf_file,
+                mmproj_file,
+                moved,
+            } => {
+                let projector = mmproj_file
+                    .as_deref()
+                    .map(|m| format!(" + {m}"))
+                    .unwrap_or_default();
+                let place = if *moved {
+                    format!("{gguf_file} → {id}/")
+                } else {
+                    format!("{id}/{gguf_file}")
+                };
+                println!("  registered  {id:<28} {place}{projector}");
+                registered.push(id.as_str());
+            }
+            Imported::AlreadyListed { id } => {
+                println!("  listed      {id:<28} already has a manifest");
+            }
+            Imported::Skipped { name, reason } => {
+                println!("  skipped     {name:<28} {reason}");
+                skipped += 1;
+            }
+        }
+    }
+    println!();
+    match registered.first() {
+        Some(first) => println!(
+            "{} registered. Run one with: eullm run {first}",
+            registered.len()
+        ),
+        None => println!("Nothing registered."),
+    }
+    // A named target that could not be registered is a failure a script
+    // should see; a sweep of the whole store reports and carries on.
+    if name.is_some() && skipped > 0 {
+        std::process::exit(1);
+    }
+}
+
 
 fn cmd_list(store: &ModelStore) {
     match store.list() {
@@ -2063,6 +2173,7 @@ fn cmd_list(store: &ModelStore) {
             println!("No models installed in {} [{}].", root.display(), source);
             // Before the catalog: "nothing installed" is misleading when a
             // model's weights are right there and only its manifest is gone.
+            print_loose(store);
             print_unlisted(store);
             println!("\nAvailable models in EU catalog:");
             for entry in catalog::EU_CATALOG.iter() {
@@ -2121,6 +2232,7 @@ fn cmd_list(store: &ModelStore) {
                     })
                     .unwrap_or("<NAME>")
             );
+            print_loose(store);
             print_unlisted(store);
         }
         Err(e) => {

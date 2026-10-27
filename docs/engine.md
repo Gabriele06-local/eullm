@@ -204,6 +204,34 @@ Show locally downloaded models. If none are available, displays the EU catalog.
 eullm list
 ```
 
+### `eullm import [model]`
+
+Register models whose files are already in the model store but have no
+`manifest.json`, so `eullm list` and `/api/tags` show them: GGUFs copied in by
+hand, or a store moved to another folder without its manifests. Nothing is
+downloaded or copied.
+
+```bash
+eullm import                       # every model in the store
+eullm import qwen3-8b              # the directory qwen3-8b/ in the store
+eullm import Model-Q4_K_M.gguf     # a file directly in the store folder
+```
+
+- A directory `<store>/<name>/` holding one model (one `.gguf`, or every shard
+  of a split model, plus at most one `mmproj*.gguf`) gets its manifest in
+  place, and `<name>` is what `eullm run` and the API's `model` field take.
+- A `.gguf` (or a split's shards) directly in the store folder is first moved
+  into a new directory named after it (`Model-Q4_K_M.gguf` →
+  `model-q4_k_m/`), the layout every other command reads.
+- Skipped, with the reason printed: a directory with more than one model in
+  it, a split with shards missing, a projector on its own, a file whose
+  directory name is already taken. Models that already have a manifest are
+  left as they are, so running it twice changes nothing.
+
+The store is `EULLM_MODELS_DIR` (environment first, then `.env`) or
+`~/.eullm/models`. A path outside it is refused: point `EULLM_MODELS_DIR` at
+that folder instead, then run `eullm import`.
+
 ### `eullm show <model>`
 
 Display detailed information about a model (local or from catalog).
@@ -2011,7 +2039,7 @@ its own.
 
 ## Audit Trail
 
-Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/audit.jsonl`. Each line is a self-contained JSON object.
+Every inference request is logged to a persistent JSONL file at `~/.eullm/audit/audit.jsonl`, or `audit.jsonl` in `EULLM_AUDIT_DIR` when that is set (in the environment, or in `.env`). Each line is a self-contained JSON object.
 
 | Field | Type | Description |
 |---|---|---|
