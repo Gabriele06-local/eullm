@@ -23,7 +23,8 @@
 //!
 //! `model` may name any model the server can load. Absent, or a System One
 //! model name (`jev-latest`, `jev-1.13.0`), it means the decision model this
-//! server already has loaded — so a Jev client works without changes.
+//! server already has loaded — so a Jev client works without changes. A
+//! Jev-Style model in the store is not such a name (`is_system_one_name`).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -691,11 +692,34 @@ struct ParsedRequest {
     policy_removed: BTreeMap<String, Vec<String>>,
 }
 
+/// Whether `model` is a System One model name — `jev`, `jev-latest`, a
+/// release such as `jev-1.13.0` — which a Jev client sends and which means
+/// the decision model this server has loaded. A Jev-Style model in the store
+/// (`jev-style-2b-decision-v3-gguf-q4_k_m`) starts with "jev" too, and is a
+/// model to load like any other: taking every "jev…" name for the alias made
+/// a server without `--decision-model` answer `model_not_loaded` to a
+/// request naming a Jev-Style model it had pulled.
+fn is_system_one_name(model: &str) -> bool {
+    let model = model.to_ascii_lowercase();
+    match model.strip_prefix("jev") {
+        Some("") => true,
+        Some(rest) => match rest.strip_prefix('-') {
+            Some("latest") => true,
+            Some(release) => {
+                release.starts_with(|c: char| c.is_ascii_digit())
+                    && release.chars().all(|c| c.is_ascii_digit() || c == '.')
+            }
+            None => false,
+        },
+        None => false,
+    }
+}
+
 fn parse_request(request: SystemOneRequest) -> Result<ParsedRequest, ApiError> {
     let model = request
         .model
         .map(|m| m.trim().to_string())
-        .filter(|m| !m.is_empty() && !m.to_ascii_lowercase().starts_with("jev"));
+        .filter(|m| !m.is_empty() && !is_system_one_name(m));
 
     let (state, state_line, structured_state) = match request.state {
         None => return Err(ApiError::invalid_request("\"state\" is required")),
@@ -1839,6 +1863,24 @@ mod tests {
         let mut b = body();
         b.as_object_mut().unwrap().remove("model");
         assert_eq!(parse(b).unwrap().model, None);
+    }
+
+    #[test]
+    fn a_jev_style_model_in_the_store_is_a_model_to_load_not_the_alias() {
+        for name in [
+            "jev-style-2b-decision-v3-gguf-q4_k_m",
+            "Jev-Style-0.8B-Decision-v3-Q4_K_M",
+        ] {
+            let mut b = body();
+            b["model"] = json!(name);
+            assert_eq!(parse(b).unwrap().model.as_deref(), Some(name));
+        }
+        for alias in ["jev", "JEV-latest", "jev-1.13.0", "jev-2"] {
+            assert!(is_system_one_name(alias), "{alias}");
+        }
+        for name in ["jev-", "jev-v1", "jevstyle", "jev-1.x", "my-jev-latest"] {
+            assert!(!is_system_one_name(name), "{name}");
+        }
     }
 
     #[test]
