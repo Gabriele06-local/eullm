@@ -96,8 +96,16 @@ JUPITER, named by its Slurm job id.
   the second article the answer needs, cited and applied, where the start
   model cited one and was graded partial or wrong. Three of the five
   losses cite the wrong article, the neighbouring number or the same
-  number of another code among the retrieved texts. The share of such
-  answers before and after GRPO is measured next.
+  number of another code among the retrieved texts. Counted over the
+  whole sets (`citation_check.py`, no judge), GRPO did not bring it:
+  - practical exam: answers citing only articles outside the question's
+    group went from 19 of 145 (dqp) to 15 in every GRPO round;
+  - held-out exam: 1-3 of 217 for every model.
+  Answers citing an article outside the group as well grew a little
+  (43 to 46), all among the right ones (11 to 18), as the completeness
+  gain predicts. The error is old and common: about half of every
+  model's wrong practical answers cite an article outside the group (31
+  of 57 for dqp, 28 of 48 for g9r-r2), against 13-22% of its right ones.
 * The 4B's first round, g4-r1, from dqp-d-q4b with the second rounds'
   settings (2541382-2541387). The vertical of g9-r2 and g9r-r2, GGUF
   Q4_K_M through EULLM Engine (2541390, judge 2541391).
