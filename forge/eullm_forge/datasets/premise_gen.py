@@ -69,7 +69,8 @@ from ..eval.norm_exam import (
 from ..eval.retrieval import named_articles, named_code, open_book_prompt
 
 KINDS = ("premessa_termine", "premessa_inesistente", "premessa_abrogato", "premessa_pena",
-         "premessa_procedibilita", "premessa_vera", "premessa_sentenza", "premessa_sentenza_vera")
+         "premessa_procedibilita", "premessa_vera", "premessa_sentenza", "premessa_sentenza_vera",
+         "premessa_numero")
 FORMATS = ("steps", "plain")
 
 # Deadlines a person might wrongly believe, by unit: the usual ones of
@@ -122,6 +123,30 @@ PENA_NAMED_Q = [
     "Per il reato di {name}{base} è prevista la {pena} fino a {hi}: è questo il massimo che "
     "si rischia?",
 ]
+# An offence named right with an article number that does not exist ("la frode
+# informatica dell'art. 640-septies c.p."): the answer says so, names the
+# article that provides for the offence, and answers from it. Until
+# 2026-10-27 every nonexistent article was answered "non posso dirti che cosa
+# prevede ... se mi indichi l'argomento, posso cercare", and the 8B, asked the
+# outside test's 640-septies, corrected the number and stopped there where the
+# answer was one article away (640-ter) among its own texts.
+NUMERO_Q = [
+    "Quale pena prevede l'art. {fake} {of} per il reato di {name}?",
+    "Per il reato di {name}, previsto dall'art. {fake} {of}, qual è la pena massima?",
+    "Il reato di {name} dell'art. {fake} {of}: quale pena rischia chi lo commette?",
+]
+SUFFIXES = ("bis", "ter", "quater", "quinquies", "sexies", "septies", "octies", "novies",
+            "decies")
+
+
+def unused_number(number: str, taken: set[str]) -> str | None:
+    """The next suffix of ``number``'s base that the code does not use ("640-septies")."""
+    base = number.split("-")[0]
+    used = [i for i, suf in enumerate(SUFFIXES) if f"{base}-{suf}" in taken]
+    nxt = (max(used) + 1) if used else 0
+    return f"{base}-{SUFFIXES[nxt]}" if nxt < len(SUFFIXES) else None
+
+
 # The procedibility as the article states it, and the question that gets it
 # wrong (false) or right (true). {reato} is "il reato previsto dall'art. ..."
 # or "il reato di <heading>".
@@ -421,6 +446,19 @@ def _inesistente_answer(fmt: str, n: str, of: str) -> str:
             "pertinente.")
 
 
+def _numero_answer(fmt: str, fake: str, n: str, of: str, name: str, pos: int, quote: str,
+                   penalty: str) -> str:
+    if fmt == "plain":
+        return (f"La premessa non è corretta: l'art. {fake} {of} non mi risulta che esista; il "
+                f"reato di {name} è previsto dall'art. {n} {of} [{pos}], che prevede {penalty}. "
+                f"Il testo dice: «{quote}».")
+    return (f"Verifica della premessa: tra i testi riportati non c'è l'art. {fake} {of}, e non "
+            f"mi risulta che esista: il reato di {name} è previsto dall'art. {n} {of} [{pos}]. "
+            "La premessa della domanda è errata.\n"
+            f"Norma applicabile: art. {n} {of} [{pos}]: «{quote}».\n"
+            f"Risposta: per il reato di {name} l'art. {n} {of} prevede {penalty}.")
+
+
 def _abrogato_answer(fmt: str, n: str, of: str, pos: int, quote: str) -> str:
     if fmt == "plain":
         return (f"La premessa non è corretta: l'art. {n} {of} è stato abrogato, come riporta "
@@ -621,6 +659,31 @@ def build_pairs(index, *, per_code: int, rng: random.Random, fmt: str = "steps",
                                       f"la pena prevista è la {pena} da {say(lo, lo_unit)} a "
                                       f"{say(hi, unit)}."),
                         keywords=[_deadline_keyword(hi, unit)]))
+
+            # The offence by its name, the article by a number that does not exist.
+            for a, (pena, lo, lo_unit, hi, unit, sentence, comma) in rng.sample(
+                    punished, min(per_code, len(punished))):
+                name = offence_name(a.text)
+                fake = unused_number(a.number, taken) if name in unique else None
+                if not fake or (code, fake) in exclude:
+                    skip("numero:no_name_or_number")
+                    continue
+                q = rng.choice(NUMERO_Q).format(fake=fake, of=of, name=name)
+                if not index.missing_article_note(q):
+                    skip("numero:exists")
+                    continue
+                found, pos = _with_article(index, q, code, a.number, k, rng)
+                quote = quote_span(sentence, anchor=str(hi))
+                if pos is None or not _quoted_in(quote, found, pos):
+                    skip("numero:quote_not_shown")
+                    continue
+                where = f"{comma.strip(' ,')} " if comma else ""
+                penalty = f"{where}la {pena} da {say(lo, lo_unit)} a {say(hi, unit)}"
+                pairs.append(PremisePair(
+                    key=f"pf-n-{code}-{fake}", kind="premessa_numero", code=code,
+                    number=a.number, question=q, instruction=open_book_prompt(q, found),
+                    output=_numero_answer(fmt, fake, a.number, of, name, pos, quote, penalty),
+                    keywords=[a.number, _deadline_keyword(hi, unit)]))
 
             stated = [(a, p) for a in live if (p := procedibility_of(a.text))]
             for a, (how, sentence) in rng.sample(stated, min(per_code, len(stated))):

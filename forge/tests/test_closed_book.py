@@ -107,3 +107,10 @@ def test_the_scripts_build_once_and_print_counts_only(tmp_path, capsys):
     assert load("score_closed_book").main([str(out), str(answers)]) == 0
     printed = capsys.readouterr().out
     assert "r2l" in printed and "Esiste" not in printed and "Recidiva" not in printed
+    assert "denies-real" in printed and "procedibility: 100% of the items want" in printed
+    # a model that says "non esiste" to everything: right on the made-up, denying the real
+    answers.write_text("".join(json.dumps({"id": it["id"], "answer": "Non esiste."}) + "\n"
+                               for it in items))
+    load("score_closed_book").main([str(out), str(answers)])
+    row = next(ln for ln in capsys.readouterr().out.splitlines() if ln.startswith("r2l"))
+    assert "100%" in row.split()[4]

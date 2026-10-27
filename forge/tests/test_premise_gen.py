@@ -498,3 +498,31 @@ def test_an_answer_quoting_a_text_cut_short_earns_nothing():
     assert not quote_cut_short("«Il danno si risarcisce ai sensi dell'art. 2043 c.c.»")
     scores = answer_reward([cut, whole], ["pratica", "pratica"], [[], []])
     assert scores == [-1.0, None]
+
+
+def test_an_offence_with_a_wrong_number_is_corrected_pointed_and_answered():
+    # 2026-10-27: the 8B corrected "640-septies" and stopped, with 640-ter in its texts
+    from eullm_forge.datasets.premise_gen import unused_number
+    assert unused_number("640", {"640", "640-bis", "640-ter", "640-quater",
+                                 "640-quinquies"}) == "640-sexies"
+    assert unused_number("640-ter", {"640", "640-bis", "640-ter"}) == "640-quater"
+    assert unused_number("99", {"99"}) == "99-bis"
+    pairs = [p for p in _penal_pairs() if p.kind == "premessa_numero"]
+    assert {p.number for p in pairs} == {"10", "11"}       # not the general provision
+    p = next(p for p in pairs if p.number == "10")
+    assert "10-bis" in p.question and "truffa semplice" in p.question
+    assert "art. 10 del codice penale" in p.output and "3 anni" in p.output
+    assert p.keywords[0] == "10"
+    assert score_answer(p.output, "premessa_numero", p.keywords) == 1.0
+    # correcting and stopping, as before, earns nothing
+    stopped = ("Verifica della premessa: tra i testi riportati non c'è l'art. 10-bis del codice "
+               "penale, e non mi risulta che esista. Se mi indichi l'argomento, posso cercare.")
+    assert score_answer(stopped, "premessa_numero", p.keywords) == 0.0
+    # nor does answering on the wrong number, or hedging it
+    assert score_answer("L'art. 10-bis c.p. prevede la reclusione da sei mesi a tre anni.",
+                        "premessa_numero", p.keywords) == 0.0
+    assert score_answer("L'art. 10-bis potrebbe non esistere; l'art. 10 prevede da 6 mesi a "
+                        "3 anni.", "premessa_numero", p.keywords) == 0.0
+    plain = next(q for q in _penal_pairs("plain") if q.kind == "premessa_numero"
+                 and q.number == "10")
+    assert score_answer(plain.output, "premessa_numero", plain.keywords) == 1.0
