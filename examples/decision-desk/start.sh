@@ -129,9 +129,21 @@ main() {
     done
   fi
 
-  # 5. The page. The chat model loads while it opens.
+  # 5. The page. The chat model loads while it opens. On a Linux machine
+  # without a screen (a GPU server over SSH) no browser is opened: Python
+  # would fall back to a text browser in this terminal, when one is
+  # installed. The page is opened from the computer in front of you.
   say ""
-  python3 "$dir/desk.py" --url "$url" --port "${DESK_PORT:-8770}" \
+  desk_port=${DESK_PORT:-8770}
+  browser=
+  if [ "$(uname -s)" = Linux ] && [ -z "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+    browser=--no-browser
+    say "No screen on this machine. On your computer, run"
+    say "  ssh -L $desk_port:127.0.0.1:$desk_port $(id -un)@$(hostname)"
+    say "and open http://127.0.0.1:$desk_port"
+    say ""
+  fi
+  python3 "$dir/desk.py" --url "$url" --port "$desk_port" $browser \
     --decision-model "$decision" --embedding-model "$embedding" --chat-model "$chat" </dev/null
 }
 
