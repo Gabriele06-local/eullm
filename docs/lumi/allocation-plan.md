@@ -532,6 +532,12 @@ two nodes it runs about two weeks, the 23-30 node-hours a day the
 allocation's pace asks for. `c03`'s `rccl-*` groups go with it: they were
 labelled `rccl` in the spec for jobs of an RCCL build, and every LUMI build
 has RCCL since 16-10-2026.
+Submitted the same day: `eullm 0.7.94 (ROCm) [ac4ec51a6522]` (the tag plus
+one commit of tools and docs; the engine is the tag's), 835 points planned,
+817 of them timed from an earlier run of the same configuration; two chains
+of 14 jobs of 8 hours (heads 23206675 and 23206689), at most about 220
+node-hours, most of a chain's later jobs ending at once if the work runs
+short of the estimate.
 
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
