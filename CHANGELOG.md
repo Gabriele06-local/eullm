@@ -13,6 +13,11 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
+## Unreleased
+
+### Changed
+- **llama.cpp moves to b11925**, 443 commits newer than the one 0.7.95 runs on. Eight more model architectures load: `beam`, `deepseek41`, `flint`, `kolibri1`, `maion-coder`, `muse-spark`, `sensenova_u1` and `vllm-decision2`. The expert cache (`--moe-cache`) keeps EuLLM's own eviction rather than the one llama.cpp moved to: replayed on routing modelled on LUMI's measurements, it finds no expert in VRAM once a step needs more experts than the cache holds (Qwen3-Coder-480B with 8 requests at once, Qwen3-235B with 32), where EuLLM's finds 60% and 73%.
+
 ## 0.7.95 — 2026-10-27
 
 ### Added
