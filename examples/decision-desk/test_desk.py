@@ -37,7 +37,7 @@ BY_SUBJECT = {s["subject"]: s for s in desk.SAMPLES}
 
 def fake_answers(state):
     """What a decision model that is always right would answer."""
-    sample = BY_SUBJECT.get(state["subject"])
+    sample = BY_SUBJECT.get(state["subject"]) if isinstance(state, dict) else None
     expect = sample["expect"] if sample else {"team": "billing", "action": "reply"}
     team = expect["team"] or "billing"
     teams = {t: 0.02 for t in desk.TEAMS}
@@ -365,6 +365,32 @@ class Audit(WithFake):
     def test_no_audit_file_means_no_audit_lines(self):
         audit = stage(self.run_sample("de-billing", audit_file=None), "audit")
         self.assertEqual(audit, {"stage": "audit", "file": None, "lines": []})
+
+
+class WarmUp(WithFake):
+    def test_the_named_decision_model_and_the_chat_model_load_before_the_first_email(
+        self,
+    ):
+        d = desk.Desk(
+            options(
+                self.fake.url, decision_model="jev-style-2b-decision-v3-gguf-q4_k_m"
+            )
+        )
+        d.warm_up()
+        self.assertEqual(
+            (d.warmup["index"], d.warmup["decision"], d.warmup["chat"]),
+            ("ready", "ready", "ready"),
+        )
+        (decision,) = self.fake.posted("/v1/systemone")
+        self.assertEqual(decision["model"], "jev-style-2b-decision-v3-gguf-q4_k_m")
+        (chat,) = self.fake.posted("/v1/chat/completions")
+        self.assertEqual(chat["max_tokens"], 1)
+
+    def test_without_a_named_decision_model_the_loaded_one_is_left_alone(self):
+        d = desk.Desk(options(self.fake.url))
+        d.warm_up()
+        self.assertEqual(d.warmup["decision"], "waiting")
+        self.assertFalse(self.fake.posted("/v1/systemone"))
 
 
 class Check(WithFake):

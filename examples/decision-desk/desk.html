@@ -282,10 +282,11 @@ function modelState(key, m, warm) {
   dot.className = "dot";
   if (!status || status.error) { dot.classList.add("bad"); state.textContent = "server not reachable"; return; }
   if (m.loaded) { dot.classList.add("ok"); state.textContent = key === "chat" ? "loaded" : "loaded, resident"; return; }
-  if (key === "decision") { dot.classList.add("bad"); state.textContent = "start eullm serve with --decision-model"; return; }
-  if (key === "chat" && warm.chat === "failed") { dot.classList.add("bad"); state.textContent = warm.error || "failed to load"; return; }
+  // No decision model named and none loaded: the server has to be given one.
+  if (key === "decision" && !m.name) { dot.classList.add("bad"); state.textContent = "start eullm serve with --decision-model"; return; }
+  if (warm[key] === "failed") { dot.classList.add("bad"); state.textContent = warm.error || "failed to load"; return; }
   dot.classList.add("wait");
-  state.textContent = key === "chat" ? "loading…" : "loads on the first email";
+  state.textContent = warm[key] === "loading" ? "loading…" : "loads on the first email";
 }
 
 async function refreshStatus() {
