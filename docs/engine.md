@@ -204,33 +204,42 @@ Show locally downloaded models. If none are available, displays the EU catalog.
 eullm list
 ```
 
-### `eullm import [model]`
+### Model libraries and `eullm import`
 
-Register models whose files are already in the model store but have no
-`manifest.json`, so `eullm list` and `/api/tags` show them: GGUFs copied in by
-hand, or a store moved to another folder without its manifests. Nothing is
-downloaded or copied.
+Besides the models `eullm pull` downloads, EuLLM lists and runs any GGUF it
+finds, in place:
+
+- in the folders of `EULLM_MODEL_LIBRARIES` (environment first, then `.env`;
+  separated by `;`, on Linux and macOS also by `:`), such as LM Studio's
+  models folder or a Hugging Face cache;
+- in its own folder (`EULLM_MODELS_DIR`, or `~/.eullm/models`), outside the
+  model directories `eullm pull` made.
+
+Every subfolder is read. Nothing is moved, renamed, added or deleted there, so
+the program that made the folder keeps using it; `eullm rm` refuses a library
+model. Hidden folders (a name starting with a dot) are not entered.
+
+- **Names**: from the file (`Qwen3-8B-Q4_K_M.gguf` → `qwen3-8b-q4_k_m`). When
+  two files would get the same name, or a pulled model already has it, each
+  takes its folder's name in front (`unsloth-qwen3-8b-q4_k_m`).
+- **Projectors** (`mmproj*.gguf`, or any GGUF whose header says
+  `general.architecture = clip`) are not models: one in the same folder as a
+  model is that model's projector.
+- **Split models** (`-00001-of-00003.gguf`): one model, opened from its first
+  part; one with parts missing is left out.
+
+`eullm list`, `/api/tags` and `/v1/models` show them (status `library`, the
+file's path as description), and `eullm run <name>` or a request's `model`
+field runs them. The folders are scanned again at most every 5 seconds, so a
+file added or removed shows up without a restart.
 
 ```bash
-eullm import                       # every model in the store
-eullm import qwen3-8b              # the directory qwen3-8b/ in the store
-eullm import Model-Q4_K_M.gguf     # a file directly in the store folder
+eullm import          # what the scan found, and what it left out and why
 ```
 
-- A directory `<store>/<name>/` holding one model (one `.gguf`, or every shard
-  of a split model, plus at most one `mmproj*.gguf`) gets its manifest in
-  place, and `<name>` is what `eullm run` and the API's `model` field take.
-- A `.gguf` (or a split's shards) directly in the store folder is first moved
-  into a new directory named after it (`Model-Q4_K_M.gguf` →
-  `model-q4_k_m/`), the layout every other command reads.
-- Skipped, with the reason printed: a directory with more than one model in
-  it, a split with shards missing, a projector on its own, a file whose
-  directory name is already taken. Models that already have a manifest are
-  left as they are, so running it twice changes nothing.
-
-The store is `EULLM_MODELS_DIR` (environment first, then `.env`) or
-`~/.eullm/models`. A path outside it is refused: point `EULLM_MODELS_DIR` at
-that folder instead, then run `eullm import`.
+`eullm import` writes nothing. In 0.7.95 it wrote manifests and moved a `.gguf`
+lying loose in the store folder into a folder of its own; manifests it wrote
+then are read as before.
 
 ### `eullm show <model>`
 

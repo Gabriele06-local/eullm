@@ -448,7 +448,7 @@ impl AppState {
         // than an error.
         let found = self
             .store
-            .mmproj_path(&normalized)
+            .resolve_mmproj(&normalized)
             .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
         let named = found.is_none() && self.fallback_mmproj.is_some();
         let mmproj_path = found.or_else(|| {
@@ -1949,14 +1949,14 @@ impl AppState {
         }
 
         // 5. Exact name in model store.
-        if let Some(p) = self.store.gguf_path(name) {
+        if let Some(p) = self.store.resolve_gguf(name) {
             return Ok(p);
         }
 
         // 5. Try normalized name (Ollama tag format).
         let normalized = normalize_model_name(name);
         if normalized != name
-            && let Some(p) = self.store.gguf_path(&normalized)
+            && let Some(p) = self.store.resolve_gguf(&normalized)
         {
             return Ok(p);
         }
@@ -3084,6 +3084,10 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
         // directories.
         let (root, source) = cfg.store.root_with_source();
         tracing::info!("Model store: {}  [source: {source}]", root.display());
+        let (libraries, source) = cfg.store.libraries_with_source();
+        for l in libraries {
+            tracing::info!("Model library (read only): {}  [source: {source}]", l.display());
+        }
     }
     match audit.check_writable() {
         Ok(()) => tracing::info!(

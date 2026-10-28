@@ -94,9 +94,37 @@ fn same_repo(a: &str, b: &str) -> bool {
 /// before `hf_repo` existed, so the two cannot drift apart.
 const EXTERNAL_SOURCE_PREFIX: &str = "External model pulled from ";
 
-/// The description `ModelStore::import` writes: provenance, not a description
-/// of the model, so `written_description` leaves it out like the one above.
+/// The description `eullm import` wrote in 0.7.95: provenance, not a
+/// description of the model, so `written_description` leaves it out like the
+/// one above. Such manifests are still on disk.
 const IMPORTED_DESCRIPTION: &str = "Imported from files already in the model store";
+
+/// The start of the description of a library model's made-up manifest, the
+/// file's path after it.
+const LIBRARY_PREFIX: &str = "In a model library: ";
+
+/// The manifest a library model is listed with: made up from the file, never
+/// written.
+fn library_manifest(m: &super::library::LibraryModel) -> ModelManifest {
+    let file_name = |p: &Path| p.file_name().and_then(|n| n.to_str()).map(str::to_string);
+    ModelManifest {
+        id: m.id.clone(),
+        name: m.id.clone(),
+        description: format!("{LIBRARY_PREFIX}{}", m.path.display()),
+        languages: Vec::new(),
+        base: m.id.clone(),
+        vram_gb: 0,
+        size_bytes: m.size_bytes,
+        license: "unknown".into(),
+        digest: String::new(),
+        pulled_at: String::new(),
+        status: "library".into(),
+        gguf_file: file_name(&m.path),
+        mmproj_file: m.mmproj.as_deref().and_then(file_name),
+        hf_repo: None,
+        hf_filename: None,
+    }
+}
 
 /// Which HuggingFace file a manifest's weights are, as far as it says.
 struct RecordedHfFile {
@@ -127,7 +155,8 @@ impl ModelManifest {
         let description = self.description.trim();
         (!description.is_empty()
             && !description.starts_with(EXTERNAL_SOURCE_PREFIX)
-            && description != IMPORTED_DESCRIPTION)
+            && description != IMPORTED_DESCRIPTION
+            && !description.starts_with(LIBRARY_PREFIX))
             .then_some(description)
     }
 
@@ -254,6 +283,14 @@ pub struct ModelStore {
     root: PathBuf,
     /// Where `root` came from, for `root_with_source`.
     source: String,
+    /// The folders of `EULLM_MODEL_LIBRARIES`: read in place, never written to
+    /// (`models::library`).
+    libraries: Vec<PathBuf>,
+    /// Where `libraries` came from, for `libraries_with_source`.
+    libraries_source: String,
+    /// The last scan of the libraries and when it was made: `/api/tags` and
+    /// `/v1/models` are asked for often, and a scan walks every folder.
+    scan_cache: std::sync::Mutex<Option<(std::time::Instant, std::sync::Arc<super::library::Scan>)>>,
 }
 
 /// Find a multimodal projector sitting next to a GGUF file.
@@ -369,7 +406,40 @@ impl ModelStore {
             &env_file.display().to_string(),
             home.as_deref(),
         )?;
-        Ok(Self { root, source })
+        let env_libraries = std::env::var("EULLM_MODEL_LIBRARIES").ok();
+        let (libraries, libraries_source) = Self::resolve_libraries(
+            env_libraries.as_deref(),
+            file_contents.as_deref(),
+            &env_file.display().to_string(),
+        );
+        Ok(Self {
+            root,
+            source,
+            libraries,
+            libraries_source,
+            scan_cache: std::sync::Mutex::new(None),
+        })
+    }
+
+    /// `EULLM_MODEL_LIBRARIES`: the environment, then the `.env` file; none
+    /// when neither sets it. Returns the folders and where they came from.
+    fn resolve_libraries(
+        env: Option<&str>,
+        file_contents: Option<&str>,
+        file_label: &str,
+    ) -> (Vec<PathBuf>, String) {
+        if let Some(spec) = env.map(str::trim).filter(|s| !s.is_empty()) {
+            return (super::library::parse_libraries(spec), "EULLM_MODEL_LIBRARIES".to_string());
+        }
+        if let Some(spec) = file_contents
+            .and_then(|contents| crate::api::ip_allowlist::env_file_var(contents, "EULLM_MODEL_LIBRARIES"))
+        {
+            return (
+                super::library::parse_libraries(&spec),
+                format!("EULLM_MODEL_LIBRARIES ({file_label})"),
+            );
+        }
+        (Vec::new(), "none".to_string())
     }
 
     /// Pure resolution step behind `default_store`, split out so the
@@ -410,7 +480,18 @@ impl ModelStore {
         Self {
             root,
             source: "test".to_string(),
+            libraries: Vec::new(),
+            libraries_source: "none".to_string(),
+            scan_cache: std::sync::Mutex::new(None),
         }
+    }
+
+    /// The same store, reading the model libraries `libraries` too. Tests only,
+    /// like `at`.
+    #[cfg(test)]
+    pub fn with_libraries(mut self, libraries: Vec<PathBuf>) -> Self {
+        self.libraries = libraries;
+        self
     }
 
     /// Write a manifest to disk for a pulled model.
@@ -637,55 +718,78 @@ impl ModelStore {
     /// fully written. A listing that repeats it without looking is how a user
     /// ends up trusting a model that cannot load.
     pub fn is_present(&self, id: &str) -> bool {
-        self.gguf_path(id).is_some()
+        self.gguf_path(id).is_some() || self.library_model(id).is_some()
     }
 
-    /// Directories that hold weights but produced no entry in `list()`.
-    ///
-    /// `list()` counts a directory only when it contains a `manifest.json`
-    /// that parses. Anything else is skipped, and until this existed it was
-    /// skipped in silence: a model with its weights on disk simply stopped
-    /// appearing, with nothing on screen connecting the absence to a cause.
-    /// A missing manifest is not exotic — an interrupted pull, a restored
-    /// backup, a directory copied by hand from another machine.
-    ///
-    /// Only directories that actually contain a `.gguf` are reported, so an
-    /// unrelated folder in the store root does not become a warning.
-    ///
-    /// Returns `(directory name, why it was skipped)`.
-    pub fn unlisted(&self) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            return out;
-        };
-        for entry in entries.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                continue;
-            }
-            let dir = entry.path();
-            let holds_weights = fs::read_dir(&dir).is_ok_and(|mut it| {
-                it.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|ext| ext == "gguf")))
-            });
-            if !holds_weights {
-                continue;
-            }
-            let manifest = dir.join("manifest.json");
-            let reason = if !manifest.exists() {
-                "no manifest.json".to_string()
-            } else {
-                match fs::read_to_string(&manifest) {
-                    Err(e) => format!("manifest.json cannot be read: {e}"),
-                    Ok(data) => match serde_json::from_str::<ModelManifest>(&data) {
-                        // Listed normally — nothing to report.
-                        Ok(_) => continue,
-                        Err(e) => format!("manifest.json is malformed: {e}"),
-                    },
-                }
-            };
-            out.push((entry.file_name().to_string_lossy().into_owned(), reason));
+    /// The folders of `EULLM_MODEL_LIBRARIES` and where they were set.
+    pub fn libraries_with_source(&self) -> (&[PathBuf], &str) {
+        (&self.libraries, &self.libraries_source)
+    }
+
+    /// The models found without a manifest: in the folders of
+    /// `EULLM_MODEL_LIBRARIES`, and in the store's own folder outside its model
+    /// directories (files copied in by hand, a model directory whose manifest
+    /// is missing). Read in place: nothing is moved or written. A scan is
+    /// reused for a few seconds, the time of a client's burst of requests.
+    pub fn library(&self) -> std::sync::Arc<super::library::Scan> {
+        const FRESH: std::time::Duration = std::time::Duration::from_secs(5);
+        let mut cache = self.scan_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, scan)) = cache.as_ref()
+            && at.elapsed() < FRESH
+        {
+            return scan.clone();
         }
-        out.sort();
-        out
+        let scan = std::sync::Arc::new(self.scan_now());
+        *cache = Some((std::time::Instant::now(), scan.clone()));
+        scan
+    }
+
+    fn scan_now(&self) -> super::library::Scan {
+        let managed = self.list().unwrap_or_default();
+        let skip_dirs: std::collections::HashSet<PathBuf> =
+            managed.iter().map(|m| self.root.join(&m.id)).collect();
+        let taken: std::collections::HashSet<String> = managed.into_iter().map(|m| m.id).collect();
+        let mut roots = Vec::with_capacity(1 + self.libraries.len());
+        if self.root.is_dir() {
+            roots.push(self.root.clone());
+        }
+        roots.extend(self.libraries.iter().filter(|l| **l != self.root).cloned());
+        super::library::scan(&roots, &skip_dirs, &taken)
+    }
+
+    /// The model `name` names in a library, if any.
+    pub fn library_model(&self, name: &str) -> Option<super::library::LibraryModel> {
+        self.library().get(name).cloned()
+    }
+
+    /// The weights `name` loads: a model of the store, else one of a library.
+    /// `gguf_path` stays the store's alone, because a pull asks it whether a
+    /// model is already downloaded, and a library's file is not.
+    pub fn resolve_gguf(&self, name: &str) -> Option<PathBuf> {
+        self.gguf_path(name).or_else(|| self.library_model(name).map(|m| m.path))
+    }
+
+    /// The projector of `name`: the store's, else the one beside a library model.
+    pub fn resolve_mmproj(&self, name: &str) -> Option<PathBuf> {
+        self.mmproj_path(name)
+            .or_else(|| self.library_model(name).and_then(|m| m.mmproj))
+    }
+
+    /// The store's models and the libraries' together, for the listings
+    /// (`eullm list`, `/api/tags`, `/v1/models`, the picker). A library model
+    /// gets a manifest made up on the spot, never written.
+    pub fn list_all(&self) -> Result<Vec<ModelManifest>, Box<dyn std::error::Error>> {
+        let mut models = self.list()?;
+        models.extend(self.library().models.iter().map(library_manifest));
+        Ok(models)
+    }
+
+    /// `get`, falling back to the libraries.
+    pub fn get_any(&self, name: &str) -> Result<Option<ModelManifest>, Box<dyn std::error::Error>> {
+        if let Some(m) = self.get(name)? {
+            return Ok(Some(m));
+        }
+        Ok(self.library_model(name).as_ref().map(library_manifest))
     }
 
     /// List all locally available models.
@@ -899,23 +1003,6 @@ impl ModelStore {
     }
 }
 
-/// What `ModelStore::import` did with one model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Imported {
-    /// A manifest was written for `id`. `moved` when its files sat loose in
-    /// the store root and were moved into a directory of their own first.
-    Registered {
-        id: String,
-        gguf_file: String,
-        mmproj_file: Option<String>,
-        moved: bool,
-    },
-    /// It already had a manifest that reads: left as it was.
-    AlreadyListed { id: String },
-    /// Not registered, and why.
-    Skipped { name: String, reason: String },
-}
-
 /// The id a model stored under file stem `stem` gets: lowercase, with
 /// anything but ASCII letters, digits, `.`, `_` and `-` replaced by `-`.
 /// Shared by a pull from a URL and `import`, so the same file gets the same
@@ -942,303 +1029,6 @@ pub fn model_id_for(stem: &str) -> String {
         id.to_string()
     }
 }
-
-/// One model among some `.gguf` files: a single file, or every shard of a
-/// split model.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct WeightFiles {
-    /// The file name without `.gguf`, or a split's stem.
-    stem: String,
-    /// The files, the one llama.cpp opens first (shard 1) first.
-    files: Vec<String>,
-    /// Set for a split with shards missing: `(present, total)`.
-    missing: Option<(usize, u32)>,
-}
-
-/// Group weight file names (projectors already taken out) into models.
-fn group_weights(names: &[String]) -> Vec<WeightFiles> {
-    let mut out: Vec<WeightFiles> = Vec::new();
-    // (stem, total the names claim, (index, file name) of each shard found)
-    type Split = (String, u32, Vec<(u32, String)>);
-    let mut splits: Vec<Split> = Vec::new();
-    for name in names {
-        match crate::registry::parse_shard(name) {
-            Some((stem, index, total)) => match splits.iter_mut().find(|(s, _, _)| s == stem) {
-                Some((_, _, shards)) => shards.push((index, name.clone())),
-                None => splits.push((stem.to_string(), total, vec![(index, name.clone())])),
-            },
-            None => out.push(WeightFiles {
-                stem: name[..name.len() - ".gguf".len()].to_string(),
-                files: vec![name.clone()],
-                missing: None,
-            }),
-        }
-    }
-    for (stem, total, mut shards) in splits {
-        shards.sort();
-        shards.dedup_by_key(|(i, _)| *i);
-        let complete = shards.len() as u32 == total;
-        out.push(WeightFiles {
-            missing: (!complete).then_some((shards.len(), total)),
-            stem,
-            files: shards.into_iter().map(|(_, f)| f).collect(),
-        });
-    }
-    out.sort_by(|a, b| a.stem.cmp(&b.stem));
-    out
-}
-
-/// The `.gguf` files directly in `dir`, by name, sorted.
-fn gguf_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
-        .filter_map(|e| e.file_name().to_str().map(str::to_string))
-        .filter(|n| Path::new(n).extension().is_some_and(|e| e == "gguf"))
-        .collect();
-    names.sort();
-    names
-}
-
-impl ModelStore {
-    /// Write the missing manifests of models whose files are already in the
-    /// store: what makes a folder of GGUFs copied in by hand, or a store moved
-    /// without its manifests, show up in `eullm list` and `/api/tags`.
-    ///
-    /// With `name` `None`, every model in the store root that has no usable
-    /// manifest; otherwise that one, by its directory name or by the name of
-    /// a loose file in the root. Two shapes are understood:
-    ///
-    /// - a directory `root/<id>/` holding one model (a file, or the shards of
-    ///   a split, plus at most one projector): the manifest is written in
-    ///   place, under the directory's name. A directory holding several
-    ///   models is skipped: which one its name runs is not something to guess;
-    /// - a `.gguf` (or a split's shards) directly in the root: moved into a
-    ///   new `root/<id>/`, the layout every other command reads, and then
-    ///   registered. A rename inside the root, so nothing is copied. A loose
-    ///   projector is skipped, since nothing says which model it belongs to.
-    ///
-    /// A directory whose manifest is unreadable or malformed is registered
-    /// again: it is what `unlisted` reports. One with a manifest that reads
-    /// is left alone, so running this twice changes nothing.
-    pub fn import(&self, name: Option<&str>) -> Vec<Imported> {
-        let mut out = Vec::new();
-        let Ok(entries) = fs::read_dir(&self.root) else {
-            if let Some(name) = name {
-                out.push(Imported::Skipped {
-                    name: name.to_string(),
-                    reason: format!("the model store {} cannot be read", self.root.display()),
-                });
-            }
-            return out;
-        };
-        let mut dirs = Vec::new();
-        for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|t| t.is_dir())
-                && let Some(dir) = entry.file_name().to_str()
-            {
-                dirs.push(dir.to_string());
-            }
-        }
-        dirs.sort();
-        let loose = gguf_names(&self.root);
-        let (projectors, weights): (Vec<String>, Vec<String>) = loose
-            .into_iter()
-            .partition(|n| crate::registry::is_mmproj(n));
-        let loose_models = group_weights(&weights);
-
-        match name {
-            None => {
-                for dir in &dirs {
-                    // A folder without weights is not a model: not reported.
-                    if !gguf_names(&self.root.join(dir)).is_empty() {
-                        out.push(self.import_dir(dir));
-                    }
-                }
-                for model in &loose_models {
-                    out.push(self.import_loose(model));
-                }
-                for projector in projectors {
-                    out.push(Imported::Skipped {
-                        name: projector,
-                        reason: LOOSE_PROJECTOR.to_string(),
-                    });
-                }
-            }
-            Some(name) => {
-                let name = name.strip_prefix("eullm/").unwrap_or(name);
-                let file = |stem: &str| {
-                    loose_models
-                        .iter()
-                        .find(|m| m.stem == stem || m.files.iter().any(|f| f == name))
-                };
-                if dirs.iter().any(|d| d == name) {
-                    out.push(self.import_dir(name));
-                } else if let Some(model) =
-                    file(name.strip_suffix(".gguf").unwrap_or(name))
-                {
-                    out.push(self.import_loose(model));
-                } else if projectors.iter().any(|p| p == name) {
-                    out.push(Imported::Skipped {
-                        name: name.to_string(),
-                        reason: LOOSE_PROJECTOR.to_string(),
-                    });
-                } else {
-                    out.push(Imported::Skipped {
-                        name: name.to_string(),
-                        reason: format!(
-                            "no directory or .gguf of that name in {}",
-                            self.root.display()
-                        ),
-                    });
-                }
-            }
-        }
-        out
-    }
-
-    /// `import` for a model directory `root/<dir>/`.
-    fn import_dir(&self, dir: &str) -> Imported {
-        let skipped = |reason: String| Imported::Skipped {
-            name: dir.to_string(),
-            reason,
-        };
-        let Some(path) = self.safe_model_dir(dir) else {
-            return skipped("not a usable model name".to_string());
-        };
-        if let Ok(Some(_)) = self.get(dir) {
-            return Imported::AlreadyListed { id: dir.to_string() };
-        }
-        let (projectors, weights): (Vec<String>, Vec<String>) = gguf_names(&path)
-            .into_iter()
-            .partition(|n| crate::registry::is_mmproj(n));
-        let models = group_weights(&weights);
-        let model = match models.as_slice() {
-            [] if projectors.is_empty() => return skipped("no .gguf in it".to_string()),
-            [] => return skipped("only a projector (mmproj), no model weights".to_string()),
-            [model] => model,
-            several => {
-                let names: Vec<&str> = several.iter().map(|m| m.files[0].as_str()).collect();
-                return skipped(format!(
-                    "{} models in one directory ({}): give each a directory of its own",
-                    several.len(),
-                    names.join(", ")
-                ));
-            }
-        };
-        if let Some((present, total)) = model.missing {
-            return skipped(format!("split model with {present} of its {total} shards"));
-        }
-        // With several projectors the manifest names none; the store still
-        // finds one by scanning (`mmproj_path`), as it did before.
-        let mmproj = match projectors.as_slice() {
-            [one] => Some(one.as_str()),
-            _ => None,
-        };
-        let size = model
-            .files
-            .iter()
-            .filter_map(|f| fs::metadata(path.join(f)).ok())
-            .map(|m| m.len())
-            .sum();
-        match self.write_minimal_manifest(
-            dir,
-            &model.files[0],
-            IMPORTED_DESCRIPTION.to_string(),
-            size,
-            mmproj,
-            None,
-        ) {
-            Ok(_) => Imported::Registered {
-                id: dir.to_string(),
-                gguf_file: model.files[0].clone(),
-                mmproj_file: mmproj.map(str::to_string),
-                moved: false,
-            },
-            Err(e) => skipped(format!("the manifest could not be written: {e}")),
-        }
-    }
-
-    /// `import` for a model whose files sit loose in the store root.
-    fn import_loose(&self, model: &WeightFiles) -> Imported {
-        let name = model.files[0].clone();
-        let skipped = |reason: String| Imported::Skipped {
-            name: name.clone(),
-            reason,
-        };
-        if let Some((present, total)) = model.missing {
-            return skipped(format!("split model with {present} of its {total} shards"));
-        }
-        let id = model_id_for(&model.stem);
-        let Some(dir) = self.safe_model_dir(&id) else {
-            return skipped(format!("no usable model name can be made from it ({id:?})"));
-        };
-        if dir.exists() {
-            return skipped(format!(
-                "a directory {id}/ already exists: move the file into it, or rename one of them"
-            ));
-        }
-        if let Err(e) = create_model_dir(&dir) {
-            return skipped(e.to_string());
-        }
-        // Move back what was moved, and remove the directory again, when a
-        // later step fails: a half-moved split would not load from either place.
-        let undo = |moved: &[&String]| {
-            for f in moved {
-                let _ = fs::rename(dir.join(f), self.root.join(f));
-            }
-            let _ = fs::remove_dir_all(&dir);
-        };
-        let mut moved = Vec::new();
-        for f in &model.files {
-            if let Err(e) = fs::rename(self.root.join(f), dir.join(f)) {
-                undo(&moved);
-                return skipped(format!("could not move {f} into {id}/: {e}"));
-            }
-            moved.push(f);
-        }
-        let size = model
-            .files
-            .iter()
-            .filter_map(|f| fs::metadata(dir.join(f)).ok())
-            .map(|m| m.len())
-            .sum();
-        match self.write_minimal_manifest(
-            &id,
-            &model.files[0],
-            IMPORTED_DESCRIPTION.to_string(),
-            size,
-            None,
-            None,
-        ) {
-            Ok(_) => Imported::Registered {
-                id,
-                gguf_file: name,
-                mmproj_file: None,
-                moved: true,
-            },
-            Err(e) => {
-                undo(&moved);
-                skipped(format!("the manifest could not be written: {e}"))
-            }
-        }
-    }
-
-    /// The `.gguf` files sitting directly in the store root, projectors left
-    /// out: models no command lists until `import` gives them a directory.
-    pub fn loose_ggufs(&self) -> Vec<String> {
-        gguf_names(&self.root)
-            .into_iter()
-            .filter(|n| !crate::registry::is_mmproj(n))
-            .collect()
-    }
-}
-
-/// Why a projector loose in the store root is not imported.
-const LOOSE_PROJECTOR: &str =
-    "a projector (mmproj) on its own: move it into the directory of the model it belongs to";
 
 /// What `ModelStore::delete` removed.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -1391,82 +1181,6 @@ mod projector_with_mtp_tests {
             (Some(p), None)
         );
         assert_eq!(projector_with_mtp(None, false, true, "m"), (None, None));
-    }
-}
-
-#[cfg(test)]
-mod unlisted_tests {
-    use super::*;
-
-    fn tmp(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("eullm-unlisted-{tag}-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&d);
-        fs::create_dir_all(&d).expect("tmp dir");
-        d
-    }
-
-    fn weights(dir: &Path, name: &str) -> PathBuf {
-        let d = dir.join(name);
-        fs::create_dir_all(&d).expect("model dir");
-        fs::write(d.join("model.gguf"), b"weights").expect("weights");
-        d
-    }
-
-    // The case that prompted this: weights present, manifest gone. Before,
-    // `list()` skipped the directory in silence and the model simply was not
-    // there any more, with nothing saying why.
-    #[test]
-    fn a_model_without_a_manifest_is_reported_rather_than_vanishing() {
-        let root = tmp("no-manifest");
-        weights(&root, "orphaned-model");
-        let store = ModelStore::at(root.clone());
-
-        assert!(store.list().expect("list").is_empty());
-        let unlisted = store.unlisted();
-        assert_eq!(unlisted.len(), 1);
-        assert_eq!(unlisted[0].0, "orphaned-model");
-        assert!(
-            unlisted[0].1.contains("no manifest.json"),
-            "{:?}",
-            unlisted[0]
-        );
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn a_malformed_manifest_says_so_instead_of_being_skipped_quietly() {
-        let root = tmp("malformed");
-        let d = weights(&root, "half-written");
-        fs::write(d.join("manifest.json"), "{\"id\": \"half-written\",").expect("truncated");
-        let store = ModelStore::at(root.clone());
-
-        assert!(store.list().expect("list").is_empty());
-        let unlisted = store.unlisted();
-        assert_eq!(unlisted.len(), 1);
-        assert!(unlisted[0].1.contains("malformed"), "{:?}", unlisted[0]);
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // A model that lists correctly must not also be reported as broken, and a
-    // directory with no weights in it is not a model at all: neither belongs
-    // in a warning the user is meant to act on.
-    #[test]
-    fn nothing_is_reported_when_there_is_nothing_wrong() {
-        let root = tmp("healthy");
-        let d = weights(&root, "good-model");
-        let manifest = serde_json::json!({
-            "id": "good-model", "name": "good-model", "description": "",
-            "languages": [], "base": "", "vram_gb": 1, "size_bytes": 7,
-            "license": "Apache-2.0", "digest": "", "pulled_at": "", "status": "ready",
-            "gguf_file": "model.gguf",
-        });
-        fs::write(d.join("manifest.json"), manifest.to_string()).expect("manifest");
-        fs::create_dir_all(root.join("not-a-model")).expect("stray dir");
-        let store = ModelStore::at(root.clone());
-
-        assert_eq!(store.list().expect("list").len(), 1);
-        assert!(store.unlisted().is_empty());
-        let _ = fs::remove_dir_all(&root);
     }
 }
 
@@ -2067,25 +1781,28 @@ mod hf_file_tests {
     }
 }
 
+
 #[cfg(test)]
-mod import_tests {
+mod library_tests {
     use super::*;
     use uuid::Uuid;
 
     struct Scratch(PathBuf);
     impl Scratch {
         fn new() -> Self {
-            let d = std::env::temp_dir().join(format!("eullm-import-{}", Uuid::new_v4()));
-            fs::create_dir_all(&d).expect("mkdir");
+            let d = std::env::temp_dir().join(format!("eullm-store-lib-{}", Uuid::new_v4()));
+            fs::create_dir_all(d.join("store")).expect("mkdir");
+            fs::create_dir_all(d.join("lib")).expect("mkdir");
             Self(d)
         }
-        fn file(&self, rel: &str, bytes: usize) {
+        fn file(&self, rel: &str) -> PathBuf {
             let p = self.0.join(rel);
             fs::create_dir_all(p.parent().unwrap()).expect("mkdir");
-            fs::write(p, vec![0u8; bytes]).expect("write");
+            fs::write(&p, b"not a real gguf").expect("write");
+            p
         }
         fn store(&self) -> ModelStore {
-            ModelStore::at(self.0.clone())
+            ModelStore::at(self.0.join("store")).with_libraries(vec![self.0.join("lib")])
         }
     }
     impl Drop for Scratch {
@@ -2095,136 +1812,70 @@ mod import_tests {
     }
 
     #[test]
-    fn a_directory_without_a_manifest_is_registered_in_place() {
+    fn a_library_model_is_listed_and_runs_by_name_where_it_lies() {
         let s = Scratch::new();
-        s.file("qwen3-8b/Qwen3-8B-Q4_K_M.gguf", 10);
-        s.file("qwen3-8b/mmproj-F16.gguf", 3);
+        let file = s.file("lib/lmstudio-community/Qwen3-8B-GGUF/Qwen3-8B-Q4_K_M.gguf");
+        let projector = s.file("lib/lmstudio-community/Qwen3-8B-GGUF/mmproj-F16.gguf");
         let store = s.store();
-        assert!(store.list().unwrap().is_empty());
 
-        let out = store.import(None);
-        assert_eq!(
-            out,
-            vec![Imported::Registered {
-                id: "qwen3-8b".into(),
-                gguf_file: "Qwen3-8B-Q4_K_M.gguf".into(),
-                mmproj_file: Some("mmproj-F16.gguf".into()),
-                moved: false,
-            }]
-        );
-        let listed = store.list().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].size_bytes, 10, "the weights, not the projector");
-        assert_eq!(listed[0].written_description(), None, "provenance is not a description");
-        assert!(store.unlisted().is_empty());
-        assert!(store.gguf_path("qwen3-8b").unwrap().ends_with("Qwen3-8B-Q4_K_M.gguf"));
+        assert!(store.list().unwrap().is_empty(), "the store's own list is the store's");
+        let all = store.list_all().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, "qwen3-8b-q4_k_m");
+        assert_eq!(all[0].status, "library");
+        assert_eq!(all[0].written_description(), None);
 
-        // Twice changes nothing.
-        assert_eq!(
-            store.import(None),
-            vec![Imported::AlreadyListed { id: "qwen3-8b".into() }]
-        );
+        assert_eq!(store.resolve_gguf("qwen3-8b-q4_k_m"), Some(file.clone()));
+        assert_eq!(store.resolve_mmproj("qwen3-8b-q4_k_m"), Some(projector));
+        assert!(store.is_present("qwen3-8b-q4_k_m"));
+        // A pull asks gguf_path whether a model is downloaded: a library's is not.
+        assert_eq!(store.gguf_path("qwen3-8b-q4_k_m"), None);
+        // Nothing was written next to it.
+        let entries = fs::read_dir(file.parent().unwrap()).unwrap().count();
+        assert_eq!(entries, 2);
     }
 
     #[test]
-    fn a_loose_file_gets_a_directory_of_its_own() {
+    fn the_store_s_own_folder_is_read_like_a_library_outside_its_models() {
         let s = Scratch::new();
-        s.file("My Model Q4.gguf", 7);
+        let loose = s.file("store/copied-in-by-hand.gguf");
+        s.file("store/pulled/model.gguf");
         let store = s.store();
-        assert_eq!(store.loose_ggufs(), vec!["My Model Q4.gguf".to_string()]);
-
-        let out = store.import(Some("My Model Q4.gguf"));
-        assert_eq!(
-            out,
-            vec![Imported::Registered {
-                id: "my-model-q4".into(),
-                gguf_file: "My Model Q4.gguf".into(),
-                mmproj_file: None,
-                moved: true,
-            }]
-        );
-        assert!(!s.0.join("My Model Q4.gguf").exists());
-        assert!(s.0.join("my-model-q4").join("My Model Q4.gguf").is_file());
-        assert!(store.exists("my-model-q4"));
-        assert!(store.loose_ggufs().is_empty());
-    }
-
-    #[test]
-    fn a_split_model_is_one_model_opened_from_its_first_shard() {
-        let s = Scratch::new();
-        s.file("Big-Q4-00002-of-00002.gguf", 5);
-        s.file("Big-Q4-00001-of-00002.gguf", 5);
-        s.file("half/Half-00001-of-00003.gguf", 5);
-        let out = s.store().import(None);
-        assert_eq!(out.len(), 2);
-        assert!(matches!(&out[0], Imported::Skipped { name, reason }
-            if name == "half" && reason.contains("1 of its 3 shards")));
-        assert_eq!(
-            out[1],
-            Imported::Registered {
-                id: "big-q4".into(),
-                gguf_file: "Big-Q4-00001-of-00002.gguf".into(),
-                mmproj_file: None,
-                moved: true,
-            }
-        );
-        let m = s.store().get("big-q4").unwrap().unwrap();
-        assert_eq!(m.size_bytes, 10, "every shard counts");
-        assert!(s.0.join("big-q4").join("Big-Q4-00002-of-00002.gguf").is_file());
-    }
-
-    #[test]
-    fn what_cannot_be_told_apart_is_skipped_and_left_untouched() {
-        let s = Scratch::new();
-        s.file("two/a-Q4.gguf", 1);
-        s.file("two/a-Q8.gguf", 1);
-        s.file("mmproj-loose.gguf", 1);
-        s.file("taken.gguf", 1);
-        s.file("taken/notes.txt", 1);
-        s.file("docs/readme.txt", 1);
-        let out = s.store().import(None);
-        let skipped: Vec<&str> = out
-            .iter()
-            .map(|r| match r {
-                Imported::Skipped { name, .. } => name.as_str(),
-                other => panic!("nothing here is registrable: {other:?}"),
-            })
-            .collect();
-        // `docs/` and `taken/` hold no weights, so a sweep says nothing about them.
-        assert_eq!(skipped, vec!["two", "taken.gguf", "mmproj-loose.gguf"]);
-        assert!(s.0.join("taken.gguf").is_file(), "not moved over an existing directory");
-        assert!(s.store().list().unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_malformed_manifest_is_rewritten_and_a_good_one_kept() {
-        let s = Scratch::new();
-        s.file("broken/m.gguf", 1);
-        fs::write(s.0.join("broken").join("manifest.json"), "{ not json").unwrap();
-        s.file("good/m.gguf", 1);
-        s.store()
-            .write_external_manifest("good", "m.gguf", "https://example.eu/m.gguf", 1, None, None)
+        store
+            .write_external_manifest("pulled", "model.gguf", "https://example.eu/m.gguf", 1, None, None)
             .unwrap();
-        let out = s.store().import(None);
-        assert!(matches!(&out[0], Imported::Registered { id, .. } if id == "broken"));
-        assert_eq!(out[1], Imported::AlreadyListed { id: "good".into() });
-        let good = s.store().get("good").unwrap().unwrap();
-        assert!(good.description.contains("example.eu"), "left as it was");
+        let all = store.list_all().unwrap();
+        let ids: Vec<&str> = all.iter().map(|m| m.id.as_str()).collect();
+        // The pulled model once, from its manifest; the loose file found in place.
+        assert_eq!(ids, vec!["pulled", "copied-in-by-hand"]);
+        assert_eq!(store.resolve_gguf("copied-in-by-hand"), Some(loose.clone()));
+        assert!(loose.is_file(), "not moved");
     }
 
     #[test]
-    fn an_unknown_name_is_reported() {
+    fn a_store_id_wins_over_a_library_file_of_the_same_name() {
         let s = Scratch::new();
-        let out = s.store().import(Some("nope"));
-        assert!(matches!(&out[..], [Imported::Skipped { name, .. }] if name == "nope"));
-        assert!(matches!(&s.store().import(Some("../etc"))[..], [Imported::Skipped { .. }]));
+        s.file("store/qwen3-8b/model.gguf");
+        s.file("lib/some-folder/qwen3-8b.gguf");
+        let store = s.store();
+        store
+            .write_external_manifest("qwen3-8b", "model.gguf", "https://example.eu/m.gguf", 1, None, None)
+            .unwrap();
+        let ids: Vec<String> = store.list_all().unwrap().into_iter().map(|m| m.id).collect();
+        assert_eq!(ids, vec!["qwen3-8b".to_string(), "some-folder-qwen3-8b".to_string()]);
+        assert!(store.resolve_gguf("qwen3-8b").unwrap().starts_with(s.0.join("store")));
     }
 
     #[test]
-    fn ids_match_what_a_url_pull_would_make() {
-        assert_eq!(model_id_for("Qwen3-8B-Q4_K_M"), "qwen3-8b-q4_k_m");
-        assert_eq!(model_id_for("My Model (v2)"), "my-model--v2");
-        assert_eq!(model_id_for(".hidden"), "hidden");
-        assert_eq!(model_id_for("***"), "model");
+    fn the_libraries_come_from_the_environment_then_the_env_file() {
+        let file = "EULLM_MODEL_LIBRARIES=/from/file;/also\n";
+        let (libs, source) = ModelStore::resolve_libraries(Some("/env"), Some(file), ".env");
+        assert_eq!((libs, source.as_str()), (vec![PathBuf::from("/env")], "EULLM_MODEL_LIBRARIES"));
+        let (libs, source) = ModelStore::resolve_libraries(Some(" "), Some(file), ".env");
+        assert_eq!(libs, vec![PathBuf::from("/from/file"), PathBuf::from("/also")]);
+        assert_eq!(source, "EULLM_MODEL_LIBRARIES (.env)");
+        let (libs, source) = ModelStore::resolve_libraries(None, None, ".env");
+        assert!(libs.is_empty());
+        assert_eq!(source, "none");
     }
 }

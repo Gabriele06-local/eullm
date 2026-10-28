@@ -33,7 +33,7 @@ opens in the browser, and you can also type in the terminal. Any GGUF works:
 eullm run ./my-model.gguf          # a file you have
 eullm run                          # no model: pick one from a list
 eullm list                         # models already downloaded
-eullm import                       # register GGUFs copied into the models folder by hand
+eullm import                       # what was found in the model folders, and what was left out
 ```
 
 While it runs, any Ollama or OpenAI client can use it at
@@ -115,7 +115,8 @@ read them.
 | `EULLM_ALLOWED_IPS` | `192.168.1.0/24` | Who may connect besides this machine. **By default only this machine can**: set it to use EuLLM from another PC |
 | `EULLM_API_KEYS` | `myapp:8f3b1d9c2e7a4f60b5` | Require a key (`Authorization: Bearer 8f3b1d9c2e7a4f60b5`). Needed behind Docker |
 | `EULLM_ALLOWED_ORIGINS` | `https://chat.example.eu` | Web pages on other hosts allowed to call the API |
-| `EULLM_MODELS_DIR` | `/data/models` | Where models are kept (default `~/.eullm/models`). GGUFs already in that folder: `eullm import` registers them |
+| `EULLM_MODELS_DIR` | `/data/models` | Where `eullm pull` keeps models (default `~/.eullm/models`). Any `.gguf` in it, at any depth, is listed and runs |
+| `EULLM_MODEL_LIBRARIES` | `D:\LM Studio\models;E:\gguf` | Other programs' model folders, read in every subfolder and never changed: their models are listed and run by name |
 | `HF_TOKEN` | `hf_...` | For gated or private Hugging Face models |
 
 The startup log says which settings are in effect and where each came from.
