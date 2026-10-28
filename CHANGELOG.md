@@ -18,6 +18,9 @@ something changed, less so for understanding what it means.
 ### Added
 - **Model libraries: other programs' model folders used as they are.** `EULLM_MODEL_LIBRARIES` (in the environment or in `.env`, folders separated by `;`) names folders such as LM Studio's models folder or a Hugging Face cache. Every `.gguf` in them, through every subfolder, is listed by `eullm list`, `/api/tags` and `/v1/models` and runs by its name, and nothing in them is moved, renamed, added or deleted, so the program that made the folder keeps using it. `eullm rm` refuses such a model. A projector (`mmproj`) goes with the model in its folder instead of being offered as a model; a model split in parts is one model.
 
+### Changed
+- **llama.cpp moves to b11925**, 443 commits newer than the one 0.7.95 runs on. Eight more model architectures load: `beam`, `deepseek41`, `flint`, `kolibri1`, `maion-coder`, `muse-spark`, `sensenova_u1` and `vllm-decision2`. The expert cache (`--moe-cache`) keeps EuLLM's own eviction rather than the one llama.cpp moved to: replayed on routing modelled on LUMI's measurements, it finds no expert in VRAM once a step needs more experts than the cache holds (Qwen3-Coder-480B with 8 requests at once, Qwen3-235B with 32), where EuLLM's finds 60% and 73%.
+
 ### Fixed
 - **`eullm import` no longer moves files, and the models folder is read at any depth.** In 0.7.95 it moved a `.gguf` lying in the models folder into a folder of its own, read one level of subfolders only, and listed projectors as models. Every `.gguf` in the models folder, at any depth, is now listed and runs where it is, with no command; `eullm import` only shows what was found and what was left out, and why. The model picker (`eullm` with no arguments) no longer offers projectors as models either.
 

@@ -1385,18 +1385,16 @@ pub struct DynamicChatTemplate {
 }
 
 /// A chat prompt rendered from OpenAI-format request JSON (messages plus
-/// optional tools), carrying the output-format descriptor needed to parse
-/// the model's raw output back into structured content, reasoning and tool
-/// calls. Unlike [`DynamicChatTemplate`], a pre-opened thinking tag is not
-/// handed back as a response prefix here: the parser this descriptor builds
-/// was derived from the prompt exactly as rendered (`generation_prompt`),
-/// knows the output starts inside the block, and expects it that way.
+/// optional tools), carrying the parser of the output format, needed to
+/// parse the model's raw output back into structured content, reasoning and
+/// tool calls. Unlike [`DynamicChatTemplate`], a pre-opened thinking tag is
+/// not handed back as a response prefix here: the parser was built from the
+/// prompt exactly as rendered (its generation prompt), knows the output
+/// starts inside the block, and expects it that way.
 pub struct DynamicOaiTemplate {
     /// The rendered prompt, ready to generate from as-is.
     pub prompt: String,
-    format: i32,
-    parser: String,
-    generation_prompt: String,
+    parser: Option<llama_cpp_2::model::ChatParser>,
 }
 
 /// One tool call extracted from a model's output.
@@ -1436,9 +1434,7 @@ impl DynamicOaiTemplate {
         let raw = match llama_cpp_2::model::chat_parse(
             text,
             /* is_partial */ false,
-            self.format,
-            &self.parser,
-            &self.generation_prompt,
+            self.parser.as_ref(),
         ) {
             Ok(raw) => raw,
             Err(e) => {
@@ -1603,9 +1599,7 @@ pub(crate) fn render_oai_chat_template(
     }
     Some(DynamicOaiTemplate {
         prompt: result.prompt,
-        format: result.format,
         parser: result.parser,
-        generation_prompt: result.generation_prompt,
     })
 }
 
@@ -3785,10 +3779,8 @@ mod stop_reason_tests {
 
     // ── DynamicOaiTemplate::parse_output ────────────────────────────────────
     //
-    // The parse side is model-free (llama.cpp's common_chat_parse rebuilds
-    // its state from the descriptor alone), so the full FFI round trip runs
-    // in CI. With an empty parser descriptor llama.cpp substitutes a pure
-    // content parser: everything — thinking tags included — passes through
+    // The parse side is model-free, so the full FFI round trip runs in CI.
+    // With no parser llama.cpp substitutes a pure content parser: everything — thinking tags included — passes through
     // as content, verbatim. Reasoning and tool-call extraction live in the
     // PEG parser the template render derives, which needs a real GGUF, so
     // that half is validated on hardware; what CI pins down here is the FFI
@@ -3797,9 +3789,7 @@ mod stop_reason_tests {
     fn content_only_template() -> super::DynamicOaiTemplate {
         super::DynamicOaiTemplate {
             prompt: String::new(),
-            format: 0,
-            parser: String::new(),
-            generation_prompt: String::new(),
+            parser: None,
         }
     }
 
