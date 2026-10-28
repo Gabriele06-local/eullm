@@ -782,22 +782,22 @@ enum Commands {
     },
     /// List locally available models
     List,
-    /// Register models whose files are already in the model store
+    /// Show the models found in the model libraries, and what was left out
     ///
-    /// Writes the missing manifest.json of each model in the store
-    /// (EULLM_MODELS_DIR, or ~/.eullm/models) that has none, so it shows in
-    /// `eullm list` and `/api/tags`: GGUFs copied in by hand, or a store moved
-    /// without its manifests. A .gguf directly in the store folder is moved
-    /// into a directory of its own first; nothing is copied or downloaded.
-    /// Models that already have a manifest are left as they are.
+    /// The folders of EULLM_MODEL_LIBRARIES (environment or .env, separated
+    /// by ;) and the store's own folder are read through every subfolder, in
+    /// place: nothing is moved, renamed or written, so LM Studio or any other
+    /// program keeps using the same folder. Every model found is listed by
+    /// `eullm list` and `/api/tags` and runs by its name, with no command
+    /// needed; this one only shows the scan, with the files it skipped
+    /// (projectors without a model, incomplete split models) and why.
     ///
     /// Examples:
-    ///   eullm import                  (every model in the store)
-    ///   eullm import qwen3-8b         (the directory qwen3-8b/)
-    ///   eullm import Model-Q4_K_M.gguf  (a file in the store folder)
+    ///   eullm import
     Import {
-        /// A model directory or .gguf file in the store, by name or path;
-        /// the store folder itself, or nothing, for all of them
+        /// Accepted for compatibility with 0.7.95 and ignored: every folder
+        /// is always read whole
+        #[arg(hide = true)]
         target: Option<String>,
     },
     /// Show model information
@@ -1264,7 +1264,7 @@ async fn main() {
             .await;
         }
         Commands::List => cmd_list(&store),
-        Commands::Import { target } => cmd_import(&store, target.as_deref()),
+        Commands::Import { target: _ } => cmd_import(&store),
         Commands::Show { model } => cmd_show(&store, &model),
         Commands::Rm { model, force } => cmd_rm(&store, &model, force),
         Commands::Serve { ui, opts } => {
@@ -2040,141 +2040,67 @@ async fn download_mmproj(
     }
 }
 
-/// Report model directories that hold weights but that `list()` could not
-/// read, so they do not vanish from the listing without explanation.
-///
-/// Printed after the table rather than mixed into it: these are not usable
-/// models, and putting them in the same list would suggest they can be run.
-fn print_unlisted(store: &ModelStore) {
-    let unlisted = store.unlisted();
-    if unlisted.is_empty() {
-        return;
-    }
-    println!("\nNot listed above — weights on disk, manifest unusable:");
-    for (name, reason) in &unlisted {
-        println!("  {name:<24} {reason}");
-    }
-    println!(
-        "\n  Register them with `eullm import` (writes the manifest, downloads nothing),\n           or `eullm pull <name>` (re-downloads and rewrites the manifest)."
-    );
-}
-/// Report `.gguf` files sitting directly in the store folder: no command lists
-/// them as models until `eullm import` gives each a directory.
-fn print_loose(store: &ModelStore) {
-    let loose = store.loose_ggufs();
-    if loose.is_empty() {
-        return;
-    }
-    println!("\nIn the store folder but not registered as models:");
-    for name in &loose {
-        println!("  {name}");
-    }
-    println!("\n  Register them with `eullm import`.");
-}
-
-/// `eullm import`: write the manifests of models already in the store.
-///
-/// `target` may be a path, as long as it is the store folder or something
-/// directly in it: the store reads only its own folder, so a model elsewhere
-/// would be registered and then not found. That case is refused with what to
-/// do instead, rather than copying gigabytes the user did not ask to copy.
-fn cmd_import(store: &ModelStore, target: Option<&str>) {
-    use models::store::Imported;
-    use std::path::Path;
+/// The folders models are read from, for the head of `eullm list` and
+/// `eullm import`.
+fn print_folders(store: &ModelStore) {
     let (root, source) = store.root_with_source();
-    println!("Model store: {} [{source}]\n", root.display());
-
-    let name = match target {
-        None => None,
-        // A name in the store first, so a folder of the same name in the
-        // working directory does not stand in for it.
-        Some(t) if models::store::is_safe_filename(t) && root.join(t).exists() => {
-            Some(t.to_string())
-        }
-        Some(t) if Path::new(t).exists() => {
-            let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-            let path = canonical(Path::new(t));
-            let root = canonical(root);
-            if path == root {
-                None
-            } else if path.parent() == Some(root.as_path())
-                && let Some(file) = path.file_name().and_then(|n| n.to_str())
-            {
-                Some(file.to_string())
-            } else {
-                eprintln!(
-                    "Error: {t} is not in the model store ({}).\n  \
-                     Point EULLM_MODELS_DIR at the folder that holds it (in the environment \
-                     or in .env), or move it into the store, then run `eullm import` again.",
-                    root.display()
-                );
-                std::process::exit(1);
-            }
-        }
-        Some(t) => Some(t.to_string()),
-    };
-
-    let results = store.import(name.as_deref());
-    if results.is_empty() {
-        println!("Nothing to import: no model files in the store.");
-        return;
-    }
-    let mut registered = Vec::new();
-    let mut skipped = 0;
-    for r in &results {
-        match r {
-            Imported::Registered {
-                id,
-                gguf_file,
-                mmproj_file,
-                moved,
-            } => {
-                let projector = mmproj_file
-                    .as_deref()
-                    .map(|m| format!(" + {m}"))
-                    .unwrap_or_default();
-                let place = if *moved {
-                    format!("{gguf_file} → {id}/")
-                } else {
-                    format!("{id}/{gguf_file}")
-                };
-                println!("  registered  {id:<28} {place}{projector}");
-                registered.push(id.as_str());
-            }
-            Imported::AlreadyListed { id } => {
-                println!("  listed      {id:<28} already has a manifest");
-            }
-            Imported::Skipped { name, reason } => {
-                println!("  skipped     {name:<28} {reason}");
-                skipped += 1;
-            }
-        }
-    }
-    println!();
-    match registered.first() {
-        Some(first) => println!(
-            "{} registered. Run one with: eullm run {first}",
-            registered.len()
-        ),
-        None => println!("Nothing registered."),
-    }
-    // A named target that could not be registered is a failure a script
-    // should see; a sweep of the whole store reports and carries on.
-    if name.is_some() && skipped > 0 {
-        std::process::exit(1);
+    println!("Models in {} [{source}]", root.display());
+    let (libraries, source) = store.libraries_with_source();
+    for l in libraries {
+        let missing = if l.is_dir() { "" } else { "  (not found)" };
+        println!("Library   {} [{source}]{missing}", l.display());
     }
 }
 
+/// The `.gguf` files a scan of the libraries left out, and why.
+fn print_skipped(store: &ModelStore) {
+    let scan = store.library();
+    if scan.skipped.is_empty() {
+        return;
+    }
+    println!("\nNot models (left as they are):");
+    for s in &scan.skipped {
+        println!("  {}  {}", s.path.display(), s.reason);
+    }
+}
+
+/// `eullm import`: what a scan of the libraries and the store's folder finds.
+/// Writes nothing: every model found is listed and runs without a manifest,
+/// and 0.7.95's import, which moved loose files into folders of their own,
+/// changed a folder other programs may also read.
+fn cmd_import(store: &ModelStore) {
+    print_folders(store);
+    let scan = store.library();
+    println!();
+    if scan.models.is_empty() {
+        println!("No model found outside the store's downloaded models.");
+    }
+    for m in &scan.models {
+        let projector = m
+            .mmproj
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .map(|n| format!("  + {}", n.to_string_lossy()))
+            .unwrap_or_default();
+        println!(
+            "  {:<32} {:>8}  {}{projector}",
+            m.id,
+            format_bytes(m.size_bytes),
+            m.path.display()
+        );
+    }
+    print_skipped(store);
+    if let Some(first) = scan.models.first() {
+        println!("\nNothing to import: they are listed and run as they are, e.g. eullm run {}", first.id);
+    }
+}
 
 fn cmd_list(store: &ModelStore) {
-    match store.list() {
+    match store.list_all() {
         Ok(models) if models.is_empty() => {
-            let (root, source) = store.root_with_source();
-            println!("No models installed in {} [{}].", root.display(), source);
-            // Before the catalog: "nothing installed" is misleading when a
-            // model's weights are right there and only its manifest is gone.
-            print_loose(store);
-            print_unlisted(store);
+            print_folders(store);
+            println!("\nNo models installed.");
+            print_skipped(store);
             println!("\nAvailable models in EU catalog:");
             for entry in catalog::EU_CATALOG.iter() {
                 println!(
@@ -2188,8 +2114,8 @@ fn cmd_list(store: &ModelStore) {
         Ok(models) => {
             // NAME is the addressable id — exactly what you pass to `eullm run`.
             // The human-readable name is shown as a trailing description.
-            let (root, source) = store.root_with_source();
-            println!("Models in {} [{}]\n", root.display(), source);
+            print_folders(store);
+            println!();
             println!(
                 "{:<24} {:>8} {:>6} {:<16} DESCRIPTION",
                 "NAME", "SIZE", "VRAM", "STATUS"
@@ -2205,8 +2131,13 @@ fn cmd_list(store: &ModelStore) {
                 // copy, so a stale display name (e.g. an old "(text-only)" tag)
                 // self-corrects without a re-pull. External models fall back to
                 // the manifest name.
-                let desc = catalog::find_model(id)
-                    .map(|e| e.name.as_str())
+                // A library model has no name of its own: its file says
+                // what it is.
+                let library_path = (m.status == "library")
+                    .then(|| m.description.split_once(": ").map(|(_, p)| p))
+                    .flatten();
+                let desc = library_path
+                    .or_else(|| catalog::find_model(id).map(|e| e.name.as_str()))
                     .unwrap_or(m.name.as_str());
                 // `status` is whatever was written into the manifest at pull
                 // time, so it keeps saying `ready` for a model whose GGUF is
@@ -2232,8 +2163,7 @@ fn cmd_list(store: &ModelStore) {
                     })
                     .unwrap_or("<NAME>")
             );
-            print_loose(store);
-            print_unlisted(store);
+            print_skipped(store);
         }
         Err(e) => {
             eprintln!("Error listing models: {e}");
@@ -2243,8 +2173,8 @@ fn cmd_list(store: &ModelStore) {
 }
 
 fn cmd_show(store: &ModelStore, model: &str) {
-    // First check local store
-    match store.get(model) {
+    // First check local store, and the libraries
+    match store.get_any(model) {
         Ok(Some(manifest)) => {
             // Show the addressable id and the fresh catalog name when known.
             let id = if manifest.id.is_empty() {
@@ -2293,6 +2223,18 @@ fn cmd_show(store: &ModelStore, model: &str) {
 fn cmd_rm(store: &ModelStore, model: &str, force: bool) {
     // Resolve the model to its on-disk manifest so we can show name + size
     // in the confirmation prompt. If there's no manifest, refuse.
+    // A library's files belong to the user and to whatever else reads the
+    // folder: EuLLM lists and runs them, and deletes nothing there.
+    if store.get(model).ok().flatten().is_none()
+        && let Some(m) = store.library_model(model)
+    {
+        eprintln!(
+            "Error: '{model}' is {} in a model library, which EuLLM only reads.\n  \
+             Delete the file yourself if you want it gone.",
+            m.path.display()
+        );
+        std::process::exit(1);
+    }
     let manifest = match store.get(model) {
         Ok(Some(m)) => m,
         Ok(None) => {
@@ -2362,8 +2304,8 @@ fn resolve_model_path(model: &str, store: &ModelStore) -> Option<PathBuf> {
         return Some(path);
     }
 
-    // Check model store for downloaded GGUF files
-    store.gguf_path(model)
+    // Check model store for downloaded GGUF files, then the libraries
+    store.resolve_gguf(model)
 }
 
 /// `--max-loaded-models`, `--default-model` and `--auto-model`, resolved
@@ -3158,8 +3100,8 @@ async fn cmd_run(
         // then finds missing.
         let mmproj_for_config = mmproj
             .clone()
-            .or_else(|| store.mmproj_path(&model_name))
-            .or_else(|| store.mmproj_path(model))
+            .or_else(|| store.resolve_mmproj(&model_name))
+            .or_else(|| store.resolve_mmproj(model))
             .or_else(|| crate::models::store::mmproj_beside(&gguf_path));
         // `--mtp` drafts on the scheduler's one slot only, which a projector
         // rules out: see `projector_with_mtp`.

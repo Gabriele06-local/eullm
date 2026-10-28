@@ -1934,7 +1934,7 @@ async fn list_models(State(state): State<S>) -> Json<Value> {
         .iter()
         .filter_map(|m| m.get("name").and_then(|v| v.as_str()).map(String::from))
         .collect();
-    for m in state.store.list().unwrap_or_default() {
+    for m in state.store.list_all().unwrap_or_default() {
         if m.id.is_empty() || already.contains(&m.id) {
             continue;
         }
@@ -2916,7 +2916,7 @@ fn ndjson_lines(values: impl Stream<Item = Value> + Send + 'static) -> axum::res
 fn local_model_ids(state: &AppState) -> Vec<String> {
     state
         .store
-        .list()
+        .list_all()
         .unwrap_or_default()
         .into_iter()
         .filter(|m| !m.id.is_empty())
