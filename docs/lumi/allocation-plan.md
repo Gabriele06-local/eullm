@@ -587,6 +587,12 @@ the new binary under the label `v080`.
 It did, the same day: `build exit: 0`, `eullm 0.8.0 (ROCm) [4cf28c5d2989]`,
 device code `amdhsa--gfx90a`, linked to `libamdhip64.so.6` and
 `librccl.so.1`, built with this site's ROCm 6.3 (patch 0013).
+The test was submitted next: the old binary `eullm 0.7.95 (ROCm)
+[be0cf9ec87be]` built the same way (`eullm-v0795`, `eullm-target/v0795`),
+the smoke job 23253715 on the new one, `c14` planned with 18 points per
+binary and one job of 8 hours each (23253735 `v0795`, 23253737 `v080`), the
+round's waiting jobs held (`JobHeldUser`) and 23253738 on `debug`, waiting on
+both, to release them.
 
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
