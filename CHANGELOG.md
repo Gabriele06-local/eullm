@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.8.0 — 2026-10-28
 
 ### Added
 - **Model libraries: other programs' model folders used as they are.** `EULLM_MODEL_LIBRARIES` (in the environment or in `.env`, folders separated by `;`) names folders such as LM Studio's models folder or a Hugging Face cache. Every `.gguf` in them, through every subfolder, is listed by `eullm list`, `/api/tags` and `/v1/models` and runs by its name, and nothing in them is moved, renamed, added or deleted, so the program that made the folder keeps using it. `eullm rm` refuses such a model. A projector (`mmproj`) goes with the model in its folder instead of being offered as a model; a model split in parts is one model.
