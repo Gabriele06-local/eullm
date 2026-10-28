@@ -24,6 +24,7 @@ Nothing here is merged until the reference PC and the three sites have run it
 | `0008` + `0009` eviction | **one patch**, `0008-moe-cache-evicts-by-pass-and-decaying-counts`, replacing upstream's new 50/50 SLRU (#30637). Replayed through `bench/moe_cache_sim` (the SLRU added to it), the SLRU finds what the LRU found: the same where a step fits, and 0% of the experts in VRAM where it overflows the cache (Qwen3-235B at 32 sequences, Qwen3-Coder-480B at 8 and 32), where this patch finds 73%, 60% and 33% |
 | `0011` pool keeps VRAM free | **halved**: upstream now drops a context's CUDA graphs when its pool frees memory (`invalidate_cuda_graphs`), so the patch's own per-device flush counter is gone and its threshold flush calls upstream's function |
 | `0012` meta split loads | the loader's buffers are a vector now: one line |
+| `0013` top-k MoE group mask on HIP | **new**: upstream's grouped top-k MoE fusion (#29181) uses `__ballot_sync`, which ROCm 6.x declares only with `HIP_ENABLE_WARP_SYNC_BUILTINS`, so ggml-hip did not compile for the MI250X with ROCm 6.3.4 (found by the LUMI build, 28 October; the RDNA release build uses ROCm 7.2.4 and does not see it). On HIP the mask is read through a shuffle; checked with ROCm 6.3.4's clang for gfx90a, gfx1100 and gfx1201 |
 
 ### The wrapper and the Rust side
 
