@@ -546,22 +546,22 @@ nothing pushed to it: two worktrees on `/scratch`, the branch and its base
 be0cf9e (0.7.95), each built into a directory of its own
 (`eullm-target/llama-b11925`, `eullm-target/v0795`), with `EULLM_REPO` set
 to the worktree, since `campaign_env.sh` exports the main checkout's and
-`build_engine.sh` takes it; `r-v0794`'s chains keep `eullm-target/v0794`.
-The tests, old against new, the same models and flags (`c14-llama-bump`):
+`build_engine.sh` takes it; `r-v0794`'s chains keep `eullm-target/v0794`
+and are held (`scontrol hold`) while the test runs, released by a job that
+waits on it. The main checks only, old against new, the same models and
+flags (`c14-llama-bump`), in one `standard-g` job of 8 hours per binary:
 
 1. `sbatch_smoke.slurm` with the new binary.
-2. `bump-mtp-*`: the six Qwen3.5/3.6 MTP twins without `--mtp` and with
-   1-3, 100 gsm8k questions at temperature 0 and the Leonardo prompt at the
-   default sampling. On the reference PC b11925 keeps about 5 points fewer
-   drafts at `--mtp 2` and writes 2-3.5% slower.
-3. `bump-soak-*`: twelve hours at 32 requests on one GCD (Qwen3-32B f16 and
-   its Q8_0, Qwen3-30B-A3B Q8_0, Qwen3.6-35B-A3B), llama.cpp's log on: patch
-   0011 is halved and calls upstream's graph invalidation. Labels of their
-   own (`v0795-soak`, `b11925-soak`), one `small-g` job of four GCDs and 13
-   hours per binary.
-4. `bump-moe`: the 235B and the 480B with `--moe-cache auto` at 8 and 32
-   requests, `LLAMA_MOE_CACHE_STATS=64`: the share of experts in VRAM, now
-   with 0008 alone in place of llama.cpp's new SLRU.
+2. `bump-moe`, first, on the whole node: the 235B with `--moe-cache auto`
+   at 8 and 32 requests, `LLAMA_MOE_CACHE_STATS=64`: the share of experts
+   in VRAM, now with 0008 alone in place of llama.cpp's new SLRU.
+3. `bump-soak-*`: five hours at 32 requests on one GCD (Qwen3-32B f16 and
+   its Q8_0, Qwen3-30B-A3B Q8_0, Qwen3.6-35B-A3B), llama.cpp's log on:
+   patch 0011 is halved and calls upstream's graph invalidation.
+4. `bump-mtp-graded`, beside the soaks: the six Qwen3.5/3.6 MTP twins
+   without `--mtp` and with `--mtp 2`, 100 gsm8k questions at temperature 0.
+   On the reference PC b11925 keeps about 5 points fewer drafts at `--mtp 2`
+   and writes 2-3.5% slower.
 
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
