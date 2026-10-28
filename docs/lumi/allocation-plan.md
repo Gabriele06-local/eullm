@@ -593,6 +593,10 @@ the smoke job 23253715 on the new one, `c14` planned with 18 points per
 binary and one job of 8 hours each (23253735 `v0795`, 23253737 `v080`), the
 round's waiting jobs held (`JobHeldUser`) and 23253738 on `debug`, waiting on
 both, to release them.
+The smoke passed on the new binary: one MI250X GCD found (gfx90a, wave
+size 64, 65,520 MiB), Qwen3-8B (4.68 GiB) loaded whole on it by `--fit`,
+5.9 GB of HBM in use after the request (llama.cpp's breakdown: 4,455 MiB of
+model, 576 of context, 108 of compute).
 
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
