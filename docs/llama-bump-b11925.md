@@ -90,6 +90,44 @@ Then the same model and flags on each binary, one server at a time:
    (Qwen3, Spark) and one tool call through Open WebUI or `/v1/chat/completions`
    with `tools`: reasoning in `reasoning_content`, the call in `tool_calls`.
 
+### Measured, 28 October
+
+The 0.7.95 release binary (be0cf9e) against this branch (f49a78e), built
+with `--features cuda`, one server at a time, `bench/speed_check.py` at
+temperature 0. Tokens per second.
+
+| Model, setting | 0.7.95 writes / reads | b11925 writes / reads |
+|---|---:|---:|
+| Qwen3.6-35B-A3B Q4 (22 GB, expert cache), 16K prompt | 134.4 / 5,065 | 137.0 / 5,510 |
+| Qwen3.8-Flash-Next IQ2_XS (67 GB), 16K prompt | 66.5 / 1,737 | 66.8 / 1,826 |
+| Flash-Next, `prefetch_check` 33K, prefetch off | 66.5 / 1,057 | 69.3 / 1,151 |
+| Flash-Next, `prefetch_check` 33K, prefetch 4 | 64.8 / 1,634 | 66.4 / 1,766 |
+| Qwen3.5-9B MTP Q4_K_M, no MTP, story / code | 123.9 / 124.4 | 125.1 / 125.4 |
+| the same, `--mtp 2`, story | 178.2, 55% of drafts kept | 171.9, 50% |
+| the same, `--mtp 2`, code | 228.2, 86% | 223.8, 81% |
+| the same, `--mtp 2`, 16K prompt read | 4,738-4,758 | 5,513-5,531 |
+
+- **The expert cache**: Qwen3.6-35B-A3B found 97.57% of its experts in VRAM
+  at decode on 0.7.95 and 97.72% on b11925, and copied 7,225 and 6,789 MiB;
+  the pinning (18.22 GiB, loaded without mmap) and the statistics work on
+  the rewritten `0002` and `0008`. The prefetch reads 23% of a micro-batch's
+  experts from the cache's slots in VRAM, as before (`0004`).
+- **The same answer**: Flash-Next gave e23bd058 on both binaries and both
+  prefetch settings. The other models' greedy answers differ between the two
+  binaries, as llama.cpp's CUDA kernels moved; Qwen3.5-9B's story is now the
+  same with and without `--mtp` (1083b386), where 0.7.95 gave two.
+- **MTP**: the only loss. Every other figure is level or better, but with
+  `--mtp 2` the model keeps about 5 points fewer of its drafts on both texts
+  (three runs each, every run the same figure), and writes 2-3.5% slower.
+  llama.cpp's MTP drafting is unchanged between the two pins (only the batch
+  call that carries the hidden state was renamed), and so is Qwen3.5's graph
+  once EuLLM's old `0007` is counted; the target's numerics moved, and the MTP
+  head drafts against them. To be measured on the six Qwen3.5/3.6 MTP models
+  of the LUMI round before it is called general.
+- **Tools and reasoning**: Qwen3.6-35B-A3B answered a `tools` request with an
+  empty `content`, the reasoning in `reasoning_content` and
+  `meteo({"citta": "Roma"})` in `tool_calls` on both binaries.
+
 ## 4. On the three sites
 
 Each site builds this branch into a build directory of its own, so that no
