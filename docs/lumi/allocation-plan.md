@@ -563,6 +563,15 @@ flags (`c14-llama-bump`), in one `standard-g` job of 8 hours per binary:
    On the reference PC b11925 keeps about 5 points fewer drafts at `--mtp 2`
    and writes 2-3.5% slower.
 
+The branch does not build for the MI250X (28-10-2026, 19:30, the first
+build, nothing submitted): llama.cpp's `ggml-cuda/topk-moe.cu` instantiates
+`topk_moe_cuda<576>` and `group_mask_warp_inplace` finds no match for gfx90a
+(`n_experts = 576, experts_per_thread = 18`, "substitution failure"), 13
+errors, so `ggml-hip` stops. gfx90a runs 64-wide wavefronts where CUDA's
+warp is 32, and a build for a 32-wide AMD card (the release's RDNA) does not
+meet it. The release's `eullm-linux-x64-rocm-gfx90a` would fail the same
+way. The test waits for the branch to build here; `r-v0794` goes on.
+
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
 ("pool[...] freeing"), HSA errors, out of memory and NaN.
