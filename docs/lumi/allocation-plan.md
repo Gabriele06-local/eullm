@@ -584,6 +584,10 @@ it has to finish and the binary has to carry gfx90a code
 (`amdhsa--gfx90a`, as the release checks it). Then the same `c14` test,
 the new binary under the label `v080`.
 
+It did, the same day: `build exit: 0`, `eullm 0.8.0 (ROCm) [4cf28c5d2989]`,
+device code `amdhsa--gfx90a`, linked to `libamdhip64.so.6` and
+`librccl.so.1`, built with this site's ROCm 6.3 (patch 0013).
+
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
 ("pool[...] freeing"), HSA errors, out of memory and NaN.
