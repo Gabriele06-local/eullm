@@ -539,6 +539,59 @@ of 14 jobs of 8 hours (heads 23206675 and 23206689), at most about 220
 node-hours, most of a chain's later jobs ending at once if the work runs
 short of the estimate.
 
+28-10-2026, llama.cpp b11925 before it is merged (branch
+`chore/llama-cpp-b11925`, b86d2f0 -> b11925, 443 commits;
+`docs/llama-bump-b11925.md` on it). Not merged into this site's branch and
+nothing pushed to it: two worktrees on `/scratch`, the branch and its base
+be0cf9e (0.7.95), each built into a directory of its own
+(`eullm-target/llama-b11925`, `eullm-target/v0795`), with `EULLM_REPO` set
+to the worktree, since `campaign_env.sh` exports the main checkout's and
+`build_engine.sh` takes it; `r-v0794`'s chains keep `eullm-target/v0794`
+and are held (`scontrol hold`) while the test runs, released by a job that
+waits on it. The main checks only, old against new, the same models and
+flags (`c14-llama-bump`), in one `standard-g` job of 8 hours per binary:
+
+1. `sbatch_smoke.slurm` with the new binary.
+2. `bump-moe`, first, on the whole node: the 235B with `--moe-cache auto`
+   at 8 and 32 requests, `LLAMA_MOE_CACHE_STATS=64`: the share of experts
+   in VRAM, now with 0008 alone in place of llama.cpp's new SLRU.
+3. `bump-soak-*`: five hours at 32 requests on one GCD (Qwen3-32B f16 and
+   its Q8_0, Qwen3-30B-A3B Q8_0, Qwen3.6-35B-A3B), llama.cpp's log on:
+   patch 0011 is halved and calls upstream's graph invalidation.
+4. `bump-mtp-graded`, beside the soaks: the six Qwen3.5/3.6 MTP twins
+   without `--mtp` and with `--mtp 2`, 100 gsm8k questions at temperature 0.
+   On the reference PC b11925 keeps about 5 points fewer drafts at `--mtp 2`
+   and writes 2-3.5% slower.
+
+The branch does not build for the MI250X (28-10-2026, 19:30, the first
+build, nothing submitted): llama.cpp's `ggml-cuda/topk-moe.cu` instantiates
+`topk_moe_cuda<576>` and `group_mask_warp_inplace` finds no match for gfx90a
+(`n_experts = 576, experts_per_thread = 18`, "substitution failure"), 13
+errors, so `ggml-hip` stops. gfx90a runs 64-wide wavefronts where CUDA's
+warp is 32, and a build for a 32-wide AMD card (the release's RDNA) does not
+meet it. The release's `eullm-linux-x64-rocm-gfx90a` would fail the same
+way. The test waits for the branch to build here; `r-v0794` goes on.
+
+29-10-2026: the fix is on `feat/model-libraries` (4cf28c5), which carries
+the same llama.cpp b11925, the model libraries and 0.8.0, and replaces
+`chore/llama-cpp-b11925` for the test. The cause was not the 64-wide
+wavefront but `__ballot_sync`, which ROCm 6.x declares only with
+`HIP_ENABLE_WARP_SYNC_BUILTINS` (ROCm 7 always, so the release's RDNA build
+on 7.2.4 never met it); patch 0013 uses a shuffle on HIP for the same mask.
+First a build of the branch with this site's ROCm, in a worktree and a
+target directory of their own (`eullm-ml`, `eullm-target/model-libraries`):
+it has to finish and the binary has to carry gfx90a code
+(`amdhsa--gfx90a`, as the release checks it). Then the same `c14` test,
+the new binary under the label `v080`.
+
+It did, the same day: `build exit: 0`, `eullm 0.8.0 (ROCm) [4cf28c5d2989]`,
+device code `amdhsa--gfx90a`, linked to `libamdhip64.so.6` and
+`librccl.so.1`, built with this site's ROCm 6.3 (patch 0013).
+
+`tools/lumi/log_checks.py`, in every job summary from now on, reads the
+server logs for the cache's windows and totals, the pool's flushes
+("pool[...] freeing"), HSA errors, out of memory and NaN.
+
 25-10-2026, evening, `mtp-ab` on the twins, the first measurement of MTP on
 the MI250X with drafts (jobs 23140145 on `next25` and 23140146 on `next26`,
 `standard-g`, about ten minutes each; the two `small-g` copies were
