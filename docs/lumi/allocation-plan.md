@@ -572,6 +572,18 @@ warp is 32, and a build for a 32-wide AMD card (the release's RDNA) does not
 meet it. The release's `eullm-linux-x64-rocm-gfx90a` would fail the same
 way. The test waits for the branch to build here; `r-v0794` goes on.
 
+29-10-2026: the fix is on `feat/model-libraries` (4cf28c5), which carries
+the same llama.cpp b11925, the model libraries and 0.8.0, and replaces
+`chore/llama-cpp-b11925` for the test. The cause was not the 64-wide
+wavefront but `__ballot_sync`, which ROCm 6.x declares only with
+`HIP_ENABLE_WARP_SYNC_BUILTINS` (ROCm 7 always, so the release's RDNA build
+on 7.2.4 never met it); patch 0013 uses a shuffle on HIP for the same mask.
+First a build of the branch with this site's ROCm, in a worktree and a
+target directory of their own (`eullm-ml`, `eullm-target/model-libraries`):
+it has to finish and the binary has to carry gfx90a code
+(`amdhsa--gfx90a`, as the release checks it). Then the same `c14` test,
+the new binary under the label `v080`.
+
 `tools/lumi/log_checks.py`, in every job summary from now on, reads the
 server logs for the cache's windows and totals, the pool's flushes
 ("pool[...] freeing"), HSA errors, out of memory and NaN.

@@ -1,10 +1,11 @@
 {
   "campaign": "c14-llama-bump",
   "notes": [
-    "llama.cpp b86d2f0 -> b11925 (branch chore/llama-cpp-b11925, docs/llama-bump-b11925.md on",
-    "it), before it is merged: the same points on the engine of 0.7.95 (be0cf9e, label v0795)",
-    "and on the branch (label b11925), each binary built in a directory of its own, each in",
-    "one job of at most 8 hours. The main checks only, so that the test is short:",
+    "llama.cpp b86d2f0 -> b11925 before it is merged, as on branch feat/model-libraries (0.8.0:",
+    "the new llama.cpp, the model libraries, patch 0013 for ggml-hip on ROCm 6), which replaced",
+    "chore/llama-cpp-b11925 on 29-10-2026: the same points on the engine of 0.7.95 (be0cf9e,",
+    "label v0795) and on the branch (label v080), each binary built in a directory of its own,",
+    "each in one job of at most 8 hours. The main checks only, so that the test is short:",
     "bump-moe first, on the whole node: the expert cache on the 235B at 8 and 32 requests with",
     "LLAMA_MOE_CACHE_STATS=64, the share of experts in VRAM (tools/lumi/log_checks.py in the job",
     "summary). Patch 0008 now replaces llama.cpp's new SLRU, which the simulator finds at 0%",
