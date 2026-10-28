@@ -109,6 +109,39 @@ JUPITER, named by its Slurm job id.
 * The 4B's first round, g4-r1, from dqp-d-q4b with the second rounds'
   settings (2541382-2541387). The vertical of g9-r2 and g9r-r2, GGUF
   Q4_K_M through EULLM Engine (2541390, judge 2541391).
+* Waiting for a node: a 6-hour link (2541383) asked for at 09:50 got
+  one at 19:55; the vertical (4 h asked) waited 1 h 50 min, the short
+  jobs none. The GRPO links are 3 hours from 28-10 (`GRPO_LINK_H=3`).
+
+**28-10-2026**
+* The vertical of the second rounds (2541390, 5 minutes of one node:
+  conversion 66 s, Q4_K_M 21 s, each exam 83-93 s; judge 2541391), the
+  held-out exam open book through EULLM Engine and llama-server. The
+  same exam as dqp's vertical (191 open, 187 without the note).
+
+  | Q4_K_M | engine, open | engine, no note | llama-server, open | llama-server, no note |
+  |---|---:|---:|---:|---:|
+  | g9-r2 | 197 | 197 | 198 | 195 |
+  | g9r-r2 | 196 | 194 | 197 | 195 |
+
+  GRPO's gain survives quantisation: 6 to 10 questions over dqp's Q4.
+* The 4B's first round, g4-r1 (400 steps of six prompts in 3 h 52 min,
+  2541383), against dqp-d-q4b:
+  - held-out exam 197 + 2 against 186 + 13;
+  - practical exam 68 + 22 against 63 + 22;
+  - LexIA 9 against 9;
+  - trap test 385 against 383, rewritten 970 against 956.
+  It is the 9B's pattern: partials turned complete, the traps level.
+* Queued, in 3-hour links: g4-r2 from g4-r1 (2566556-2566561), and
+  g9r-r3 from g9r-r2 (2566890-2566897). g9r-r3 is the control the next
+  reward must beat: a third round of the same recipe.
+* The llama.cpp b11925 test (branch `chore/llama-cpp-b11925`): the first
+  build labelled llama-b11925 was made from this branch's checkout, not
+  the bump's: `EULLM_REPO`, exported by Forge's env.sh in the same shell,
+  overrode the checkout `build_engine.sh` was run from (0.7.93 at
+  2401fe4 instead of 0.7.95). To be built again with
+  `env -u EULLM_REPO`. `tools/jupiter/sbatch_mtp_compare.slurm` is ready
+  for the MTP part.
 
 **23-10-2026**
 * The second node idle overnight: the submission script refused the
