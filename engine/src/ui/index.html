@@ -30,8 +30,8 @@
       <button id="catalog-btn" type="button" class="icon-btn" aria-label="Get models" title="Browse and download models from HuggingFace">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </button>
-      <button id="settings-btn" type="button" class="icon-btn" aria-label="Settings" title="Settings">
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+      <button id="settings-btn" type="button" class="icon-btn" aria-label="Parameters" aria-expanded="false" aria-controls="params" title="Parameters: system prompt, sampling, reasoning">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
       </button>
     </div>
   </header>
@@ -134,37 +134,83 @@
     </div>
   </form>
 
-  <dialog id="settings-modal">
-    <form method="dialog" class="settings-form">
-      <h2>Settings</h2>
-      <label>
-        <span>System prompt</span>
-        <textarea id="settings-system" rows="3" placeholder="(optional) e.g. You are a helpful assistant who answers concisely in Italian."></textarea>
-      </label>
-      <label>
-        <span>Temperature <span id="settings-temp-val" class="setting-num">0.7</span></span>
-        <input id="settings-temp" type="range" min="0" max="2" step="0.05" value="0.7"/>
-      </label>
-      <label>
-        <span>Max response tokens (0 = unlimited — the context window is the cap)</span>
-        <input id="settings-max-tokens" type="number" min="0" max="262144" step="1" value="0"/>
-      </label>
-      <label class="row">
-        <input id="settings-think" type="checkbox" checked/>
-        <span>Reasoning mode — uncheck for faster, direct answers on models with a reasoning
-        toggle (Qwen3 family). Always-reasoning models (DeepSeek-R1, QwQ) ignore this and
-        think anyway.</span>
-      </label>
-      <label class="row">
-        <input id="settings-math" type="checkbox" checked/>
-        <span>Render math (LaTeX <code>$…$</code> / <code>$$…$$</code> → MathML, best-effort)</span>
-      </label>
-      <div class="settings-actions">
-        <button type="submit" value="cancel" class="btn-secondary">Cancel</button>
-        <button type="submit" value="ok" class="btn-primary">Save</button>
-      </div>
-    </form>
-  </dialog>
+  <aside id="params" class="params" hidden aria-labelledby="params-title">
+    <header class="params-head">
+      <h2 id="params-title">Parameters</h2>
+      <button id="params-close" type="button" class="icon-btn small" aria-label="Close parameters" title="Close (Esc)">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
+    </header>
+    <div class="params-body">
+      <section class="params-group">
+        <h3>Answer</h3>
+        <label class="field" for="settings-system">
+          <span class="field-name">System prompt</span>
+          <textarea id="settings-system" rows="4" placeholder="Optional. For example: answer concisely, in Italian."></textarea>
+        </label>
+        <label class="switch" for="settings-think">
+          <input id="settings-think" type="checkbox" checked/>
+          <span><span class="field-name">Reasoning</span>
+          <small>Off gives faster, direct answers on models with a reasoning switch (Qwen3). Models that always reason, such as DeepSeek-R1 and QwQ, reason anyway.</small></span>
+        </label>
+        <label class="field" for="settings-max-tokens">
+          <span class="field-name">Longest answer <small>tokens, 0 = until the model stops or the context is full</small></span>
+          <input id="settings-max-tokens" type="number" min="0" max="262144" step="1" value="0" inputmode="numeric"/>
+        </label>
+      </section>
+
+      <section class="params-group">
+        <h3>Sampling</h3>
+        <div class="slider" data-key="temperature">
+          <label for="settings-temp" class="field-name">Temperature</label>
+          <output id="settings-temp-val" for="settings-temp">0.70</output>
+          <input id="settings-temp" type="range" min="0" max="2" step="0.05" value="0.7"/>
+          <small>0 always picks the likeliest token; higher is more varied.</small>
+        </div>
+        <div class="slider" data-key="topP">
+          <label for="settings-top-p" class="field-name">Top P</label>
+          <output id="settings-top-p-val" for="settings-top-p">0.90</output>
+          <input id="settings-top-p" type="range" min="0" max="1" step="0.01" value="0.9"/>
+          <small>Draws only from the likeliest tokens that add up to this share.</small>
+        </div>
+        <div class="slider" data-key="topK">
+          <label for="settings-top-k" class="field-name">Top K</label>
+          <output id="settings-top-k-val" for="settings-top-k">40</output>
+          <input id="settings-top-k" type="range" min="0" max="200" step="1" value="40"/>
+          <small>Draws only from this many likeliest tokens; 0 turns it off.</small>
+        </div>
+        <div class="slider" data-key="minP">
+          <label for="settings-min-p" class="field-name">Min P</label>
+          <output id="settings-min-p-val" for="settings-min-p">0.00</output>
+          <input id="settings-min-p" type="range" min="0" max="0.5" step="0.01" value="0"/>
+          <small>Drops tokens less likely than this share of the likeliest one.</small>
+        </div>
+        <div class="slider" data-key="repeatPenalty">
+          <label for="settings-repeat" class="field-name">Repeat penalty</label>
+          <output id="settings-repeat-val" for="settings-repeat">1.10</output>
+          <input id="settings-repeat" type="range" min="1" max="2" step="0.01" value="1.1"/>
+          <small>Above 1 makes words just used less likely; 1 turns it off.</small>
+        </div>
+        <label class="field" for="settings-seed">
+          <span class="field-name">Seed <small>empty = a new one each time</small></span>
+          <input id="settings-seed" type="number" min="0" max="4294967295" step="1" placeholder="random" inputmode="numeric"/>
+        </label>
+      </section>
+
+      <section class="params-group">
+        <h3>Display</h3>
+        <label class="switch" for="settings-math">
+          <input id="settings-math" type="checkbox" checked/>
+          <span><span class="field-name">Render math</span>
+          <small>LaTeX between <code>$…$</code> and <code>$$…$$</code> shown as formulas.</small></span>
+        </label>
+      </section>
+    </div>
+    <footer class="params-foot">
+      <small>Kept in this browser. Applies from the next message.</small>
+      <button id="params-reset" type="button" class="btn-secondary small">Reset to defaults</button>
+    </footer>
+  </aside>
 
   <dialog id="catalog-modal">
     <div class="catalog">

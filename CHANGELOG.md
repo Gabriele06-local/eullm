@@ -17,6 +17,9 @@ something changed, less so for understanding what it means.
 
 ### Added
 - **A Monitor page in the chat UI** (the pulse icon in the top bar): the models in memory and what each is doing, the speed of the answers being written and of the last prompt read, every request running and the last 50 answered (prompt and answer tokens, reading and writing speed, time to the first token, MTP drafts kept, how it ended), and the machine over the last two minutes: CPU, memory, the engine's disk reads, and for each GPU its load, VRAM, temperature, power and PCIe traffic (NVIDIA; AMD without PCIe traffic; other GPUs VRAM only). It is all kept in memory on the machine, nothing is saved or sent, and the machine is sampled only while the page is open. The same figures are `GET /api/monitor`. An AMD card is named from the system's PCI ID list, since consumer cards do not report their name to the driver.
+- **The chat shows the engine's own figures under each answer**: writing speed and answer tokens, the prompt tokens read and how fast, time to the first token, MTP drafts kept, the total time, and a warning when the answer was cut at the length limit, with a button that copies the answer without its reasoning. It counted the pieces the browser received before.
+- **The reasoning folds once the answer begins**, and says how long the model thought ("Thought for 12 s"); a click opens it again.
+- **A Parameters panel in the chat replaces the Settings window**: system prompt, reasoning, longest answer, and now Top P, Top K, Min P, repeat penalty and seed beside the temperature, applied from the next message and kept in the browser.
 - **The chat UI has the EuLLM icon** in the browser tab (`/favicon.ico`).
 
 ### Changed

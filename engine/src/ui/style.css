@@ -257,12 +257,29 @@ body {
 }
 
 .msg-meta {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--text-faint);
-  margin-top: 6px;
+  margin-top: 8px;
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  font-variant-numeric: tabular-nums;
+  min-height: 1.4em;
 }
+.msg-meta b { color: var(--text-dim); font-weight: 600; }
+.msg-meta .meta-warn { color: var(--warn); }
+.meta-copy {
+  margin-left: auto;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font: inherit;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+.meta-copy:hover, .meta-copy:focus-visible { color: var(--text); border-color: var(--border); }
 
 .msg.assistant.streaming .msg-content::after {
   content: "▌";
@@ -273,23 +290,50 @@ body {
 
 @keyframes blink { to { opacity: 0; } }
 
+/* Reasoning: folded once the answer begins, its time in the summary. */
 .think {
-  background: var(--bg-elev);
-  border: 1px dashed var(--border);
-  border-radius: var(--radius);
-  padding: 10px 12px;
-  margin: 8px 0;
+  margin: 4px 0 10px;
+  border-left: 2px solid var(--border);
+  padding-left: 12px;
+  white-space: normal;
+}
+.think > summary {
+  list-style: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
+  font-weight: 500;
   color: var(--text-dim);
+  padding: 2px 0;
+  border-radius: var(--radius-sm);
+  user-select: none;
 }
-.think-label {
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  color: var(--text-faint);
-  font-weight: 700;
-  margin-bottom: 4px;
+.think > summary::-webkit-details-marker { display: none; }
+.think > summary::before {
+  content: "";
+  width: 6px; height: 6px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.15s ease;
+  margin-right: 2px;
 }
+.think[open] > summary::before { transform: rotate(45deg); }
+.think > summary:hover { color: var(--text); }
+.think > summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.think.live > summary { color: var(--accent); }
+.think-body {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  margin: 6px 0 2px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+@media (prefers-reduced-motion: reduce) { .think > summary::before { transition: none; } }
 
 /* ── Markdown-lite block elements rendered inside .msg-content ─────────── */
 
@@ -551,36 +595,57 @@ body {
   gap: 12px;
 }
 
-/* ── Settings modal ───────────────────────────────────────────────────── */
+/* ── Parameters panel ─────────────────────────────────────────────────── */
+/* A drawer at the right edge, under the top bar. On a wide screen the chat
+   column moves over to make room, so the answer stays readable beside it. */
 
-dialog#settings-modal {
-  background: var(--bg-elev);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: 22px;
-  max-width: 480px;
-  width: calc(100% - 32px);
-  box-shadow: var(--shadow);
-}
-dialog#settings-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
-
-.settings-form h2 { margin: 0 0 16px; font-size: 18px; }
-.settings-form label {
+.params {
+  position: fixed;
+  top: var(--topbar-h, 65px);
+  right: 0;
+  bottom: 0;
+  width: min(360px, 100vw);
+  z-index: 20;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 13px;
-  color: var(--text-dim);
-  margin-bottom: 14px;
+  background: var(--bg-elev);
+  border-left: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-.settings-form label.row {
-  flex-direction: row;
+.params[hidden] { display: none; }
+.params-head {
+  display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  padding: 14px 18px 10px;
 }
-.settings-form input[type="number"],
-.settings-form textarea {
+.params-head h2 { margin: 0; font-size: 16px; }
+.params-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 18px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.params-group { display: flex; flex-direction: column; gap: 14px; }
+.params-group h3 {
+  margin: 0;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.params-group:first-child h3 { border-top: 0; padding-top: 0; }
+.field-name { font-size: 13px; font-weight: 500; color: var(--text); }
+.field-name small, .params small { font-size: 12px; font-weight: 400; color: var(--text-faint); }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field textarea, .field input[type="number"] {
   background: var(--bg-input);
   border: 1px solid var(--border);
   color: var(--text);
@@ -589,14 +654,47 @@ dialog#settings-modal::backdrop { background: rgba(0, 0, 0, 0.6); }
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   resize: vertical;
+  width: 100%;
 }
-.settings-form input[type="range"] { width: 100%; }
-.setting-num {
+.field textarea:focus, .field input:focus { outline: none; border-color: var(--accent); }
+.switch { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.switch input { margin-top: 3px; accent-color: var(--accent); }
+.switch > span { display: flex; flex-direction: column; gap: 2px; }
+.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.slider input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--accent); margin: 2px 0; }
+.slider small { grid-column: 1 / -1; }
+.slider output {
   font-family: var(--mono);
-  color: var(--text);
-  margin-left: 6px;
   font-size: 12px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  min-width: 3.5em;
+  text-align: right;
 }
+.slider.changed output { border-color: var(--accent); color: var(--accent); }
+.params-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--border);
+}
+.btn-secondary.small { padding: 5px 10px; font-size: 12px; white-space: nowrap; flex-shrink: 0; }
+
+@media (min-width: 1240px) {
+  body.params-open .messages,
+  body.params-open .composer { padding-right: 378px; }
+}
+
 
 .settings-actions {
   display: flex;
