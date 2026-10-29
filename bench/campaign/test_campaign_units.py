@@ -901,3 +901,15 @@ def test_a_long_round_goes_as_chains_of_short_jobs():
                            "exclusive": True, "min_duration_s": 7200,
                            "max_duration_s": 86400}))
     assert campaign.chain_plan([soak], max_hours=8) == (8 * 3600, 3)
+
+
+def test_a_campaign_spec_is_read_as_utf8(tmp_path):
+    """A spec is written by hand and may name a campaign or a group in
+    non-ASCII text: it is read as UTF-8, not with the host's locale."""
+    import json
+
+    spec = tmp_path / "citta.json"
+    spec.write_text(json.dumps({"campaign": "citt\u00e0", "groups": []},
+                               ensure_ascii=False), encoding="utf-8")
+    [(path, loaded)] = campaign.load_specs([str(spec)])
+    assert path == str(spec) and loaded["campaign"] == "citt\u00e0"
