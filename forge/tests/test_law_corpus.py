@@ -149,3 +149,23 @@ def test_the_scripts_write_the_corpus_and_resume(tmp_path, capsys, monkeypatch):
     mod.main(args)                                           # the two done are not asked again
     printed = capsys.readouterr().out
     assert "2 done already" in printed and "L'art. 99" not in printed
+
+
+def test_a_chain_started_halfway_asks_the_middle_of_the_list(tmp_path, monkeypatch):
+    norms = tmp_path / "legislazione_cp.chunks.jsonl"
+    norms.write_text("".join(json.dumps(r) + "\n" for r in RECORDS))
+    mod = load("law_rewrites")
+    asked = []
+
+    def fake_ask(url, msgs, max_tokens, temperature, seed, timeout=600.0):
+        asked.append(msgs[1]["content"].split("\n")[0])
+        return {"choices": [{"message": {"content": ""}, "finish_reason": "stop"}], "usage": {}}
+
+    monkeypatch.setattr(mod, "ask", fake_ask)
+    base = ["--norms", str(norms), "--url", "http://x", "--parallel", "1",
+            "--styles", "parafrasi", "--limit", "1"]
+    mod.main(base + ["--out", str(tmp_path / "a" / "rewrites.jsonl")])
+    mod.main(base + ["--out", str(tmp_path / "b" / "rewrites.jsonl"), "--start", "0.5"])
+    # four articles in force, 99 624 624-bis 625: halfway is the third
+    assert asked == ["Art. 99 del codice penale (Recidiva)",
+                     "Art. 624-bis del codice penale (Furto in abitazione)"]

@@ -915,3 +915,33 @@ def test_a_result_file_is_read_as_utf8(tmp_path):
          "point": "p"}, ensure_ascii=False), encoding="utf-8")
     [row] = campaign.result_rows(str(results))
     assert row["group"] == "gr\u00fcppe"
+
+def test_a_campaign_spec_is_read_as_utf8(tmp_path):
+    """A spec is written by hand and may name a campaign or a group in
+    non-ASCII text: it is read as UTF-8, not with the host's locale."""
+    import json
+
+    spec = tmp_path / "citta.json"
+    spec.write_text(json.dumps({"campaign": "città", "groups": []},
+                               ensure_ascii=False), encoding="utf-8")
+    [(path, loaded)] = campaign.load_specs([str(spec)])
+    assert path == str(spec) and loaded["campaign"] == "città"
+
+
+def test_store_gguf_reads_a_manifest_of_utf8_text(tmp_path, monkeypatch):
+    """A model whose manifest names non-ASCII text still resolves its
+    `gguf_file`: the store's manifest is UTF-8, whatever the host locale."""
+    import json
+
+    import point
+
+    d = tmp_path / "models" / "m"
+    d.mkdir(parents=True)
+    (d / "a.gguf").write_bytes(b"GGUF first")
+    (d / "z\u00c1.gguf").write_bytes(b"GGUF named")
+    (d / "manifest.json").write_text(json.dumps(
+        {"name": "Mod\u00e8le", "gguf_file": "z\u00c1.gguf"},
+        ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setenv("EULLM_MODELS_DIR", str(tmp_path / "models"))
+    # The sorted fallback would pick a.gguf: only the manifest names z\u00c1.gguf.
+    assert point.store_gguf("m") == os.path.join(str(d), "z\u00c1.gguf")

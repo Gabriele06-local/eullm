@@ -16,8 +16,9 @@ is written for an article an evaluation set (``--exclude``) asks about.
 
 Resumable and safe to chain, like cds_schede.py: what is in this output, a
 sibling (``rewrites*.jsonl`` beside it) or the rejects of the current checks
-is not asked again; ``--reverse`` takes the list from the other end, so two
-chains share it, re-reading each other's files every five minutes; and
+is not asked again; ``--reverse`` takes the list from the other end and ``--start 0.5``
+begins halfway, so up to four chains share it without asking the same
+article twice, re-reading each other's files every five minutes; and
 ``--stop-after`` stops taking new articles in time for a two-hour link.
 Prints counts and throughput, never a text.
 """
@@ -116,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--samples", type=int, default=1, help="rewrites per article and style")
     ap.add_argument("--codes", default="", help="comma-separated codes (default: all)")
     ap.add_argument("--reverse", action="store_true", help="take the list from the other end")
+    ap.add_argument("--start", type=float, default=0.0,
+                    help="begin this far into the list (0-1), so more chains share it")
     ap.add_argument("--url", action="append", default=[])
     ap.add_argument("--serve", help="teacher GGUF: start one llama-server per --gpus entry")
     ap.add_argument("--gpus", default="0")
@@ -142,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     todo = work_list(articles, styles, args.samples, asked)
     if args.reverse:
         todo.reverse()
+    cut = int(len(todo) * min(max(args.start, 0.0), 1.0))
+    todo = todo[cut:] + todo[:cut]
     rejects_path = args.out.with_name(args.out.name.replace(".jsonl", "") + ".rejects.jsonl")
     skip = done_ids(*siblings(args.out), rejects_path)
     total = len(todo)
