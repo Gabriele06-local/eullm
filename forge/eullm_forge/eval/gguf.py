@@ -85,7 +85,7 @@ class LlamaServer:
 
     def log_tail(self, n: int = 15) -> str:
         try:
-            return "\n".join(self.log_path.read_text(errors="replace").splitlines()[-n:])
+            return "\n".join(self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-n:])
         except OSError:
             return "(no server log)"
 
