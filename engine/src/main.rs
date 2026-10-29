@@ -825,9 +825,16 @@ enum Commands {
         #[command(flatten)]
         opts: RuntimeOpts,
 
-        /// Enable the embedded chat UI (off by default for headless serve).
-        /// Pass --ui to also expose the chat at http://localhost:<ui-port>/.
+        /// Disable the embedded chat UI (otherwise served on --ui-port, as
+        /// with `run`). The UI listener enforces the same API keys, IP
+        /// allowlist and origins as the API; a UI port already taken is
+        /// logged and the API is served anyway.
         #[arg(long)]
+        no_ui: bool,
+
+        /// Accepted and ignored: the chat UI is on by default after 0.8.0.
+        /// Kept so that existing scripts and compose files still start.
+        #[arg(long, hide = true, conflicts_with = "no_ui")]
         ui: bool,
     },
     /// Unload generation models from a running eullm server, freeing their
@@ -1268,7 +1275,7 @@ async fn main() {
         Commands::Import { target: _ } => cmd_import(&store),
         Commands::Show { model } => cmd_show(&store, &model),
         Commands::Rm { model, force } => cmd_rm(&store, &model, force),
-        Commands::Serve { ui, opts } => {
+        Commands::Serve { no_ui, ui: _, opts } => {
             // One `let` re-binds every shared flag under the name the body
             // already uses, so extracting `RuntimeOpts` cost nothing below
             // this line.
@@ -1380,7 +1387,7 @@ async fn main() {
                 }
                 (k, corrected)
             };
-            let ui_port_opt = if ui { Some(ui_port) } else { None };
+            let ui_port_opt = if no_ui { None } else { Some(ui_port) };
             cmd_serve(
                 port,
                 replace,
@@ -5492,6 +5499,29 @@ mod cli_default_parity_tests {
                 std::mem::discriminant(&other)
             ),
         }
+    }
+
+    /// Whether the chat UI is served, as `run` and `serve` parsed their flags.
+    fn ui_on(argv: &[&str]) -> bool {
+        match Cli::parse_from(argv).command.expect("subcommand") {
+            Commands::Run { no_ui, .. } | Commands::Serve { no_ui, .. } => !no_ui,
+            other => panic!(
+                "unexpected subcommand: {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    /// The chat UI is on for both commands unless `--no-ui` (until 0.8.0 `serve`
+    /// used to need `--ui`, which is still accepted so old scripts start).
+    #[test]
+    fn the_chat_ui_is_on_unless_told_otherwise() {
+        assert!(ui_on(&["eullm", "run", "m.gguf"]));
+        assert!(ui_on(&["eullm", "serve"]));
+        assert!(ui_on(&["eullm", "serve", "--ui"]));
+        assert!(!ui_on(&["eullm", "run", "m.gguf", "--no-ui"]));
+        assert!(!ui_on(&["eullm", "serve", "--no-ui"]));
+        assert!(Cli::try_parse_from(["eullm", "serve", "--ui", "--no-ui"]).is_err());
     }
 
     /// The KV cache defaults of `run` and `serve`.
