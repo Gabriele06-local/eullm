@@ -25,6 +25,7 @@ const APP_JS: &str = include_str!("app.js");
 const MONITOR_JS: &str = include_str!("monitor.js");
 const LOGO_DARK_PNG: &[u8] = include_bytes!("eullm-logo-dark.png");
 const LOGO_LIGHT_PNG: &[u8] = include_bytes!("eullm-logo-light.png");
+const FAVICON_ICO: &[u8] = include_bytes!("favicon.ico");
 
 /// Build the UI sub-router. Mount at `/` on the top-level router.
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
@@ -35,6 +36,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/eullm-ui/monitor.js", get(serve_monitor_js))
         .route("/eullm-ui/logo-dark.png", get(serve_logo_dark))
         .route("/eullm-ui/logo-light.png", get(serve_logo_light))
+        .route("/favicon.ico", get(serve_favicon))
 }
 
 async fn serve_index() -> Response {
@@ -59,6 +61,10 @@ async fn serve_logo_dark() -> Response {
 
 async fn serve_logo_light() -> Response {
     binary_asset(LOGO_LIGHT_PNG, "image/png")
+}
+
+async fn serve_favicon() -> Response {
+    binary_asset(FAVICON_ICO, "image/x-icon")
 }
 
 /// Content-Security-Policy for the chat UI.
