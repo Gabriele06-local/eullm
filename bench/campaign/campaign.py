@@ -692,7 +692,7 @@ def hf_ref_to_id(ref: str) -> str:
 def load_specs(paths) -> list:
     specs = []
     for path in paths:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             specs.append((path, json.load(f)))
     return specs
 
@@ -1104,7 +1104,7 @@ def result_rows(results: str) -> list:
     in `<campaign>/failed/`, are not results)."""
     rows = []
     for path in sorted(glob.glob(os.path.join(results, "*", "*.json"))):
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             r = json.load(f)
         if r.get("schema") == SCHEMA:
             rows.append(row_of(r))
@@ -1212,7 +1212,7 @@ def cmd_report(args):
         for job in jobs:
             for path in glob.glob(os.path.join(results, "*", "failed", f"*.{job}.json")):
                 try:
-                    with open(path) as f:
+                    with open(path, encoding="utf-8") as f:
                         r = json.load(f)
                 except (OSError, ValueError):
                     continue
