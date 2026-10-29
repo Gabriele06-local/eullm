@@ -832,7 +832,7 @@ enum Commands {
         #[arg(long)]
         no_ui: bool,
 
-        /// Accepted and ignored: the chat UI is on by default after 0.8.0.
+        /// Accepted and ignored: the chat UI is on by default since 0.8.5.
         /// Kept so that existing scripts and compose files still start.
         #[arg(long, hide = true, conflicts_with = "no_ui")]
         ui: bool,

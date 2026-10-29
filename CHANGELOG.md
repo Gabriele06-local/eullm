@@ -13,7 +13,7 @@ Entries for **0.6.36 and later** are written by hand. Everything below that is
 derived from the commit history and reads like it: useful for tracing when
 something changed, less so for understanding what it means.
 
-## Unreleased
+## 0.8.5 — 2026-10-29
 
 ### Added
 - **A Monitor page in the chat UI** (the pulse icon in the top bar): the models in memory and what each is doing, the speed of the answers being written and of the last prompt read, every request running and the last 50 answered (prompt and answer tokens, reading and writing speed, time to the first token, MTP drafts kept, how it ended), and the machine over the last two minutes: CPU, memory, the engine's disk reads, and for each GPU its load, VRAM, temperature, power and PCIe traffic (NVIDIA; AMD without PCIe traffic; other GPUs VRAM only). It is all kept in memory on the machine, nothing is saved or sent, and the machine is sampled only while the page is open. The same figures are `GET /api/monitor`. An AMD card is named from the system's PCI ID list, since consumer cards do not report their name to the driver.
