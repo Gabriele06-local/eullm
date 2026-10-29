@@ -901,3 +901,14 @@ def test_a_long_round_goes_as_chains_of_short_jobs():
                            "exclusive": True, "min_duration_s": 7200,
                            "max_duration_s": 86400}))
     assert campaign.chain_plan([soak], max_hours=8) == (8 * 3600, 3)
+
+
+def test_a_server_log_is_read_as_utf8(tmp_path):
+    """`Server.log_tail` reads the engine's log as UTF-8: the last lines of a
+    failure are shown as written, not as mojibake, on any host locale."""
+    import point
+
+    log = tmp_path / "server.log"
+    log.write_text("errore: modello non trovato a citt\u00e0\n", encoding="utf-8")
+    server = point.Server("/bin/eullm", 18080, [], {}, str(log))
+    assert "citt\u00e0" in server.log_tail()
