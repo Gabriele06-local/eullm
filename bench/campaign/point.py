@@ -147,7 +147,7 @@ def store_gguf(model_id: str):
         os.path.expanduser("~"), ".eullm", "models")
     d = os.path.join(root, model_id)
     try:
-        with open(os.path.join(d, "manifest.json")) as f:
+        with open(os.path.join(d, "manifest.json"), encoding="utf-8") as f:
             name = json.load(f).get("gguf_file")
         if name and os.path.exists(os.path.join(d, name)):
             return os.path.join(d, name)
