@@ -903,6 +903,18 @@ def test_a_long_round_goes_as_chains_of_short_jobs():
     assert campaign.chain_plan([soak], max_hours=8) == (8 * 3600, 3)
 
 
+def test_a_campaign_spec_is_read_as_utf8(tmp_path):
+    """A spec is written by hand and may name a campaign or a group in
+    non-ASCII text: it is read as UTF-8, not with the host's locale."""
+    import json
+
+    spec = tmp_path / "citta.json"
+    spec.write_text(json.dumps({"campaign": "città", "groups": []},
+                               ensure_ascii=False), encoding="utf-8")
+    [(path, loaded)] = campaign.load_specs([str(spec)])
+    assert path == str(spec) and loaded["campaign"] == "città"
+
+
 def test_store_gguf_reads_a_manifest_of_utf8_text(tmp_path, monkeypatch):
     """A model whose manifest names non-ASCII text still resolves its
     `gguf_file`: the store's manifest is UTF-8, whatever the host locale."""
