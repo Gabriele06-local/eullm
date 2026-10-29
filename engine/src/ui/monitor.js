@@ -297,6 +297,7 @@
   }
 
   function show(on) {
+    if (on) document.dispatchEvent(new CustomEvent("eullm:view", { detail: "monitor" }));
     els.view.hidden = !on;
     els.messages.hidden = on;
     els.form.hidden = on;
@@ -304,6 +305,15 @@
     els.btn.classList.toggle("active", on);
     if (on) start(); else stop();
   }
+
+  // Another page (About) opened: step aside without bringing the chat back.
+  document.addEventListener("eullm:view", (e) => {
+    if (e.detail === "monitor" || els.view.hidden) return;
+    els.view.hidden = true;
+    els.btn.setAttribute("aria-pressed", "false");
+    els.btn.classList.remove("active");
+    stop();
+  });
 
   els.btn.addEventListener("click", () => show(els.view.hidden));
   document.addEventListener("visibilitychange", () => {

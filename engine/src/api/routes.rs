@@ -186,6 +186,7 @@ pub fn api_routes() -> Router<S> {
         .route("/tags", get(list_models))
         .route("/ps", get(list_running))
         .route("/monitor", get(monitor))
+        .route("/about", get(about))
         .route("/generate", post(generate))
         .route("/chat", post(chat))
         .route("/show", post(show_model))
@@ -2057,6 +2058,38 @@ async fn monitor() -> Json<Value> {
         .await
         .unwrap_or_default();
     Json(json!({ "active": active, "history": history, "system": system }))
+}
+
+/// `GET /api/about` — what the chat UI's About page shows: this build, the
+/// machine and the devices llama.cpp can use, where models are kept, and
+/// the server's protections: whether API keys are required (never the keys)
+/// and which networks are admitted without one. Behind the same perimeter
+/// as the rest of `/api`, so it tells nothing to someone not let in.
+async fn about(State(state): State<S>) -> Json<Value> {
+    let machine = tokio::task::spawn_blocking(crate::monitor::system::machine)
+        .await
+        .ok();
+    let (models_dir, models_source) = state.store.root_with_source();
+    let (libraries, _) = state.store.libraries_with_source();
+    Json(json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": env!("EULLM_GIT_HASH"),
+        "backend": crate::inference::backend_label(),
+        "llama_cpp": env!("EULLM_LLAMA_CPP"),
+        "release_asset": Some(env!("EULLM_RELEASE_ASSET")).filter(|a| !a.is_empty()),
+        "cpu_features": crate::inference::cpu_features_summary().trim(),
+        "machine": machine,
+        "models_dir": models_dir,
+        "models_dir_source": models_source,
+        "model_libraries": libraries,
+        "audit_log": crate::audit::AuditLogger::new().log_path(),
+        "api_port": state.api_port,
+        "protections": {
+            "api_keys": state.api_keys.is_enabled(),
+            "allowed_ips": state.ip_allowlist.describe(),
+            "allowed_ips_source": state.ip_allowlist.source(),
+        },
+    }))
 }
 
 /// `GET /api/ps` — the models in memory, Ollama's endpoint of the name: every
