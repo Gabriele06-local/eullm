@@ -64,7 +64,7 @@ options work for `run` and `serve`.
 | `--batch-size N` | 1 | How many requests are answered at the same time. **The context is split among them**: `-c 16384 --batch-size 4` gives each request 4096. Raise both together |
 | `-p`, `--port N` | 11434 | Port of the API (the same as Ollama's) |
 | `--ui-port N` | 11435 | Port of the browser chat |
-| `--no-ui` / `--ui` | | `run`: turn the browser chat off. `serve`: turn it on |
+| `--no-ui` | | Turn the browser chat off (`run` and `serve`; it is on by default for both) |
 | `--cli` | | `run`: chat in the terminal only, without opening the browser |
 | `-t`, `--threads N` | all cores | CPU threads |
 | `--keep-alive 10m` | never | Unload the model after that long without requests, to free the GPU |

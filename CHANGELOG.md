@@ -16,7 +16,11 @@ something changed, less so for understanding what it means.
 ## Unreleased
 
 ### Added
-- **A Monitor page in the chat UI** (the pulse icon in the top bar): the models in memory and what each is doing, the speed of the answers being written and of the last prompt read, every request running and the last 50 answered (prompt and answer tokens, reading and writing speed, time to the first token, MTP drafts kept, how it ended), and the machine over the last two minutes: CPU, memory, the engine's disk reads, and for each GPU its load, VRAM, temperature, power and PCIe traffic (NVIDIA; AMD without PCIe traffic; other GPUs VRAM only). It is all kept in memory on the machine, nothing is saved or sent, and the machine is sampled only while the page is open. The same figures are `GET /api/monitor`.
+- **A Monitor page in the chat UI** (the pulse icon in the top bar): the models in memory and what each is doing, the speed of the answers being written and of the last prompt read, every request running and the last 50 answered (prompt and answer tokens, reading and writing speed, time to the first token, MTP drafts kept, how it ended), and the machine over the last two minutes: CPU, memory, the engine's disk reads, and for each GPU its load, VRAM, temperature, power and PCIe traffic (NVIDIA; AMD without PCIe traffic; other GPUs VRAM only). It is all kept in memory on the machine, nothing is saved or sent, and the machine is sampled only while the page is open. The same figures are `GET /api/monitor`. An AMD card is named from the system's PCI ID list, since consumer cards do not report their name to the driver.
+- **The chat UI has the EuLLM icon** in the browser tab (`/favicon.ico`).
+
+### Changed
+- **`eullm serve` serves the chat UI too, as `eullm run` does**, on `--ui-port` (11435), behind the same API keys, IP allowlist and origins as the API; `--no-ui` turns it off. A UI port already taken does not stop the server: it is logged and the API is served anyway. `--ui`, which turned it on until now, is still accepted and does nothing. Docker images and compose start it the same way: publish port 11435 to reach it, or add `--no-ui`.
 
 ## 0.8.0 — 2026-10-28
 

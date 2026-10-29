@@ -300,6 +300,7 @@ mod nvidia {
 mod amd {
     use std::fs;
     use std::path::Path;
+    use std::sync::Mutex;
 
     use super::Gpu;
 
@@ -333,6 +334,58 @@ mod amd {
             .collect()
     }
 
+    /// Where distributions keep the PCI ID list (`hwdata`, `pciutils`).
+    const PCI_IDS: [&str; 3] = [
+        "/usr/share/hwdata/pci.ids",
+        "/usr/share/misc/pci.ids",
+        "/usr/share/pci.ids",
+    ];
+
+    /// The card's name from the system's PCI ID list, by its device id:
+    /// consumer cards leave `product_name` empty. Looked up once per device
+    /// id, since the list is a megabyte and the card is read every second.
+    fn marketing_name(device: &Path) -> Option<String> {
+        static NAMES: Mutex<Vec<(String, Option<String>)>> = Mutex::new(Vec::new());
+        let id = fs::read_to_string(device.join("device")).ok()?;
+        let id = id.trim().trim_start_matches("0x").to_lowercase();
+        let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, name)) = names.iter().find(|(known, _)| *known == id) {
+            return name.clone();
+        }
+        let name = PCI_IDS
+            .iter()
+            .find_map(|path| fs::read_to_string(path).ok())
+            .and_then(|ids| pci_name(&ids, "1002", &id));
+        names.push((id, name.clone()));
+        name
+    }
+
+    /// The name `pci.ids` gives device `device` of vendor `vendor` (both
+    /// lowercase hex, no `0x`): the marketing name in its brackets where it
+    /// has one (`Navi 32 [Radeon RX 7700 XT / 7800 XT]`), else the chip.
+    pub(super) fn pci_name(ids: &str, vendor: &str, device: &str) -> Option<String> {
+        let mut lines = ids
+            .lines()
+            .skip_while(|l| !l.starts_with(&format!("{vendor}  ")));
+        lines.next()?;
+        let line = lines
+            .take_while(|l| l.starts_with('\t') || l.starts_with('#') || l.is_empty())
+            .find(|l| {
+                l.strip_prefix('\t')
+                    .is_some_and(|d| !d.starts_with('\t') && d.starts_with(&format!("{device}  ")))
+            })?;
+        let chip = line.trim_start()[device.len()..].trim();
+        let name = match (chip.find('['), chip.rfind(']')) {
+            (Some(a), Some(b)) if b > a => &chip[a + 1..b],
+            _ => chip,
+        };
+        Some(if name.starts_with("AMD") {
+            name.to_string()
+        } else {
+            format!("AMD {name}")
+        })
+    }
+
     fn card(index: u32, device: &Path) -> Gpu {
         // hwmon holds temperature in millidegrees and power in microwatts;
         // newer kernels name the average `power1_average`, some only
@@ -347,6 +400,7 @@ mod amd {
             .ok()
             .map(|n| n.trim().to_string())
             .filter(|n| !n.is_empty())
+            .or_else(|| marketing_name(device))
             .unwrap_or_else(|| format!("AMD GPU {index}"));
         Gpu {
             name,
@@ -404,6 +458,38 @@ mod tests {
                 pcie_tx_bps: None,
             }]
         );
+    }
+
+    #[test]
+    fn an_amd_card_is_named_from_the_pci_id_list() {
+        let ids = "\
+# comment
+1000  Broadcom / LSI
+\t73bf  Not this one
+1002  Advanced Micro Devices, Inc. [AMD/ATI]
+\t73bf  Navi 21 [Radeon RX 6800/6800 XT / 6900 XT]
+\t\t1002 0e3a  Radeon RX 6900 XT
+\t7480  Navi 33 [Radeon RX 7600/7600 XT/7600M XT/7600S/7700S / PRO W7600]
+\t74a1  Aqua Vanjaram [Instinct MI300X]
+\t7448  Navi 31 [Radeon Pro W7900]
+\t9999  Some Chip
+1003  ULSI Systems
+\t73df  Wrong vendor
+";
+        assert_eq!(
+            amd::pci_name(ids, "1002", "73bf").as_deref(),
+            Some("AMD Radeon RX 6800/6800 XT / 6900 XT")
+        );
+        assert_eq!(
+            amd::pci_name(ids, "1002", "74a1").as_deref(),
+            Some("AMD Instinct MI300X")
+        );
+        assert_eq!(
+            amd::pci_name(ids, "1002", "9999").as_deref(),
+            Some("AMD Some Chip")
+        );
+        assert_eq!(amd::pci_name(ids, "1002", "73df"), None);
+        assert_eq!(amd::pci_name(ids, "1002", "0e3a"), None);
     }
 
     #[test]

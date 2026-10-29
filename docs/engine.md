@@ -51,8 +51,9 @@ docker run -d --gpus all -p 127.0.0.1:11434:11434 -v eullm-models:/models \
   -e EULLM_ALLOWED_IPS=172.16.0.0/12,192.168.0.0/16 eullm/engine:cuda
 ```
 
-The container runs `eullm serve` (add `--ui` after the image name for the
-chat UI, as compose does) as uid 10001, with its models in `/models` and its
+The container runs `eullm serve`, with the chat UI on port 11435 (publish it
+with `-p 127.0.0.1:11435:11435`, or add `--no-ui` after the image name to turn
+it off), as uid 10001, with its models in `/models` and its
 audit trail in `/data/audit`. `EULLM_ALLOWED_IPS` admits the Docker addresses
 a published port's callers arrive from; to serve other machines, publish on
 all interfaces and set `EULLM_API_KEYS`. The CUDA image needs the NVIDIA
@@ -256,7 +257,14 @@ Start the API server without loading any model. The first API request with a `"m
 ```bash
 eullm serve
 eullm serve --port 8080
+eullm serve --no-ui        # API only, no chat UI
 ```
+
+The chat UI is served on `--ui-port` (11435) as with `run`, behind the same
+API keys, IP allowlist and origins as the API; `--no-ui` turns it off. A UI
+port already taken is logged and the API is served anyway. (Until 0.8.0
+`serve` started without the UI unless given `--ui`, which is still accepted
+and does nothing.)
 
 `serve` takes the same runtime flags as `run` (they are one shared set), and
 they apply to every model it loads or swaps to: automatic GPU sizing runs on

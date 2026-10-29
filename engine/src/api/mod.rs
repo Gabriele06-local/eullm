@@ -3318,8 +3318,8 @@ pub async fn serve(cfg: ServeConfig) -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn the optional chat-UI listener on a separate port. It exposes the
     // same API surface (so the embedded JS can call same-origin) plus the
-    // HTML/CSS/JS for the chat at `/`. Disabled by default for `eullm serve`
-    // (headless) and enabled by default for `eullm run` (interactive).
+    // HTML/CSS/JS for the chat at `/`. On by default for both `eullm run` and
+    // `eullm serve`; `--no-ui` turns it off.
     let ui_handle = if let Some(ui_port) = ui_port_opt {
         if ui_port == api_port {
             tracing::warn!(
