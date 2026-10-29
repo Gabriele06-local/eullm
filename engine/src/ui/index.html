@@ -24,6 +24,9 @@
         <span class="model-picker-label">Model</span>
         <select id="model-select" aria-label="Model"></select>
       </label>
+      <button id="monitor-btn" type="button" class="icon-btn" aria-label="Monitor" aria-pressed="false" title="Monitor: requests, GPU, CPU, memory">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      </button>
       <button id="catalog-btn" type="button" class="icon-btn" aria-label="Get models" title="Browse and download models from HuggingFace">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </button>
@@ -51,6 +54,32 @@
       </div>
     </div>
   </main>
+
+  <section id="monitor" class="monitor" hidden aria-label="Monitor">
+    <div class="mon-head">
+      <h2>Monitor</h2>
+      <span id="mon-live" class="mon-live" title="Updated every second">live</span>
+      <span class="mon-note">Kept in memory on this machine only: the last 50 requests and two minutes of samples. Nothing is saved or sent.</span>
+    </div>
+    <div id="mon-models" class="mon-models"></div>
+    <div id="mon-tiles" class="mon-tiles"></div>
+    <div id="mon-gpus" class="mon-gpus"></div>
+    <h3 class="mon-section">Requests</h3>
+    <div class="mon-table-wrap">
+      <table class="mon-table">
+        <thead>
+          <tr>
+            <th>Time</th><th>Model</th><th>Endpoint</th><th>State</th>
+            <th class="num">Prompt</th><th class="num">Answer</th>
+            <th class="num">Reads tok/s</th><th class="num">Writes tok/s</th>
+            <th class="num">First token</th><th class="num">Total</th>
+            <th class="num">Drafts kept</th><th>Ended</th>
+          </tr>
+        </thead>
+        <tbody id="mon-requests"></tbody>
+      </table>
+    </div>
+  </section>
 
   <form id="chat-form" class="composer">
     <div id="attachment-bar" class="attachment-bar" hidden>
@@ -135,5 +164,6 @@
   </dialog>
 
   <script src="/eullm-ui/app.js"></script>
+  <script src="/eullm-ui/monitor.js"></script>
 </body>
 </html>
