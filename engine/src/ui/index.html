@@ -27,6 +27,9 @@
       <button id="monitor-btn" type="button" class="icon-btn" aria-label="Monitor" aria-pressed="false" title="Monitor: requests, GPU, CPU, memory">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
       </button>
+      <button id="about-btn" type="button" class="icon-btn" aria-label="About" aria-pressed="false" title="About this engine: version, build, hardware, protections">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+      </button>
       <button id="catalog-btn" type="button" class="icon-btn" aria-label="Get models" title="Browse and download models from HuggingFace">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
       </button>
@@ -104,6 +107,55 @@
         </table>
       </div>
     </article>
+  </section>
+
+  <section id="about" class="about" hidden aria-labelledby="about-title">
+    <header class="about-hero">
+      <picture>
+        <source srcset="/eullm-ui/logo-dark.png" media="(prefers-color-scheme: dark)">
+        <img src="/eullm-ui/logo-light.png" alt="EuLLM" height="56">
+      </picture>
+      <div class="about-hero-text">
+        <h2 id="about-title">EuLLM Engine <span id="about-version"></span></h2>
+        <p>A language model server that runs on your own hardware. Prompts, answers and the audit trail stay on this machine; nothing is sent anywhere unless you ask for a download.</p>
+        <div id="about-chips" class="about-chips"></div>
+      </div>
+      <button id="about-copy" type="button" class="btn-secondary small" title="Copy version, build and hardware, for a bug report">Copy details</button>
+    </header>
+
+    <div class="about-grid">
+      <section class="about-card">
+        <h3>This build</h3>
+        <dl id="about-build" class="kv"></dl>
+      </section>
+      <section class="about-card">
+        <h3>This machine</h3>
+        <dl id="about-machine" class="kv"></dl>
+      </section>
+      <section class="about-card wide">
+        <h3>Devices llama.cpp can use</h3>
+        <ul id="about-devices" class="device-list"></ul>
+      </section>
+      <section class="about-card">
+        <h3>Where things are kept</h3>
+        <dl id="about-paths" class="kv"></dl>
+      </section>
+      <section class="about-card">
+        <h3>Who can use this server</h3>
+        <dl id="about-protection" class="kv"></dl>
+        <p class="about-note">Set in the environment or in the <code>.env</code> beside the engine: <code>EULLM_API_KEYS</code> asks every request for a key, <code>EULLM_ALLOWED_IPS</code> admits more networks.</p>
+      </section>
+      <section class="about-card wide">
+        <h3>Licence and credits</h3>
+        <p>EuLLM Engine is free software under the <strong>GNU AGPL v3 or later</strong>. It runs models with <a href="https://github.com/ggml-org/llama.cpp" target="_blank" rel="noopener">llama.cpp</a> and ggml (MIT), through the Rust bindings of <a href="https://github.com/utilityai/llama-cpp-rs" target="_blank" rel="noopener">llama-cpp-rs</a> (MIT or Apache-2.0).</p>
+        <p class="about-links">
+          <a href="https://www.eullm.eu" target="_blank" rel="noopener">eullm.eu</a>
+          <a href="https://github.com/eullm/eullm" target="_blank" rel="noopener">Source code</a>
+          <a href="https://github.com/eullm/eullm/releases" target="_blank" rel="noopener">Releases</a>
+          <a href="https://github.com/eullm/eullm/blob/main/CHANGELOG.md" target="_blank" rel="noopener">What changed</a>
+        </p>
+      </section>
+    </div>
   </section>
 
   <form id="chat-form" class="composer">
@@ -236,5 +288,6 @@
 
   <script src="/eullm-ui/app.js"></script>
   <script src="/eullm-ui/monitor.js"></script>
+  <script src="/eullm-ui/about.js"></script>
 </body>
 </html>

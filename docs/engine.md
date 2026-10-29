@@ -1795,6 +1795,52 @@ curl http://localhost:11434/api/ps
   (`--embedding-model`, `--decision-model`) or the model `eullm run` started
   with.
 
+#### `GET /api/about`
+
+What the chat UI's About page (the ⓘ icon) shows: this build, the machine,
+the devices llama.cpp can use, where models and the audit trail are kept, and
+who may use the server. Read once per call; behind the same perimeter as the
+rest of `/api`.
+
+```bash
+curl http://localhost:11434/api/about
+```
+
+```json
+{
+  "version": "0.8.5", "commit": "a3bbe56fc2b6", "backend": "CUDA",
+  "llama_cpp": "b11925", "release_asset": "eullm-linux-x64-cuda",
+  "cpu_features": "CPU : SSE3 = 1 | AVX2 = 1 | F16C = 1 | FMA = 1 | …",
+  "machine": {
+    "os": "Linux (Ubuntu 24.04)", "kernel": "6.8.0", "arch": "x86_64", "host": "b550",
+    "cpu": "AMD Ryzen 9 5950X 16-Core Processor", "cores": 32, "physical_cores": 16,
+    "ram_total": 67328999424, "started_ms": 1793298619000,
+    "devices": [
+      { "name": "CUDA0", "description": "NVIDIA GeForce RTX 5070 Ti", "kind": "gpu", "memory_total": 17094475776 },
+      { "name": "CPU", "description": "AMD Ryzen 9 5950X 16-Core Processor", "kind": "cpu", "memory_total": null }
+    ]
+  },
+  "models_dir": "/home/me/.eullm/models", "models_dir_source": "default",
+  "model_libraries": ["/home/me/.lmstudio/models"],
+  "audit_log": "/home/me/.eullm/audit/audit.jsonl",
+  "api_port": 11434,
+  "protections": {
+    "api_keys": false,
+    "allowed_ips": "127.0.0.1/32, ::1/128",
+    "allowed_ips_source": "default (loopback only — nothing configured)"
+  }
+}
+```
+
+- `commit` ends in `-dirty` for a build with local changes; `release_asset`
+  is the release file the binary was published as, `null` for a build from
+  source.
+- `devices` lists what llama.cpp's backends offer, the CPU included, with the
+  memory of each GPU.
+- `protections` says whether every request needs an API key (never the keys
+  themselves) and which networks are admitted without one
+  (`EULLM_ALLOWED_IPS`).
+
 #### `GET /api/monitor`
 
 What the chat UI's Monitor page (the pulse icon in its top bar) shows: the

@@ -193,6 +193,111 @@ impl Sampler {
     }
 }
 
+/// The machine and what llama.cpp can run on, for the About page: read once
+/// per call, nothing sampled.
+#[derive(Debug, Clone, Serialize)]
+pub struct Machine {
+    pub os: Option<String>,
+    pub kernel: Option<String>,
+    pub arch: String,
+    pub host: Option<String>,
+    pub cpu: Option<String>,
+    pub cores: usize,
+    pub physical_cores: Option<usize>,
+    pub ram_total: u64,
+    /// When this process started, in milliseconds since 1970.
+    pub started_ms: Option<u64>,
+    /// Every device llama.cpp's backends offer, CPU included.
+    pub devices: Vec<Device>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Device {
+    pub name: String,
+    pub description: String,
+    /// `cpu`, `gpu`, `igpu` or `accel`.
+    pub kind: &'static str,
+    pub memory_total: Option<u64>,
+}
+
+pub fn machine() -> Machine {
+    let mut system = sysinfo::System::new().ok();
+    if let Some(s) = system.as_mut() {
+        s.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
+        s.refresh_memory();
+    }
+    let pid = sysinfo::get_current_pid().ok();
+    let started_ms = system.as_mut().zip(pid).and_then(|(s, pid)| {
+        s.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            false,
+            sysinfo::ProcessRefreshKind::nothing(),
+        );
+        s.process(pid).map(|p| p.start_time() * 1000)
+    });
+    Machine {
+        os: sysinfo::System::long_os_version().ok(),
+        kernel: sysinfo::System::kernel_version().ok(),
+        arch: sysinfo::System::cpu_arch(),
+        host: sysinfo::System::host_name().ok(),
+        cpu: system
+            .as_ref()
+            .and_then(|s| s.cpus().first())
+            .map(|c| c.brand().trim().to_string())
+            .filter(|b| !b.is_empty()),
+        cores: system.as_ref().map_or(0, |s| s.cpus().len()),
+        physical_cores: sysinfo::System::physical_core_count().ok(),
+        ram_total: system.as_ref().map_or(0, |s| s.total_memory()),
+        started_ms,
+        devices: devices(),
+    }
+}
+
+fn devices() -> Vec<Device> {
+    use llama_cpp_sys_2::{
+        GGML_BACKEND_DEVICE_TYPE_ACCEL, GGML_BACKEND_DEVICE_TYPE_CPU, GGML_BACKEND_DEVICE_TYPE_GPU,
+        ggml_backend_dev_count, ggml_backend_dev_description, ggml_backend_dev_get,
+        ggml_backend_dev_memory, ggml_backend_dev_name, ggml_backend_dev_type,
+    };
+    let text = |p: *const std::ffi::c_char| {
+        if p.is_null() {
+            String::new()
+        } else {
+            // SAFETY: a C string the device owns for the life of the process.
+            unsafe { std::ffi::CStr::from_ptr(p) }
+                .to_string_lossy()
+                .into_owned()
+        }
+    };
+    let mut out = Vec::new();
+    // SAFETY: as in `ggml_devices`.
+    unsafe {
+        for i in 0..ggml_backend_dev_count() {
+            let dev = ggml_backend_dev_get(i);
+            if dev.is_null() {
+                continue;
+            }
+            let kind = match ggml_backend_dev_type(dev) {
+                GGML_BACKEND_DEVICE_TYPE_CPU => "cpu",
+                GGML_BACKEND_DEVICE_TYPE_GPU => "gpu",
+                GGML_BACKEND_DEVICE_TYPE_ACCEL => "accel",
+                _ => "igpu",
+            };
+            let (mut free, mut total) = (0usize, 0usize);
+            if kind != "cpu" {
+                ggml_backend_dev_memory(dev, &raw mut free, &raw mut total);
+            }
+            out.push(Device {
+                name: text(ggml_backend_dev_name(dev)),
+                description: text(ggml_backend_dev_description(dev)),
+                kind,
+                memory_total: (total > 0).then_some(total as u64),
+            });
+        }
+    }
+    out
+}
+
 /// Any GPU llama.cpp knows, with its VRAM: what Metal, Vulkan and the others
 /// say, where no vendor tool is read.
 fn ggml_devices() -> Vec<Gpu> {
@@ -495,6 +600,16 @@ mod tests {
     #[test]
     fn no_drm_directory_means_no_amd_gpu() {
         assert!(amd::read(std::path::Path::new("/nonexistent/eullm/drm")).is_empty());
+    }
+
+    #[test]
+    fn the_about_page_reads_this_machine() {
+        let m = machine();
+        assert!(m.cores > 0 && m.ram_total > 0, "{m:?}");
+        assert!(!m.arch.is_empty());
+        // The CPU is always among llama.cpp's devices: ggml registers its
+        // backends on first use, with no model or backend init needed.
+        assert!(devices().iter().any(|d| d.kind == "cpu"), "{:?}", devices());
     }
 
     #[test]

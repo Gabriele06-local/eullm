@@ -196,6 +196,21 @@ pub fn check_gpu_support(gpu_layers: i32) -> i32 {
 /// downloading and disassembling it by hand — see
 /// docs/x86-64-baseline.md for the investigation that hit exactly that
 /// wall.
+/// The GPU backend this binary was built with, as `eullm -V` names it.
+pub const fn backend_label() -> &'static str {
+    if cfg!(feature = "cuda") {
+        "CUDA"
+    } else if cfg!(feature = "rocm") {
+        "ROCm"
+    } else if cfg!(feature = "vulkan") {
+        "Vulkan"
+    } else if cfg!(feature = "metal") {
+        "Metal"
+    } else {
+        "CPU"
+    }
+}
+
 pub fn cpu_features_summary() -> String {
     let ptr = unsafe { llama_cpp_sys_2::llama_print_system_info() };
     if ptr.is_null() {
