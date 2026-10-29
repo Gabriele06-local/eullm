@@ -185,6 +185,7 @@ pub fn api_routes() -> Router<S> {
     Router::new()
         .route("/tags", get(list_models))
         .route("/ps", get(list_running))
+        .route("/monitor", get(monitor))
         .route("/generate", post(generate))
         .route("/chat", post(chat))
         .route("/show", post(show_model))
@@ -2046,6 +2047,18 @@ fn running_model_entry(m: &RunningModel, now: chrono::DateTime<chrono::Utc>) -> 
     })
 }
 
+/// `GET /api/monitor` — what the chat UI's Monitor page shows: the requests
+/// running (oldest first) and the last ones answered (newest first), and the
+/// machine's samples of the last two minutes (oldest first). The models in
+/// memory are `/api/ps`. In memory only: see [`crate::monitor`].
+async fn monitor() -> Json<Value> {
+    let (active, history) = crate::monitor::requests();
+    let system = tokio::task::spawn_blocking(crate::monitor::system::snapshot)
+        .await
+        .unwrap_or_default();
+    Json(json!({ "active": active, "history": history, "system": system }))
+}
+
 /// `GET /api/ps` — the models in memory, Ollama's endpoint of the name: every
 /// generation model, the most recently used first, then the embedding and
 /// decision models, which Ollama lists too.
@@ -2283,6 +2296,7 @@ async fn generate_with(
     if let Some(ref sched) = snap.scheduler {
         // ── Continuous batching path ────────────────────────────────
         let rx = sched.try_submit(request)?;
+        let rx = crate::monitor::watch(rx, &snap.model_name, "generate");
 
         if is_streaming(&body) {
             Ok(ndjson_stream_response(
@@ -2343,6 +2357,7 @@ async fn generate_with(
 
         if is_streaming(&body) {
             let rx = sequential_to_channel(engine, request);
+            let rx = crate::monitor::watch(rx, &snap.model_name, "generate");
             Ok(ndjson_stream_response(
                 rx,
                 model,
@@ -2353,6 +2368,7 @@ async fn generate_with(
                 split_thinking,
             ))
         } else {
+            let tracker = crate::monitor::begin(&snap.model_name, "generate");
             let result = tokio::task::spawn_blocking({
                 let engine = engine;
                 move || engine.generate(&request)
@@ -2371,6 +2387,7 @@ async fn generate_with(
                 )
             })?;
 
+            tracker.answered(&result);
             audit.log(
                 &model,
                 StreamFormat::OllamaGenerate,
@@ -2540,6 +2557,7 @@ async fn chat_with(
         };
         if is_streaming(&body) {
             let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
+            let rx = crate::monitor::watch(rx, &snap.model_name, "chat");
             return Ok(ndjson_stream_response(
                 rx,
                 model,
@@ -2551,6 +2569,7 @@ async fn chat_with(
             ));
         }
         let rx = multimodal_to_channel(engine, mm_request, media.items, media.current_turn);
+        let rx = crate::monitor::watch(rx, &snap.model_name, "chat");
         let Collected {
             text,
             tokens_generated,
@@ -2621,6 +2640,7 @@ async fn chat_with(
 
     if let Some(ref sched) = snap.scheduler {
         let rx = sched.try_submit(request)?;
+        let rx = crate::monitor::watch(rx, &snap.model_name, "chat");
 
         if is_streaming(&body) {
             Ok(ndjson_stream_response(
@@ -2679,6 +2699,7 @@ async fn chat_with(
 
         if is_streaming(&body) {
             let rx = sequential_to_channel(engine, request);
+            let rx = crate::monitor::watch(rx, &snap.model_name, "chat");
             Ok(ndjson_stream_response(
                 rx,
                 model,
@@ -2689,6 +2710,7 @@ async fn chat_with(
                 split_thinking,
             ))
         } else {
+            let tracker = crate::monitor::begin(&snap.model_name, "chat");
             let result = tokio::task::spawn_blocking({
                 let engine = engine;
                 move || engine.generate(&request)
@@ -2707,6 +2729,7 @@ async fn chat_with(
                 )
             })?;
 
+            tracker.answered(&result);
             audit.log(
                 &model,
                 StreamFormat::OllamaChat,
@@ -3182,6 +3205,8 @@ async fn chat_completions_with(
         } else {
             sequential_to_channel(Arc::clone(snap.engine.as_ref().unwrap()), request)
         };
+        let rx = rx;
+        let rx = crate::monitor::watch(rx, &snap.model_name, "chat.completions");
         let Collected {
             text,
             tokens_generated,
@@ -3279,6 +3304,7 @@ async fn chat_completions_with(
 
     if let Some(ref sched) = snap.scheduler {
         let rx = sched.try_submit(request)?;
+        let rx = crate::monitor::watch(rx, &snap.model_name, "chat.completions");
 
         if is_streaming(&body) {
             let stream = stream_from_channel_sse(
@@ -3341,6 +3367,7 @@ async fn chat_completions_with(
 
         if is_streaming(&body) {
             let rx = sequential_to_channel(engine, request);
+            let rx = crate::monitor::watch(rx, &snap.model_name, "chat.completions");
             let stream = stream_from_channel_sse(
                 rx,
                 model,
@@ -3351,6 +3378,7 @@ async fn chat_completions_with(
             );
             Ok(Sse::new(stream).into_response())
         } else {
+            let tracker = crate::monitor::begin(&snap.model_name, "chat.completions");
             let result = tokio::task::spawn_blocking({
                 let engine = engine;
                 move || engine.generate(&request)
@@ -3369,6 +3397,7 @@ async fn chat_completions_with(
                 )
             })?;
 
+            tracker.answered(&result);
             audit.log(
                 &model,
                 StreamFormat::OpenAI,

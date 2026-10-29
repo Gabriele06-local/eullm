@@ -1787,6 +1787,63 @@ curl http://localhost:11434/api/ps
   (`--embedding-model`, `--decision-model`) or the model `eullm run` started
   with.
 
+#### `GET /api/monitor`
+
+What the chat UI's Monitor page (the pulse icon in its top bar) shows: the
+requests running, the last 50 answered, and the machine's last two minutes,
+one sample a second. Kept in the engine's memory only: nothing is written to
+disk (the [audit trail](#audit-trail) is the durable record) and nothing is
+sent anywhere. The models in memory are `/api/ps`.
+
+```bash
+curl http://localhost:11434/api/monitor
+```
+
+```json
+{
+  "active": [
+    { "id": 12, "model": "qwen3-8b", "endpoint": "chat", "started_ms": 1793280000000,
+      "phase": "generating", "prompt_tokens": null, "output_tokens": 210,
+      "prefill_tps": null, "decode_tps": 131.8, "first_token_ms": 84,
+      "duration_ms": null, "drafts": null, "ended": null }
+  ],
+  "history": [
+    { "id": 11, "model": "qwen3-8b", "endpoint": "chat.completions", "started_ms": 1793279990000,
+      "phase": "done", "prompt_tokens": 1520, "output_tokens": 412,
+      "prefill_tps": 5210.4, "decode_tps": 134.2, "first_token_ms": 310,
+      "duration_ms": 3402, "drafts": [300, 162], "ended": "stop" }
+  ],
+  "system": [
+    { "t_ms": 1793280000000, "cpu_pct": 7.5, "cores": 16,
+      "ram_used": 21474836480, "ram_total": 68719476736, "process_ram": 1288490188,
+      "disk_read_bps": 0,
+      "gpus": [
+        { "name": "NVIDIA GeForce RTX 5070 Ti", "source": "nvml", "util_pct": 97.0,
+          "vram_used": 12884901888, "vram_total": 17179869184, "temp_c": 64.0,
+          "power_w": 271.3, "power_limit_w": 300.0,
+          "pcie_rx_bps": 1048576, "pcie_tx_bps": 524288 }
+      ] }
+  ]
+}
+```
+
+- `phase` is `reading` (queued or reading the prompt), `generating`,
+  `done` or `failed`; `ended` is the stop reason (`stop`, `length`) or the
+  error. A running request's `decode_tps` is its speed so far; a finished
+  one's are the engine's own figures, as in the audit trail. `drafts` is
+  `[proposed, kept]` with `--mtp`.
+- `system` is sampled only while someone reads this endpoint: the sampler
+  starts with the first call and stops 30 seconds after the last, so a
+  server nobody watches pays nothing for it, and the first call after a quiet
+  spell returns no samples yet. `disk_read_bps` is what the engine process
+  read from disk in that second (a model loading, weights paged in through
+  mmap).
+- GPUs come from the NVIDIA driver (NVML, loaded at run time; Linux and
+  Windows) with load, VRAM, temperature, power and PCIe traffic; from the
+  `amdgpu` driver's files on Linux, without PCIe traffic; and for any other GPU
+  (Metal, Vulkan, Intel) from llama.cpp's device list, VRAM only. What a
+  driver does not report is `null`.
+
 #### `POST /api/unload`
 
 EuLLM extension: unload generation models now, freeing their VRAM. With a body

@@ -10,6 +10,7 @@ mod inference;
 mod lineedit;
 mod llama_archs;
 mod models;
+mod monitor;
 mod picker;
 mod gpu_split;
 mod readahead;
