@@ -102,9 +102,23 @@ new is how each source is written for knowledge to go in.
 | CJEU judgments in Italian | to fetch | principles, as the Cassazione |
 | General Italian text | to choose | 20-30% of every mix, so the model keeps its Italian and its reasoning |
 
-**Held out, enforced as `check_corpus_holdout.py` does:** the articles of
-our exams and of the outside test, the Consiglio di Stato 2025-26, a
-temporal slice of the Cassazione, and the articles of H3's reform.
+**Held out, enforced as `check_corpus_holdout.py` does:** the Consiglio di
+Stato 2025-26, a temporal slice of the Cassazione, and the articles of H3's
+reform. For the closed-book suite it is the **questions** that are held out,
+not the articles: a model can only know an article it trained on, so the
+articles go in as statements, while the made-up numbers the suite asks about
+are never said not to exist and no question-and-answer rewrite is written of
+an article an evaluation asks about (the knowledge-capacity setting:
+biographies trained, questions held out). `eullm_forge.datasets.law_corpus`.
+
+**The legislation part is written** (10-29): `make_law_corpus.py` by program
+(the text, a table of contents per code, heading and number, deadlines,
+penalties, procedibility, repeals, numbers a code does not have) and
+`law_rewrites.py` by the teacher (paraphrase, explanation, case, questions
+and answers, elements), each rewrite refused if it adds an article, a
+number, a deadline or a penalty its article lacks. First run on Leonardo on
+the nine codes there (`sbatch_law_rewrites.slurm`); all acts in force on
+JUPITER.
 
 **Size** is measured first (E0): tokens per source, raw and augmented. As a
 bound, training costs about 6 × parameters × tokens: for the 8B, 10 B tokens
