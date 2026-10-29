@@ -903,6 +903,19 @@ def test_a_long_round_goes_as_chains_of_short_jobs():
     assert campaign.chain_plan([soak], max_hours=8) == (8 * 3600, 3)
 
 
+def test_a_result_file_is_read_as_utf8(tmp_path):
+    """`collect` reads a result's JSON as UTF-8, like `measured_s` does: a
+    group or model named in non-ASCII text comes through unchanged."""
+    import json
+
+    results = tmp_path / "results"
+    (results / "c").mkdir(parents=True)
+    (results / "c" / "p.j1.json").write_text(json.dumps(
+        {"schema": campaign.SCHEMA, "campaign": "c", "group": "gr\u00fcppe",
+         "point": "p"}, ensure_ascii=False), encoding="utf-8")
+    [row] = campaign.result_rows(str(results))
+    assert row["group"] == "gr\u00fcppe"
+
 def test_a_campaign_spec_is_read_as_utf8(tmp_path):
     """A spec is written by hand and may name a campaign or a group in
     non-ASCII text: it is read as UTF-8, not with the host's locale."""
