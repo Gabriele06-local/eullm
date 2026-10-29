@@ -37,12 +37,12 @@
   const els = {
     modelSelect: $("model-select"),
     settingsBtn: $("settings-btn"),
-    settingsModal: $("settings-modal"),
-    settingsForm: document.querySelector(".settings-form"),
+    params: $("params"),
+    paramsClose: $("params-close"),
+    paramsReset: $("params-reset"),
     settingsSystem: $("settings-system"),
-    settingsTemp: $("settings-temp"),
-    settingsTempVal: $("settings-temp-val"),
     settingsMaxTokens: $("settings-max-tokens"),
+    settingsSeed: $("settings-seed"),
     settingsThink: $("settings-think"),
     settingsMath: $("settings-math"),
     messages: $("messages"),
@@ -88,6 +88,14 @@
     // now, typed by the user into this field.
     system: "",
     temperature: 0.7,
+    // The engine's own defaults (Ollama's), sent explicitly so that what the
+    // panel shows is what the request asks for.
+    topP: 0.9,
+    topK: 40,
+    minP: 0,
+    repeatPenalty: 1.1,
+    // null = a new seed each answer.
+    seed: null,
     // 0 = unlimited: max_tokens is omitted from the request and the server
     // generates until the model stops or the context window fills (its own
     // default, matching Ollama's num_predict=-1). A fixed cap here truncated
@@ -104,6 +112,24 @@
     // Math rendering ON by default. Heuristics protect currency-looking `$NN`
     // patterns; user can disable from settings if false positives appear.
     math: true,
+  };
+
+  // The panel's values are kept in this browser (not the conversation, which
+  // never is), so the next visit starts from them. Storage that is blocked
+  // or cleared just means the defaults.
+  const DEFAULT_SETTINGS = { ...settings };
+  const SETTINGS_STORAGE = "eullm.params";
+  try {
+    const saved = JSON.parse(localStorage.getItem(SETTINGS_STORAGE) || "{}");
+    for (const k of Object.keys(DEFAULT_SETTINGS)) {
+      const fits = k === "seed"
+        ? saved[k] === null || Number.isInteger(saved[k])
+        : typeof saved[k] === typeof DEFAULT_SETTINGS[k];
+      if (k in saved && fits) settings[k] = saved[k];
+    }
+  } catch {}
+  const saveSettings = () => {
+    try { localStorage.setItem(SETTINGS_STORAGE, JSON.stringify(settings)); } catch {}
   };
 
   // Strip reasoning blocks from an assistant turn before storing it in history.
@@ -544,37 +570,49 @@
     return html;
   }
 
-  function renderContent(text) {
+  // A reasoning block, folded once the answer has begun. `think` carries what
+  // the caller knows: `open` (the reader's own choice, or null to fold it
+  // when it is done), `seconds` (how long it took, or has taken so far).
+  function thinkBlock(inner, done, think) {
+    const trimmed = inner.trim();
+    if (done && !trimmed) return "";
+    const open = think.open ?? !done;
+    const secs = think.seconds;
+    const time = secs == null ? "" : secs < 10 ? `${secs.toFixed(1)} s` : `${Math.round(secs)} s`;
+    const label = done ? (time ? `Thought for ${time}` : "Reasoning") : `Thinking${time ? ` · ${time}` : "…"}`;
+    return `<details class="think${done ? "" : " live"}"${open ? " open" : ""}><summary>${label}</summary>` +
+      `<div class="think-body">${escapeHtml(trimmed)}</div></details>`;
+  }
+
+  function renderContent(text, think = {}) {
     // 1a. Pull out Gemma 4 channel-thought blocks, then Qwen3 <think> blocks.
     // Gemma 4 12B emits  `<|channel>thought\n[reasoning]<channel|>[final]`
     // (Google's official prompt format). Surface the reasoning as a Reasoning
     // section identical to <think>, then keep the final answer as body text.
     let thinkHtml = "";
     text = text.replace(/<\|channel>thought\n?([\s\S]*?)<channel\|>/g, (_, inner) => {
-      const trimmed = inner.trim();
-      if (trimmed) {
-        thinkHtml += `<div class="think"><div class="think-label">Reasoning</div>${escapeHtml(trimmed)}</div>`;
-      }
+      thinkHtml += thinkBlock(inner, true, think);
       return "";
     });
     // Unclosed Gemma channel-thought at the end (streaming in progress).
     text = text.replace(/<\|channel>thought\n?([\s\S]*)$/, (_, inner) => {
-      thinkHtml += `<div class="think"><div class="think-label">Reasoning…</div>${escapeHtml(inner.trim())}</div>`;
+      thinkHtml += thinkBlock(inner, false, think);
       return "";
     });
     // 1b. Pull out Qwen3 <think>...</think> blocks.
     text = text.replace(/<think>([\s\S]*?)<\/think>/g, (_, inner) => {
-      const trimmed = inner.trim();
-      if (trimmed) {
-        thinkHtml += `<div class="think"><div class="think-label">Reasoning</div>${escapeHtml(trimmed)}</div>`;
-      }
+      thinkHtml += thinkBlock(inner, true, think);
       return "";
     });
     // Unclosed <think> at the end (streaming): render as in-progress reasoning.
     text = text.replace(/<think>([\s\S]*)$/, (_, inner) => {
-      thinkHtml += `<div class="think"><div class="think-label">Reasoning…</div>${escapeHtml(inner.trim())}</div>`;
+      thinkHtml += thinkBlock(inner, false, think);
       return "";
     });
+
+    // The blank lines a model writes after its reasoning would show as a gap
+    // under the folded block.
+    if (thinkHtml) text = text.replace(/^\s+/, "");
 
     // 2a. Collapse runs of blank lines (LLMs commonly emit `\n\n\n`+, which —
     //     combined with `white-space: pre-wrap` on .msg-content — creates
@@ -683,7 +721,7 @@
   document.body.appendChild(jumpBtn);
 
   function updateJumpButton() {
-    const streaming = !!document.querySelector(".message.streaming");
+    const streaming = !!document.querySelector(".msg.streaming");
     jumpBtn.hidden = stickToBottom || !streaming;
   }
 
@@ -873,7 +911,37 @@
     const t0 = performance.now();
     let assistantText = "";
     let thinkingText = "";
-    let tokenCount = 0;
+    let chunks = 0;
+    let firstChunkAt = null;
+    // The reasoning's own clock: from its first piece to the answer's first.
+    let thinkStart = null;
+    let thinkEnd = null;
+    // null = folded by itself once the answer begins; a click makes it the
+    // reader's choice for the rest of this answer.
+    let thinkOpen = null;
+    // The engine's own figures, from the last line of the stream.
+    let final = null;
+    let finishReason = null;
+
+    const thinking = (full) =>
+      /<think>(?![\s\S]*<\/think>)/.test(full) || /<\|channel>thought(?![\s\S]*<channel\|>)/.test(full);
+    const thinkSeconds = () =>
+      thinkStart == null ? null : ((thinkEnd ?? performance.now()) - thinkStart) / 1000;
+    const paint = (ended = false) => {
+      let full = withThinking(thinkingText, assistantText);
+      // An answer cut off mid-reasoning shows its reasoning as finished.
+      if (ended && thinking(full)) full += /<think>(?![\s\S]*<\/think>)/.test(full) ? "</think>" : "<channel|>";
+      contentEl.innerHTML = renderContent(full, { open: thinkOpen, seconds: thinkSeconds() });
+    };
+    msg.addEventListener("click", (e) => {
+      const summary = e.target.closest("summary");
+      if (!summary || !msg.contains(summary)) return;
+      thinkOpen = !summary.parentElement.open;
+    });
+    // The reasoning's clock moves while no new piece comes.
+    const ticker = setInterval(() => {
+      if (thinkStart != null && thinkEnd == null) paint();
+    }, 500);
 
     try {
       const messagesToSend = [];
@@ -894,6 +962,11 @@
           messages: messagesToSend,
           stream: true,
           temperature: settings.temperature,
+          top_p: settings.topP,
+          top_k: settings.topK,
+          min_p: settings.minP,
+          repeat_penalty: settings.repeatPenalty,
+          ...(settings.seed != null ? { seed: settings.seed } : {}),
           // 0 = unlimited: omit the cap and let the server generate until
           // the model stops or the context window fills.
           ...(settings.maxTokens > 0 ? { max_tokens: settings.maxTokens } : {}),
@@ -951,15 +1024,44 @@
               markAttachmentFailed();
               return;
             }
-            const thought = ndjson ? (obj.message?.thinking || "") : "";
-            delta = ndjson
-              ? (obj.message?.content || "")
-              : (obj.choices?.[0]?.delta?.content || "");
+            // The last line carries the engine's counts: Ollama's
+            // `eval_count`/`*_duration` (nanoseconds), or OpenAI's `usage`
+            // with llama-server's `timings` (milliseconds).
+            if (ndjson && obj.done) {
+              final = {
+                promptN: obj.prompt_eval_count, promptMs: obj.prompt_eval_duration / 1e6,
+                outN: obj.eval_count, outMs: obj.eval_duration / 1e6,
+                drafts: obj.draft_n, kept: obj.draft_n_accepted,
+              };
+              finishReason = obj.done_reason;
+            } else if (!ndjson && obj.timings) {
+              const t = obj.timings;
+              final = {
+                promptN: t.prompt_n, promptMs: t.prompt_ms, outN: t.predicted_n, outMs: t.predicted_ms,
+                drafts: t.draft_n, kept: t.draft_n_accepted,
+              };
+            }
+            if (!ndjson && obj.choices?.[0]?.finish_reason) finishReason = obj.choices[0].finish_reason;
+            const d = obj.choices?.[0]?.delta;
+            const thought = ndjson ? (obj.message?.thinking || "") : (d?.reasoning_content || "");
+            delta = ndjson ? (obj.message?.content || "") : (d?.content || "");
             if (thought || delta) {
+              const now = performance.now();
+              if (firstChunkAt == null) firstChunkAt = now;
               thinkingText += thought;
               assistantText += delta;
-              tokenCount++;
-              contentEl.innerHTML = renderContent(withThinking(thinkingText, assistantText));
+              chunks++;
+              const full = withThinking(thinkingText, assistantText);
+              if (thinking(full)) {
+                if (thinkStart == null) thinkStart = now;
+              } else if (thinkStart != null && thinkEnd == null) {
+                thinkEnd = now;
+              }
+              paint();
+              const secs = (now - (firstChunkAt ?? t0)) / 1000;
+              metaEl.innerHTML = thinkStart != null && thinkEnd == null
+                ? `<span>Thinking</span>`
+                : `<span>Writing</span><span>${chunks.toLocaleString()} tokens</span>${secs > 0.5 ? `<span>${(chunks / secs).toFixed(1)} tok/s</span>` : ""}`;
               scrollToBottom();
             }
           } catch (e) {
@@ -968,32 +1070,73 @@
         }
       }
 
+      if (thinkStart != null && thinkEnd == null) thinkEnd = performance.now();
+      paint(true);
       // Tag the turn with the model that wrote it: after a mid-conversation
       // model switch, the send path uses this to tell the new model that the
       // earlier assistant turns are not its own words (see modelSwitchNotice).
       const reply = withThinking(thinkingText, assistantText);
-      history.push({
-        role: "assistant",
-        content: stripThink(reply) || reply,
-        model: currentModel,
+      const answer = stripThink(reply) || reply;
+      history.push({ role: "assistant", content: answer, model: currentModel });
+      renderMeta(metaEl, {
+        final, finishReason, chunks,
+        total: (performance.now() - t0) / 1000,
+        firstToken: firstChunkAt == null ? null : (firstChunkAt - t0) / 1000,
+        answer,
       });
-      const dt = (performance.now() - t0) / 1000;
-      const tps = tokenCount > 0 ? (tokenCount / dt).toFixed(1) : "—";
-      metaEl.innerHTML = `<span>${tokenCount} chunks</span><span>${dt.toFixed(2)}s</span><span>~${tps} chunk/s</span>`;
     } catch (err) {
       if (err.name === "AbortError") {
-        metaEl.innerHTML = `<span style="color: var(--danger)">Stopped</span>`;
+        metaEl.innerHTML = `<span class="meta-warn">Stopped</span>`;
       } else {
         contentEl.innerHTML = `<span style="color: var(--danger)">Error: ${escapeHtml(err.message)}</span>`;
         markAttachmentFailed();
         console.error(err);
       }
     } finally {
+      clearInterval(ticker);
       msg.classList.remove("streaming");
       updateJumpButton();
       setSending(false);
       abortController = null;
     }
+  }
+
+  // Under an answer: what the engine counted, when it said (an older engine
+  // or an interrupted stream leaves only what the browser saw), and a copy
+  // button for the answer without its reasoning.
+  function renderMeta(metaEl, { final, finishReason, chunks, total, firstToken, answer }) {
+    const rate = (n, ms) => (n > 0 && ms > 0 ? (n / (ms / 1000)) : null);
+    const items = [];
+    if (final && final.outN != null) {
+      const out = rate(final.outN, final.outMs);
+      items.push(`<span title="Answer tokens and writing speed"><b>${out != null ? out.toFixed(1) : "–"}</b> tok/s</span>`);
+      items.push(`<span>${final.outN.toLocaleString()} tokens</span>`);
+      const read = rate(final.promptN, final.promptMs);
+      if (final.promptN != null) {
+        items.push(`<span title="Prompt tokens read for this answer, and how fast">prompt ${final.promptN.toLocaleString()}${read != null ? ` · ${Math.round(read).toLocaleString()} tok/s` : ""}</span>`);
+      }
+      if (final.drafts > 0) {
+        items.push(`<span title="MTP drafts the model kept">${Math.round((final.kept / final.drafts) * 100)}% drafts kept</span>`);
+      }
+    } else {
+      items.push(`<span>${chunks.toLocaleString()} tokens</span>`);
+    }
+    if (firstToken != null) items.push(`<span title="Time to the first piece of the answer">first token ${firstToken.toFixed(2)} s</span>`);
+    items.push(`<span title="From sending to the last token">${total.toFixed(1)} s</span>`);
+    if (finishReason === "length") {
+      items.push(`<span class="meta-warn" title="Raise the longest answer or the context size">cut at the length limit</span>`);
+    }
+    metaEl.innerHTML = `${items.join("")}<button type="button" class="meta-copy" title="Copy the answer">Copy</button>`;
+    const btn = metaEl.querySelector(".meta-copy");
+    btn.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(answer);
+        btn.textContent = "Copied";
+      } catch {
+        btn.textContent = "Copy failed";
+      }
+      setTimeout(() => (btn.textContent = "Copy"), 1500);
+    });
   }
 
   function canSend() {
@@ -1264,35 +1407,75 @@
     els.messages.scrollTop = els.messages.scrollHeight;
   });
 
-  // ── Settings modal ────────────────────────────────────────────────────
-  els.settingsBtn.addEventListener("click", () => {
+  // ── Parameters panel ─────────────────────────────────────────────────
+  // Every change applies to the next message and is kept in this browser.
+  const sliders = [
+    { id: "settings-temp", key: "temperature", digits: 2 },
+    { id: "settings-top-p", key: "topP", digits: 2 },
+    { id: "settings-top-k", key: "topK", digits: 0 },
+    { id: "settings-min-p", key: "minP", digits: 2 },
+    { id: "settings-repeat", key: "repeatPenalty", digits: 2 },
+  ].map((s) => ({ ...s, input: $(s.id), out: $(`${s.id}-val`) }));
+
+  function showSettings() {
+    for (const s of sliders) {
+      s.input.value = settings[s.key];
+      s.out.textContent = Number(settings[s.key]).toFixed(s.digits);
+      s.input.closest(".slider")?.classList.toggle("changed", settings[s.key] !== DEFAULT_SETTINGS[s.key]);
+    }
     els.settingsSystem.value = settings.system;
-    els.settingsTemp.value = settings.temperature;
-    els.settingsTempVal.textContent = settings.temperature.toFixed(2);
     els.settingsMaxTokens.value = settings.maxTokens;
+    els.settingsSeed.value = settings.seed ?? "";
     els.settingsThink.checked = settings.think;
     els.settingsMath.checked = settings.math;
-    els.settingsModal.showModal();
-  });
+  }
 
-  els.settingsTemp.addEventListener("input", () => {
-    els.settingsTempVal.textContent = parseFloat(els.settingsTemp.value).toFixed(2);
+  for (const s of sliders) {
+    s.input.addEventListener("input", () => {
+      settings[s.key] = s.digits ? parseFloat(s.input.value) : parseInt(s.input.value, 10);
+      s.out.textContent = Number(settings[s.key]).toFixed(s.digits);
+      s.input.closest(".slider")?.classList.toggle("changed", settings[s.key] !== DEFAULT_SETTINGS[s.key]);
+      saveSettings();
+    });
+  }
+  els.settingsSystem.addEventListener("input", () => { settings.system = els.settingsSystem.value.trim(); saveSettings(); });
+  els.settingsMaxTokens.addEventListener("input", () => { settings.maxTokens = Math.max(0, parseInt(els.settingsMaxTokens.value, 10) || 0); saveSettings(); });
+  els.settingsSeed.addEventListener("input", () => {
+    const v = parseInt(els.settingsSeed.value, 10);
+    settings.seed = Number.isInteger(v) && v >= 0 ? v : null;
+    saveSettings();
   });
-
-  els.settingsModal.addEventListener("close", () => {
-    if (els.settingsModal.returnValue !== "ok") return;
-    settings.system = els.settingsSystem.value.trim();
-    settings.temperature = parseFloat(els.settingsTemp.value);
-    settings.maxTokens = parseInt(els.settingsMaxTokens.value, 10) || 0;
-    settings.think = els.settingsThink.checked;
+  els.settingsThink.addEventListener("change", () => { settings.think = els.settingsThink.checked; saveSettings(); });
+  els.settingsMath.addEventListener("change", () => {
     settings.math = els.settingsMath.checked;
+    saveSettings();
     // Re-render the last assistant turn so the math toggle takes effect immediately.
     const lastAssistant = els.messages.querySelector(".msg.assistant:last-child .msg-content");
-    if (lastAssistant && history.length) {
-      const lastTurn = history[history.length - 1];
-      if (lastTurn?.role === "assistant") {
-        lastAssistant.innerHTML = renderContent(lastTurn.content);
-      }
+    const lastTurn = history[history.length - 1];
+    if (lastAssistant && lastTurn?.role === "assistant") lastAssistant.innerHTML = renderContent(lastTurn.content);
+  });
+  els.paramsReset.addEventListener("click", () => {
+    Object.assign(settings, DEFAULT_SETTINGS);
+    saveSettings();
+    showSettings();
+  });
+
+  function toggleParams(open) {
+    // The drawer starts under the top bar, whose height depends on the width.
+    const bar = document.querySelector(".topbar");
+    if (bar) document.documentElement.style.setProperty("--topbar-h", `${bar.offsetHeight}px`);
+    els.params.hidden = !open;
+    els.settingsBtn.setAttribute("aria-expanded", String(open));
+    els.settingsBtn.classList.toggle("active", open);
+    document.body.classList.toggle("params-open", open);
+    if (open) { showSettings(); els.paramsClose.focus({ preventScroll: true }); }
+  }
+  els.settingsBtn.addEventListener("click", () => toggleParams(els.params.hidden));
+  els.paramsClose.addEventListener("click", () => { toggleParams(false); els.settingsBtn.focus(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !els.params.hidden && !document.querySelector("dialog[open]")) {
+      toggleParams(false);
+      els.settingsBtn.focus();
     }
   });
 
