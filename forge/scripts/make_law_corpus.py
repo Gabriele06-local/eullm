@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
@@ -46,9 +47,13 @@ def main(argv: list[str] | None = None) -> int:
     fakes, _ = excluded([p for p in args.exclude if p.is_file()])
     rows = program_rows(load_articles(args.norms), fakes=fakes, seed=args.seed)
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", encoding="utf-8") as f:
+    # written aside and renamed: two chains starting together each write the
+    # same rows, and neither can read the other's half-written file
+    tmp = args.out.with_name(f".{args.out.name}.{os.getpid()}")
+    with tmp.open("w", encoding="utf-8") as f:
         for r in rows:
             f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, args.out)
     forms = Counter(r["forma"] for r in rows)
     codes = Counter(r["code"] for r in rows)
     chars = sum(len(r["text"]) for r in rows)
